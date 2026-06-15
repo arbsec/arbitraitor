@@ -1,6 +1,6 @@
 # ADR 0014: Receipt canonicalization (RFC 8785 JCS)
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-16
 **Issue:** #9
 
@@ -15,7 +15,7 @@ across implementations.
 The adversarial review (H-06) recommended RFC 8785 JSON Canonicalization
 Scheme (JCS) and warned against the abandoned `serde_jcs` crate.
 
-## Decision (proposed)
+## Decision
 
 ### Receipt format
 
@@ -48,8 +48,8 @@ RFC 8785 mandates:
 
 | Candidate | Status | Notes |
 |-----------|--------|-------|
-| `serde_json_canonicalizer` | **Recommended (pending conformance tests)** | Maintained; purpose-built for RFC 8785 |
-| `serde_jcs` | **Rejected** | Maintenance concerns; known conformance divergences |
+| `serde_json_canonicalizer` | **Selected** | Maintained; purpose-built for RFC 8785; no `unsafe` code; must pass official test vectors before use |
+| `serde_jcs` | **Rejected** | Maintenance concerns; known conformance divergences from RFC 8785 |
 | Custom implementation | Fallback | Last resort; high risk of subtle bugs |
 
 **Selection criteria:**
@@ -115,3 +115,5 @@ Arbitraitor publishes official canonicalization test vectors covering:
 - [RFC 8785 — JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html)
 - [RFC 8259 — The JSON Data Interchange Syntax](https://www.rfc-editor.org/rfc/rfc8259)
 - [I-JSON (RFC 7493)](https://www.rfc-editor.org/rfc/rfc7493.html)
+- [`serde_json_canonicalizer`](https://crates.io/crates/serde_json_canonicalizer)
+- [RFC 8785 test vectors](https://github.com/cyberphone/json-canonicalization/tree/master/testfiles)

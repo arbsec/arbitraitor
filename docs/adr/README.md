@@ -33,9 +33,9 @@ supersede it.
 | [0009](0009-privilege-separation-no-root-invariant.md) | Privilege separation and no-root invariant | Accepted | #4 |
 | [0010](0010-platform-provenance-preservation.md) | Platform provenance preservation | Accepted | #5 |
 | [0011](0011-plugin-trust-classification.md) | Plugin trust classification model | Accepted | #6 |
-| [0012](0012-tuf-implementation-selection.md) | TUF implementation selection | Proposed | #7 |
+| [0012](0012-tuf-implementation-selection.md) | TUF implementation selection | Accepted | #7 |
 | [0013](0013-plan-bound-approval-capability.md) | Plan-bound approval capability model | Accepted | #8 |
-| [0014](0014-receipt-canonicalization-rfc-8785-jcs.md) | Receipt canonicalization (RFC 8785 JCS) | Proposed | #9 |
+| [0014](0014-receipt-canonicalization-rfc-8785-jcs.md) | Receipt canonicalization (RFC 8785 JCS) | Accepted | #9 |
 | [0015](0015-safe-destination-release-semantics.md) | Safe destination release semantics | Accepted | #10 |
 | [0016](0016-terminal-and-unicode-sanitization.md) | Terminal and Unicode sanitization renderer | Accepted | #11 |
 | [0017](0017-monotonic-project-configuration.md) | Monotonic project configuration | Accepted | #13 |

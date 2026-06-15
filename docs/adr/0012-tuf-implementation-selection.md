@@ -1,6 +1,6 @@
 # ADR 0012: TUF implementation selection
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-16
 **Issue:** #7
 
@@ -21,7 +21,7 @@ AWS security bulletin 2026-019 disclosed multiple vulnerabilities in `tough`
 This demonstrates that update clients are themselves high-risk parsers and
 authorization engines. The selection cannot be made casually.
 
-## Decision (proposed)
+## Decision
 
 **No Rust TUF library is selected normatively** until the evaluation criteria
 below are satisfied. The initial implementation uses a narrowly scoped
@@ -51,8 +51,8 @@ Any selected implementation must pass ALL of the following:
 
 | Candidate | Status | Notes |
 |-----------|--------|-------|
-| `tough` >= 0.22.0 | Pending evaluation | AWS-maintained; 2026-019 fixes applied; needs conformance + adversarial tests |
-| `rust-tuf` | Pending evaluation | Community-maintained; maintenance activity needs verification |
+| `tough` >= 0.22.0 | Primary candidate (pending evaluation) | AWS-maintained; 2026-019 fixes applied in 0.22.0; must pass `tuf-conformance` suite + adversarial tests before adoption |
+| `rust-tuf` | Deprioritized | Community-maintained; confirmed limited maintenance activity as of 2026-06 |
 | Custom scoped implementation | Fallback | Narrower scope, easier to audit, but must implement TUF spec correctly |
 | `go-tuf` (subprocess) | Not preferred | Adds Go runtime dependency; cross-language boundary |
 
@@ -123,4 +123,5 @@ Update metadata depends on time for expiration and freshness:
 - [AWS Security Bulletin 2026-019](https://aws.amazon.com/security/security-bulletins/2026-019-aws/)
 - [TUF Security](https://theupdateframework.io/docs/security/)
 - [TUF FAQ](https://theupdateframework.io/docs/faq/)
+- [TUF Conformance Suite](https://github.com/theupdateframework/tuf-conformance)
 - [ADR 0013](0013-plan-bound-approval-capability.md) — Plan-bound approval
