@@ -6,6 +6,7 @@ Arbitraitor is a **security boundary** — a policy-enforced download, inspectio
 
 **Before writing any code**, read:
 - [Development conventions](docs/conventions.md) — architecture boundaries, security invariants, coding rules, testing requirements.
+- [Architecture Decision Records](docs/adr/README.md) — all accepted and proposed ADRs. Every architecturally significant or security-sensitive decision must be recorded as an ADR.
 - `.spec/` — full product specification, technology stack, and adversarial review (gitignored, local only).
 
 ---
