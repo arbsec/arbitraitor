@@ -16,8 +16,12 @@ jobs:
     name: Invariant Property Tests
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: jdx/mise-action@7c8a4c723a61297258ad9651f98b0c04ab6418b2  # v2.2.3
+      - uses: mozilla-actions/sccache-action@7d96ba9496d0e7da6926f15cc2864f8eba33c544  # v0.0.10
       - name: Run invariant tests
         run: cargo nextest run --workspace --features invariant-tests
