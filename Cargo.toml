@@ -1,0 +1,145 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/arbitraitor-cli",
+    "crates/arbitraitor-core",
+    "crates/arbitraitor-model",
+    "crates/arbitraitor-policy",
+    "crates/arbitraitor-fetch",
+    "crates/arbitraitor-store",
+    "crates/arbitraitor-artifact",
+    "crates/arbitraitor-analysis",
+    "crates/arbitraitor-shell",
+    "crates/arbitraitor-powershell",
+    "crates/arbitraitor-yarax",
+    "crates/arbitraitor-av",
+    "crates/arbitraitor-archive",
+    "crates/arbitraitor-intel",
+    "crates/arbitraitor-provenance",
+    "crates/arbitraitor-exec",
+    "crates/arbitraitor-sandbox",
+    "crates/arbitraitor-receipt",
+    "crates/arbitraitor-update",
+    "crates/arbitraitor-plugin-api",
+    "crates/arbitraitor-plugin-host",
+    "crates/arbitraitor-wrapper",
+    "crates/arbitraitor-package-manager",
+    "crates/arbitraitor-testkit",
+    "crates/arbitraitor-mcp",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/arbsec/arbitraitor"
+homepage = "https://github.com/arbsec/arbitraitor"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+multiple_crate_versions = "allow"
+
+[workspace.dependencies]
+# Core async + serialization
+tokio = { version = "1.52", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+bytes = "1.11"
+
+# Error handling and diagnostics
+thiserror = "2.0"
+miette = "7.6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.6", features = ["derive", "env"] }
+
+# Cryptography and identity
+sha2 = "0.11"
+hex = "0.4"
+uuid = { version = "1.23", features = ["v4", "serde"] }
+
+# Secrets
+secrecy = "0.10"
+zeroize = { version = "1.9", features = ["derive"] }
+
+# HTTP and networking
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+url = "2.5"
+
+# Storage
+redb = "4.1"
+
+# Configuration
+toml = "1.1"
+
+# Schemas
+schemars = { version = "1.0", features = ["uuid1", "url2"] }
+
+# Filesystem
+cap-std = "4.0"
+cap-tempfile = "4.0"
+
+# Testing
+proptest = "1.11"
+insta = "1.48"
+
+# Internal crates (version managed by release-plz)
+arbitraitor-model = { path = "crates/arbitraitor-model" }
+arbitraitor-core = { path = "crates/arbitraitor-core" }
+arbitraitor-policy = { path = "crates/arbitraitor-policy" }
+arbitraitor-fetch = { path = "crates/arbitraitor-fetch" }
+arbitraitor-store = { path = "crates/arbitraitor-store" }
+arbitraitor-artifact = { path = "crates/arbitraitor-artifact" }
+arbitraitor-analysis = { path = "crates/arbitraitor-analysis" }
+arbitraitor-shell = { path = "crates/arbitraitor-shell" }
+arbitraitor-powershell = { path = "crates/arbitraitor-powershell" }
+arbitraitor-yarax = { path = "crates/arbitraitor-yarax" }
+arbitraitor-av = { path = "crates/arbitraitor-av" }
+arbitraitor-archive = { path = "crates/arbitraitor-archive" }
+arbitraitor-intel = { path = "crates/arbitraitor-intel" }
+arbitraitor-provenance = { path = "crates/arbitraitor-provenance" }
+arbitraitor-exec = { path = "crates/arbitraitor-exec" }
+arbitraitor-sandbox = { path = "crates/arbitraitor-sandbox" }
+arbitraitor-receipt = { path = "crates/arbitraitor-receipt" }
+arbitraitor-update = { path = "crates/arbitraitor-update" }
+arbitraitor-plugin-api = { path = "crates/arbitraitor-plugin-api" }
+arbitraitor-plugin-host = { path = "crates/arbitraitor-plugin-host" }
+arbitraitor-wrapper = { path = "crates/arbitraitor-wrapper" }
+arbitraitor-package-manager = { path = "crates/arbitraitor-package-manager" }
+arbitraitor-testkit = { path = "crates/arbitraitor-testkit" }
+arbitraitor-cli = { path = "crates/arbitraitor-cli" }
+arbitraitor-mcp = { path = "crates/arbitraitor-mcp" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = 1
+strip = "none"
+
+[profile.test]
+debug = 1

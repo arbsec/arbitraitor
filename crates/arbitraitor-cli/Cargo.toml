@@ -1,0 +1,26 @@
+[package]
+name = "arbitraitor-cli"
+description = "Command-line interface for Arbitraitor"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "arbitraitor"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+arbitraitor-core = { workspace = true }
+arbitraitor-model = { workspace = true }
+arbitraitor-receipt = { workspace = true }
+clap = { workspace = true }
+miette = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

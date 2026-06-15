@@ -1,0 +1,42 @@
+[tools]
+# Core language toolchain
+rust = "1.96.0"
+
+# Git hooks and conventional commits
+lefthook = "1.13.0"
+cocogitto = "7.0.0"
+
+[env]
+RUST_BACKTRACE = "1"
+
+[tasks.setup-tools]
+description = "Install cargo-based development tools (nextest, deny, audit)"
+run = """
+cargo install cargo-nextest --locked || true
+cargo install cargo-deny --locked || true
+cargo install cargo-audit --locked || true
+"""
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --check"
+
+[tasks.clippy]
+description = "Run clippy with all features"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.check]
+description = "Run cargo check"
+run = "cargo check --workspace --all-targets --all-features"
+
+[tasks.test]
+description = "Run tests with nextest"
+run = "cargo nextest run --workspace --all-features"
+
+[tasks.deny]
+description = "Run cargo-deny checks"
+run = "cargo deny check --all-features"
+
+[tasks.audit]
+description = "Run cargo-audit"
+run = "cargo audit"

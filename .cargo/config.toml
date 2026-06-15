@@ -1,0 +1,13 @@
+[build]
+# Use --locked in release/CI contexts
+
+[alias]
+check-all = "check --workspace --all-targets --all-features"
+clippy-all = "clippy --workspace --all-targets --all-features -- -D warnings"
+test-all = "nextest run --workspace --all-features"
+
+[term]
+color = "auto"
+
+[net]
+retry = 3

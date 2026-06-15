@@ -1,0 +1,11 @@
+/.github/                     @arbitraitor/maintainers
+/Cargo.lock                   @arbitraitor/security
+/deny.toml                    @arbitraitor/security
+/crates/arbitraitor-core/     @arbitraitor/security
+/crates/arbitraitor-fetch/    @arbitraitor/security
+/crates/arbitraitor-store/    @arbitraitor/security
+/crates/arbitraitor-exec/     @arbitraitor/security
+/crates/arbitraitor-update/   @arbitraitor/security
+/crates/arbitraitor-plugin-host/ @arbitraitor/security
+/wit/                         @arbitraitor/plugin-maintainers
+/rules/                       @arbitraitor/rule-reviewers

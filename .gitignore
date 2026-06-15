@@ -1,0 +1,31 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# agents
+.omo
+
+# mise
+.mise.local.toml
+
+# lefthook
+.lefthook-local.yml
+
+# cocogitto
+# COGNOME_* vars are in shell env, not files
+
+# editor
+*.sublime-workspace
+.cache/
+
+# Private specs (not part of the repo)
+.spec/

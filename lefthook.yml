@@ -1,0 +1,24 @@
+# Lefthook configuration for Arbitraitor
+# https://github.com/evilmartians/lefthook
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      run: cargo fmt --check
+      glob: "*.rs"
+      stage_fixed: false
+    clippy:
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      glob: "*.rs"
+      stage_fixed: false
+
+commit-msg:
+  commands:
+    cocogitto:
+      run: cog verify --file {1}
+
+pre-push:
+  commands:
+    test:
+      run: cargo nextest run --no-tests=pass

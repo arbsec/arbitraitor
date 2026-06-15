@@ -1,0 +1,23 @@
+name: Security Invariants
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  invariants:
+    name: Invariant Property Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: jdx/mise-action@7c8a4c723a61297258ad9651f98b0c04ab6418b2  # v2.2.3
+      - name: Run invariant tests
+        run: cargo nextest run --workspace --features invariant-tests

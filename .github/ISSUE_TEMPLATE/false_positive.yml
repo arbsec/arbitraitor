@@ -1,0 +1,41 @@
+name: False Positive or False Negative
+description: Report an incorrect detection result
+labels: ["detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not share malware samples or credentials.** Include the artifact SHA-256 hash, not the artifact itself.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the incorrect result.
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - False positive (benign content blocked)
+        - False negative (malicious content passed)
+    validations:
+      required: true
+  - type: input
+    id: hash
+    attributes:
+      label: Artifact SHA-256 hash
+    validations:
+      required: true
+  - type: input
+    id: finding-id
+    attributes:
+      label: Finding ID (from receipt)
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Redact all secrets, URLs, and private information.
