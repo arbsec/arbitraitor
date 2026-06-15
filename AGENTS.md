@@ -45,6 +45,7 @@ This keeps the main checkout clean, allows multiple parallel tasks, and prevents
 - Squash merge is the only merge strategy. The PR title becomes the commit message.
 - Small, reviewable PRs. If a change touches more than a few hundred lines, split it into stacked PRs.
 - No unrelated refactoring in security fixes. A bug fix PR contains only the fix.
+- **Adversarial review required for sub-agent PRs.** Every PR created by a sub-agent must be reviewed and approved by a different sub-agent before merging. The reviewer must attempt to break the implementation, verify security invariants hold, and check for edge cases the author missed. Self-merge by the same agent that authored the PR is forbidden.
 
 ### 1.3 Before opening a PR
 
@@ -76,7 +77,35 @@ While individual contributor commits are not required to follow Conventional Com
 
 ---
 
-## 2. Quick reference
+## 2. Project board
+
+Tasks are tracked on the **[Arbitraitor Kanban](https://github.com/orgs/arbsec/projects/1)** board (GitHub Projects v2, project ID `1`).
+
+### 2.1 Commands
+
+```sh
+# View the board
+gh project view 1 --owner arbsec
+
+# List items
+gh project item-list 1 --owner arbsec
+
+# Add an issue to the board
+gh project item-add 1 --owner arbsec --url https://github.com/arbsec/arbitraitor/issues/<number>
+
+# Edit a field (e.g. move to "In Progress")
+gh project item-edit --id <item-id> --field-id <field-id> --project-id PVT_kwDOEYXhr84BawZd --text "In Progress"
+```
+
+### 2.2 Workflow rules
+
+- Every issue or task should be on the board. If it isn't, add it.
+- Move items through columns as work progresses: **Backlog** → **Todo** → **In Progress** → **Review** → **Done**.
+- Link PRs to their corresponding issue so the board updates automatically on merge.
+
+---
+
+## 3. Quick reference
 
 ```sh
 # Create an isolated worktree
@@ -96,4 +125,9 @@ git push -u origin <type>/<short-slug>
 
 # Cleanup after merge
 git worktree remove ../arbitraitor-<task-slug>
+
+# Project board
+gh project view 1 --owner arbsec
+gh project item-list 1 --owner arbsec
+gh project item-add 1 --owner arbsec --url https://github.com/arbsec/arbitraitor/issues/<number>
 ```
