@@ -14,8 +14,4 @@ workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { workspace = true }
-uuid = { workspace = true }
-thiserror = { workspace = true }
-hex = { workspace = true }
-url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
