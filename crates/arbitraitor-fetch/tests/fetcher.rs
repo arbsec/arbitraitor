@@ -1,11 +1,12 @@
 //! Integration tests for fetch transports.
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_fetch::{
     FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, FileFetcher,
-    HttpFetcher, SizeLimitKind, VecSink,
+    HttpFetcher, SizeLimitKind, VecSink, redact_url, validate_ip,
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_testkit::mock_server::MockHttpServer;
@@ -23,11 +24,108 @@ fn http_policy() -> FetchPolicy {
         max_uncompressed_size: 1024 * 1024,
         max_redirects: 0,
         allowed_schemes: vec![FetchScheme::Http],
+        allow_loopback_addresses: true,
+    }
+}
+
+fn ssrf_policy() -> FetchPolicy {
+    FetchPolicy {
+        allow_loopback_addresses: false,
+        ..http_policy()
     }
 }
 
 fn sha256(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::new(Sha256::digest(bytes).into())
+}
+
+#[test]
+fn ssrf_policy_blocks_private_and_reserved_ranges() -> Result<(), Box<dyn std::error::Error>> {
+    let prohibited = [
+        "0.0.0.0",
+        "10.0.0.1",
+        "100.64.0.1",
+        "127.0.0.1",
+        "169.254.169.254",
+        "172.16.0.1",
+        "192.0.0.1",
+        "192.0.2.1",
+        "192.168.0.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "::",
+        "::1",
+        "::ffff:127.0.0.1",
+        "64:ff9b::1",
+        "100::1",
+        "2001:db8::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+    ];
+
+    for address in prohibited {
+        let ip = address.parse::<IpAddr>()?;
+        assert!(!validate_ip(ip), "{address} should be prohibited");
+    }
+    assert!(validate_ip("93.184.216.34".parse()?));
+    assert!(validate_ip("2606:2800:220:1:248:1893:25c8:1946".parse()?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fetch_blocks_loopback_by_default() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let url = server.binary_response(b"blocked", "text/plain").await;
+    let mut sink = VecSink::new();
+
+    let error = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, ssrf_policy()),
+            &mut sink,
+        )
+        .await
+        .err()
+        .ok_or("loopback fetch should be blocked")?;
+
+    assert!(matches!(error, FetchError::ProhibitedAddress { address } if address.is_loopback()));
+    assert!(sink.as_bytes().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn redirect_target_is_validated_against_ssrf_policy() -> Result<(), Box<dyn std::error::Error>>
+{
+    let url = metadata_redirect_server().await?;
+    let mut sink = VecSink::new();
+    let mut policy = http_policy();
+    policy.max_redirects = 1;
+
+    let error = HttpFetcher::new()
+        .fetch(FetchRequest::url(FetchUrl::parse(&url)?, policy), &mut sink)
+        .await
+        .err()
+        .ok_or("metadata redirect should be blocked")?;
+
+    assert!(
+        matches!(error, FetchError::ProhibitedAddress { address } if address.to_string() == "169.254.169.254")
+    );
+    assert!(sink.as_bytes().is_empty());
+    Ok(())
+}
+
+#[test]
+fn url_redaction_removes_secrets() {
+    let redacted = redact_url("https://user:pass@internal/api/token/secret-value?sig=abc&key=def");
+
+    assert!(!redacted.contains("user"));
+    assert!(!redacted.contains("pass"));
+    assert!(!redacted.contains("secret-value"));
+    assert!(!redacted.contains("sig=abc"));
+    assert!(redacted.contains("redacted-host.invalid"));
 }
 #[tokio::test]
 async fn http_fetch_streams_exact_response_bytes() -> Result<(), Box<dyn std::error::Error>> {
@@ -191,6 +289,20 @@ async fn exact_byte_server(
         Ok(String::from_utf8_lossy(&request).to_ascii_lowercase())
     });
     Ok((format!("http://{addr}/artifact"), handle))
+}
+
+async fn metadata_redirect_server() -> Result<String, std::io::Error> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    });
+    Ok(format!("http://{addr}/redirect"))
 }
 
 fn temp_file_path() -> Result<PathBuf, std::time::SystemTimeError> {

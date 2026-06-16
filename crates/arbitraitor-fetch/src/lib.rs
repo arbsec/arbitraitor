@@ -9,18 +9,18 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use arbitraitor_model::ids::{ArtifactId, Sha256Digest};
 use async_trait::async_trait;
-use reqwest::Url;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, instrument, trace, warn};
+use url::Url;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -185,6 +185,11 @@ pub struct FetchPolicy {
     pub max_redirects: usize,
     /// Schemes this operation may access.
     pub allowed_schemes: Vec<FetchScheme>,
+    /// Allows loopback addresses for explicitly approved local fetches.
+    ///
+    /// This is fail-closed by default. It does not allow private, link-local,
+    /// metadata, multicast, benchmarking, or other IANA special-purpose ranges.
+    pub allow_loopback_addresses: bool,
 }
 
 impl Default for FetchPolicy {
@@ -197,6 +202,7 @@ impl Default for FetchPolicy {
             max_uncompressed_size: DEFAULT_MAX_BYTES,
             max_redirects: 0,
             allowed_schemes: vec![FetchScheme::Https, FetchScheme::File, FetchScheme::Stdin],
+            allow_loopback_addresses: false,
         }
     }
 }
@@ -337,6 +343,12 @@ pub enum FetchError {
     /// Redirect response was malformed.
     #[error("malformed redirect response")]
     MalformedRedirect,
+    /// DNS resolution reached a prohibited address range.
+    #[error("resolved address is prohibited by fetch policy: {address}")]
+    ProhibitedAddress {
+        /// Blocked address.
+        address: IpAddr,
+    },
     /// Local I/O failed.
     #[error("I/O failure during {stage}: {source}")]
     Io {
@@ -455,7 +467,6 @@ impl HttpFetcher {
             url.as_url().scheme(),
             policy,
         )?;
-        let client = build_http_client(policy)?;
         let mut current = url.into_url();
         let mut visited = HashSet::new();
         let mut redirect_chain = Vec::new();
@@ -464,9 +475,11 @@ impl HttpFetcher {
             if !visited.insert(current.clone()) {
                 return Err(FetchError::RedirectLoop);
             }
-            let resolved_ips = resolve_url_ips(&current).await?;
-            debug!(url = %redacted_url(&current), resolved_count = resolved_ips.len(), "resolved fetch host");
-            let response = execute_request(&client, current.clone(), policy).await?;
+            let resolved_addrs = resolve_url_addrs(&current, policy).await?;
+            let resolved_ips = unique_ips(&resolved_addrs);
+            debug!(url = %redact_parsed_url(&current), resolved_count = resolved_ips.len(), "resolved fetch host");
+            let client = build_http_client(policy, &current, &resolved_addrs)?;
+            let response = execute_request(&client, current.clone()).await?;
             let status = response.status();
 
             if status.is_redirection() {
@@ -477,7 +490,7 @@ impl HttpFetcher {
                 }
                 let next = redirect_target(&current, response.headers())?;
                 ensure_scheme_allowed(FetchScheme::from_str(next.scheme()), next.scheme(), policy)?;
-                trace!(from = %redacted_url(&current), to = %redacted_url(&next), "following policy-approved redirect");
+                trace!(from = %redact_parsed_url(&current), to = %redact_parsed_url(&next), "following policy-approved redirect");
                 redirect_chain.push(FetchUrl(current));
                 current = next;
                 continue;
@@ -578,7 +591,16 @@ impl Fetcher for StdinFetcher {
     }
 }
 
-fn build_http_client(policy: &FetchPolicy) -> Result<reqwest::Client, FetchError> {
+fn build_http_client(
+    policy: &FetchPolicy,
+    url: &Url,
+    resolved_addrs: &[SocketAddr],
+) -> Result<reqwest::Client, FetchError> {
+    let Some(host) = url.host_str() else {
+        return Err(FetchError::InvalidUrl {
+            message: "URL must include a host".to_owned(),
+        });
+    };
     reqwest::Client::builder()
         .use_rustls_tls()
         .connect_timeout(policy.connect_timeout)
@@ -592,14 +614,14 @@ fn build_http_client(policy: &FetchPolicy) -> Result<reqwest::Client, FetchError
         .no_zstd()
         .tls_info(true)
         .user_agent(format!("{USER_AGENT_PREFIX}{}", env!("CARGO_PKG_VERSION")))
+        .resolve_to_addrs(host, resolved_addrs)
         .build()
-        .map_err(|error| classify_reqwest_error("client build", &error))
+        .map_err(|error| classify_reqwest_error("client build", error))
 }
 
 async fn execute_request(
     client: &reqwest::Client,
     url: Url,
-    _policy: &FetchPolicy,
 ) -> Result<reqwest::Response, FetchError> {
     // Exact-byte semantics: Arbitraitor stores and hashes the HTTP representation
     // bytes after HTTP transfer framing is removed by the HTTP stack. It does
@@ -612,7 +634,7 @@ async fn execute_request(
         .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
         .send()
         .await
-        .map_err(|error| classify_reqwest_error("request", &error))
+        .map_err(|error| classify_reqwest_error("request", error))
 }
 
 async fn stream_response(
@@ -651,7 +673,7 @@ async fn stream_response(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| classify_reqwest_error("read", &error))?
+        .map_err(|error| classify_reqwest_error("read", error))?
     {
         write_checked_chunk(&mut state, policy, sink, &chunk).await?;
     }
@@ -738,7 +760,7 @@ fn enforce_size(observed: u64, limit: u64, kind: SizeLimitKind) -> Result<(), Fe
     Ok(())
 }
 
-async fn resolve_url_ips(url: &Url) -> Result<Vec<IpAddr>, FetchError> {
+async fn resolve_url_addrs(url: &Url, policy: &FetchPolicy) -> Result<Vec<SocketAddr>, FetchError> {
     let Some(host) = url.host_str() else {
         return Ok(Vec::new());
     };
@@ -749,6 +771,18 @@ async fn resolve_url_ips(url: &Url) -> Result<Vec<IpAddr>, FetchError> {
             stage: "resolve",
             source,
         })?;
+    let mut socket_addrs = Vec::new();
+    for addr in addrs {
+        let ip = addr.ip();
+        validate_ip_for_policy(ip, policy)?;
+        if !socket_addrs.contains(&addr) {
+            socket_addrs.push(addr);
+        }
+    }
+    Ok(socket_addrs)
+}
+
+fn unique_ips(addrs: &[SocketAddr]) -> Vec<IpAddr> {
     let mut ips = Vec::new();
     for addr in addrs {
         let ip = addr.ip();
@@ -756,7 +790,70 @@ async fn resolve_url_ips(url: &Url) -> Result<Vec<IpAddr>, FetchError> {
             ips.push(ip);
         }
     }
-    Ok(ips)
+    ips
+}
+
+fn validate_ip_for_policy(ip: IpAddr, policy: &FetchPolicy) -> Result<(), FetchError> {
+    if validate_ip(ip) || policy.allow_loopback_addresses && ip.is_loopback() {
+        return Ok(());
+    }
+    Err(FetchError::ProhibitedAddress { address: ip })
+}
+
+/// Returns true when `ip` is globally routable under Arbitraitor's SSRF policy.
+#[must_use]
+pub fn validate_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => validate_ipv4(ip),
+        IpAddr::V6(ip) => validate_ipv6(ip),
+    }
+}
+
+fn validate_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ipv4_in(ip, [0, 0, 0, 0], 8)
+        || ipv4_in(ip, [100, 64, 0, 0], 10)
+        || ipv4_in(ip, [192, 0, 0, 0], 24)
+        || ipv4_in(ip, [192, 0, 2, 0], 24)
+        || ipv4_in(ip, [192, 88, 99, 0], 24)
+        || ipv4_in(ip, [198, 18, 0, 0], 15)
+        || ipv4_in(ip, [198, 51, 100, 0], 24)
+        || ipv4_in(ip, [203, 0, 113, 0], 24)
+        || ipv4_in(ip, [240, 0, 0, 0], 4))
+}
+
+fn validate_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return validate_ipv4(mapped);
+    }
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ipv6_in(ip, [0xfc00, 0, 0, 0, 0, 0, 0, 0], 7)
+        || ipv6_in(ip, [0xfe80, 0, 0, 0, 0, 0, 0, 0], 10)
+        || ipv6_in(ip, [0x0064, 0xff9b, 0, 0, 0, 0, 0, 0], 96)
+        || ipv6_in(ip, [0x0100, 0, 0, 0, 0, 0, 0, 0], 64)
+        || ipv6_in(ip, [0x2001, 0, 0, 0, 0, 0, 0, 0], 23)
+        || ipv6_in(ip, [0x2001, 0x0db8, 0, 0, 0, 0, 0, 0], 32)
+        || ipv6_in(ip, [0x2002, 0, 0, 0, 0, 0, 0, 0], 16))
+}
+
+fn ipv4_in(ip: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
+    let ip = u32::from(ip);
+    let network = u32::from(Ipv4Addr::from(network));
+    let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+    ip & mask == network & mask
+}
+
+fn ipv6_in(ip: Ipv6Addr, network: [u16; 8], prefix: u32) -> bool {
+    let ip = u128::from(ip);
+    let network = u128::from(Ipv6Addr::from(network));
+    let mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
+    ip & mask == network & mask
 }
 
 fn redirect_target(current: &Url, headers: &reqwest::header::HeaderMap) -> Result<Url, FetchError> {
@@ -799,7 +896,7 @@ fn ensure_scheme_allowed(
     ensure_policy_allows(scheme, policy)
 }
 
-fn classify_reqwest_error(stage: &'static str, error: &reqwest::Error) -> FetchError {
+fn classify_reqwest_error(stage: &'static str, error: reqwest::Error) -> FetchError {
     if error.is_timeout() {
         return FetchError::Timeout { stage };
     }
@@ -810,7 +907,7 @@ fn classify_reqwest_error(stage: &'static str, error: &reqwest::Error) -> FetchE
             status: status.as_u16(),
         };
     }
-    let message = error.to_string();
+    let message = error.without_url().to_string();
     if message.contains("Connection refused") || message.contains("connection refused") {
         return FetchError::ConnectionRefused;
     }
@@ -828,10 +925,105 @@ fn sha256_digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::new(Sha256::digest(bytes).into())
 }
 
-fn redacted_url(url: &Url) -> String {
+/// Redacts credentials and secret-bearing URL components for safe diagnostics.
+#[must_use]
+pub fn redact_url(value: &str) -> String {
+    Url::parse(value).map_or_else(
+        |_| "<invalid-url>".to_owned(),
+        |url| redact_parsed_url(&url),
+    )
+}
+
+fn redact_parsed_url(url: &Url) -> String {
     let mut redacted = url.clone();
     redacted.set_query(None);
     let _ = redacted.set_username("");
     let _ = redacted.set_password(None);
+    if should_redact_host(&redacted) {
+        let _ = redacted.set_host(Some("redacted-host.invalid"));
+    }
+    let sanitized_path = sanitized_path(redacted.path_segments());
+    redacted.set_path(&sanitized_path);
     redacted.to_string()
+}
+
+fn should_redact_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.parse::<IpAddr>().is_err() && !host.contains('.')
+}
+
+fn sanitized_path<'a>(segments: Option<impl Iterator<Item = &'a str>>) -> String {
+    let Some(segments) = segments else {
+        return String::new();
+    };
+    let mut redact_next = false;
+    let mut sanitized = Vec::new();
+    for segment in segments {
+        let lower = segment.to_ascii_lowercase();
+        if redact_next || is_sensitive_path_segment(&lower) {
+            sanitized.push("redacted".to_owned());
+            redact_next = !redact_next;
+        } else {
+            sanitized.push(segment.to_owned());
+            redact_next = lower == "token" || lower == "secret" || lower == "key";
+        }
+    }
+    sanitized.join("/")
+}
+
+fn is_sensitive_path_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "token" | "secret" | "password" | "passwd" | "credential" | "credentials" | "apikey"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{FetchPolicy, build_http_client, execute_request};
+
+    #[tokio::test]
+    async fn client_pins_validated_address_for_request() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await?;
+            stream.shutdown().await?;
+            Ok::<String, std::io::Error>(String::from_utf8_lossy(&request).to_ascii_lowercase())
+        });
+
+        let url = format!("http://rebind.invalid:{}/artifact", addr.port()).parse()?;
+        let policy = FetchPolicy {
+            allow_loopback_addresses: true,
+            ..FetchPolicy::default()
+        };
+        let client = build_http_client(&policy, &url, &[addr])?;
+
+        let response = execute_request(&client, url).await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let request = server.await??;
+        assert!(request.contains(&format!("host: rebind.invalid:{}", addr.port())));
+        Ok(())
+    }
 }
