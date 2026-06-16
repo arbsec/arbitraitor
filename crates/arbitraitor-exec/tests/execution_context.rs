@@ -1,11 +1,13 @@
 //! Integration tests for mediated execution contexts.
 
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
+use std::path::PathBuf;
 use std::process::Command;
 
 use arbitraitor_exec::{
     EnvAllowlist, ExecError, ExecutionContext, ExecutionContextBuilder, ExecutionPolicy,
+    NetworkPolicy, TempDirectoryPolicy,
 };
 use arbitraitor_model::ids::{ArtifactId, OperationId, Sha256Digest};
 use arbitraitor_model::operation::{
@@ -42,6 +44,10 @@ fn command_for_context(context: &ExecutionContext) -> Command {
     command.envs(context.environment_iter());
     command.current_dir(context.working_dir());
     command
+}
+
+fn tmp_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("arbitraitor-{name}-{}", std::process::id()))
 }
 
 #[test]
@@ -121,4 +127,109 @@ fn privilege_elevation_is_blocked_before_spawn() {
         error,
         Some(ExecError::PrivilegeElevationAttempt { .. })
     ));
+}
+
+#[test]
+fn custom_network_policy_cannot_bypass_missing_grant() {
+    let policy = ExecutionPolicy {
+        deny_running_as_root: false,
+        network_policy: NetworkPolicy::Allowed,
+        ..ExecutionPolicy::default()
+    };
+    let error = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy)
+        .source_environment([] as [(&str, &str); 0])
+        .build()
+        .err();
+    assert!(matches!(error, Some(ExecError::NetworkNotGranted)));
+}
+
+#[test]
+fn path_with_symlinked_parent_is_emitted_as_canonical_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let symlink_parent = tmp_path("path-parent-link");
+    let _ = fs::remove_file(&symlink_parent);
+    std::os::unix::fs::symlink("/usr", &symlink_parent)?;
+
+    let path_entry = symlink_parent.join("bin");
+    let canonical_bin = fs::canonicalize("/usr/bin")?;
+    let policy = ExecutionPolicy {
+        deny_running_as_root: false,
+        path_entries: vec![path_entry],
+        ..ExecutionPolicy::default()
+    };
+    let context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy)
+        .source_environment([] as [(&str, &str); 0])
+        .build()?;
+
+    let path_value = context.environment().get("PATH").ok_or("PATH missing")?;
+    let entries = std::env::split_paths(path_value).collect::<Vec<_>>();
+    assert_eq!(entries, vec![canonical_bin]);
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.starts_with(&symlink_parent))
+    );
+
+    let _ = fs::remove_file(&symlink_parent);
+    Ok(())
+}
+
+#[test]
+fn fixed_directory_with_symlinked_parent_is_materialized_as_canonical_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    let target_parent = tmp_path("fixed-target-parent");
+    let symlink_parent = tmp_path("fixed-parent-link");
+    let target_child = target_parent.join("child");
+    let _ = fs::remove_file(&symlink_parent);
+    let _ = fs::remove_dir_all(&target_parent);
+    fs::create_dir(&target_parent)?;
+    fs::create_dir(&target_child)?;
+    std::os::unix::fs::symlink(&target_parent, &symlink_parent)?;
+
+    let policy = ExecutionPolicy {
+        deny_running_as_root: false,
+        home_directory: TempDirectoryPolicy::Fixed(symlink_parent.join("child")),
+        ..ExecutionPolicy::default()
+    };
+    let context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy)
+        .source_environment([] as [(&str, &str); 0])
+        .build()?;
+
+    assert_eq!(
+        context.home_dir(),
+        fs::canonicalize(&target_child)?.as_path()
+    );
+    assert!(!context.home_dir().starts_with(&symlink_parent));
+
+    let _ = fs::remove_file(&symlink_parent);
+    let _ = fs::remove_dir_all(&target_parent);
+    Ok(())
+}
+
+#[test]
+fn fixed_directory_rejects_regular_file() -> Result<(), Box<dyn std::error::Error>> {
+    let fixed_file = tmp_path("fixed-file");
+    let _ = fs::remove_file(&fixed_file);
+    File::create(&fixed_file)?;
+
+    let policy = ExecutionPolicy {
+        deny_running_as_root: false,
+        home_directory: TempDirectoryPolicy::Fixed(fixed_file.clone()),
+        ..ExecutionPolicy::default()
+    };
+    let error = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy)
+        .source_environment([] as [(&str, &str); 0])
+        .build()
+        .err();
+
+    assert!(matches!(
+        error,
+        Some(ExecError::UnsafeFixedDirectory { .. })
+    ));
+    let _ = fs::remove_file(&fixed_file);
+    Ok(())
 }

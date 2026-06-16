@@ -43,6 +43,9 @@ pub enum ExecError {
     /// Trusted policy did not grant the execute capability.
     #[error("execute capability not granted by trusted policy")]
     ExecuteNotGranted,
+    /// Trusted policy did not grant network access requested by execution policy.
+    #[error("network capability not granted by trusted policy")]
+    NetworkNotGranted,
     /// The command executable is not an absolute path.
     #[error("command must be an absolute path: {command}")]
     CommandNotAbsolute {
@@ -422,8 +425,8 @@ impl ExecutionPolicy {
     ///
     /// Returns an error when the configured PATH is empty, relative, or unsafe.
     pub fn controlled_path(&self) -> Result<OsString, ExecError> {
-        validate_path_entries(&self.path_entries)?;
-        let joined = env::join_paths(&self.path_entries).map_err(|_| ExecError::EmptyPath)?;
+        let canonical_entries = validate_path_entries(&self.path_entries)?;
+        let joined = env::join_paths(&canonical_entries).map_err(|_| ExecError::EmptyPath)?;
         Ok(joined)
     }
 
@@ -733,6 +736,11 @@ impl ExecutionContextBuilder {
         if !self.granted_capabilities.execute() {
             return Err(ExecError::ExecuteNotGranted);
         }
+        if !self.granted_capabilities.network()
+            && self.policy.network_policy != NetworkPolicy::Denied
+        {
+            return Err(ExecError::NetworkNotGranted);
+        }
 
         let command = self.command.unwrap_or_else(|| PathBuf::from("/bin/sh"));
         // Commands must be absolute — no PATH lookup, no relative resolution.
@@ -746,13 +754,15 @@ impl ExecutionContextBuilder {
             }
         }
 
-        validate_path_entries(&self.policy.path_entries)?;
+        let canonical_path_entries = validate_path_entries(&self.policy.path_entries)?;
         let mut environment = filter_environment(
             &self.source_environment,
             &self.policy.environment_allowlist,
             &self.policy.environment_denylist,
         )?;
-        environment.insert("PATH".to_owned(), self.policy.controlled_path()?);
+        let controlled_path =
+            env::join_paths(&canonical_path_entries).map_err(|_| ExecError::EmptyPath)?;
+        environment.insert("PATH".to_owned(), controlled_path);
 
         let (home_dir, home_tempdir) = materialize_directory(&self.policy.home_directory)?;
         let (working_dir, working_tempdir) = materialize_directory(&self.policy.working_directory)?;
@@ -859,10 +869,11 @@ fn default_path_entries() -> Vec<PathBuf> {
 
 /// Validates that every PATH entry is absolute, not a symlink, canonicalizable,
 /// owned by root (uid 0), and not group- or world-writable.
-fn validate_path_entries(entries: &[PathBuf]) -> Result<(), ExecError> {
+fn validate_path_entries(entries: &[PathBuf]) -> Result<Vec<PathBuf>, ExecError> {
     if entries.is_empty() {
         return Err(ExecError::EmptyPath);
     }
+    let mut canonical_entries = Vec::with_capacity(entries.len());
     for entry in entries {
         if !entry.is_absolute() {
             return Err(ExecError::RelativePathEntry {
@@ -898,13 +909,14 @@ fn validate_path_entries(entries: &[PathBuf]) -> Result<(), ExecError> {
                 path: entry.clone(),
             });
         }
+        canonical_entries.push(canonical);
     }
-    Ok(())
+    Ok(canonical_entries)
 }
 
 /// Validates a fixed execution directory: must be absolute, not a symlink,
 /// and canonicalizable to a real directory.
-fn validate_fixed_directory(path: &Path) -> Result<(), ExecError> {
+fn validate_fixed_directory(path: &Path) -> Result<PathBuf, ExecError> {
     if !path.is_absolute() {
         return Err(ExecError::UnsafeFixedDirectory {
             path: path.to_path_buf(),
@@ -918,10 +930,18 @@ fn validate_fixed_directory(path: &Path) -> Result<(), ExecError> {
             path: path.to_path_buf(),
         });
     }
-    fs::canonicalize(path).map_err(|_| ExecError::UnsafeFixedDirectory {
+    let canonical = fs::canonicalize(path).map_err(|_| ExecError::UnsafeFixedDirectory {
         path: path.to_path_buf(),
     })?;
-    Ok(())
+    let meta = fs::metadata(&canonical).map_err(|_| ExecError::UnsafeFixedDirectory {
+        path: path.to_path_buf(),
+    })?;
+    if !meta.is_dir() {
+        return Err(ExecError::UnsafeFixedDirectory {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(canonical)
 }
 
 fn materialize_directory(
@@ -933,8 +953,8 @@ fn materialize_directory(
             Ok((directory.path().to_path_buf(), Some(directory)))
         }
         TempDirectoryPolicy::Fixed(path) => {
-            validate_fixed_directory(path)?;
-            Ok((path.clone(), None))
+            let canonical = validate_fixed_directory(path)?;
+            Ok((canonical, None))
         }
     }
 }
