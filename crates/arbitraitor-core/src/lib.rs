@@ -482,6 +482,14 @@ impl PipelineOperation {
                 StateErrorKind::ReleaseBeforeVerdict,
             ));
         }
+        if self.has_blocking_verdict {
+            return Err(StateError::invalid_transition(
+                &self,
+                self.state,
+                PipelineState::Approved,
+                StateErrorKind::BlockingVerdict,
+            ));
+        }
         self.transition_to(PipelineState::Approved)
     }
 
@@ -607,16 +615,31 @@ impl PipelineOperation {
         );
 
         if valid {
-            if self.state == PipelineState::Approved
-                && next == PipelineState::Released
-                && self.verdict.is_none()
-            {
-                return Err(StateError::invalid_transition(
-                    self,
-                    self.state,
-                    next,
-                    StateErrorKind::ReleaseBeforeVerdict,
-                ));
+            if self.state == PipelineState::Approved && next == PipelineState::Released {
+                if self.verdict.is_none() {
+                    return Err(StateError::invalid_transition(
+                        self,
+                        self.state,
+                        next,
+                        StateErrorKind::ReleaseBeforeVerdict,
+                    ));
+                }
+                if self.has_blocking_verdict {
+                    return Err(StateError::invalid_transition(
+                        self,
+                        self.state,
+                        next,
+                        StateErrorKind::BlockingVerdict,
+                    ));
+                }
+                if self.release_prohibited {
+                    return Err(StateError::invalid_transition(
+                        self,
+                        self.state,
+                        next,
+                        StateErrorKind::ReleaseProhibited,
+                    ));
+                }
             }
             return Ok(());
         }
@@ -694,6 +717,7 @@ mod tests {
         Release,
         Complete,
         Cancel,
+        ComponentFailure(PipelineStage),
     }
 
     fn artifact_id() -> ArtifactId {
@@ -751,6 +775,22 @@ mod tests {
         ]
     }
 
+    fn stage_strategy() -> impl Strategy<Value = PipelineStage> {
+        prop_oneof![
+            Just(PipelineStage::Created),
+            Just(PipelineStage::Retrieval),
+            Just(PipelineStage::Storage),
+            Just(PipelineStage::Identification),
+            Just(PipelineStage::Analysis),
+            Just(PipelineStage::Expansion),
+            Just(PipelineStage::Evaluation),
+            Just(PipelineStage::Approval),
+            Just(PipelineStage::Release),
+            Just(PipelineStage::Receipt),
+            Just(PipelineStage::Terminal),
+        ]
+    }
+
     fn action_strategy() -> impl Strategy<Value = Action> {
         prop_oneof![
             state_strategy().prop_map(Action::Transition),
@@ -759,6 +799,7 @@ mod tests {
             Just(Action::Release),
             Just(Action::Complete),
             Just(Action::Cancel),
+            stage_strategy().prop_map(Action::ComponentFailure),
         ]
     }
 
@@ -789,6 +830,14 @@ mod tests {
             Action::Release => current.clone().release(),
             Action::Complete => current.clone().complete(),
             Action::Cancel => current.clone().cancel(),
+            Action::ComponentFailure(stage) => {
+                let (next, _error) = current.clone().component_failure(
+                    stage,
+                    PipelineComponent::new("test"),
+                    Retryability::NotRetryable,
+                );
+                return next;
+            }
         };
         match attempted {
             Ok(next) => next,
@@ -963,6 +1012,59 @@ mod tests {
     }
 
     #[test]
+    fn transition_to_released_rejects_blocking_verdict_bypass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Exploit path: record a blocking verdict, then attempt to bypass
+        // release() by calling transition_to(Released) directly.
+        let awaiting_approval = evaluated_operation()?.record_verdict(Verdict::Block)?;
+        assert!(awaiting_approval.has_blocking_verdict);
+        assert!(awaiting_approval.release_prohibited);
+
+        // approve() must reject a blocking verdict (defense in depth).
+        assert_eq!(
+            awaiting_approval
+                .clone()
+                .approve()
+                .err()
+                .map(|error| error.kind),
+            Some(StateErrorKind::BlockingVerdict),
+        );
+
+        // Even if an Approved state with a blocking verdict is constructed
+        // (simulating a bypass of approve()), transition_to(Released) must
+        // still reject.
+        let mut bypassed = awaiting_approval;
+        bypassed.state = PipelineState::Approved;
+        assert_eq!(
+            bypassed
+                .transition_to(PipelineState::Released)
+                .err()
+                .map(|error| error.kind),
+            Some(StateErrorKind::BlockingVerdict),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transition_to_released_rejects_release_prohibited_bypass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Simulate a component failure that sets release_prohibited without a
+        // blocking verdict, then attempt to bypass release().
+        let mut bypassed = evaluated_operation()?
+            .record_verdict(Verdict::Pass)?
+            .approve()?;
+        bypassed.release_prohibited = true;
+        assert_eq!(
+            bypassed
+                .transition_to(PipelineState::Released)
+                .err()
+                .map(|error| error.kind),
+            Some(StateErrorKind::ReleaseProhibited),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn component_failure_atomically_fails_operation_and_blocks_release()
     -> Result<(), Box<dyn std::error::Error>> {
         let approved = evaluated_operation()?
@@ -1007,6 +1109,7 @@ mod tests {
                     prop_assert!(saw_awaiting_approval);
                     prop_assert!(saw_approved_after_awaiting);
                     prop_assert!(!blocking_verdict_recorded);
+                    prop_assert!(!current.release_prohibited);
                 }
             }
         }
