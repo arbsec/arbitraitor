@@ -7,7 +7,6 @@
 
 use core::fmt;
 use core::num::NonZeroU32;
-use std::borrow::Cow;
 use std::ops::Range;
 
 use arbitraitor_model::finding::{
@@ -52,7 +51,7 @@ impl fmt::Display for ShellDialect {
 /// Configuration for bounded shell parsing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParserConfig {
-    /// Maximum input bytes parsed; larger inputs are truncated and reported.
+    /// Maximum input bytes accepted for parsing; larger inputs are rejected before parsing.
     pub max_bytes: usize,
     /// Maximum AST traversal depth.
     pub max_depth: usize,
@@ -122,12 +121,21 @@ impl ShellParser {
         self.parse_bytes(source.as_bytes())
     }
 
-    /// Parses arbitrary shell bytes with lossy UTF-8 and NUL handling.
+    /// Parses arbitrary shell bytes after strict UTF-8 validation and NUL handling.
     #[must_use]
     pub fn parse_bytes(&mut self, input: &[u8]) -> ParseResult {
         let mut findings = Vec::new();
-        let dialect = detect_dialect(input);
-        let sanitized = sanitize_input(input, &self.config, &mut findings);
+        if input.len() > self.config.max_bytes {
+            findings.push(input_too_large_finding(&self.config, input.len()));
+            return rejected_result(findings, SourceStats::rejected_too_large(input.len()));
+        }
+
+        let sanitized = match sanitize_input(input, &self.config, &mut findings) {
+            Ok(sanitized) => sanitized,
+            Err(stats) => return rejected_result(findings, stats),
+        };
+
+        let dialect = detect_dialect(&sanitized.bytes);
         debug!(
             dialect = %dialect,
             raw_bytes = input.len(),
@@ -172,7 +180,10 @@ pub struct ParseResult {
     pub ast: Vec<ShellNode>,
     /// Parser, recovery, encoding, and resource-limit findings.
     pub parse_errors: Vec<Finding>,
-    /// Dialect inferred from the shebang or [`ShellDialect::Unknown`].
+    /// Dialect inferred from attacker-controlled source metadata for informational parser context only.
+    ///
+    /// Security policy must not trust this value; callers that need dialect-sensitive enforcement must
+    /// require an explicit, trusted dialect selection and fail closed when it is absent.
     pub detected_dialect: ShellDialect,
     /// Statistics about the raw and sanitized source.
     pub source_stats: SourceStats,
@@ -187,8 +198,8 @@ pub struct SourceStats {
     pub parsed_bytes: usize,
     /// Number of NUL bytes replaced before parsing.
     pub nul_bytes_replaced: usize,
-    /// Whether invalid UTF-8 was replaced lossily.
-    pub invalid_utf8_replaced: bool,
+    /// Whether invalid UTF-8 caused parsing to be rejected.
+    pub invalid_utf8_rejected: bool,
     /// Whether input exceeded [`ParserConfig::max_bytes`].
     pub truncated: bool,
     /// Count of line breaks in the sanitized source plus one for non-empty input.
@@ -364,53 +375,53 @@ fn sanitize_input(
     input: &[u8],
     config: &ParserConfig,
     findings: &mut Vec<Finding>,
-) -> SanitizedInput {
-    let truncated = input.len() > config.max_bytes;
-    let bounded = if truncated {
-        warn!(
-            raw_bytes = input.len(),
-            max_bytes = config.max_bytes,
-            "shell input truncated"
-        );
-        &input[..config.max_bytes]
-    } else {
-        input
+) -> Result<SanitizedInput, SourceStats> {
+    let source = match String::from_utf8(input.to_vec()) {
+        Ok(source) => source,
+        Err(error) => {
+            findings.push(make_finding(
+                config,
+                FindingInput::new(
+                    "encoding-invalid-utf8",
+                    FindingCategory::ParserError,
+                    Severity::Medium,
+                    "Shell input contained invalid UTF-8",
+                    "Input was rejected before parsing because byte offsets would be unreliable.",
+                )
+                .with_evidence(format!(
+                    "invalid UTF-8 at byte {}",
+                    error.utf8_error().valid_up_to()
+                )),
+            ));
+            return Err(SourceStats {
+                raw_bytes: input.len(),
+                parsed_bytes: 0,
+                nul_bytes_replaced: 0,
+                invalid_utf8_rejected: true,
+                truncated: false,
+                line_count: 0,
+            });
+        }
     };
 
     let mut nul_bytes_replaced = 0_usize;
-    for byte in bounded {
+    for byte in source.as_bytes() {
         if *byte == 0 {
             nul_bytes_replaced = nul_bytes_replaced.saturating_add(1);
         }
     }
-    let without_nuls: Cow<'_, [u8]> = if nul_bytes_replaced == 0 {
-        Cow::Borrowed(bounded)
+    let bytes = if nul_bytes_replaced == 0 {
+        source.into_bytes()
     } else {
-        let mut copy = bounded.to_vec();
+        let mut copy = source.into_bytes();
         for byte in &mut copy {
             if *byte == 0 {
                 *byte = b' ';
             }
         }
-        Cow::Owned(copy)
+        copy
     };
 
-    let invalid_utf8_replaced = std::str::from_utf8(&without_nuls).is_err();
-    let text = String::from_utf8_lossy(&without_nuls);
-    let bytes = text.into_owned().into_bytes();
-
-    if truncated {
-        findings.push(make_finding(
-            config,
-            FindingInput::new(
-                "resource-input-too-large",
-                FindingCategory::ResourceLimitEvent,
-                Severity::Medium,
-                "Shell input exceeded parser byte limit",
-                "Input was truncated before parsing to keep shell analysis bounded.",
-            ),
-        ));
-    }
     if nul_bytes_replaced > 0 {
         findings.push(make_finding(
             config,
@@ -422,18 +433,6 @@ fn sanitize_input(
                 "NUL bytes were replaced with spaces before parsing.",
             )
             .with_evidence(format!("{nul_bytes_replaced} NUL byte(s) replaced")),
-        ));
-    }
-    if invalid_utf8_replaced {
-        findings.push(make_finding(
-            config,
-            FindingInput::new(
-                "encoding-invalid-utf8",
-                FindingCategory::ParserError,
-                Severity::Low,
-                "Shell input contained invalid UTF-8",
-                "Invalid UTF-8 was converted with Unicode replacement characters before parsing.",
-            ),
         ));
     }
 
@@ -449,17 +448,61 @@ fn sanitize_input(
         newlines.saturating_add(1)
     };
 
-    SanitizedInput {
+    Ok(SanitizedInput {
         stats: SourceStats {
             raw_bytes: input.len(),
             parsed_bytes: bytes.len(),
             nul_bytes_replaced,
-            invalid_utf8_replaced,
-            truncated,
+            invalid_utf8_rejected: false,
+            truncated: false,
             line_count,
         },
         bytes,
+    })
+}
+
+impl SourceStats {
+    fn rejected_too_large(raw_bytes: usize) -> Self {
+        Self {
+            raw_bytes,
+            parsed_bytes: 0,
+            nul_bytes_replaced: 0,
+            invalid_utf8_rejected: false,
+            truncated: true,
+            line_count: 0,
+        }
     }
+}
+
+fn rejected_result(findings: Vec<Finding>, source_stats: SourceStats) -> ParseResult {
+    ParseResult {
+        ast: Vec::new(),
+        parse_errors: findings,
+        detected_dialect: ShellDialect::Unknown,
+        source_stats,
+    }
+}
+
+fn input_too_large_finding(config: &ParserConfig, raw_bytes: usize) -> Finding {
+    warn!(
+        raw_bytes,
+        max_bytes = config.max_bytes,
+        "shell input rejected before parsing"
+    );
+    make_finding(
+        config,
+        FindingInput::new(
+            "resource-input-too-large",
+            FindingCategory::ResourceLimitEvent,
+            Severity::Medium,
+            "Shell input exceeded parser byte limit",
+            "Input was rejected before parsing to keep shell analysis bounded.",
+        )
+        .with_evidence(format!(
+            "{raw_bytes} byte(s) exceeds limit of {}",
+            config.max_bytes
+        )),
+    )
 }
 
 fn collect_ast(tree: &Tree, config: &ParserConfig, findings: &mut Vec<Finding>) -> Vec<ShellNode> {
@@ -569,12 +612,14 @@ fn classify_node(node: Node<'_>) -> Option<ShellNode> {
                 span,
             }))
         }
-        "for_statement" | "while_statement" | "until_statement" | "select_statement" => {
-            Some(ShellNode::Loop(LoopNode {
-                kind: kind_string,
-                span,
-            }))
-        }
+        "for_statement"
+        | "c_style_for_statement"
+        | "while_statement"
+        | "until_statement"
+        | "select_statement" => Some(ShellNode::Loop(LoopNode {
+            kind: kind_string,
+            span,
+        })),
         "function_definition" => Some(ShellNode::Function(FunctionNode {
             kind: kind_string,
             span,
@@ -856,17 +901,31 @@ case "$1" in start) echo start ;; *) test -n "$1" ;; esac
     }
 
     #[test]
-    fn handles_null_bytes_and_invalid_utf8() -> Result<(), Box<dyn std::error::Error>> {
+    fn handles_null_bytes_without_shifting_spans() -> Result<(), Box<dyn std::error::Error>> {
         let mut parser = parser()?;
-        let result = parser.parse_bytes(b"#!/bin/sh\necho a\0b\xff\n");
+        let result = parser.parse_bytes(b"#!/bin/sh\necho a\0b\n");
         assert_eq!(result.source_stats.nul_bytes_replaced, 1);
-        assert!(result.source_stats.invalid_utf8_replaced);
+        assert!(!result.source_stats.invalid_utf8_rejected);
+        assert_eq!(
+            result.source_stats.raw_bytes,
+            result.source_stats.parsed_bytes
+        );
         assert!(
             result
                 .parse_errors
                 .iter()
                 .any(|finding| finding.id == "encoding-nul-bytes")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_before_parsing() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = parser()?;
+        let result = parser.parse_bytes(b"#!/bin/sh\necho ok\xff\n");
+        assert!(result.ast.is_empty());
+        assert_eq!(result.source_stats.parsed_bytes, 0);
+        assert!(result.source_stats.invalid_utf8_rejected);
         assert!(
             result
                 .parse_errors
@@ -877,21 +936,67 @@ case "$1" in start) echo start ;; *) test -n "$1" ;; esac
     }
 
     #[test]
-    fn enforces_depth_and_size_limits() -> Result<(), Box<dyn std::error::Error>> {
+    fn rejects_oversized_input_before_parsing() -> Result<(), Box<dyn std::error::Error>> {
         let mut parser = ShellParser::with_config(ParserConfig {
             max_bytes: 32,
+            max_depth: 64,
+            max_nodes: 10_000,
+            ..ParserConfig::default()
+        })?;
+        let result = parser.parse_str("if then echo unterminated syntax that must not be parsed\n");
+        assert!(result.ast.is_empty());
+        assert_eq!(result.source_stats.parsed_bytes, 0);
+        assert!(result.source_stats.truncated);
+        assert!(
+            result
+                .parse_errors
+                .iter()
+                .any(|finding| finding.id == "resource-input-too-large")
+        );
+        assert!(
+            result
+                .parse_errors
+                .iter()
+                .all(|finding| finding.category == FindingCategory::ResourceLimitEvent)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bounds_deeply_nested_input_by_max_depth() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = ShellParser::with_config(ParserConfig {
+            max_bytes: 4096,
             max_depth: 1,
             max_nodes: 10_000,
             ..ParserConfig::default()
         })?;
         let nested = format!("{}echo ok{}", "$(".repeat(64), ")".repeat(64));
         let result = parser.parse_str(&nested);
-        assert!(result.source_stats.truncated);
+        assert!(!result.source_stats.truncated);
         assert!(
             result
                 .parse_errors
                 .iter()
-                .any(|finding| finding.category == FindingCategory::ResourceLimitEvent)
+                .any(|finding| finding.id == "resource-depth-limit")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_c_style_for_loop_body_commands() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = parser()?;
+        let result =
+            parser.parse_str("for ((i=0; i<3; i++)); do curl https://example.invalid; done\n");
+        assert!(result.parse_errors.is_empty());
+        assert!(result.ast.iter().any(|node| matches!(
+            node,
+            ShellNode::Loop(loop_node) if loop_node.kind == "c_style_for_statement"
+        )));
+        assert!(
+            result
+                .ast
+                .iter()
+                .any(|node| matches!(node, ShellNode::Command(_)))
         );
         Ok(())
     }
