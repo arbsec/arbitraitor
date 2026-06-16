@@ -11,7 +11,7 @@ use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::{ArtifactId, OperationId};
 use arbitraitor_model::operation::OperationPlan;
 use arbitraitor_model::verdict::Verdict;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// A named component participating in a pipeline stage.
@@ -80,7 +80,17 @@ impl PipelineStage {
     /// Returns whether any error in this stage must prohibit later release.
     #[must_use]
     pub const fn release_prohibited_on_error(self) -> bool {
-        matches!(self, Self::Retrieval | Self::Storage | Self::Analysis)
+        matches!(
+            self,
+            Self::Retrieval
+                | Self::Storage
+                | Self::Identification
+                | Self::Analysis
+                | Self::Expansion
+                | Self::Evaluation
+                | Self::Approval
+                | Self::Release
+        )
     }
 }
 
@@ -172,6 +182,10 @@ pub enum StateErrorKind {
     CompletionBeforeRelease,
     /// A component reported a stage failure.
     ComponentFailure,
+    /// Release was requested after an invariant made release impossible.
+    ReleaseProhibited,
+    /// Release was requested after a blocking verdict was recorded.
+    BlockingVerdict,
 }
 
 impl core::fmt::Display for StateErrorKind {
@@ -184,6 +198,8 @@ impl core::fmt::Display for StateErrorKind {
             Self::AnalysisBeforeStorage => "analysis requested before storage",
             Self::CompletionBeforeRelease => "completion requested before release",
             Self::ComponentFailure => "pipeline component failure",
+            Self::ReleaseProhibited => "release prohibited by prior failure",
+            Self::BlockingVerdict => "release prohibited by blocking verdict",
         })
     }
 }
@@ -258,23 +274,70 @@ impl StateError {
 }
 
 /// Serializable pipeline operation state and security-relevant context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `PipelineOperation` is an immutable-by-value state machine: every transition
+/// consumes the previous value and returns a new value. It contains no interior
+/// mutability, does not spawn work, and derives thread-safety solely from its
+/// fields. Callers that share an operation between threads must provide their
+/// own synchronization and must serialize transitions so stale clones cannot be
+/// released after a newer clone records a failure or blocking verdict.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineOperation {
     /// Operation identifier that binds approval and receipts.
-    pub operation_id: OperationId,
+    operation_id: OperationId,
     /// Artifact identity the pipeline protects.
-    pub artifact_id: ArtifactId,
+    artifact_id: ArtifactId,
     /// Current pipeline state.
-    pub state: PipelineState,
+    state: PipelineState,
     /// Final policy verdict once evaluation has completed.
-    pub verdict: Option<Verdict>,
+    verdict: Option<Verdict>,
     /// Findings accumulated by analysis components.
-    pub findings: Vec<Finding>,
+    findings: Vec<Finding>,
     /// Optional plan-bound operation context from the domain model.
-    pub operation_plan: Option<OperationPlan>,
+    operation_plan: Option<OperationPlan>,
     /// Whether any failure has made release impossible.
-    pub release_prohibited: bool,
+    release_prohibited: bool,
+    /// Whether a blocking verdict was ever recorded for this operation.
+    has_blocking_verdict: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineOperationWire {
+    operation_id: OperationId,
+    artifact_id: ArtifactId,
+    state: PipelineState,
+    verdict: Option<Verdict>,
+    findings: Vec<Finding>,
+    operation_plan: Option<OperationPlan>,
+    release_prohibited: bool,
+    #[serde(default)]
+    has_blocking_verdict: bool,
+}
+
+impl<'de> Deserialize<'de> for PipelineOperation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PipelineOperationWire::deserialize(deserializer)?;
+        let operation = Self {
+            operation_id: wire.operation_id,
+            artifact_id: wire.artifact_id,
+            state: wire.state,
+            verdict: wire.verdict,
+            findings: wire.findings,
+            operation_plan: wire.operation_plan,
+            release_prohibited: wire.release_prohibited,
+            has_blocking_verdict: wire.has_blocking_verdict
+                || wire.verdict.is_some_and(verdict_prohibits_release),
+        };
+        operation
+            .validate_invariants()
+            .map_err(serde::de::Error::custom)?;
+        Ok(operation)
+    }
 }
 
 impl PipelineOperation {
@@ -289,7 +352,56 @@ impl PipelineOperation {
             findings: Vec::new(),
             operation_plan: None,
             release_prohibited: false,
+            has_blocking_verdict: false,
         }
+    }
+
+    /// Returns the operation identifier that binds approval and receipts.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the artifact identity the pipeline protects.
+    #[must_use]
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
+    /// Returns the current pipeline state.
+    #[must_use]
+    pub const fn state(&self) -> PipelineState {
+        self.state
+    }
+
+    /// Returns the final policy verdict once evaluation has completed.
+    #[must_use]
+    pub const fn verdict(&self) -> Option<Verdict> {
+        self.verdict
+    }
+
+    /// Returns accumulated analysis findings.
+    #[must_use]
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+
+    /// Returns the plan-bound operation context from the domain model.
+    #[must_use]
+    pub const fn operation_plan(&self) -> Option<&OperationPlan> {
+        self.operation_plan.as_ref()
+    }
+
+    /// Returns whether any failure has made release impossible.
+    #[must_use]
+    pub const fn release_prohibited(&self) -> bool {
+        self.release_prohibited
+    }
+
+    /// Returns whether a blocking verdict was ever recorded for this operation.
+    #[must_use]
+    pub const fn has_blocking_verdict(&self) -> bool {
+        self.has_blocking_verdict
     }
 
     /// Attaches a plan-bound operation context.
@@ -347,6 +459,10 @@ impl PipelineOperation {
         }
         let previous = self.state;
         self.verdict = Some(verdict);
+        if verdict_prohibits_release(verdict) {
+            self.has_blocking_verdict = true;
+            self.release_prohibited = true;
+        }
         self.state = PipelineState::AwaitingApproval;
         tracing::info!(?previous, ?verdict, operation_id = %self.operation_id, "pipeline verdict recorded");
         Ok(self)
@@ -383,7 +499,45 @@ impl PipelineOperation {
                 StateErrorKind::ReleaseBeforeVerdict,
             ));
         }
+        if self.has_blocking_verdict {
+            return Err(StateError::invalid_transition(
+                &self,
+                self.state,
+                PipelineState::Released,
+                StateErrorKind::BlockingVerdict,
+            ));
+        }
+        if self.release_prohibited {
+            return Err(StateError::invalid_transition(
+                &self,
+                self.state,
+                PipelineState::Released,
+                StateErrorKind::ReleaseProhibited,
+            ));
+        }
         self.transition_to(PipelineState::Released)
+    }
+
+    /// Records a component failure and atomically updates operation state.
+    #[must_use]
+    pub fn component_failure(
+        mut self,
+        stage: PipelineStage,
+        component: PipelineComponent,
+        retryability: Retryability,
+    ) -> (Self, StateError) {
+        let error = StateError::component_failure(
+            stage,
+            component,
+            retryability,
+            self.artifact_id.clone(),
+            self.operation_id,
+        );
+        self.release_prohibited |= error.release_prohibited;
+        if error.release_prohibited && !self.state.is_terminal() {
+            self.state = PipelineState::Failed;
+        }
+        (self, error)
     }
 
     /// Completes the operation receipt after release.
@@ -474,6 +628,46 @@ impl PipelineOperation {
             transition_error_kind(self.state, next),
         ))
     }
+
+    fn validate_invariants(&self) -> Result<(), &'static str> {
+        if self.state.prohibits_release() && !self.release_prohibited {
+            return Err("release-prohibited terminal states must set release_prohibited");
+        }
+        if matches!(
+            self.state,
+            PipelineState::AwaitingApproval | PipelineState::Approved
+        ) && self.verdict.is_none()
+        {
+            return Err("approval states require a recorded verdict");
+        }
+        if matches!(
+            self.state,
+            PipelineState::Released | PipelineState::Completed
+        ) && self.verdict.is_none()
+        {
+            return Err("released states require a recorded verdict");
+        }
+        if matches!(
+            self.state,
+            PipelineState::Released | PipelineState::Completed
+        ) && (self.release_prohibited || self.has_blocking_verdict)
+        {
+            return Err("released states cannot have release-prohibition markers");
+        }
+        if self.verdict.is_some_and(verdict_prohibits_release)
+            && (!self.has_blocking_verdict || !self.release_prohibited)
+        {
+            return Err("blocking verdicts must persist release-prohibition markers");
+        }
+        Ok(())
+    }
+}
+
+const fn verdict_prohibits_release(verdict: Verdict) -> bool {
+    matches!(
+        verdict,
+        Verdict::Block | Verdict::Error | Verdict::Incomplete
+    )
 }
 
 fn transition_error_kind(from: PipelineState, to: PipelineState) -> StateErrorKind {
@@ -566,6 +760,25 @@ mod tests {
             Just(Action::Complete),
             Just(Action::Cancel),
         ]
+    }
+
+    const fn state_rank(state: PipelineState) -> u8 {
+        match state {
+            PipelineState::Created => 0,
+            PipelineState::Retrieving => 1,
+            PipelineState::Stored => 2,
+            PipelineState::Identified => 3,
+            PipelineState::Analyzing => 4,
+            PipelineState::Expanding => 5,
+            PipelineState::Evaluating => 6,
+            PipelineState::AwaitingApproval => 7,
+            PipelineState::Approved => 8,
+            PipelineState::Released => 9,
+            PipelineState::Completed
+            | PipelineState::Blocked
+            | PipelineState::Failed
+            | PipelineState::Cancelled => 10,
+        }
     }
 
     fn apply_action(current: PipelineOperation, action: Action) -> PipelineOperation {
@@ -665,7 +878,12 @@ mod tests {
         for stage in [
             PipelineStage::Retrieval,
             PipelineStage::Storage,
+            PipelineStage::Identification,
             PipelineStage::Analysis,
+            PipelineStage::Expansion,
+            PipelineStage::Evaluation,
+            PipelineStage::Approval,
+            PipelineStage::Release,
         ] {
             let error = StateError::component_failure(
                 stage,
@@ -681,7 +899,7 @@ mod tests {
     #[test]
     fn component_failure_does_not_overstate_other_stages() {
         let error = StateError::component_failure(
-            PipelineStage::Approval,
+            PipelineStage::Created,
             PipelineComponent::new("component"),
             Retryability::NotRetryable,
             artifact_id(),
@@ -690,15 +908,94 @@ mod tests {
         assert!(!error.release_prohibited);
     }
 
+    #[test]
+    fn blocking_verdict_permanently_prevents_release() -> Result<(), Box<dyn std::error::Error>> {
+        for verdict in [Verdict::Block, Verdict::Error, Verdict::Incomplete] {
+            let blocked = evaluated_operation()?.record_verdict(verdict)?;
+
+            assert!(blocked.has_blocking_verdict);
+            assert!(blocked.release_prohibited);
+            assert_eq!(
+                blocked.release().err().map(|error| error.kind),
+                Some(StateErrorKind::BlockingVerdict)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deserialized_released_state_requires_verdict_and_no_release_prohibition() {
+        let invalid = PipelineOperation {
+            operation_id: OperationId::new(),
+            artifact_id: artifact_id(),
+            state: PipelineState::Released,
+            verdict: None,
+            findings: Vec::new(),
+            operation_plan: None,
+            release_prohibited: false,
+            has_blocking_verdict: false,
+        };
+
+        assert!(invalid.validate_invariants().is_err());
+
+        let invalid = PipelineOperation {
+            verdict: Some(Verdict::Block),
+            release_prohibited: true,
+            has_blocking_verdict: true,
+            ..invalid
+        };
+
+        assert!(invalid.validate_invariants().is_err());
+    }
+
+    #[test]
+    fn release_prohibited_flag_prevents_release() -> Result<(), Box<dyn std::error::Error>> {
+        let mut operation = evaluated_operation()?
+            .record_verdict(Verdict::Pass)?
+            .approve()?;
+        operation.release_prohibited = true;
+
+        assert_eq!(
+            operation.release().err().map(|error| error.kind),
+            Some(StateErrorKind::ReleaseProhibited)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn component_failure_atomically_fails_operation_and_blocks_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let approved = evaluated_operation()?
+            .record_verdict(Verdict::Pass)?
+            .approve()?;
+        let (operation, error) = approved.component_failure(
+            PipelineStage::Evaluation,
+            PipelineComponent::new("policy-engine"),
+            Retryability::NotRetryable,
+        );
+
+        assert_eq!(error.kind, StateErrorKind::ComponentFailure);
+        assert!(error.release_prohibited);
+        assert_eq!(operation.state, PipelineState::Failed);
+        assert!(operation.release_prohibited);
+        assert_eq!(
+            operation.release().err().map(|error| error.kind),
+            Some(StateErrorKind::ReleaseProhibited)
+        );
+        Ok(())
+    }
+
     proptest! {
         #[test]
         fn no_release_before_verdict(actions in prop::collection::vec(action_strategy(), 0..128)) {
             let mut current = operation();
             let mut saw_awaiting_approval = false;
             let mut saw_approved_after_awaiting = false;
+            let mut blocking_verdict_recorded = false;
 
             for action in actions {
                 current = apply_action(current, action);
+                blocking_verdict_recorded |= current.has_blocking_verdict;
                 if current.state == PipelineState::AwaitingApproval && current.verdict.is_some() {
                     saw_awaiting_approval = true;
                 }
@@ -709,6 +1006,7 @@ mod tests {
                     prop_assert!(current.verdict.is_some());
                     prop_assert!(saw_awaiting_approval);
                     prop_assert!(saw_approved_after_awaiting);
+                    prop_assert!(!blocking_verdict_recorded);
                 }
             }
         }
@@ -719,7 +1017,12 @@ mod tests {
             let mut saw_released = false;
 
             for action in actions {
+                let previous = current.clone();
                 current = apply_action(current, action);
+                prop_assert!(state_rank(current.state) >= state_rank(previous.state));
+                if previous.state == PipelineState::Released {
+                    prop_assert!(matches!(current.state, PipelineState::Released | PipelineState::Completed));
+                }
                 saw_released |= current.state == PipelineState::Released;
                 if current.state == PipelineState::Completed {
                     prop_assert!(saw_released);
@@ -736,6 +1039,8 @@ mod tests {
             } else {
                 None
             };
+            current.release_prohibited = from.prohibits_release();
+            current.has_blocking_verdict = false;
 
             let result = current.clone().transition_to(to);
             if result.is_err() {
