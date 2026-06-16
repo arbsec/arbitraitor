@@ -36,11 +36,11 @@ fn grants() -> GrantedCapabilities {
 }
 
 fn command_for_context(context: &ExecutionContext) -> Command {
-    let mut command = Command::new(&context.command);
-    command.args(&context.arguments);
+    let mut command = Command::new(context.command());
+    command.args(context.arguments());
     command.env_clear();
     command.envs(context.environment_iter());
-    command.current_dir(&context.working_dir);
+    command.current_dir(context.working_dir());
     command
 }
 
