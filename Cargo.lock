@@ -144,6 +144,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-core",
  "arbitraitor-model",
+ "cap-tempfile",
  "thiserror",
  "tokio",
  "tracing",
