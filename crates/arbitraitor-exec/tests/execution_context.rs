@@ -35,19 +35,6 @@ fn grants() -> GrantedCapabilities {
     )
 }
 
-fn context_with_env(
-    environment: impl IntoIterator<Item = (&'static str, &'static str)>,
-) -> Result<ExecutionContext, ExecError> {
-    let policy = ExecutionPolicy {
-        deny_running_as_root: false,
-        ..ExecutionPolicy::default()
-    };
-    ExecutionContextBuilder::new(plan(), grants())
-        .policy(policy)
-        .source_environment(environment)
-        .build()
-}
-
 fn command_for_context(context: &ExecutionContext) -> Command {
     let mut command = Command::new(&context.command);
     command.args(&context.arguments);
@@ -90,9 +77,7 @@ fn child_environment_contains_only_allowlisted_variables() -> Result<(), Box<dyn
 #[test]
 fn child_does_not_observe_extra_inherited_file_descriptors()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _parent_file = File::open("/dev/null")?;
-    let context = context_with_env([])?;
-    let context = ExecutionContextBuilder::new(context.operation_plan.clone(), grants())
+    let context = ExecutionContextBuilder::new(plan(), grants())
         .policy(ExecutionPolicy {
             deny_running_as_root: false,
             ..ExecutionPolicy::default()
@@ -101,11 +86,22 @@ fn child_does_not_observe_extra_inherited_file_descriptors()
         .source_environment([] as [(&str, &str); 0])
         .build()?;
 
-    let output = command_for_context(&context).output()?;
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout)?;
-    let count: usize = stdout.trim().parse()?;
-    assert!(count <= 4, "unexpected fd count: {count}");
+    let baseline_output = command_for_context(&context).output()?;
+    assert!(baseline_output.status.success());
+    let baseline: usize = String::from_utf8(baseline_output.stdout)?.trim().parse()?;
+
+    // Open a file descriptor — Rust sets CLOEXEC by default, so the child
+    // should NOT inherit it and the fd count should remain unchanged.
+    let _parent_file = File::open("/dev/null")?;
+
+    let after_output = command_for_context(&context).output()?;
+    assert!(after_output.status.success());
+    let after: usize = String::from_utf8(after_output.stdout)?.trim().parse()?;
+
+    assert_eq!(
+        baseline, after,
+        "CLOEXEC fd leaked to child: baseline={baseline}, after_opening={after}"
+    );
     Ok(())
 }
 
