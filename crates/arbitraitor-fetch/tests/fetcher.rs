@@ -58,6 +58,8 @@ fn ssrf_policy_blocks_private_and_reserved_ranges() -> Result<(), Box<dyn std::e
         "240.0.0.1",
         "::",
         "::1",
+        "::127.0.0.1",
+        "::192.168.1.1",
         "::ffff:127.0.0.1",
         "64:ff9b::1",
         "100::1",

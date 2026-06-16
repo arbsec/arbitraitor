@@ -833,6 +833,7 @@ fn validate_ipv6(ip: Ipv6Addr) -> bool {
     !(ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
+        || ipv6_in(ip, [0, 0, 0, 0, 0, 0, 0, 0], 8)
         || ipv6_in(ip, [0xfc00, 0, 0, 0, 0, 0, 0, 0], 7)
         || ipv6_in(ip, [0xfe80, 0, 0, 0, 0, 0, 0, 0], 10)
         || ipv6_in(ip, [0x0064, 0xff9b, 0, 0, 0, 0, 0, 0], 96)
