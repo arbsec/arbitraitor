@@ -4,6 +4,7 @@
 //! processes and does not apply kernel sandboxing; downstream execution and
 //! sandbox crates consume the context produced here.
 
+#![cfg(unix)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
