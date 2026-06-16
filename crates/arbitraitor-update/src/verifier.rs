@@ -2,9 +2,11 @@
 
 use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::error::UpdateError;
-use crate::manifest::{UpdateManifest, UpdateTarget};
+use crate::manifest::{CURRENT_SCHEMA_VERSION, Sha256Digest, UpdateManifest, UpdateTarget};
 
 /// Abstraction for signed update manifest and target verification.
 pub trait UpdateVerifier: Send + Sync {
@@ -93,7 +95,7 @@ impl UpdateVerifier for MinisignVerifier {
     ) -> Result<UpdateManifest, UpdateError> {
         if signature.is_empty() {
             return Err(UpdateError::SignatureMissing {
-                manifest_version: manifest_version_for_error(manifest_bytes),
+                manifest_version: "unknown".to_owned(),
             });
         }
 
@@ -126,7 +128,9 @@ impl UpdateVerifier for MinisignVerifier {
         manifest: &UpdateManifest,
         current_time: &str,
     ) -> Result<(), UpdateError> {
-        if manifest.expires_at.as_str() <= current_time {
+        let expires_at = parse_timestamp(&manifest.expires_at, "expires_at")?;
+        let now = parse_timestamp(current_time, "current_time")?;
+        if expires_at <= now {
             return Err(UpdateError::ManifestExpired {
                 expired_at: manifest.expires_at.clone(),
             });
@@ -148,8 +152,8 @@ impl UpdateVerifier for MinisignVerifier {
             });
         }
 
-        let actual_hash = hex::encode(Sha256::digest(content));
-        if !actual_hash.eq_ignore_ascii_case(&target.sha256) {
+        let actual_hash = Sha256Digest::from_bytes(Sha256::digest(content).into());
+        if actual_hash != target.sha256 {
             return Err(UpdateError::ManifestMalformed {
                 reason: format!("target {} SHA-256 mismatch", target.path),
             });
@@ -159,9 +163,18 @@ impl UpdateVerifier for MinisignVerifier {
 }
 
 fn parse_manifest(manifest_bytes: &[u8]) -> Result<UpdateManifest, UpdateError> {
-    serde_json::from_slice(manifest_bytes).map_err(|error| UpdateError::ManifestMalformed {
-        reason: error.to_string(),
-    })
+    let manifest: UpdateManifest =
+        serde_json::from_slice(manifest_bytes).map_err(|error| UpdateError::InvalidManifest {
+            reason: error.to_string(),
+        })?;
+    if manifest.schema_version != CURRENT_SCHEMA_VERSION {
+        return Err(UpdateError::UnsupportedSchema {
+            found: manifest.schema_version,
+            expected: CURRENT_SCHEMA_VERSION,
+        });
+    }
+    manifest.validate_manifest()?;
+    Ok(manifest)
 }
 
 fn decode_signature(signature: &[u8]) -> Result<Signature, UpdateError> {
@@ -174,21 +187,16 @@ fn decode_signature(signature: &[u8]) -> Result<Signature, UpdateError> {
     })
 }
 
-fn manifest_version_for_error(manifest_bytes: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(manifest_bytes)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("manifest_version")
-                .and_then(serde_json::Value::as_u64)
-        })
-        .map_or_else(|| "unknown".to_owned(), |version| version.to_string())
+fn parse_timestamp(value: &str, field_name: &str) -> Result<OffsetDateTime, UpdateError> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|error| UpdateError::InvalidManifest {
+        reason: format!("{field_name} must be an RFC 3339 timestamp: {error}"),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::UpdateChannel;
+    use crate::manifest::{TargetPath, UpdateChannel};
 
     const PUBLIC_KEY: &str = "RURBUkJJVFIwMQOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4";
     const MANIFEST: &str = r#"{"schema_version":1,"manifest_version":7,"channel":"rule_packs","targets":[{"path":"rules/core.yar","sha256":"3cfe5c044c1050206b76c938a3b5645d9c6ad975748b078516f871bbb384875b","size":12,"target_version":"1.2.3"}],"published_at":"2026-06-16T00:00:00Z","expires_at":"2026-12-31T23:59:59Z","publisher":"test-key"}"#;
@@ -257,6 +265,121 @@ mod tests {
             .verify_target(&manifest.targets[0], b"wrong-content")
             .err();
         assert!(matches!(error, Some(UpdateError::ManifestMalformed { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_timezone_offset_expiry_bypass() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = MinisignVerifier::new(PUBLIC_KEY.as_bytes())?;
+        let mut manifest = verifier.verify_manifest(MANIFEST.as_bytes(), SIGNATURE.as_bytes())?;
+        manifest.expires_at = "2026-06-16T01:00:00+01:00".to_owned();
+
+        let error = verifier
+            .check_freshness(&manifest, "2026-06-16T00:30:00Z")
+            .err();
+        assert!(matches!(
+            error,
+            Some(UpdateError::ManifestExpired { expired_at })
+                if expired_at == "2026-06-16T01:00:00+01:00"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unparseable_manifest_timestamp() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = MinisignVerifier::new(PUBLIC_KEY.as_bytes())?;
+        let mut manifest = verifier.verify_manifest(MANIFEST.as_bytes(), SIGNATURE.as_bytes())?;
+        manifest.expires_at = "2026-12-31 23:59:59".to_owned();
+
+        let error = verifier
+            .check_freshness(&manifest, "2026-12-31T00:00:00Z")
+            .err();
+        assert!(matches!(error, Some(UpdateError::InvalidManifest { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unparseable_current_timestamp() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = MinisignVerifier::new(PUBLIC_KEY.as_bytes())?;
+        let manifest = verifier.verify_manifest(MANIFEST.as_bytes(), SIGNATURE.as_bytes())?;
+        let error = verifier.check_freshness(&manifest, "not-a-time").err();
+        assert!(matches!(error, Some(UpdateError::InvalidManifest { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_huge_unsigned_manifest_without_parsing() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = MinisignVerifier::new(PUBLIC_KEY.as_bytes())?;
+        let manifest_bytes = vec![b'{'; 1024 * 1024 + 1];
+        let error = verifier.verify_manifest(&manifest_bytes, b"").err();
+        assert!(matches!(
+            error,
+            Some(UpdateError::SignatureMissing { manifest_version }) if manifest_version == "unknown"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_current_schema_version() {
+        let manifest = parse_manifest(MANIFEST.as_bytes());
+        assert!(manifest.is_ok());
+    }
+
+    #[test]
+    fn rejects_future_schema_version() {
+        let manifest = MANIFEST.replace("\"schema_version\":1", "\"schema_version\":2");
+        let error = parse_manifest(manifest.as_bytes()).err();
+        assert!(matches!(
+            error,
+            Some(UpdateError::UnsupportedSchema {
+                found: 2,
+                expected: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_past_schema_version() {
+        let manifest = MANIFEST.replace("\"schema_version\":1", "\"schema_version\":0");
+        let error = parse_manifest(manifest.as_bytes()).err();
+        assert!(matches!(
+            error,
+            Some(UpdateError::UnsupportedSchema {
+                found: 0,
+                expected: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_target_path_during_manifest_parsing() {
+        let manifest = MANIFEST.replace("rules/core.yar", "../../.ssh/authorized_keys");
+        let error = parse_manifest(manifest.as_bytes()).err();
+        assert!(matches!(error, Some(UpdateError::InvalidManifest { .. })));
+    }
+
+    #[test]
+    fn rejects_invalid_target_digest_during_manifest_parsing() {
+        let manifest = MANIFEST.replace(
+            "3cfe5c044c1050206b76c938a3b5645d9c6ad975748b078516f871bbb384875b",
+            "abc",
+        );
+        let error = parse_manifest(manifest.as_bytes()).err();
+        assert!(matches!(error, Some(UpdateError::InvalidManifest { .. })));
+    }
+
+    #[test]
+    fn compares_target_hashes_as_parsed_digests() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = MinisignVerifier::new(PUBLIC_KEY.as_bytes())?;
+        let target = UpdateTarget {
+            path: TargetPath::new("rules/core.yar")?,
+            sha256: Sha256Digest::from_hex(
+                "3cfe5c044c1050206b76c938a3b5645d9c6ad975748b078516f871bbb384875b",
+            )?,
+            size: 12,
+            target_version: "1.2.3".to_owned(),
+        };
+        verifier.verify_target(&target, b"rule-content")?;
         Ok(())
     }
 }

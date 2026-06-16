@@ -37,7 +37,23 @@ pub enum UpdateError {
         expired_at: String,
     },
 
+    /// The manifest uses an unsupported schema version.
+    #[error("unsupported update manifest schema version {found}; expected {expected}")]
+    UnsupportedSchema {
+        /// Schema version found in the manifest.
+        found: u32,
+        /// Schema version supported by this verifier.
+        expected: u32,
+    },
+
     /// The manifest could not be parsed or violates manifest invariants.
+    #[error("update manifest is invalid: {reason}")]
+    InvalidManifest {
+        /// Safe diagnostic reason for the invalid manifest.
+        reason: String,
+    },
+
+    /// The manifest could not be parsed or a target verification failed.
     #[error("update manifest is malformed: {reason}")]
     ManifestMalformed {
         /// Safe diagnostic reason for the malformed manifest or target mismatch.
