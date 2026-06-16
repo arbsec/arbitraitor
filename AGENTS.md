@@ -106,7 +106,73 @@ gh project item-edit --id <item-id> --field-id <field-id> --project-id PVT_kwDOE
 
 ---
 
-## 3. Quick reference
+## 3. Tooling: MCP servers
+
+Agents have access to Model Context Protocol (MCP) servers that provide capabilities beyond plain file I/O and shell commands. **Prefer MCP tools over manual alternatives** when the task matches.
+
+### 3.1 Serena — LSP-powered code analysis
+
+Serena wraps a language server (rust-analyzer) to provide semantic code intelligence.
+
+**Use for:**
+- `serena_find_symbol` / `serena_get_symbols_overview` — locate types, functions, traits without grepping.
+- `serena_find_referencing_symbols` — find all call sites before refactoring or deleting.
+- `serena_find_implementations` — check trait impls, locate concrete implementations.
+- `serena_get_diagnostics_for_file` — get compiler errors/warnings for a file (faster than full `cargo check`).
+- `serena_rename_symbol` — workspace-wide rename with LSP precision (no regex misses).
+- `serena_replace_symbol_body` — replace a function/method body with semantic awareness.
+
+**Prefer over:** `grep` for symbol searches, manual find-and-replace for renames, full `cargo check` for single-file diagnostics.
+
+### 3.2 Sequential thinking — structured problem decomposition
+
+Multi-step reasoning tool for complex analysis with revision and branching.
+
+**Use for:**
+- Breaking down ambiguous requirements into concrete steps.
+- Architecture decisions with multiple viable approaches.
+- Root-cause analysis when debugging fails after the first attempt.
+- Any task where the full scope isn't clear upfront.
+
+**How:** Start with an initial thought count estimate, revise as understanding deepens, branch into alternative approaches when needed.
+
+### 3.3 Tavily — web research and content extraction
+
+Web search, page extraction, site crawling, and multi-source research.
+
+**Use for:**
+- `tavily_search` — quick lookups: library versions, API changes, CVE details.
+- `tavily_extract` — pull documentation or blog posts from specific URLs.
+- `tavily_research` — deep multi-source research for unfamiliar domains.
+- `tavily_map` / `tavily_crawl` — map or crawl documentation sites for API references.
+
+**Prefer over:** Manual web browsing, guessing library APIs from memory.
+
+### 3.4 Context7 — library documentation
+
+Resolve and query up-to-date documentation for any library or framework.
+
+**Use for:**
+- `context7_resolve-library-id` — find the Context7 ID for a crate or library.
+- `context7_query-docs` — query specific API docs, configuration, or best practices.
+
+**Typical workflow:** resolve ID → query docs → apply findings. Skip the resolve step if the user provides an ID in `/org/project` format.
+
+**Prefer over:** Reading vendored docs, relying on potentially outdated training data.
+
+### 3.5 Priority order
+
+When multiple tools could serve a task:
+
+1. **Serena** for anything involving code symbols, references, or diagnostics in this repo.
+2. **Context7** for external library/framework documentation.
+3. **Tavily** for web research, CVE lookups, or non-documentation web content.
+4. **Sequential thinking** for complex multi-step reasoning before any implementation.
+5. **Plain tools** (`grep`, `read`, `bash`) only when no MCP tool covers the task or adds unnecessary overhead.
+
+---
+
+## 4. Quick reference
 
 ```sh
 # Create an isolated worktree
