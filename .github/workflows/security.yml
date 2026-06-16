@@ -3,7 +3,13 @@ name: Security
 on:
   push:
     branches: [main]
+    paths: &security_paths
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/security.yml"
   pull_request:
+    paths: *security_paths
 
 permissions:
   contents: read
@@ -20,8 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925  # v4.1.0
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
       - name: Run cargo-deny
-        run: cargo deny check --all-features
+        run: cargo deny check
 
   cargo-audit:
     name: Advisory Check
@@ -30,5 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925  # v4.1.0
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
       - name: Run cargo-audit
         run: cargo audit

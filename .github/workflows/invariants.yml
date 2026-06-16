@@ -3,9 +3,17 @@ name: Security Invariants
 on:
   push:
     branches: [main]
+    paths: &invariant_paths
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".mise.toml"
+      - ".github/workflows/invariants.yml"
   pull_request:
+    paths: *invariant_paths
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,5 +31,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925  # v4.1.0
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
       - name: Run invariant tests
-        run: cargo nextest run --workspace --features invariant-tests
+        run: cargo nextest run --workspace
