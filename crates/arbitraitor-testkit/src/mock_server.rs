@@ -53,12 +53,21 @@ impl MockHttpServer {
                 .await;
         }
 
-        self.absolute_url(&format!("/{prefix}/0"))
+        if count == 0 {
+            self.absolute_url(&terminal)
+        } else {
+            self.absolute_url(&format!("/{prefix}/0"))
+        }
     }
 
-    /// Configures a redirect whose target uses plain HTTP.
-    pub async fn https_to_http_redirect(&self) -> String {
-        let route_path = self.unique_path("https-to-http-redirect");
+    /// Configures an HTTP redirect chain.
+    ///
+    /// NOTE: `WireMock` serves HTTP only. This tests redirect handling logic, NOT TLS downgrade
+    /// detection. TLS downgrade tests require a real HTTPS server.
+    ///
+    /// TODO: real HTTPS downgrade testing requires a custom HTTPS server -- see #33.
+    pub async fn http_redirect_chain(&self) -> String {
+        let route_path = self.unique_path("http-redirect-chain");
         let target = self.absolute_url("/downgraded-target");
         Mock::given(method("GET"))
             .and(path(route_path.as_str()))
@@ -83,8 +92,14 @@ impl MockHttpServer {
     }
 
     /// Configures a response carrying metadata that identifies a private peer address.
-    pub async fn private_ip_response(&self) -> String {
-        let route_path = self.unique_path("private-ip-response");
+    ///
+    /// This provides metadata for header-based private-address detection tests only. `WireMock`
+    /// still accepts the TCP connection on the mock server address; it does not bind to a private
+    /// IP and does not exercise real SSRF network controls.
+    ///
+    /// TODO: real SSRF network tests require a custom TCP server -- see #33.
+    pub async fn private_ip_metadata_headers(&self) -> String {
+        let route_path = self.unique_path("private-ip-metadata-headers");
         Mock::given(method("GET"))
             .and(path(route_path.as_str()))
             .respond_with(
@@ -112,14 +127,19 @@ impl MockHttpServer {
         self.absolute_url(&route_path)
     }
 
-    /// Configures a response body marked as an intentionally truncated payload.
-    pub async fn truncated_response(&self) -> String {
-        let route_path = self.unique_path("truncated-response");
+    /// Configures a response body with intentionally short content.
+    ///
+    /// `WireMock` and Hyper reject mismatched `Content-Length` responses, so this tests small-body
+    /// handling rather than TCP-level truncation.
+    ///
+    /// TODO: raw TCP-level truncation tests require a custom TCP server -- see #33.
+    pub async fn short_content_response(&self) -> String {
+        let route_path = self.unique_path("short-content-response");
         Mock::given(method("GET"))
             .and(path(route_path.as_str()))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("X-Arbitraitor-Truncated", "true")
+                    .insert_header("X-Arbitraitor-Short-Content", "true")
                     .set_body_bytes(b"partial".to_vec()),
             )
             .mount(&self.server)
@@ -153,9 +173,15 @@ impl MockHttpServer {
         self.absolute_url(&route_path)
     }
 
-    /// Configures an endpoint that mimics a cloud instance metadata service.
-    pub async fn ssrf_target(&self) -> String {
-        let route_path = self.unique_path("ssrf-target");
+    /// Configures headers mimicking a cloud instance metadata service response.
+    ///
+    /// This provides metadata for header-based SSRF detection tests only. `WireMock` still accepts
+    /// the TCP connection on the mock server address; it does not bind to a metadata IP and does
+    /// not exercise real SSRF network controls.
+    ///
+    /// TODO: real SSRF network tests require a custom TCP server -- see #33.
+    pub async fn ssrf_metadata_headers(&self) -> String {
+        let route_path = self.unique_path("ssrf-metadata-headers");
         Mock::given(method("GET"))
             .and(path(route_path.as_str()))
             .respond_with(
@@ -211,19 +237,31 @@ mod tests {
         let server = MockHttpServer::start().await;
         let urls = [
             server.redirect_chain(2).await,
-            server.https_to_http_redirect().await,
+            server.http_redirect_chain().await,
             server.cross_origin_redirect().await,
-            server.private_ip_response().await,
+            server.private_ip_metadata_headers().await,
             server.content_mismatch("expected", "actual").await,
-            server.truncated_response().await,
+            server.short_content_response().await,
             server.large_response(16).await,
-            server.ssrf_target().await,
+            server.ssrf_metadata_headers().await,
         ];
 
         for url in urls {
             let response = fetch(&url)?;
             assert!(response.starts_with("HTTP/1.1 "));
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn redirect_chain_zero_serves_terminal_route() -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockHttpServer::start().await;
+        let url = server.redirect_chain(0).await;
+
+        let response = fetch(&url)?;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("redirect complete"));
         Ok(())
     }
 
