@@ -5,10 +5,10 @@
 path = "CHANGELOG.md"
 template = "remote"
 remote = "github.com"
-owner = "arbitraitor"
+owner = "arbsec"
 repository = "arbitraitor"
 authors = [
-    { username = "mekwall", signature = "Erik Wallin <erik@arbitraitor.dev>" }
+    { username = "mekwall", signature = "Marcus Ekwall <marcus.ekwall@gmail.com>" }
 ]
 
 [commit_types]
