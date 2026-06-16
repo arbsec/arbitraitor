@@ -1,5 +1,7 @@
 //! Integration tests for mediated execution contexts.
 
+#![cfg(unix)]
+
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::path::PathBuf;
