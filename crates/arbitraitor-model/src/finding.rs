@@ -1,5 +1,8 @@
 //! Detector findings and detector metadata.
 
+use core::fmt;
+use core::num::NonZeroU32;
+
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::ArtifactKind;
@@ -50,6 +53,7 @@ pub enum FindingCategory {
 
 /// A detector finding emitted for an artifact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Finding {
     /// Stable finding identifier within the detector output.
     pub id: String,
@@ -80,7 +84,8 @@ pub struct Finding {
 }
 
 /// Supporting evidence attached to a finding.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Evidence {
     /// Evidence kind.
     pub kind: EvidenceKind,
@@ -88,6 +93,29 @@ pub struct Evidence {
     pub description: String,
     /// Optional bounded evidence content.
     pub content: Option<String>,
+}
+
+impl fmt::Debug for Evidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("Evidence");
+        debug.field("kind", &self.kind);
+        debug.field("description", &self.description);
+
+        let redacted_content = self.content.as_deref().map(bounded_debug_text);
+        debug.field("content", &redacted_content);
+        debug.finish()
+    }
+}
+
+fn bounded_debug_text(value: &str) -> String {
+    const MAX_DEBUG_CHARS: usize = 80;
+
+    let escaped: String = value.escape_debug().collect();
+    let mut bounded: String = escaped.chars().take(MAX_DEBUG_CHARS).collect();
+    if escaped.chars().count() > MAX_DEBUG_CHARS {
+        bounded.push('…');
+    }
+    bounded
 }
 /// Evidence representation kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -110,22 +138,169 @@ pub enum EvidenceKind {
 }
 
 /// Source or byte location for a finding.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SourceLocation {
     /// 1-indexed line number.
-    pub line: u32,
+    pub line: NonZeroU32,
     /// 1-indexed column number.
-    pub column: u32,
+    pub column: NonZeroU32,
     /// Optional 1-indexed ending line number.
-    pub end_line: Option<u32>,
+    pub end_line: Option<NonZeroU32>,
     /// Optional 1-indexed ending column number.
-    pub end_column: Option<u32>,
+    pub end_column: Option<NonZeroU32>,
     /// Optional zero-indexed byte offset.
-    pub byte_offset: Option<usize>,
+    pub byte_offset: Option<u64>,
 }
+
+impl SourceLocation {
+    /// Creates a validated source location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceLocationError::ReversedRange`] when an end position precedes the start.
+    pub fn new(
+        line: NonZeroU32,
+        column: NonZeroU32,
+        end_line: Option<NonZeroU32>,
+        end_column: Option<NonZeroU32>,
+        byte_offset: Option<u64>,
+    ) -> Result<Self, SourceLocationError> {
+        let location = Self {
+            line,
+            column,
+            end_line,
+            end_column,
+            byte_offset,
+        };
+        location.validate_range()?;
+        Ok(location)
+    }
+
+    fn validate_range(&self) -> Result<(), SourceLocationError> {
+        match (self.end_line, self.end_column) {
+            (Some(end_line), Some(end_column)) => {
+                SourceRange::new(
+                    SourcePosition::new(self.line, self.column),
+                    SourcePosition::new(end_line, end_column),
+                )?;
+                Ok(())
+            }
+            (Some(end_line), None) if end_line < self.line => {
+                Err(SourceLocationError::ReversedRange)
+            }
+            (None, Some(end_column)) if end_column < self.column => {
+                Err(SourceLocationError::ReversedRange)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceLocation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSourceLocation {
+            line: NonZeroU32,
+            column: NonZeroU32,
+            end_line: Option<NonZeroU32>,
+            end_column: Option<NonZeroU32>,
+            byte_offset: Option<u64>,
+        }
+
+        let raw = RawSourceLocation::deserialize(deserializer)?;
+        Self::new(
+            raw.line,
+            raw.column,
+            raw.end_line,
+            raw.end_column,
+            raw.byte_offset,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// 1-indexed source position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePosition {
+    /// 1-indexed line number.
+    pub line: NonZeroU32,
+    /// 1-indexed column number.
+    pub column: NonZeroU32,
+}
+
+impl SourcePosition {
+    /// Creates a source position.
+    #[must_use]
+    pub const fn new(line: NonZeroU32, column: NonZeroU32) -> Self {
+        Self { line, column }
+    }
+}
+
+/// Inclusive source range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceRange {
+    /// Start position.
+    pub start: SourcePosition,
+    /// End position.
+    pub end: SourcePosition,
+}
+
+impl SourceRange {
+    /// Creates a source range whose end is not before its start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceLocationError::ReversedRange`] when `end` precedes `start`.
+    pub fn new(start: SourcePosition, end: SourcePosition) -> Result<Self, SourceLocationError> {
+        if (end.line, end.column) < (start.line, start.column) {
+            return Err(SourceLocationError::ReversedRange);
+        }
+        Ok(Self { start, end })
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSourceRange {
+            start: SourcePosition,
+            end: SourcePosition,
+        }
+
+        let raw = RawSourceRange::deserialize(deserializer)?;
+        Self::new(raw.start, raw.end).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Invalid source location or range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceLocationError {
+    /// End position precedes start position.
+    ReversedRange,
+}
+
+impl fmt::Display for SourceLocationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReversedRange => formatter.write_str("source range end precedes start"),
+        }
+    }
+}
+
+impl std::error::Error for SourceLocationError {}
 
 /// Metadata advertised by a detector implementation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DetectorMetadata {
     /// Detector identifier.
     pub id: String,
@@ -148,10 +323,12 @@ pub struct DetectorMetadata {
 mod tests {
     use super::{
         DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory, SourceLocation,
+        SourcePosition, SourceRange,
     };
     use crate::artifact::{ArtifactKind, ShellDialect};
     use crate::ids::Sha256Digest;
     use crate::verdict::{Confidence, Severity};
+    use core::num::NonZeroU32;
 
     fn digest() -> Sha256Digest {
         Sha256Digest::new([0x42; 32])
@@ -191,20 +368,55 @@ mod tests {
         Ok(())
     }
 
+    fn nonzero(value: u32) -> Result<NonZeroU32, Box<dyn std::error::Error>> {
+        NonZeroU32::new(value).ok_or_else(|| "test value must be non-zero".into())
+    }
+
     #[test]
-    fn source_location_round_trips_max_edges() -> Result<(), Box<dyn std::error::Error>> {
-        let value = SourceLocation {
-            line: u32::MAX,
-            column: u32::MAX,
-            end_line: Some(u32::MAX),
-            end_column: Some(u32::MAX),
-            byte_offset: Some(usize::MAX),
-        };
+    fn source_location_round_trips_valid_edges() -> Result<(), Box<dyn std::error::Error>> {
+        let value = SourceLocation::new(
+            nonzero(u32::MAX)?,
+            nonzero(u32::MAX)?,
+            Some(nonzero(u32::MAX)?),
+            Some(nonzero(u32::MAX)?),
+            Some(u64::MAX),
+        )?;
         assert_eq!(
             serde_json::from_str::<SourceLocation>(&serde_json::to_string(&value)?)?,
             value
         );
         Ok(())
+    }
+
+    #[test]
+    fn source_location_rejects_zero_and_reversed_ranges() {
+        let zero_line =
+            r#"{"line":0,"column":1,"end_line":null,"end_column":null,"byte_offset":null}"#;
+        assert!(serde_json::from_str::<SourceLocation>(zero_line).is_err());
+
+        let reversed = r#"{"line":2,"column":1,"end_line":1,"end_column":1,"byte_offset":null}"#;
+        assert!(serde_json::from_str::<SourceLocation>(reversed).is_err());
+    }
+
+    #[test]
+    fn source_range_constructor_rejects_reversed_range() -> Result<(), Box<dyn std::error::Error>> {
+        let start = SourcePosition::new(nonzero(2)?, nonzero(1)?);
+        let end = SourcePosition::new(nonzero(1)?, nonzero(1)?);
+        assert!(SourceRange::new(start, end).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_debug_bounds_and_escapes_content() {
+        let value = Evidence {
+            kind: EvidenceKind::Other,
+            description: "description".to_owned(),
+            content: Some(format!("line\n{}", "x".repeat(100))),
+        };
+        let debug = format!("{value:?}");
+        assert!(debug.contains("line\\\\n"));
+        assert!(debug.contains('…'));
+        assert!(!debug.contains("x".repeat(100).as_str()));
     }
 
     #[test]

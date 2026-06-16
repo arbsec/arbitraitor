@@ -5,6 +5,7 @@ use core::str::FromStr;
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
 
 const SHA256_HEX_LEN: usize = 64;
 
@@ -121,9 +122,69 @@ impl<'de> Deserialize<'de> for Sha256Digest {
 pub struct ArtifactId(pub Sha256Digest);
 
 /// Unique identifier for a planned or executed operation.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct OperationId(pub String);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OperationId(Uuid);
+
+impl OperationId {
+    /// Generates a new sortable operation identifier.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Returns the underlying UUID.
+    #[must_use]
+    pub const fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for OperationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for OperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Serialize for OperationId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for OperationId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OperationIdVisitor;
+
+        impl Visitor<'_> for OperationIdVisitor {
+            type Value = OperationId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a UUID string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Uuid::parse_str(value).map(OperationId).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(OperationIdVisitor)
+    }
+}
 
 /// Unique identifier for a detector or policy plugin.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -170,7 +231,7 @@ mod tests {
     #[test]
     fn id_newtypes_round_trip_edge_values() -> Result<(), Box<dyn std::error::Error>> {
         let artifact = ArtifactId(Sha256Digest::new([u8::MAX; 32]));
-        let operation = OperationId(String::new());
+        let operation = OperationId::new();
         let plugin = PluginId("plugin.example.detector".to_owned());
 
         assert_eq!(
@@ -186,5 +247,10 @@ mod tests {
             plugin
         );
         Ok(())
+    }
+
+    #[test]
+    fn operation_id_rejects_empty_json_string() {
+        assert!(serde_json::from_str::<OperationId>("\"\"").is_err());
     }
 }

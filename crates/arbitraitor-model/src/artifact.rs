@@ -32,7 +32,7 @@ pub enum TarCompression {
 
 /// Initial artifact class used by scanners and policy.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "detail")]
 pub enum ArtifactKind {
     /// Shell script with an identified dialect.
     ShellScript(ShellDialect),
@@ -40,6 +40,10 @@ pub enum ArtifactKind {
     PowerShellScript,
     /// Python script or source distribution entry point.
     PythonScript,
+    /// Perl script.
+    PerlScript,
+    /// Ruby script.
+    RubyScript,
     /// JavaScript or TypeScript source.
     JavaScript,
     /// Windows Portable Executable.
@@ -52,6 +56,14 @@ pub enum ArtifactKind {
     WebAssembly,
     /// ZIP or ZIP-derived archive.
     Zip,
+    /// Standalone gzip-compressed artifact.
+    Gzip,
+    /// Standalone bzip2-compressed artifact.
+    Bzip2,
+    /// Standalone xz-compressed artifact.
+    Xz,
+    /// Standalone Zstandard-compressed artifact.
+    Zstd,
     /// Tar archive with optional compression.
     Tar(TarCompression),
     /// Debian package.
@@ -105,6 +117,10 @@ mod tests {
     fn artifact_kind_round_trips_nested_shell_variant() -> Result<(), Box<dyn std::error::Error>> {
         let value = ArtifactKind::ShellScript(ShellDialect::Bash);
         assert_eq!(
+            serde_json::to_string(&value)?,
+            r#"{"kind":"shell-script","detail":"bash"}"#
+        );
+        assert_eq!(
             serde_json::from_str::<ArtifactKind>(&serde_json::to_string(&value)?)?,
             value
         );
@@ -114,6 +130,10 @@ mod tests {
     #[test]
     fn artifact_kind_round_trips_tar_edge_variant() -> Result<(), Box<dyn std::error::Error>> {
         let value = ArtifactKind::Tar(TarCompression::Zstd);
+        assert_eq!(
+            serde_json::to_string(&value)?,
+            r#"{"kind":"tar","detail":"zstd"}"#
+        );
         assert_eq!(
             serde_json::from_str::<ArtifactKind>(&serde_json::to_string(&value)?)?,
             value
@@ -125,9 +145,31 @@ mod tests {
     fn artifact_kind_round_trips_plain_variant() -> Result<(), Box<dyn std::error::Error>> {
         let value = ArtifactKind::OfficeDocument;
         assert_eq!(
+            serde_json::to_string(&value)?,
+            r#"{"kind":"office-document"}"#
+        );
+        assert_eq!(
             serde_json::from_str::<ArtifactKind>(&serde_json::to_string(&value)?)?,
             value
         );
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_kind_round_trips_new_variants() -> Result<(), Box<dyn std::error::Error>> {
+        for value in [
+            ArtifactKind::PerlScript,
+            ArtifactKind::RubyScript,
+            ArtifactKind::Gzip,
+            ArtifactKind::Bzip2,
+            ArtifactKind::Xz,
+            ArtifactKind::Zstd,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<ArtifactKind>(&serde_json::to_string(&value)?)?,
+                value
+            );
+        }
         Ok(())
     }
 }
