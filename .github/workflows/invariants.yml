@@ -3,7 +3,14 @@ name: Security Invariants
 on:
   push:
     branches: [main]
+    paths: &invariant_paths
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".mise.toml"
+      - ".github/workflows/invariants.yml"
   pull_request:
+    paths: *invariant_paths
 
 permissions:
   contents: read

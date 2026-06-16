@@ -3,7 +3,13 @@ name: Security
 on:
   push:
     branches: [main]
+    paths: &security_paths
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/security.yml"
   pull_request:
+    paths: *security_paths
 
 permissions:
   contents: read
