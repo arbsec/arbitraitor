@@ -152,10 +152,12 @@ name = "arbitraitor-fetch"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-testkit",
  "async-trait",
  "bytes",
  "reqwest",
  "secrecy",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",
