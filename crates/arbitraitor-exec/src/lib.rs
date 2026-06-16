@@ -848,21 +848,28 @@ fn validate_env_prefix(prefix: &str) -> Result<(), ExecError> {
 ///
 /// Each candidate is canonicalized at runtime so that system-level symlinks
 /// (e.g. `/bin` → `/usr/bin`) are resolved before validation. Entries that
-/// do not exist are silently skipped; duplicates after canonicalization are
-/// removed.
+/// do not exist, are not root-owned, or are group-/world-writable are silently
+/// skipped; duplicates after canonicalization are removed.
 fn default_path_entries() -> Vec<PathBuf> {
     let candidates = ["/usr/local/bin", "/usr/bin", "/bin"];
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
     for candidate in candidates {
-        if let Ok(canonical) = fs::canonicalize(candidate)
-            && seen.insert(canonical.clone())
-        {
-            entries.push(canonical);
+        let Ok(canonical) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if !seen.insert(canonical.clone()) {
+            continue;
         }
-    }
-    if entries.is_empty() {
-        entries.push(PathBuf::from("/usr/local/bin"));
+        // Verify the entry passes the same safety checks as validate_path_entries:
+        // root-owned (uid 0) and not group-/world-writable.
+        let Ok(meta) = fs::metadata(&canonical) else {
+            continue;
+        };
+        if meta.uid() != 0 || (meta.permissions().mode() & 0o022 != 0) {
+            continue;
+        }
+        entries.push(canonical);
     }
     entries
 }
