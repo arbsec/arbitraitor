@@ -12,7 +12,9 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
+async-trait = { workspace = true }
 cap-std = { workspace = true }
 cap-tempfile = { workspace = true }
 hex = { workspace = true }
