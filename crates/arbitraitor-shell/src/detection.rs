@@ -260,6 +260,8 @@ impl DetectionState<'_> {
             }
         }
 
+        self.detect_process_substitution_pipe_to_executor(&edges);
+
         let downloaded_paths = self.downloaded_paths();
         let commands = self.commands().to_vec();
         for (index, command) in commands.iter().enumerate() {
@@ -275,6 +277,41 @@ impl DetectionState<'_> {
                     evidence_kind: EvidenceKind::Command,
                     tag: "downloaded-file-execution",
                 });
+            }
+        }
+    }
+
+    fn detect_process_substitution_pipe_to_executor(&mut self, edges: &[(usize, usize)]) {
+        let commands = self.commands().to_vec();
+        for (executor_index, executor) in commands.iter().enumerate() {
+            if !is_shell_executor(executor) || !has_pipe_input(edges, executor_index) {
+                continue;
+            }
+
+            for producer_index in pipe_chain_predecessors(edges, executor_index) {
+                let Some(producer) = commands.get(producer_index) else {
+                    continue;
+                };
+                let Some(producer_source) = self.source.get(producer.span.byte_range.clone())
+                else {
+                    continue;
+                };
+                if contains_network_process_substitution(producer_source) {
+                    self.push(CommandFinding {
+                        id: format!(
+                            "download-process-substitution-pipe-execute-{producer_index}-{executor_index}"
+                        ),
+                        category: FindingCategory::DynamicCodeExecution,
+                        severity: Severity::Critical,
+                        confidence: Confidence::Confirmed,
+                        title: "Downloaded process substitution is piped to a shell",
+                        description: "The script places network-retrieved content inside process substitution on an earlier pipe command, then pipes that command's output into a shell interpreter.",
+                        command: executor.clone(),
+                        evidence_kind: EvidenceKind::Command,
+                        tag: "download-to-execute",
+                    });
+                    break;
+                }
             }
         }
     }
@@ -451,15 +488,22 @@ fn resolved_command_basename(command: &ExtractedCommand) -> String {
 }
 
 fn command_basename(name: &str) -> String {
-    strip_quotes(name)
+    canonicalize_word(name)
         .rsplit('/')
         .next()
         .unwrap_or_default()
         .to_owned()
 }
 
+fn canonicalize_word(word: &str) -> String {
+    word.trim()
+        .chars()
+        .filter(|character| !matches!(character, '\'' | '"'))
+        .collect()
+}
+
 fn is_wrapper_option(argument: &str) -> bool {
-    let stripped = strip_quotes(argument);
+    let stripped = canonicalize_word(argument);
     stripped.starts_with('-') || stripped.contains('=')
 }
 
@@ -534,6 +578,12 @@ fn contains_network_command_substitution(command_source: &str) -> bool {
         .any(|substitution| contains_command_name(substitution, &["curl", "wget"]))
 }
 
+fn contains_network_process_substitution(command_source: &str) -> bool {
+    (command_source.contains("<(") || command_source.contains(">("))
+        && contains_command_name(command_source, &["curl", "wget"])
+        && contains_url_literal(command_source)
+}
+
 fn contains_decode_command_substitution(command_source: &str) -> bool {
     command_substitutions(command_source)
         .iter()
@@ -597,6 +647,16 @@ fn find_balanced_end(input: &str, mut index: usize) -> usize {
 }
 
 fn contains_command_name(source: &str, names: &[&str]) -> bool {
+    canonicalize_word(source)
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '|' | ';' | '&' | '(' | ')' | '<' | '>')
+        })
+        .map(command_basename)
+        .any(|piece| names.iter().any(|name| piece == *name))
+}
+
+fn contains_url_literal(source: &str) -> bool {
     source
         .split(|character: char| {
             character.is_whitespace()
@@ -605,8 +665,25 @@ fn contains_command_name(source: &str, names: &[&str]) -> bool {
                     '|' | ';' | '&' | '(' | ')' | '<' | '>' | '"' | '\''
                 )
         })
-        .map(command_basename)
-        .any(|piece| names.iter().any(|name| piece == *name))
+        .map(strip_quotes)
+        .any(|piece| is_url(&piece))
+}
+
+fn has_pipe_input(edges: &[(usize, usize)], command_index: usize) -> bool {
+    edges.iter().any(|(_, to)| *to == command_index)
+}
+
+fn pipe_chain_predecessors(edges: &[(usize, usize)], command_index: usize) -> BTreeSet<usize> {
+    let mut predecessors = BTreeSet::new();
+    let mut stack = vec![command_index];
+    while let Some(current) = stack.pop() {
+        for (from, _) in edges.iter().filter(|(_, to)| *to == current) {
+            if predecessors.insert(*from) {
+                stack.push(*from);
+            }
+        }
+    }
+    predecessors
 }
 
 fn command_invoked_from_variable(source: &str, command: &ExtractedCommand) -> bool {
