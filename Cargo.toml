@@ -98,6 +98,7 @@ schemars = { version = "1.0", features = ["uuid1", "url2"] }
 # Filesystem
 cap-std = "4.0"
 cap-tempfile = "4.0"
+libc = "0.2"
 
 # Testing
 proptest = "1.11"

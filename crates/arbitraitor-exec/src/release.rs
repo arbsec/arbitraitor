@@ -5,6 +5,11 @@
 //! digest verification immediately before and after writing, writes only via a
 //! sibling temporary file, refuses surprising destination state, and records the
 //! method used for the operation receipt.
+//!
+//! Threat model scope: for the MVP, the approved destination parent and its
+//! ancestors are assumed not to be writable by the same untrusted UID that may
+//! race the release operation. Active same-UID directory watchers and writable
+//! ancestor rename races are documented inline as known limitations.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -27,17 +32,8 @@ use uuid::Uuid;
 const PRIVATE_RELEASE_MODE: u32 = 0o600;
 const COPY_BUFFER_BYTES: usize = 8192;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const O_NOFOLLOW: i32 = 0o400_000;
-#[cfg(any(
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "ios",
-    target_os = "macos",
-    target_os = "netbsd",
-    target_os = "openbsd"
-))]
-const O_NOFOLLOW: i32 = 0x0000_0100;
+const OPEN_NOFOLLOW_FLAGS: i32 = libc::O_NOFOLLOW;
+const OPEN_DIR_NOFOLLOW_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_DIRECTORY;
 
 /// Policy gates for destination release.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -249,6 +245,13 @@ impl DestinationParent {
                 path: parent.to_path_buf(),
             });
         }
+        // SECURITY NOTE: The capability above pins the opened parent directory,
+        // but the user-facing `destination` path can name a different directory
+        // if an attacker can rename writable ancestors after this point. That
+        // writable-ancestor attacker model is out of scope for the MVP; release
+        // policy assumes the destination parent and ancestors are not
+        // attacker-writable. Future work should verify the parent directory
+        // identity again before emitting the release receipt.
         Ok(Self {
             dir,
             path: parent.to_path_buf(),
@@ -275,7 +278,15 @@ impl SiblingTemp {
             let mut options = OpenOptions::new();
             options.read(true).write(true).create_new(true);
             options.mode(PRIVATE_RELEASE_MODE);
-            options.custom_flags(O_NOFOLLOW);
+            options.custom_flags(OPEN_NOFOLLOW_FLAGS);
+            // SECURITY NOTE: A same-UID attacker actively watching the
+            // destination directory can hard-link this named temporary file
+            // before the later `nlink()` check. The UUID name prevents
+            // pre-creation but does not defeat active watching. Linux
+            // `O_TMPFILE` would avoid a linkable temporary name, but stable Rust
+            // std/cap-std do not expose it here; this is a known MVP
+            // limitation. The post-write link-count check remains
+            // defense-in-depth, not a complete same-UID guarantee.
             match dir.open_with(&name, &options) {
                 Ok(file) => {
                     file.set_permissions(Permissions::from_mode(PRIVATE_RELEASE_MODE))
@@ -377,7 +388,7 @@ fn open_child_dir_nofollow(
 ) -> Result<Dir, ReleaseError> {
     let mut options = OpenOptions::new();
     options.read(true);
-    options.custom_flags(O_NOFOLLOW);
+    options.custom_flags(OPEN_DIR_NOFOLLOW_FLAGS);
     let file = parent.open_with(part, &options).map_err(|source| {
         if source.kind() == io::ErrorKind::Other {
             ReleaseError::ForbiddenIndirection {
@@ -646,7 +657,7 @@ fn open_existing_or_create_non_atomic_destination(
     let mut existing_options = OpenOptions::new();
     existing_options.write(true);
     existing_options.mode(PRIVATE_RELEASE_MODE);
-    existing_options.custom_flags(O_NOFOLLOW);
+    existing_options.custom_flags(OPEN_NOFOLLOW_FLAGS);
     match parent.dir.open_with(&parent.name, &existing_options) {
         Ok(file) => {
             reject_open_file_metadata(destination, &file)?;
@@ -673,7 +684,7 @@ fn create_new_non_atomic_destination(
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     options.mode(PRIVATE_RELEASE_MODE);
-    options.custom_flags(O_NOFOLLOW);
+    options.custom_flags(OPEN_NOFOLLOW_FLAGS);
     let file = parent
         .dir
         .open_with(&parent.name, &options)
@@ -741,7 +752,7 @@ fn verify_final_destination(
 ) -> Result<(), ReleaseError> {
     let mut options = OpenOptions::new();
     options.read(true);
-    options.custom_flags(O_NOFOLLOW);
+    options.custom_flags(OPEN_NOFOLLOW_FLAGS);
     let mut file = parent
         .open_with(name, &options)
         .map_err(|source| ReleaseError::Io {
