@@ -19,10 +19,12 @@ use tracing::{debug, warn};
 use tree_sitter::{LanguageError, Node, Parser, Point, Tree};
 
 pub mod detection;
+pub mod detection_credential;
 mod detection_system;
 mod normalization;
 
 pub use detection::detect;
+pub use detection_credential::detect_credential_threats;
 pub use detection_system::detect_system_threats;
 pub use normalization::{
     DecodeKind, DecodedArtifact, ExtractedCommand, ExtractedUrl, NormalizationResult,
