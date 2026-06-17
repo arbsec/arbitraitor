@@ -312,7 +312,7 @@ impl NormalizerState<'_> {
             return;
         }
 
-        let name = tokens.remove(0);
+        let name = canonical_command_name(&tokens.remove(0));
         self.extract_urls_from_value(&name, &event.span);
         for argument in &tokens {
             self.extract_urls_from_value(argument, &event.span);
@@ -541,6 +541,12 @@ impl NormalizerState<'_> {
 fn resolve_token(token: &str, bindings: &BTreeMap<String, String>) -> Option<String> {
     let unquoted = strip_outer_quotes(token);
     expand_escapes_and_variables(&unquoted, bindings)
+}
+
+fn canonical_command_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| !matches!(character, '\'' | '"'))
+        .collect()
 }
 
 fn collect_events(ast: &ShellAst, state: &mut NormalizerState<'_>) -> Vec<AstEvent> {
