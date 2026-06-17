@@ -83,11 +83,19 @@ impl PolicyEngine {
             return Verdict::Block;
         }
 
-        // --- Rules: first match wins ---
+        let mut saw_unavailable = false;
         for rule in &self.policy.rules {
-            if rule_matches(&rule.when, findings, context) {
-                return resolve_action(rule.action, context, &self.policy.defaults);
+            match rule_matches(&rule.when, findings, context) {
+                TriState::Matched => {
+                    return resolve_action(rule.action, context, &self.policy.defaults);
+                }
+                TriState::Unavailable => saw_unavailable = true,
+                TriState::NotMatched => {}
             }
+        }
+
+        if saw_unavailable && self.policy.defaults.fail_closed_on_unavailable {
+            return Verdict::Block;
         }
 
         // --- Default action ---
@@ -100,20 +108,32 @@ impl PolicyEngine {
 // ---------------------------------------------------------------------------
 
 /// Checks whether any finding (or the context alone) satisfies the condition.
-fn rule_matches(condition: &Condition, findings: &[Finding], context: &EvalContext) -> bool {
+fn rule_matches(condition: &Condition, findings: &[Finding], context: &EvalContext) -> TriState {
     // Context-only pass: handles conditions without finding references, or
     // when there are zero findings.
-    if evaluate_condition(condition, None, context) == TriState::Matched {
-        return true;
+    let context_result = evaluate_condition(condition, None, context);
+    if context_result == TriState::Matched {
+        return TriState::Matched;
     }
+    if findings.is_empty() {
+        return context_result;
+    }
+
+    let mut saw_unavailable = false;
     // Per-finding pass: each finding is checked individually so that
     // multi-field conditions apply to the *same* finding.
     for finding in findings {
-        if evaluate_condition(condition, Some(finding), context) == TriState::Matched {
-            return true;
+        match evaluate_condition(condition, Some(finding), context) {
+            TriState::Matched => return TriState::Matched,
+            TriState::Unavailable => saw_unavailable = true,
+            TriState::NotMatched => {}
         }
     }
-    false
+    if saw_unavailable {
+        TriState::Unavailable
+    } else {
+        TriState::NotMatched
+    }
 }
 
 /// Resolves a policy action to a final verdict, applying the non-interactive
@@ -125,7 +145,10 @@ fn resolve_action(
 ) -> Verdict {
     let verdict: Verdict = action.into();
     if verdict == Verdict::Prompt && !context.is_interactive {
-        defaults.non_interactive_prompt_action.into()
+        match defaults.non_interactive_prompt_action {
+            PolicyAction::Prompt => Verdict::Block,
+            action => action.into(),
+        }
     } else {
         verdict
     }

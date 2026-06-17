@@ -191,11 +191,10 @@ fn passes_when_low_severity_rule_matches() {
 }
 
 #[test]
-fn defaults_to_prompt_when_no_rule_matches() {
+fn blocks_when_no_rule_matches_because_evidence_is_unavailable() {
     let engine = PolicyEngine::load(EXAMPLE_POLICY).unwrap();
-    // No findings → no rule matches → default prompt
     let verdict = engine.evaluate(&[], &interactive_https_ctx());
-    assert_eq!(verdict, Verdict::Prompt);
+    assert_eq!(verdict, Verdict::Block);
 }
 
 #[test]
@@ -489,11 +488,12 @@ all = [{ field = "context.is_private_network", equals = true }]
 }
 
 #[test]
-fn three_valued_logic_skips_rule_when_evidence_unavailable() {
-    // A rule referencing finding.* fields should be skipped when there are
-    // no findings, rather than matching or erroring.
+fn unavailable_evidence_does_not_pass() {
     let policy = r#"
 version = 1
+[defaults]
+action = "pass"
+
 [network]
 require_https = false
 
@@ -506,7 +506,25 @@ category = "malware-signature"
     let engine = PolicyEngine::load(policy).unwrap();
     let ctx = EvalContext::new(true).with_https(true);
     let verdict = engine.evaluate(&[], &ctx);
-    assert_eq!(verdict, Verdict::Prompt); // default, not block
+    assert_ne!(verdict, Verdict::Pass);
+    assert_eq!(verdict, Verdict::Block);
+}
+
+#[test]
+fn non_interactive_prompt_resolves_to_block() {
+    let policy = r#"
+version = 1
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "prompt"
+
+[network]
+require_https = false
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+    let ctx = EvalContext::new(false).with_https(true);
+    let verdict = engine.evaluate(&[], &ctx);
+    assert_eq!(verdict, Verdict::Block);
 }
 
 #[test]
@@ -564,6 +582,48 @@ fn rejects_unknown_toml_fields() {
 version = 1
 unknown_field = true
 ";
+    assert!(PolicyEngine::load(policy).is_err());
+}
+
+#[test]
+fn typo_in_field_name_rejected() {
+    let policy = r#"
+version = 1
+[[rules]]
+id = "typo-field"
+action = "block"
+[rules.when]
+fiel = "finding.detector"
+equals = "trusted"
+"#;
+    assert!(PolicyEngine::load(policy).is_err());
+}
+
+#[test]
+fn operator_without_field_rejected() {
+    let policy = r#"
+version = 1
+[[rules]]
+id = "operator-only"
+action = "pass"
+[rules.when]
+equals = "trusted"
+"#;
+    assert!(PolicyEngine::load(policy).is_err());
+}
+
+#[test]
+fn unknown_nested_field_rejected() {
+    let policy = r#"
+version = 1
+[[rules]]
+id = "unknown-nested"
+action = "block"
+[rules.when]
+field = "finding.detector"
+equals = "trusted"
+unexpected = true
+"#;
     assert!(PolicyEngine::load(policy).is_err());
 }
 

@@ -28,7 +28,7 @@
 //! let engine = PolicyEngine::load(toml).unwrap();
 //! let context = EvalContext::new(true).with_https(true);
 //! let verdict = engine.evaluate(&[], &context);
-//! assert_eq!(verdict, Verdict::Prompt); // no findings → default prompt
+//! assert_eq!(verdict, Verdict::Block);
 //! ```
 //!
 //! # Design principles
@@ -36,8 +36,8 @@
 //! - **Deterministic:** rules are evaluated top-to-bottom; first match wins.
 //!   The same policy + findings + context always produce the same verdict.
 //! - **Three-valued logic:** when evidence is unavailable (e.g. a condition
-//!   references `finding.*` but no finding is provided), the rule is *skipped*
-//!   rather than failing.
+//!   references `finding.*` but no finding is provided), evaluation fails closed
+//!   by default instead of treating missing evidence as a clean non-match.
 //! - **Fail-closed:** the default action is `prompt`; in a non-interactive
 //!   context prompts are upgraded to `block`.
 //! - **Total:** evaluation never panics. Every code path returns a verdict.

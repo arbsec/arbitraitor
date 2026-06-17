@@ -54,6 +54,10 @@ pub struct DefaultsConfig {
     /// non-interactive (e.g. CI/CD, daemon).
     #[serde(default = "default_non_interactive_action")]
     pub non_interactive_prompt_action: PolicyAction,
+
+    /// Whether unavailable evidence during rule evaluation fails closed.
+    #[serde(default = "default_true")]
+    pub fail_closed_on_unavailable: bool,
 }
 
 impl Default for DefaultsConfig {
@@ -61,6 +65,7 @@ impl Default for DefaultsConfig {
         Self {
             action: default_action(),
             non_interactive_prompt_action: default_non_interactive_action(),
+            fail_closed_on_unavailable: true,
         }
     }
 }
@@ -351,6 +356,7 @@ impl ScalarValue {
 /// Intermediate representation used to deserialize a [`Condition`] flexibly
 /// from TOML before validating exactly one form was supplied.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCondition {
     #[serde(default)]
     all: Option<Vec<Condition>>,
@@ -387,10 +393,19 @@ impl Condition {
         let shorthand = u8::from(raw.finding.is_some());
         let field_match = u8::from(raw.field.is_some());
         let forms = combinators + shorthand + field_match;
+        let operators = u8::from(raw.equals.is_some())
+            + u8::from(raw.one_of.is_some())
+            + u8::from(raw.contains.is_some())
+            + u8::from(raw.greater_than.is_some());
 
+        if raw.field.is_none() && operators > 0 {
+            return Err("condition operator supplied without a `field` key".to_owned());
+        }
+        if raw.field.is_some() && (combinators > 0 || shorthand > 0) {
+            return Err("condition cannot mix `field` with `all`, `any`, or `finding`".to_owned());
+        }
         if forms == 0 {
-            // Empty condition table → vacuously true (matches everything).
-            return Ok(Self::All(Vec::new()));
+            return Err("condition must specify `all`, `any`, `finding`, or `field`".to_owned());
         }
         if forms > 1 {
             return Err(
