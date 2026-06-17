@@ -6,11 +6,15 @@ use arbitraitor_model::ids::Sha256Digest;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tree_sitter::{LanguageError, Node, Parser};
+use tree_sitter::LanguageError;
 
-use crate::{ShellNode, SourceSpan, span_for_node};
+use crate::{ShellNode, SourceSpan};
 
-const MAX_DECODED_BYTES: usize = 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 32 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 256 * 1024;
+const MAX_DECODE_ARTIFACTS: usize = 64;
+const MAX_NORMALIZE_DEPTH: usize = 50;
+const MAX_NORMALIZE_NODES: usize = 10_000;
 
 /// Borrowed shell AST collected by [`crate::ShellParser`].
 pub type ShellAst = [ShellNode];
@@ -28,6 +32,10 @@ pub struct NormalizationResult {
     pub urls: Vec<ExtractedUrl>,
     /// Final constant variable bindings proven by the post-pass.
     pub variable_bindings: BTreeMap<String, String>,
+    /// Whether shell data-flow mechanisms outside [`PipeGraph`] scope were observed.
+    pub has_unmodeled_flow: bool,
+    /// Notes about bounded normalization, including any truncation events.
+    pub notes: Vec<String>,
 }
 
 /// Command extracted from the shell AST.
@@ -52,6 +60,8 @@ pub struct DecodedArtifact {
     pub size: usize,
     /// Span of the command or heredoc that produced the child artifact.
     pub parent_span: SourceSpan,
+    /// Command index that consumed source bytes for this artifact, when known.
+    pub source_command_index: Option<usize>,
     /// Decoded bytes for the recursive scanner.
     pub content: Vec<u8>,
 }
@@ -63,17 +73,26 @@ pub enum DecodeKind {
     Base64,
     /// Hex decoding through `xxd -r -p`.
     Hex,
-    /// Gzip decompression through `gunzip`.
-    Gzip,
-    /// Xz decompression through `xz -d`.
-    Xz,
+    // TODO: Add Gzip and Xz variants when bounded decompression is implemented
+    // with proper size/depth limits. See issue #38 for tracking.
     /// OpenSSL base64 decoding through `openssl enc -d -base64`.
     OpenSsl,
     /// Heredoc body extraction.
     Heredoc,
 }
 
-/// Directed command data-flow graph.
+/// Directed graph of data flow between commands connected by shell pipes (`|`).
+///
+/// # Scope Limitations
+///
+/// This graph ONLY captures pipe-based data flow. The following data flow
+/// mechanisms are NOT modeled:
+/// - File redirections (`>`, `>>`, `<`)
+/// - Process substitution (`<(...)`, `>(...)`)
+/// - Named pipes (`mkfifo`)
+/// - Temp-file handoffs
+///
+/// Downstream policy must treat this graph as advisory, not exhaustive.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PipeGraph {
     /// Command-index edges from producer to consumer.
@@ -106,36 +125,56 @@ struct ConstantBytes {
     span: SourceSpan,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventKind {
+    Command,
+    Assignment,
+    Pipeline,
+    Heredoc,
+}
+
+#[derive(Clone, Debug)]
+struct AstEvent {
+    kind: EventKind,
+    span: SourceSpan,
+    node_kind: String,
+    depth: usize,
+}
+
 /// Runs semantic normalization as a post-pass over parsed shell source.
 ///
 /// The original artifact is not modified. Derived decoded artifacts are bounded
-/// to one MiB until the limit is policy-controlled.
+/// to 32 KiB each, 256 KiB aggregate, and 64 total artifacts.
 ///
 /// # Errors
 ///
-/// Returns an error if the embedded Bash grammar cannot be configured or if
-/// tree-sitter fails to produce a parse tree for `source`.
+/// This post-pass uses the already parsed [`ShellAst`] and does not reparse.
+/// The result type remains fallible for API compatibility with earlier
+/// normalization implementations.
 pub fn normalize(ast: &ShellAst, source: &str) -> Result<NormalizationResult, NormalizeError> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_bash::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source.as_bytes(), None)
-        .ok_or(NormalizeError::NoTree)?;
-
-    let root = tree.root_node();
     let mut state = NormalizerState {
         source,
         bindings: BTreeMap::new(),
         commands: Vec::with_capacity(ast.len()),
         command_spans: Vec::new(),
+        command_source_indexes: BTreeMap::new(),
         pipe_edges: Vec::new(),
         decoded_artifacts: Vec::new(),
         urls: Vec::new(),
         seen_urls: BTreeSet::new(),
+        total_decoded_bytes: 0,
+        artifact_count: 0,
+        max_depth: MAX_NORMALIZE_DEPTH,
+        visited_nodes: 0,
+        notes: Vec::new(),
+        has_unmodeled_flow: false,
     };
-    state.visit(root);
-    state.extract_pipeline_edges(root);
+
+    let events = collect_events(ast, &mut state);
+    state.visit(&events);
+    state.extract_pipeline_edges(&events);
     state.detect_decode_chains();
+    state.decode_heredocs(&events);
 
     Ok(NormalizationResult {
         commands: state.commands,
@@ -145,6 +184,8 @@ pub fn normalize(ast: &ShellAst, source: &str) -> Result<NormalizationResult, No
         decoded_artifacts: state.decoded_artifacts,
         urls: state.urls,
         variable_bindings: state.bindings,
+        has_unmodeled_flow: state.has_unmodeled_flow,
+        notes: state.notes,
     })
 }
 
@@ -153,73 +194,114 @@ struct NormalizerState<'source> {
     bindings: BTreeMap<String, String>,
     commands: Vec<ExtractedCommand>,
     command_spans: Vec<SourceSpan>,
+    command_source_indexes: BTreeMap<usize, usize>,
     pipe_edges: Vec<(usize, usize)>,
     decoded_artifacts: Vec<DecodedArtifact>,
     urls: Vec<ExtractedUrl>,
     seen_urls: BTreeSet<(String, usize)>,
+    total_decoded_bytes: usize,
+    artifact_count: usize,
+    max_depth: usize,
+    visited_nodes: usize,
+    notes: Vec<String>,
+    has_unmodeled_flow: bool,
 }
 
 impl NormalizerState<'_> {
-    fn visit(&mut self, node: Node<'_>) {
-        if node.kind() == "heredoc_body" {
-            self.extract_heredoc(node);
-            return;
-        }
+    fn visit(&mut self, events: &[AstEvent]) {
+        let command_local_assignments = command_local_assignment_starts(events, self.source);
+        let mut seen_commands = BTreeSet::new();
 
-        if node.kind() == "variable_assignment" {
-            self.record_assignment(node);
-            return;
-        }
+        for event in events {
+            if self.should_truncate(event) {
+                continue;
+            }
 
-        if is_command_node(node) {
-            self.record_command(node);
-            return;
-        }
-
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            self.visit(child);
+            match event.kind {
+                EventKind::Command => {
+                    if seen_commands
+                        .insert((event.span.byte_range.start, event.span.byte_range.end))
+                    {
+                        self.record_command(event);
+                    }
+                }
+                EventKind::Assignment => {
+                    if !command_local_assignments.contains(&event.span.byte_range.start) {
+                        self.record_assignment(&event.span);
+                    }
+                }
+                EventKind::Pipeline | EventKind::Heredoc => {}
+            }
         }
     }
 
-    fn record_assignment(&mut self, node: Node<'_>) {
-        let Some(text) = node_text(self.source, node) else {
+    fn should_truncate(&mut self, event: &AstEvent) -> bool {
+        if self.visited_nodes >= MAX_NORMALIZE_NODES {
+            if !self
+                .notes
+                .iter()
+                .any(|note| note == "normalization truncated at node limit")
+            {
+                self.notes
+                    .push("normalization truncated at node limit".to_owned());
+            }
+            return true;
+        }
+        self.visited_nodes = self.visited_nodes.saturating_add(1);
+
+        if event.depth > self.max_depth {
+            if !self
+                .notes
+                .iter()
+                .any(|note| note == "normalization truncated at depth limit")
+            {
+                self.notes
+                    .push("normalization truncated at depth limit".to_owned());
+            }
+            return true;
+        }
+        false
+    }
+
+    fn record_assignment(&mut self, span: &SourceSpan) {
+        let Some(text) = self.source.get(span.byte_range.clone()) else {
             return;
         };
         let Some((name, value)) = split_assignment(text) else {
             return;
         };
-        let Some(resolved) = self.resolve_token(value) else {
+        let Some(resolved) = resolve_token(value, &self.bindings) else {
             self.bindings.remove(name);
             return;
         };
-        if let Some(span) = span_for_node(node) {
-            self.extract_urls_from_value(&resolved, &span);
-        }
+        self.extract_urls_from_value(&resolved, span);
         self.bindings.insert(name.to_owned(), resolved);
     }
 
-    fn record_command(&mut self, node: Node<'_>) {
-        let Some(span) = span_for_node(node) else {
+    fn record_command(&mut self, event: &AstEvent) {
+        let Some(text) = self.source.get(event.span.byte_range.clone()) else {
             return;
         };
+        let words = lex_shell_words(text);
+        if words.is_empty() {
+            return;
+        }
+
+        let snapshot = self.bindings.clone();
+        let mut word_iter = words.iter().peekable();
+        while word_iter
+            .peek()
+            .is_some_and(|word| split_assignment(word.raw.as_str()).is_some())
+        {
+            word_iter.next();
+        }
+
         let mut tokens = Vec::new();
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            match child.kind() {
-                "variable_assignment"
-                | "file_redirect"
-                | "heredoc_redirect"
-                | "herestring_redirect" => {
-                    self.visit(child);
-                }
-                _ => {
-                    if let Some(token) = self.resolve_word_like(child)
-                        && !token.is_empty()
-                    {
-                        tokens.push(token);
-                    }
-                }
+        for word in word_iter {
+            if let Some(token) = resolve_token(&word.raw, &snapshot)
+                && !token.is_empty()
+            {
+                tokens.push(token);
             }
         }
 
@@ -228,76 +310,42 @@ impl NormalizerState<'_> {
         }
 
         let name = tokens.remove(0);
-        self.extract_urls_from_value(&name, &span);
+        self.extract_urls_from_value(&name, &event.span);
         for argument in &tokens {
-            self.extract_urls_from_value(argument, &span);
+            self.extract_urls_from_value(argument, &event.span);
         }
-        self.command_spans.push(span.clone());
+
+        let command_index = self.commands.len();
+        self.command_spans.push(event.span.clone());
+        self.command_source_indexes
+            .insert(event.span.byte_range.start, command_index);
         self.commands.push(ExtractedCommand {
             name,
             arguments: tokens,
-            span,
+            span: event.span.clone(),
         });
     }
 
-    fn extract_heredoc(&mut self, node: Node<'_>) {
-        let Some(span) = span_for_node(node) else {
-            return;
-        };
-        let Some(text) = node_text(self.source, node) else {
-            return;
-        };
-        self.push_decoded(DecodeKind::Heredoc, text.as_bytes().to_vec(), span);
-    }
-
-    fn resolve_word_like(&self, node: Node<'_>) -> Option<String> {
-        match node.kind() {
-            "command_name" | "word" | "string" | "raw_string" | "concatenation"
-            | "simple_expansion" | "ansi_c_string" | "number" => {
-                node_text(self.source, node).and_then(|text| self.resolve_token(text))
-            }
-            _ => {
-                let mut value = String::new();
-                let mut saw_child = false;
-                let mut cursor = node.walk();
-                for child in node.named_children(&mut cursor) {
-                    saw_child = true;
-                    if let Some(piece) = self.resolve_word_like(child) {
-                        value.push_str(&piece);
-                    } else {
-                        return None;
-                    }
-                }
-                saw_child.then_some(value)
-            }
-        }
-    }
-
-    fn resolve_token(&self, token: &str) -> Option<String> {
-        let unquoted = strip_outer_quotes(token);
-        expand_escapes_and_variables(&unquoted, &self.bindings)
-    }
-
-    fn extract_pipeline_edges(&mut self, node: Node<'_>) {
-        if node.kind() == "pipeline" {
+    fn extract_pipeline_edges(&mut self, events: &[AstEvent]) {
+        for event in events
+            .iter()
+            .filter(|event| event.kind == EventKind::Pipeline && event.depth <= self.max_depth)
+        {
             let mut command_indexes = Vec::new();
             for (index, span) in self.command_spans.iter().enumerate() {
-                if span.byte_range.start >= node.start_byte()
-                    && span.byte_range.end <= node.end_byte()
+                if span.byte_range.start >= event.span.byte_range.start
+                    && span.byte_range.end <= event.span.byte_range.end
                 {
                     command_indexes.push(index);
                 }
             }
             command_indexes.sort_unstable();
+            command_indexes.dedup();
             for pair in command_indexes.windows(2) {
                 if let [left, right] = pair {
                     self.pipe_edges.push((*left, *right));
                 }
             }
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            self.extract_pipeline_edges(child);
         }
     }
 
@@ -321,28 +369,95 @@ impl NormalizerState<'_> {
                 produced.insert(to, input);
                 continue;
             };
-            if bytes.len() > MAX_DECODED_BYTES {
-                continue;
-            }
             let constant = ConstantBytes {
                 bytes: bytes.clone(),
                 span: command.span.clone(),
             };
-            self.push_decoded(kind, bytes, command.span.clone());
+            self.push_decoded(kind, bytes, command.span.clone(), Some(to));
             produced.insert(to, constant);
         }
     }
 
-    fn push_decoded(&mut self, kind: DecodeKind, content: Vec<u8>, parent_span: SourceSpan) {
+    fn decode_heredocs(&mut self, events: &[AstEvent]) {
+        let heredocs: Vec<&AstEvent> = events
+            .iter()
+            .filter(|event| event.kind == EventKind::Heredoc && event.node_kind == "heredoc_body")
+            .collect();
+
+        for heredoc in heredocs {
+            let Some(body) = self.source.get(heredoc.span.byte_range.clone()) else {
+                continue;
+            };
+            let content = if heredoc_uses_tab_stripping(self.source, heredoc.span.byte_range.start)
+            {
+                strip_leading_tabs(body).into_bytes()
+            } else {
+                body.as_bytes().to_vec()
+            };
+            let source_command_index =
+                self.nearest_consuming_command(heredoc.span.byte_range.start);
+            self.push_decoded(
+                DecodeKind::Heredoc,
+                content.clone(),
+                heredoc.span.clone(),
+                source_command_index,
+            );
+
+            let Some(command_index) = source_command_index else {
+                continue;
+            };
+            let Some(command) = self.commands.get(command_index) else {
+                continue;
+            };
+            let command_span = command.span.clone();
+            let Some((kind, bytes)) = decode_command(command, &content) else {
+                continue;
+            };
+            self.push_decoded(kind, bytes, command_span, Some(command_index));
+        }
+    }
+
+    fn nearest_consuming_command(&self, heredoc_start: usize) -> Option<usize> {
+        self.command_spans
+            .iter()
+            .enumerate()
+            .filter(|(_, span)| span.byte_range.start < heredoc_start)
+            .max_by_key(|(_, span)| span.byte_range.start)
+            .map(|(index, _)| index)
+    }
+
+    fn push_decoded(
+        &mut self,
+        kind: DecodeKind,
+        content: Vec<u8>,
+        parent_span: SourceSpan,
+        source_command_index: Option<usize>,
+    ) {
         if content.len() > MAX_DECODED_BYTES {
+            self.notes
+                .push("decoded artifact skipped: per-artifact byte limit exceeded".to_owned());
             return;
         }
+        if self.artifact_count >= MAX_DECODE_ARTIFACTS {
+            self.notes
+                .push("decoded artifact skipped: artifact count limit exceeded".to_owned());
+            return;
+        }
+        if self.total_decoded_bytes.saturating_add(content.len()) > MAX_TOTAL_DECODED_BYTES {
+            self.notes
+                .push("decoded artifact skipped: aggregate byte limit exceeded".to_owned());
+            return;
+        }
+
+        self.total_decoded_bytes = self.total_decoded_bytes.saturating_add(content.len());
+        self.artifact_count = self.artifact_count.saturating_add(1);
         let digest = Sha256Digest::new(Sha256::digest(&content).into());
         self.decoded_artifacts.push(DecodedArtifact {
             digest,
             kind,
             size: content.len(),
             parent_span,
+            source_command_index,
             content,
         });
     }
@@ -359,15 +474,212 @@ impl NormalizerState<'_> {
     }
 }
 
-fn is_command_node(node: Node<'_>) -> bool {
-    matches!(
-        node.kind(),
-        "command" | "simple_command" | "declaration_command"
-    )
+fn resolve_token(token: &str, bindings: &BTreeMap<String, String>) -> Option<String> {
+    let unquoted = strip_outer_quotes(token);
+    expand_escapes_and_variables(&unquoted, bindings)
 }
 
-fn node_text<'source>(source: &'source str, node: Node<'_>) -> Option<&'source str> {
-    source.get(node.start_byte()..node.end_byte())
+fn collect_events(ast: &ShellAst, state: &mut NormalizerState<'_>) -> Vec<AstEvent> {
+    let mut sorted_nodes: Vec<&ShellNode> = ast.iter().collect();
+    sorted_nodes.sort_by_key(|node| (node.span().byte_range.start, node.span().byte_range.end));
+
+    let mut stack: Vec<SourceSpan> = Vec::new();
+    let mut events = Vec::new();
+    for node in sorted_nodes {
+        let span = node.span().clone();
+        while stack
+            .last()
+            .is_some_and(|parent| span.byte_range.start >= parent.byte_range.end)
+        {
+            stack.pop();
+        }
+        let depth = stack.len();
+        if span.byte_range.end > span.byte_range.start {
+            stack.push(span.clone());
+        }
+
+        match node {
+            ShellNode::Command(command) => events.push(AstEvent {
+                kind: EventKind::Command,
+                span,
+                node_kind: command.kind.clone(),
+                depth,
+            }),
+            ShellNode::Assignment(assignment) => events.push(AstEvent {
+                kind: EventKind::Assignment,
+                span,
+                node_kind: assignment.kind.clone(),
+                depth,
+            }),
+            ShellNode::Pipeline(pipeline) => events.push(AstEvent {
+                kind: EventKind::Pipeline,
+                span,
+                node_kind: pipeline.kind.clone(),
+                depth,
+            }),
+            ShellNode::Heredoc(heredoc) => {
+                state.has_unmodeled_flow = true;
+                events.push(AstEvent {
+                    kind: EventKind::Heredoc,
+                    span,
+                    node_kind: heredoc.kind.clone(),
+                    depth,
+                });
+            }
+            ShellNode::Redirect(_) | ShellNode::ProcessSubstitution(_) => {
+                state.has_unmodeled_flow = true;
+            }
+            ShellNode::Conditional(_)
+            | ShellNode::Loop(_)
+            | ShellNode::Function(_)
+            | ShellNode::CommandSubstitution(_) => {}
+        }
+    }
+    events.sort_by_key(|event| (event.span.byte_range.start, event.span.byte_range.end));
+    events
+}
+
+fn command_local_assignment_starts(events: &[AstEvent], source: &str) -> BTreeSet<usize> {
+    let mut starts = BTreeSet::new();
+    for command in events
+        .iter()
+        .filter(|event| event.kind == EventKind::Command)
+    {
+        let Some(text) = source.get(command.span.byte_range.clone()) else {
+            continue;
+        };
+        let words = lex_shell_words(text);
+        let prefix_assignment_count = words
+            .iter()
+            .take_while(|word| split_assignment(word.raw.as_str()).is_some())
+            .count();
+        if prefix_assignment_count == 0 || prefix_assignment_count == words.len() {
+            continue;
+        }
+        for word in words.iter().take(prefix_assignment_count) {
+            starts.insert(command.span.byte_range.start.saturating_add(word.start));
+        }
+    }
+    starts
+}
+
+#[derive(Clone, Debug)]
+struct ShellWord {
+    raw: String,
+    start: usize,
+}
+
+fn lex_shell_words(input: &str) -> Vec<ShellWord> {
+    let mut words = Vec::new();
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index = index.saturating_add(1);
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        if matches!(bytes[index], b'|' | b';' | b'&') {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if matches!(bytes[index], b'<' | b'>') {
+            index = skip_redirect(input, index);
+            continue;
+        }
+
+        let start = index;
+        let mut raw = String::new();
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte.is_ascii_whitespace() || matches!(byte, b'|' | b';' | b'&') {
+                break;
+            }
+            if matches!(byte, b'<' | b'>') {
+                break;
+            }
+            if byte == b'\'' || byte == b'"' {
+                let quote = byte;
+                raw.push(char::from(byte));
+                index = index.saturating_add(1);
+                while index < bytes.len() {
+                    raw.push(char::from(bytes[index]));
+                    if bytes[index] == quote {
+                        index = index.saturating_add(1);
+                        break;
+                    }
+                    index = index.saturating_add(1);
+                }
+                continue;
+            }
+            if byte == b'`' {
+                raw.push('`');
+                index = index.saturating_add(1);
+                while index < bytes.len() {
+                    raw.push(char::from(bytes[index]));
+                    if bytes[index] == b'`' {
+                        index = index.saturating_add(1);
+                        break;
+                    }
+                    index = index.saturating_add(1);
+                }
+                continue;
+            }
+            if byte == b'$' && bytes.get(index.saturating_add(1)) == Some(&b'(') {
+                raw.push_str("$()");
+                index = skip_balanced(input, index.saturating_add(2));
+                continue;
+            }
+            raw.push(char::from(byte));
+            index = index.saturating_add(1);
+        }
+        if !raw.is_empty() {
+            words.push(ShellWord { raw, start });
+        }
+    }
+    words
+}
+
+fn skip_redirect(input: &str, mut index: usize) -> usize {
+    let bytes = input.as_bytes();
+    while index < bytes.len() && matches!(bytes[index], b'<' | b'>' | b'&' | b'-') {
+        index = index.saturating_add(1);
+    }
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index = index.saturating_add(1);
+    }
+    if index < bytes.len() && bytes[index] == b'(' {
+        return skip_balanced(input, index.saturating_add(1));
+    }
+    while index < bytes.len()
+        && !bytes[index].is_ascii_whitespace()
+        && !matches!(bytes[index], b'|' | b';' | b'&')
+    {
+        index = index.saturating_add(1);
+    }
+    index
+}
+
+fn skip_balanced(input: &str, mut index: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut depth = 1_usize;
+    while index < bytes.len() && depth > 0 {
+        match bytes[index] {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            b'\'' | b'"' => {
+                let quote = bytes[index];
+                index = index.saturating_add(1);
+                while index < bytes.len() && bytes[index] != quote {
+                    index = index.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+        index = index.saturating_add(1);
+    }
+    index
 }
 
 fn split_assignment(text: &str) -> Option<(&str, &str)> {
@@ -432,17 +744,22 @@ fn expand_escapes_and_variables(
                 }
                 None => output.push('\\'),
             },
-            '$' => match read_variable_reference(&mut chars) {
-                Some(reference) => {
-                    if let Some(value) = bindings.get(&reference.name) {
-                        output.push_str(value);
-                    } else {
-                        output.push_str(&reference.original);
-                    }
+            '$' => {
+                if chars.peek().is_some_and(|character| *character == '(') {
+                    return None;
                 }
-                None => output.push('$'),
-            },
-            '`' | '(' | ')' if token.contains("$(") || token.contains('`') => return None,
+                match read_variable_reference(&mut chars) {
+                    Some(reference) => {
+                        if let Some(value) = bindings.get(&reference.name) {
+                            output.push_str(value);
+                        } else {
+                            output.push_str(&reference.original);
+                        }
+                    }
+                    None => output.push('$'),
+                }
+            }
+            '`' => return None,
             _ => output.push(character),
         }
     }
@@ -494,10 +811,13 @@ fn decode_hex_pair(high: char, low: char) -> Option<u8> {
 
 fn command_constant_output(command: &ExtractedCommand) -> Option<ConstantBytes> {
     match command.name.as_str() {
-        "echo" => Some(ConstantBytes {
-            bytes: command.arguments.join(" ").into_bytes(),
-            span: command.span.clone(),
-        }),
+        "echo" => {
+            let arguments = echo_payload_arguments(&command.arguments);
+            Some(ConstantBytes {
+                bytes: arguments.join(" ").into_bytes(),
+                span: command.span.clone(),
+            })
+        }
         "printf"
             if command
                 .arguments
@@ -519,27 +839,61 @@ fn command_constant_output(command: &ExtractedCommand) -> Option<ConstantBytes> 
     }
 }
 
+fn echo_payload_arguments(arguments: &[String]) -> &[String] {
+    let mut start = 0;
+    while let Some(argument) = arguments.get(start) {
+        if argument == "-n" {
+            start = start.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    &arguments[start..]
+}
+
 fn decode_command(command: &ExtractedCommand, input: &[u8]) -> Option<(DecodeKind, Vec<u8>)> {
     match command.name.as_str() {
-        "base64"
-            if command
-                .arguments
-                .iter()
-                .any(|argument| argument == "-d" || argument == "--decode") =>
-        {
+        "base64" if base64_decode_flags(&command.arguments) => {
             decode_base64(input).map(|bytes| (DecodeKind::Base64, bytes))
         }
         "openssl" if is_openssl_base64_decode(&command.arguments) => {
             decode_base64(input).map(|bytes| (DecodeKind::OpenSsl, bytes))
         }
-        "xxd"
-            if command.arguments.iter().any(|argument| argument == "-r")
-                && command.arguments.iter().any(|argument| argument == "-p") =>
-        {
+        "xxd" if xxd_reverse_plain_flags(&command.arguments) => {
             decode_hex(input).map(|bytes| (DecodeKind::Hex, bytes))
         }
         _ => None,
     }
+}
+
+fn base64_decode_flags(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        let lower = argument.to_ascii_lowercase();
+        lower == "--decode"
+            || lower == "-d"
+            || argument == "-D"
+            || (lower.starts_with('-')
+                && !lower.starts_with("--")
+                && lower.chars().skip(1).any(|flag| flag == 'd'))
+    })
+}
+
+fn xxd_reverse_plain_flags(arguments: &[String]) -> bool {
+    let mut reverse = false;
+    let mut plain = false;
+    for argument in arguments {
+        if !argument.starts_with('-') || argument.starts_with("--") {
+            continue;
+        }
+        for flag in argument.chars().skip(1) {
+            match flag {
+                'r' => reverse = true,
+                'p' => plain = true,
+                _ => {}
+            }
+        }
+    }
+    reverse && plain
 }
 
 fn is_openssl_base64_decode(arguments: &[String]) -> bool {
@@ -586,6 +940,28 @@ fn decode_hex(input: &[u8]) -> Option<Vec<u8>> {
         output.push(decode_hex_pair(high, low)?);
     }
     Some(output)
+}
+
+fn heredoc_uses_tab_stripping(source: &str, body_start: usize) -> bool {
+    let prefix = &source[..body_start.min(source.len())];
+    let line_start = prefix
+        .rfind('\n')
+        .map_or(0, |index| index.saturating_add(1));
+    prefix[line_start..].contains("<<-")
+}
+
+fn strip_leading_tabs(body: &str) -> String {
+    let mut stripped = String::new();
+    for segment in body.split_inclusive('\n') {
+        stripped.push_str(segment.strip_prefix('\t').unwrap_or(segment));
+    }
+    if !body.ends_with('\n')
+        && let Some(last) = body.rsplit('\n').next()
+        && body == last
+    {
+        return body.strip_prefix('\t').unwrap_or(body).to_owned();
+    }
+    stripped
 }
 
 fn extract_urls(value: &str) -> Vec<String> {
