@@ -115,11 +115,16 @@ dependencies = [
 name = "arbitraitor-cli"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-analysis",
  "arbitraitor-core",
+ "arbitraitor-fetch",
  "arbitraitor-model",
  "arbitraitor-receipt",
+ "arbitraitor-store",
  "clap",
  "miette",
+ "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tracing",
  "tracing-subscriber",
