@@ -111,6 +111,9 @@ pub enum StoreError {
         /// Locked digest.
         digest: Sha256Digest,
     },
+    /// A store path component is a symlink.
+    #[error("symlink detected in store path: {0}")]
+    SymlinkDetected(PathBuf),
     /// The requested artifact was not present in the CAS.
     #[error("artifact {digest} was not found")]
     NotFound {
@@ -242,17 +245,17 @@ impl ContentStore {
     pub fn get(&self, digest: &Sha256Digest) -> Result<ArtifactHandle, StoreError> {
         let path = object_path(digest);
         let mut file = open_read_only_nofollow(&self.inner.root, &self.inner.root_path, &path)
-            .map_err(|source| {
-                if source.kind() == io::ErrorKind::NotFound {
+            .map_err(|error| match error {
+                StoreError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => {
                     StoreError::NotFound {
                         digest: digest.clone(),
                     }
-                } else {
-                    StoreError::Io {
-                        stage: "open-object",
-                        source,
-                    }
                 }
+                StoreError::Io { source, .. } => StoreError::Io {
+                    stage: "open-object",
+                    source,
+                },
+                error => error,
             })?;
         let size = file
             .metadata()
@@ -298,18 +301,23 @@ impl ContentStore {
 
     fn acquire_lock(&self, digest: &Sha256Digest) -> Result<LockGuard, StoreError> {
         let path = lock_path(digest);
-        let file = open_lock_file(&self.inner.root, &path).map_err(|source| {
-            if source.kind() == io::ErrorKind::AlreadyExists {
-                StoreError::LockHeld {
-                    digest: digest.clone(),
+        let file =
+            open_lock_file(&self.inner.root, &self.inner.root_path, &path).map_err(|error| {
+                match error {
+                    StoreError::Io { source, .. }
+                        if source.kind() == io::ErrorKind::AlreadyExists =>
+                    {
+                        StoreError::LockHeld {
+                            digest: digest.clone(),
+                        }
+                    }
+                    StoreError::Io { source, .. } => StoreError::Io {
+                        stage: "create-lock",
+                        source,
+                    },
+                    error => error,
                 }
-            } else {
-                StoreError::Io {
-                    stage: "create-lock",
-                    source,
-                }
-            }
-        })?;
+            })?;
         Ok(LockGuard {
             root: self
                 .inner
@@ -545,10 +553,7 @@ fn ensure_private_dir(
     path: impl AsRef<Path>,
 ) -> Result<bool, StoreError> {
     let path = path.as_ref();
-    reject_symlink(root_path.join(path), "metadata-dir").map_err(|source| StoreError::Io {
-        stage: "metadata-dir",
-        source,
-    })?;
+    reject_intermediate_symlinks(root_path, path)?;
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     builder.mode(PRIVATE_DIR_MODE);
@@ -566,12 +571,7 @@ fn ensure_private_dir(
             });
         }
     };
-    reject_symlink(root_path.join(path), "metadata-dir-after-create").map_err(|source| {
-        StoreError::Io {
-            stage: "metadata-dir-after-create",
-            source,
-        }
-    })?;
+    reject_intermediate_symlinks(root_path, path)?;
     #[cfg(unix)]
     root.set_permissions(path, cap_std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
         .map_err(|source| StoreError::Io {
@@ -608,16 +608,21 @@ fn lock_path(digest: &Sha256Digest) -> PathBuf {
     PathBuf::from(LOCKS_DIR).join(format!("{digest}.lock"))
 }
 
-fn open_read_only_nofollow(root: &Dir, root_path: &Path, path: &Path) -> io::Result<File> {
-    reject_symlink(root_path.join(path), "metadata-object")?;
+fn open_read_only_nofollow(root: &Dir, root_path: &Path, path: &Path) -> Result<File, StoreError> {
+    reject_intermediate_symlinks(root_path, path)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(O_NOFOLLOW);
     root.open_with(path, &options)
+        .map_err(|source| StoreError::Io {
+            stage: "open-object",
+            source,
+        })
 }
 
-fn open_lock_file(root: &Dir, path: &Path) -> io::Result<File> {
+fn open_lock_file(root: &Dir, root_path: &Path, path: &Path) -> Result<File, StoreError> {
+    reject_intermediate_symlinks(root_path, path)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -625,18 +630,31 @@ fn open_lock_file(root: &Dir, path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     options.custom_flags(O_NOFOLLOW);
     root.open_with(path, &options)
+        .map_err(|source| StoreError::Io {
+            stage: "create-lock",
+            source,
+        })
 }
 
-fn reject_symlink(path: impl AsRef<Path>, stage: &'static str) -> io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "refusing to follow symlink in store path",
-        )),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io::Error::new(error.kind(), format!("{stage}: {error}"))),
+fn reject_intermediate_symlinks(root: &Path, relative: &Path) -> Result<(), StoreError> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StoreError::SymlinkDetected(current));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    stage: "metadata-store-path",
+                    source,
+                });
+            }
+        }
     }
+    Ok(())
 }
 
 fn digest_file(file: &File) -> Result<Sha256Digest, StoreError> {
@@ -955,9 +973,74 @@ mod tests {
         symlink(&outside, root.join(OBJECTS_DIR).join(&hex[..2]))?;
         assert!(matches!(
             store_bytes(&store, Some(&digest), bytes).await,
-            Err(StoreError::Io { .. })
+            Err(StoreError::SymlinkDetected(_))
         ));
         fs::remove_file(root.join(OBJECTS_DIR).join(&hex[..2]))?;
+        fs::remove_dir_all(root)?;
+        fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn get_rejects_symlinked_objects_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root()?;
+        let outside = temp_root()?;
+        let store = ContentStore::open(&root)?;
+        let digest = store_bytes(&store, None, b"objects symlink bytes").await?;
+        fs::remove_dir_all(root.join(OBJECTS_DIR))?;
+        symlink(&outside, root.join(OBJECTS_DIR))?;
+        assert!(matches!(
+            store.get(&digest),
+            Err(StoreError::SymlinkDetected(_))
+        ));
+        fs::remove_file(root.join(OBJECTS_DIR))?;
+        fs::remove_dir_all(root)?;
+        fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn get_rejects_symlinked_shard_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root()?;
+        let outside = temp_root()?;
+        let store = ContentStore::open(&root)?;
+        let digest = store_bytes(&store, None, b"shard symlink bytes").await?;
+        let hex = digest.to_string();
+        let shard_path = root.join(OBJECTS_DIR).join(&hex[..2]);
+        fs::remove_dir_all(&shard_path)?;
+        symlink(&outside, &shard_path)?;
+        assert!(matches!(
+            store.get(&digest),
+            Err(StoreError::SymlinkDetected(_))
+        ));
+        fs::remove_file(shard_path)?;
+        fs::remove_dir_all(root)?;
+        fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_rejects_symlinked_locks_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root()?;
+        let outside = temp_root()?;
+        let store = ContentStore::open(&root)?;
+        let digest = digest_bytes(b"lock symlink bytes");
+        fs::remove_dir_all(root.join(LOCKS_DIR))?;
+        symlink(&outside, root.join(LOCKS_DIR))?;
+        assert!(matches!(
+            store.sink(Some(&digest)),
+            Err(StoreError::SymlinkDetected(_))
+        ));
+        fs::remove_file(root.join(LOCKS_DIR))?;
         fs::remove_dir_all(root)?;
         fs::remove_dir_all(outside)?;
         Ok(())
