@@ -320,3 +320,15 @@ fn tab_stripped_heredoc_is_decoded_after_tab_removal() -> Result<(), Box<dyn std
     );
     Ok(())
 }
+
+#[test]
+fn tab_stripped_heredoc_body_preserves_content_without_tabs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let result = normalize_source("cat <<-EOF\n\t\tcmd\nEOF\n")?;
+    assert!(
+        result.decoded_artifacts.iter().any(|artifact| {
+            artifact.kind == DecodeKind::Heredoc && artifact.content == b"cmd\n"
+        })
+    );
+    Ok(())
+}

@@ -1007,11 +1007,16 @@ fn decode_hex(input: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn heredoc_uses_tab_stripping(source: &str, body_start: usize) -> bool {
+    // Tree-sitter already strips leading tabs from <<- bodies at the AST level,
+    // so this function is defensive. We use rfind("<<") to locate the nearest
+    // heredoc redirect marker before the body start. This is syntactically
+    // naive (could match << in comments/strings or pick the wrong marker for
+    // same-command multiple heredocs), but worst case is a no-op
+    // strip_leading_tabs call on already-stripped content.
     let prefix = &source[..body_start.min(source.len())];
-    let line_start = prefix
-        .rfind('\n')
-        .map_or(0, |index| index.saturating_add(1));
-    prefix[line_start..].contains("<<-")
+    prefix
+        .rfind("<<")
+        .is_some_and(|pos| prefix[pos..].starts_with("<<-"))
 }
 
 fn strip_leading_tabs(body: &str) -> String {
@@ -1039,4 +1044,28 @@ fn extract_urls(value: &str) -> Vec<String> {
         }
     }
     urls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heredoc_uses_tab_stripping;
+
+    #[test]
+    fn detects_dash_heredoc_before_body() {
+        let source = "cat <<-EOF\n\t\tcontent\nEOF\n";
+        assert!(heredoc_uses_tab_stripping(source, 12));
+    }
+
+    #[test]
+    fn rejects_non_dash_heredoc_before_body() {
+        let source = "cat <<EOF\ncontent\nEOF\n";
+        assert!(!heredoc_uses_tab_stripping(source, 8));
+    }
+
+    #[test]
+    fn picks_nearest_heredoc_marker() {
+        let source = "cat <<FIRST\nx\nFIRST\ncat <<-SECOND\n\ty\nSECOND\n";
+        assert!(heredoc_uses_tab_stripping(source, 34));
+        assert!(!heredoc_uses_tab_stripping(source, 12));
+    }
 }
