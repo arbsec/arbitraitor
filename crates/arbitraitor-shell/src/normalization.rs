@@ -173,7 +173,7 @@ pub fn normalize(ast: &ShellAst, source: &str) -> Result<NormalizationResult, No
     let events = collect_events(ast, &mut state);
     state.visit(&events);
     state.extract_pipeline_edges(&events);
-    state.detect_decode_chains();
+    state.detect_decode_chains(&events);
     state.decode_heredocs(&events);
 
     Ok(NormalizationResult {
@@ -289,10 +289,13 @@ impl NormalizerState<'_> {
 
         let snapshot = self.bindings.clone();
         let mut word_iter = words.iter().peekable();
-        while word_iter
-            .peek()
-            .is_some_and(|word| split_assignment(word.raw.as_str()).is_some())
-        {
+        while let Some(word) = word_iter.peek() {
+            let Some((_, value)) = split_assignment(word.raw.as_str()) else {
+                break;
+            };
+            if let Some(resolved) = resolve_token(value, &snapshot) {
+                self.extract_urls_from_value(&resolved, &event.span);
+            }
             word_iter.next();
         }
 
@@ -347,14 +350,33 @@ impl NormalizerState<'_> {
                 }
             }
         }
+        for (index, pair) in self.command_spans.windows(2).enumerate() {
+            let [left, right] = pair else {
+                continue;
+            };
+            if left.byte_range.end > right.byte_range.start {
+                continue;
+            }
+            let Some(between) = self.source.get(left.byte_range.end..right.byte_range.start) else {
+                continue;
+            };
+            if between.contains('|') {
+                self.pipe_edges.push((index, index.saturating_add(1)));
+            }
+        }
+        self.pipe_edges.sort_unstable();
+        self.pipe_edges.dedup();
     }
 
-    fn detect_decode_chains(&mut self) {
+    fn detect_decode_chains(&mut self, events: &[AstEvent]) {
         let mut produced = BTreeMap::new();
         for (index, command) in self.commands.iter().enumerate() {
             if let Some(bytes) = command_constant_output(command) {
                 produced.insert(index, bytes);
             }
+        }
+        for (index, content) in self.heredoc_command_contents(events) {
+            produced.insert(index, content);
         }
 
         let edges = self.pipe_edges.clone();
@@ -394,8 +416,7 @@ impl NormalizerState<'_> {
             } else {
                 body.as_bytes().to_vec()
             };
-            let source_command_index =
-                self.nearest_consuming_command(heredoc.span.byte_range.start);
+            let source_command_index = self.heredoc_body_command_index(events, heredoc);
             self.push_decoded(
                 DecodeKind::Heredoc,
                 content.clone(),
@@ -417,6 +438,34 @@ impl NormalizerState<'_> {
         }
     }
 
+    fn heredoc_command_contents(&self, events: &[AstEvent]) -> BTreeMap<usize, ConstantBytes> {
+        let mut contents = BTreeMap::new();
+        for heredoc in events
+            .iter()
+            .filter(|event| event.kind == EventKind::Heredoc && event.node_kind == "heredoc_body")
+        {
+            let Some(body) = self.source.get(heredoc.span.byte_range.clone()) else {
+                continue;
+            };
+            let bytes = if heredoc_uses_tab_stripping(self.source, heredoc.span.byte_range.start) {
+                strip_leading_tabs(body).into_bytes()
+            } else {
+                body.as_bytes().to_vec()
+            };
+            let Some(command_index) = self.heredoc_body_command_index(events, heredoc) else {
+                continue;
+            };
+            contents.insert(
+                command_index,
+                ConstantBytes {
+                    bytes,
+                    span: heredoc.span.clone(),
+                },
+            );
+        }
+        contents
+    }
+
     fn nearest_consuming_command(&self, heredoc_start: usize) -> Option<usize> {
         self.command_spans
             .iter()
@@ -424,6 +473,21 @@ impl NormalizerState<'_> {
             .filter(|(_, span)| span.byte_range.start < heredoc_start)
             .max_by_key(|(_, span)| span.byte_range.start)
             .map(|(index, _)| index)
+    }
+
+    fn heredoc_body_command_index(&self, events: &[AstEvent], body: &AstEvent) -> Option<usize> {
+        let heredoc_redirect_start = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::Heredoc
+                    && event.node_kind != "heredoc_body"
+                    && event.span.byte_range.start < body.span.byte_range.start
+            })
+            .max_by_key(|event| event.span.byte_range.start)
+            .map_or(body.span.byte_range.start, |event| {
+                event.span.byte_range.start
+            });
+        self.nearest_consuming_command(heredoc_redirect_start)
     }
 
     fn push_decoded(
@@ -953,13 +1017,13 @@ fn heredoc_uses_tab_stripping(source: &str, body_start: usize) -> bool {
 fn strip_leading_tabs(body: &str) -> String {
     let mut stripped = String::new();
     for segment in body.split_inclusive('\n') {
-        stripped.push_str(segment.strip_prefix('\t').unwrap_or(segment));
+        stripped.push_str(segment.trim_start_matches('\t'));
     }
     if !body.ends_with('\n')
         && let Some(last) = body.rsplit('\n').next()
         && body == last
     {
-        return body.strip_prefix('\t').unwrap_or(body).to_owned();
+        return body.trim_start_matches('\t').to_owned();
     }
     stripped
 }

