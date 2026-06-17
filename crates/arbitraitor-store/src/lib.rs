@@ -26,13 +26,23 @@ const LOCKS_DIR: &str = "locks";
 const STAGING_DIR: &str = "staging";
 const META_DB: &str = "meta.db";
 const SHA256_HEX_LEN: usize = 64;
+const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 #[cfg(unix)]
 const PRIVATE_DIR_MODE: u32 = 0o700;
-#[cfg(all(unix, target_os = "linux"))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const O_NOFOLLOW: i32 = 0o400_000;
+#[cfg(any(
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+const O_NOFOLLOW: i32 = 0x0000_0100;
 
 /// Content-addressed quarantine store rooted at one filesystem capability.
 #[derive(Clone)]
@@ -53,12 +63,23 @@ pub struct StreamingSink<'store> {
     temp: Option<TempFile<'store>>,
     hasher: Sha256,
     bytes_written: u64,
+    max_bytes: u64,
     expected_digest: Option<Sha256Digest>,
     lock: Option<LockGuard>,
     finished: bool,
 }
 
-/// Read-only handle to a digest-verified CAS object.
+/// A read-only handle to a verified artifact in the CAS store.
+///
+/// # Verification
+///
+/// The content digest is verified once at handle creation. The handle does NOT
+/// continuously verify content integrity. If the underlying file is modified
+/// after handle creation, reads may return bytes that no longer match the
+/// expected digest.
+///
+/// Callers that need streaming integrity verification (e.g., during release)
+/// should re-hash while reading and verify the final digest.
 pub struct ArtifactHandle {
     digest: Sha256Digest,
     size: u64,
@@ -107,6 +128,14 @@ pub enum StoreError {
     /// The streaming sink had already been finished or aborted.
     #[error("streaming sink is already closed")]
     Closed,
+    /// Artifact bytes exceeded the configured sink limit.
+    #[error("artifact size exceeded limit: attempted {attempted} bytes, maximum {max_bytes} bytes")]
+    SizeExceeded {
+        /// Attempted total artifact size in bytes.
+        attempted: u64,
+        /// Maximum allowed artifact size in bytes.
+        max_bytes: u64,
+    },
 }
 
 impl ContentStore {
@@ -129,9 +158,9 @@ impl ContentStore {
                 source,
             })?;
 
-        ensure_private_dir(&cap_root, OBJECTS_DIR)?;
-        ensure_private_dir(&cap_root, LOCKS_DIR)?;
-        ensure_private_dir(&cap_root, STAGING_DIR)?;
+        ensure_private_dir(&cap_root, root, OBJECTS_DIR)?;
+        ensure_private_dir(&cap_root, root, LOCKS_DIR)?;
+        ensure_private_dir(&cap_root, root, STAGING_DIR)?;
         let staging = cap_root
             .open_dir(STAGING_DIR)
             .map_err(|source| StoreError::Io {
@@ -172,6 +201,19 @@ impl ContentStore {
         &self,
         expected_digest: Option<&Sha256Digest>,
     ) -> Result<StreamingSink<'_>, StoreError> {
+        self.sink_with_limits(expected_digest, DEFAULT_MAX_BYTES)
+    }
+
+    /// Creates a streaming sink with an explicit maximum artifact size in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if staging file creation or lock acquisition fails.
+    pub fn sink_with_limits(
+        &self,
+        expected_digest: Option<&Sha256Digest>,
+        max_bytes: u64,
+    ) -> Result<StreamingSink<'_>, StoreError> {
         let lock = expected_digest
             .map(|digest| self.acquire_lock(digest))
             .transpose()?;
@@ -185,6 +227,7 @@ impl ContentStore {
             temp: Some(temp),
             hasher: Sha256::new(),
             bytes_written: 0,
+            max_bytes,
             expected_digest: expected_digest.cloned(),
             lock,
             finished: false,
@@ -198,18 +241,19 @@ impl ContentStore {
     /// Returns [`StoreError`] if the object is absent or digest verification fails.
     pub fn get(&self, digest: &Sha256Digest) -> Result<ArtifactHandle, StoreError> {
         let path = object_path(digest);
-        let mut file = open_read_only_nofollow(&self.inner.root, &path).map_err(|source| {
-            if source.kind() == io::ErrorKind::NotFound {
-                StoreError::NotFound {
-                    digest: digest.clone(),
+        let mut file = open_read_only_nofollow(&self.inner.root, &self.inner.root_path, &path)
+            .map_err(|source| {
+                if source.kind() == io::ErrorKind::NotFound {
+                    StoreError::NotFound {
+                        digest: digest.clone(),
+                    }
+                } else {
+                    StoreError::Io {
+                        stage: "open-object",
+                        source,
+                    }
                 }
-            } else {
-                StoreError::Io {
-                    stage: "open-object",
-                    source,
-                }
-            }
-        })?;
+            })?;
         let size = file
             .metadata()
             .map_err(|source| StoreError::Io {
@@ -344,22 +388,33 @@ impl StreamingSink<'_> {
         if self.finished {
             return Err(StoreError::Closed);
         }
+        let chunk_len = u64::try_from(chunk.len()).map_err(|source| StoreError::Io {
+            stage: "count-bytes",
+            source: io::Error::new(io::ErrorKind::InvalidData, source),
+        })?;
+        let attempted =
+            self.bytes_written
+                .checked_add(chunk_len)
+                .ok_or_else(|| StoreError::Io {
+                    stage: "count-bytes",
+                    source: io::Error::new(io::ErrorKind::InvalidData, "artifact size overflow"),
+                })?;
+        if attempted > self.max_bytes {
+            self.finished = true;
+            drop(self.temp.take());
+            drop(self.lock.take());
+            return Err(StoreError::SizeExceeded {
+                attempted,
+                max_bytes: self.max_bytes,
+            });
+        }
         let temp = self.temp.as_mut().ok_or(StoreError::Closed)?;
         temp.write_all(chunk).map_err(|source| StoreError::Io {
             stage: "write-staging",
             source,
         })?;
         self.hasher.update(chunk);
-        self.bytes_written = self
-            .bytes_written
-            .checked_add(u64::try_from(chunk.len()).map_err(|source| StoreError::Io {
-                stage: "count-bytes",
-                source: io::Error::new(io::ErrorKind::InvalidData, source),
-            })?)
-            .ok_or_else(|| StoreError::Io {
-                stage: "count-bytes",
-                source: io::Error::new(io::ErrorKind::InvalidData, "artifact size overflow"),
-            })?;
+        self.bytes_written = attempted;
         Ok(())
     }
 
@@ -386,7 +441,13 @@ impl StreamingSink<'_> {
             });
         }
 
-        let shard = ensure_object_shard(&self.store.inner.root, &digest)?;
+        let (shard, shard_created) = ensure_object_shard(&self.store.inner, &digest)?;
+        if shard_created {
+            sync_dir_path(
+                &self.store.inner.root_path.join(OBJECTS_DIR),
+                "fsync-objects",
+            )?;
+        }
         let target = digest.to_string();
         if shard.open(&target).is_ok() {
             drop(temp);
@@ -478,39 +539,63 @@ impl Drop for LockGuard {
     }
 }
 
-fn ensure_private_dir(root: &Dir, path: impl AsRef<Path>) -> Result<(), StoreError> {
+fn ensure_private_dir(
+    root: &Dir,
+    root_path: &Path,
+    path: impl AsRef<Path>,
+) -> Result<bool, StoreError> {
     let path = path.as_ref();
+    reject_symlink(root_path.join(path), "metadata-dir").map_err(|source| StoreError::Io {
+        stage: "metadata-dir",
+        source,
+    })?;
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     builder.mode(PRIVATE_DIR_MODE);
-    match root.create_dir_with(path, &builder) {
-        Ok(()) => {}
+    let created = match root.create_dir_with(path, &builder) {
+        Ok(()) => true,
         Err(error)
-            if error.kind() == io::ErrorKind::AlreadyExists && root.open_dir(path).is_ok() => {}
+            if error.kind() == io::ErrorKind::AlreadyExists && root.open_dir(path).is_ok() =>
+        {
+            false
+        }
         Err(source) => {
             return Err(StoreError::Io {
                 stage: "create-dir",
                 source,
             });
         }
-    }
+    };
+    reject_symlink(root_path.join(path), "metadata-dir-after-create").map_err(|source| {
+        StoreError::Io {
+            stage: "metadata-dir-after-create",
+            source,
+        }
+    })?;
     #[cfg(unix)]
     root.set_permissions(path, cap_std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
         .map_err(|source| StoreError::Io {
             stage: "chmod-dir",
             source,
         })?;
-    Ok(())
+    Ok(created)
 }
 
-fn ensure_object_shard(root: &Dir, digest: &Sha256Digest) -> Result<Dir, StoreError> {
+fn ensure_object_shard(
+    store: &StoreInner,
+    digest: &Sha256Digest,
+) -> Result<(Dir, bool), StoreError> {
     let hex = digest.to_string();
     let shard_path = PathBuf::from(OBJECTS_DIR).join(&hex[..2]);
-    ensure_private_dir(root, &shard_path)?;
-    root.open_dir(&shard_path).map_err(|source| StoreError::Io {
-        stage: "open-shard",
-        source,
-    })
+    let created = ensure_private_dir(&store.root, &store.root_path, &shard_path)?;
+    let shard = store
+        .root
+        .open_dir(&shard_path)
+        .map_err(|source| StoreError::Io {
+            stage: "open-shard",
+            source,
+        })?;
+    Ok((shard, created))
 }
 
 fn object_path(digest: &Sha256Digest) -> PathBuf {
@@ -523,10 +608,11 @@ fn lock_path(digest: &Sha256Digest) -> PathBuf {
     PathBuf::from(LOCKS_DIR).join(format!("{digest}.lock"))
 }
 
-fn open_read_only_nofollow(root: &Dir, path: &Path) -> io::Result<File> {
+fn open_read_only_nofollow(root: &Dir, root_path: &Path, path: &Path) -> io::Result<File> {
+    reject_symlink(root_path.join(path), "metadata-object")?;
     let mut options = OpenOptions::new();
     options.read(true);
-    #[cfg(all(unix, target_os = "linux"))]
+    #[cfg(unix)]
     options.custom_flags(O_NOFOLLOW);
     root.open_with(path, &options)
 }
@@ -536,9 +622,21 @@ fn open_lock_file(root: &Dir, path: &Path) -> io::Result<File> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(PRIVATE_FILE_MODE);
-    #[cfg(all(unix, target_os = "linux"))]
+    #[cfg(unix)]
     options.custom_flags(O_NOFOLLOW);
     root.open_with(path, &options)
+}
+
+fn reject_symlink(path: impl AsRef<Path>, stage: &'static str) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to follow symlink in store path",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io::Error::new(error.kind(), format!("{stage}: {error}"))),
+    }
 }
 
 fn digest_file(file: &File) -> Result<Sha256Digest, StoreError> {
@@ -821,6 +919,60 @@ mod tests {
             store.sink(Some(&digest)),
             Err(StoreError::LockHeld { .. })
         ));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_enforces_byte_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root()?;
+        let store = ContentStore::open(&root)?;
+        let mut sink = store.sink_with_limits(None, 5)?;
+        sink.write_chunk(b"12345").await?;
+        assert!(matches!(
+            sink.write_chunk(b"6").await,
+            Err(StoreError::SizeExceeded {
+                attempted: 6,
+                max_bytes: 5
+            })
+        ));
+        assert_eq!(fs::read_dir(root.join(STAGING_DIR))?.count(), 0);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn store_rejects_symlinked_shard_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root()?;
+        let outside = temp_root()?;
+        let store = ContentStore::open(&root)?;
+        let bytes = b"symlink shard bytes";
+        let digest = digest_bytes(bytes);
+        let hex = digest.to_string();
+        symlink(&outside, root.join(OBJECTS_DIR).join(&hex[..2]))?;
+        assert!(matches!(
+            store_bytes(&store, Some(&digest), bytes).await,
+            Err(StoreError::Io { .. })
+        ));
+        fs::remove_file(root.join(OBJECTS_DIR).join(&hex[..2]))?;
+        fs::remove_dir_all(root)?;
+        fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn new_shard_reports_parent_directory_fsync_needed_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root()?;
+        let store = ContentStore::open(&root)?;
+        let digest = digest_bytes(b"new shard fsync marker");
+        let (_first_shard, first_created) = ensure_object_shard(&store.inner, &digest)?;
+        assert!(first_created);
+        let (_second_shard, second_created) = ensure_object_shard(&store.inner, &digest)?;
+        assert!(!second_created);
         fs::remove_dir_all(root)?;
         Ok(())
     }
