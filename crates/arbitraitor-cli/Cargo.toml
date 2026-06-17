@@ -16,11 +16,16 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+arbitraitor-analysis = { workspace = true }
 arbitraitor-core = { workspace = true }
+arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-receipt = { workspace = true }
+arbitraitor-store = { workspace = true }
 clap = { workspace = true }
 miette = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
