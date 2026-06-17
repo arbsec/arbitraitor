@@ -140,10 +140,16 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-core",
  "arbitraitor-model",
+ "arbitraitor-store",
+ "cap-std",
  "cap-tempfile",
+ "libc",
+ "proptest",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

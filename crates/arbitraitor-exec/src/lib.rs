@@ -24,6 +24,8 @@ use arbitraitor_model::verdict::AssuranceLevel;
 use thiserror::Error;
 use tracing::debug;
 
+pub mod release;
+
 static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Default `PATH` entries used when policy does not provide a stricter value.
