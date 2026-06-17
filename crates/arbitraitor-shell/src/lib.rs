@@ -18,12 +18,18 @@ use thiserror::Error;
 use tracing::{debug, warn};
 use tree_sitter::{LanguageError, Node, Parser, Point, Tree};
 
+mod detection_system;
 mod normalization;
+
+pub use detection_system::detect_system_threats;
 
 pub use normalization::{
     DecodeKind, DecodedArtifact, ExtractedCommand, ExtractedUrl, NormalizationResult,
     NormalizeError, PipeGraph, ShellAst, normalize,
 };
+
+/// Compatibility alias for the shell normalization output consumed by detectors.
+pub type NormalizeResult = NormalizationResult;
 
 const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_DEPTH: usize = 128;
