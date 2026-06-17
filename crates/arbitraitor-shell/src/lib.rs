@@ -20,11 +20,13 @@ use tree_sitter::{LanguageError, Node, Parser, Point, Tree};
 
 pub mod detection;
 pub mod detection_credential;
+pub mod detection_destructive;
 mod detection_system;
 mod normalization;
 
 pub use detection::detect;
 pub use detection_credential::detect_credential_threats;
+pub use detection_destructive::detect_destructive_threats;
 pub use detection_system::detect_system_threats;
 pub use normalization::{
     DecodeKind, DecodedArtifact, ExtractedCommand, ExtractedUrl, NormalizationResult,
