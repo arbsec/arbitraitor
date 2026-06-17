@@ -71,9 +71,12 @@ dependencies = [
 name = "arbitraitor-analysis"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-model",
+ "arbitraitor-shell",
  "async-trait",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
  "tracing",

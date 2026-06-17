@@ -12,9 +12,12 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-artifact = { workspace = true }
 arbitraitor-core = { workspace = true }
 arbitraitor-model = { workspace = true }
+arbitraitor-shell = { workspace = true }
 async-trait = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
