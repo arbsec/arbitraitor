@@ -22,6 +22,8 @@ pub fn detect(normalize_result: &NormalizationResult, source: &str) -> Vec<Findi
     state.detect_eval_usage();
     state.detect_source_from_risky_inputs();
     state.detect_process_substitution_network_retrieval();
+    state.detect_command_substitution_execution();
+    state.detect_shell_command_string_execution();
     state.detect_variable_command_execution();
     state.detect_decode_to_execute();
     state.detect_download_to_execute();
@@ -40,7 +42,7 @@ impl DetectionState<'_> {
     fn detect_eval_usage(&mut self) {
         let commands = self.commands().to_vec();
         for (index, command) in commands.iter().enumerate() {
-            if command.name == "eval" {
+            if command_basename(&command.name) == "eval" {
                 self.push(CommandFinding {
                     id: format!("dynamic-eval-{index}"),
                     category: FindingCategory::DynamicCodeExecution,
@@ -60,7 +62,7 @@ impl DetectionState<'_> {
         let downloaded_paths = self.downloaded_paths();
         let commands = self.commands().to_vec();
         for (index, command) in commands.iter().enumerate() {
-            if !is_source_command(&command.name) {
+            if !is_source_command(command) {
                 continue;
             }
             if command.arguments.iter().any(|argument| {
@@ -86,19 +88,83 @@ impl DetectionState<'_> {
     fn detect_process_substitution_network_retrieval(&mut self) {
         let commands = self.commands().to_vec();
         for (index, command) in commands.iter().enumerate() {
-            if is_network_retrieval(command)
-                && command_starts_in_process_substitution(self.source, command)
+            if !is_network_retrieval(command)
+                || !command_starts_in_process_substitution(self.source, command)
             {
+                continue;
+            }
+            let consumer = process_substitution_consumer(self.source, self.commands(), command)
+                .cloned()
+                .unwrap_or_else(|| command.clone());
+            let consumed_by_executor =
+                process_substitution_consumer(self.source, self.commands(), command)
+                    .is_some_and(is_execution_primitive);
+            self.push(CommandFinding {
+                id: format!("dynamic-process-substitution-network-{index}"),
+                category: if consumed_by_executor {
+                    FindingCategory::DynamicCodeExecution
+                } else {
+                    FindingCategory::Transport
+                },
+                severity: if consumed_by_executor {
+                    Severity::Critical
+                } else {
+                    Severity::Medium
+                },
+                confidence: if consumed_by_executor {
+                    Confidence::Confirmed
+                } else {
+                    Confidence::High
+                },
+                title: if consumed_by_executor {
+                    "Process substitution executes network content"
+                } else {
+                    "Network retrieval via process substitution"
+                },
+                description: if consumed_by_executor {
+                    "The script feeds content fetched by curl or wget through process substitution into a shell execution primitive. This source-level heuristic complements AST pipe analysis for non-pipe shell data flow."
+                } else {
+                    "The script retrieves network content through process substitution. The consuming command is not a shell execution primitive, so this is transport evidence rather than confirmed dynamic execution."
+                },
+                command: consumer,
+                evidence_kind: EvidenceKind::Command,
+                tag: "process-substitution-network",
+            });
+        }
+    }
+
+    fn detect_command_substitution_execution(&mut self) {
+        let commands = self.commands().to_vec();
+        for (index, command) in commands.iter().enumerate() {
+            if !is_execution_primitive(command) {
+                continue;
+            }
+            let Some(command_source) = self.source.get(command.span.byte_range.clone()) else {
+                continue;
+            };
+            if contains_network_command_substitution(command_source) {
                 self.push(CommandFinding {
-                    id: format!("dynamic-process-substitution-network-{index}"),
+                    id: format!("command-substitution-network-execute-{index}"),
+                    category: FindingCategory::DynamicCodeExecution,
+                    severity: Severity::Critical,
+                    confidence: Confidence::High,
+                    title: "Dynamic execution of network-retrieved content via command substitution",
+                    description: "The script executes a command string containing command substitution that invokes curl or wget. This source-level heuristic complements AST-based pipe analysis for non-pipe shell data flow.",
+                    command: command.clone(),
+                    evidence_kind: EvidenceKind::Command,
+                    tag: "command-substitution-network-execute",
+                });
+            } else if contains_decode_command_substitution(command_source) {
+                self.push(CommandFinding {
+                    id: format!("command-substitution-decode-execute-{index}"),
                     category: FindingCategory::DynamicCodeExecution,
                     severity: Severity::Critical,
                     confidence: Confidence::Confirmed,
-                    title: "Process substitution retrieves network content",
-                    description: "The script feeds content fetched by curl or wget through process substitution, a shell data-flow mechanism that can hide download-to-execute behavior from simple pipe analysis.",
+                    title: "Dynamic execution of decoded content via command substitution",
+                    description: "The script executes a command string containing command substitution that decodes content before execution. This source-level heuristic complements AST-based pipe analysis for non-pipe shell data flow.",
                     command: command.clone(),
                     evidence_kind: EvidenceKind::Command,
-                    tag: "process-substitution-network",
+                    tag: "command-substitution-decode-execute",
                 });
             }
         }
@@ -120,6 +186,25 @@ impl DetectionState<'_> {
                     command: command.clone(),
                     evidence_kind: EvidenceKind::Command,
                     tag: "variable-command-construction",
+                });
+            }
+        }
+    }
+
+    fn detect_shell_command_string_execution(&mut self) {
+        let commands = self.commands().to_vec();
+        for (index, command) in commands.iter().enumerate() {
+            if is_shell_executor(command) && shell_executes_command_string(command) {
+                self.push(CommandFinding {
+                    id: format!("shell-command-string-execute-{index}"),
+                    category: FindingCategory::DynamicCodeExecution,
+                    severity: Severity::High,
+                    confidence: Confidence::High,
+                    title: "Shell interpreter executes an inline command string",
+                    description: "The script invokes a shell execution primitive with -c, causing an argument string to be parsed and executed as code. Wrapper commands such as env, command, and busybox are resolved before matching.",
+                    command: command.clone(),
+                    evidence_kind: EvidenceKind::Command,
+                    tag: "shell-command-string-execute",
                 });
             }
         }
@@ -160,12 +245,12 @@ impl DetectionState<'_> {
             let Some(consumer) = self.commands().get(*to).cloned() else {
                 continue;
             };
-            if is_network_retrieval(&producer) && is_shell_executor(&consumer.name) {
+            if is_network_retrieval(&producer) && is_shell_executor(&consumer) {
                 self.push(CommandFinding {
                     id: format!("download-pipe-execute-{from}-{to}"),
                     category: FindingCategory::DynamicCodeExecution,
-                    severity: Severity::High,
-                    confidence: Confidence::High,
+                    severity: Severity::Critical,
+                    confidence: Confidence::Confirmed,
                     title: "Downloaded content is piped directly to a shell",
                     description: "The script streams content from curl or wget into a shell interpreter, collapsing retrieval, inspection, and execution into one operation.",
                     command: consumer,
@@ -236,7 +321,7 @@ impl DetectionState<'_> {
                     continue;
                 }
                 let command = self.commands().get(*to)?;
-                if is_shell_executor(&command.name) || command.name == "eval" {
+                if is_execution_primitive(command) {
                     return Some(command);
                 }
                 stack.push(*to);
@@ -247,7 +332,7 @@ impl DetectionState<'_> {
 
     fn containing_eval(&self, span: &SourceSpan) -> Option<&ExtractedCommand> {
         self.commands().iter().find(|command| {
-            command.name == "eval"
+            command_basename(&command.name) == "eval"
                 && command.span.byte_range.start <= span.byte_range.start
                 && command.span.byte_range.end >= span.byte_range.end
         })
@@ -328,17 +413,76 @@ fn evidence_description(span: &SourceSpan) -> String {
     )
 }
 
-fn is_source_command(name: &str) -> bool {
-    matches!(name, "source" | ".")
+fn is_source_command(command: &ExtractedCommand) -> bool {
+    matches!(resolved_command_basename(command).as_str(), "source" | ".")
 }
 
-fn is_shell_executor(name: &str) -> bool {
-    matches!(name, "sh" | "bash" | "dash" | "ash" | "zsh" | "ksh")
+fn is_shell_executor(command: &ExtractedCommand) -> bool {
+    matches!(
+        resolved_command_basename(command).as_str(),
+        "sh" | "bash" | "dash" | "ash" | "zsh" | "ksh"
+    )
+}
+
+fn is_execution_primitive(command: &ExtractedCommand) -> bool {
+    is_shell_executor(command)
+        || matches!(
+            resolved_command_basename(command).as_str(),
+            "eval" | "source" | "." | "exec"
+        )
 }
 
 fn is_network_retrieval(command: &ExtractedCommand) -> bool {
-    matches!(command.name.as_str(), "curl" | "wget")
+    matches!(resolved_command_basename(command).as_str(), "curl" | "wget")
         && command.arguments.iter().any(|argument| is_url(argument))
+}
+
+fn resolved_command_basename(command: &ExtractedCommand) -> String {
+    let name = command_basename(&command.name);
+    if matches!(name.as_str(), "env" | "command" | "busybox") {
+        command
+            .arguments
+            .iter()
+            .find(|argument| !is_wrapper_option(argument))
+            .map_or(name, |argument| command_basename(argument))
+    } else {
+        name
+    }
+}
+
+fn command_basename(name: &str) -> String {
+    strip_quotes(name)
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn is_wrapper_option(argument: &str) -> bool {
+    let stripped = strip_quotes(argument);
+    stripped.starts_with('-') || stripped.contains('=')
+}
+
+fn shell_executes_command_string(command: &ExtractedCommand) -> bool {
+    let basename = command_basename(&command.name);
+    let arguments: &[String] = if matches!(basename.as_str(), "env" | "command" | "busybox") {
+        command
+            .arguments
+            .iter()
+            .position(|argument| !is_wrapper_option(argument))
+            .map_or(&[], |position| {
+                &command.arguments[position.saturating_add(1)..]
+            })
+    } else {
+        &command.arguments
+    };
+    arguments.iter().any(|argument| shell_c_flag(argument))
+}
+
+fn shell_c_flag(argument: &str) -> bool {
+    let stripped = strip_quotes(argument);
+    stripped == "-c"
+        || (stripped.starts_with('-') && stripped.chars().skip(1).any(|flag| flag == 'c'))
 }
 
 fn is_url(value: &str) -> bool {
@@ -366,6 +510,103 @@ fn command_starts_in_process_substitution(source: &str, command: &ExtractedComma
     };
     let trimmed = prefix.trim_end();
     trimmed.ends_with("<(") || trimmed.ends_with(">(")
+}
+
+fn process_substitution_consumer<'a>(
+    source: &str,
+    commands: &'a [ExtractedCommand],
+    producer: &ExtractedCommand,
+) -> Option<&'a ExtractedCommand> {
+    commands
+        .iter()
+        .filter(|command| command.span.byte_range.start < producer.span.byte_range.start)
+        .filter(|command| {
+            source
+                .get(command.span.byte_range.clone())
+                .is_some_and(|text| text.contains("<(") || text.contains(">("))
+        })
+        .max_by_key(|command| command.span.byte_range.start)
+}
+
+fn contains_network_command_substitution(command_source: &str) -> bool {
+    command_substitutions(command_source)
+        .iter()
+        .any(|substitution| contains_command_name(substitution, &["curl", "wget"]))
+}
+
+fn contains_decode_command_substitution(command_source: &str) -> bool {
+    command_substitutions(command_source)
+        .iter()
+        .any(|substitution| {
+            contains_command_name(substitution, &["base64", "openssl", "xxd"])
+                && (substitution.contains(" -d")
+                    || substitution.contains("--decode")
+                    || substitution.contains(" -D")
+                    || substitution.contains(" -r")
+                    || substitution.contains("-base64"))
+        })
+}
+
+fn command_substitutions(command_source: &str) -> Vec<String> {
+    let mut substitutions = Vec::new();
+    let bytes = command_source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'$' && bytes.get(index.saturating_add(1)) == Some(&b'(') {
+            let start = index.saturating_add(2);
+            let end = find_balanced_end(command_source, start);
+            substitutions.push(command_source[start..end.min(command_source.len())].to_owned());
+            index = end.saturating_add(1);
+            continue;
+        }
+        if bytes[index] == b'`' {
+            let start = index.saturating_add(1);
+            let end = command_source[start..]
+                .find('`')
+                .map_or(command_source.len(), |offset| start.saturating_add(offset));
+            substitutions.push(command_source[start..end].to_owned());
+            index = end.saturating_add(1);
+            continue;
+        }
+        index = index.saturating_add(1);
+    }
+    substitutions
+}
+
+fn find_balanced_end(input: &str, mut index: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut depth = 1_usize;
+    while index < bytes.len() && depth > 0 {
+        match bytes[index] {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            b'\'' | b'"' => {
+                let quote = bytes[index];
+                index = index.saturating_add(1);
+                while index < bytes.len() && bytes[index] != quote {
+                    index = index.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+        if depth > 0 {
+            index = index.saturating_add(1);
+        }
+    }
+    index
+}
+
+fn contains_command_name(source: &str, names: &[&str]) -> bool {
+    source
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '|' | ';' | '&' | '(' | ')' | '<' | '>' | '"' | '\''
+                )
+        })
+        .map(command_basename)
+        .any(|piece| names.iter().any(|name| piece == *name))
 }
 
 fn command_invoked_from_variable(source: &str, command: &ExtractedCommand) -> bool {
@@ -444,7 +685,7 @@ fn command_executes_path(command: &ExtractedCommand, paths: &BTreeSet<String>) -
     if paths.contains(command.name.as_str()) {
         return true;
     }
-    is_shell_executor(&command.name)
+    is_shell_executor(command)
         && command.arguments.iter().any(|argument| {
             let stripped = strip_quotes(argument);
             paths.contains(stripped.as_str())
@@ -456,7 +697,10 @@ fn chmod_executable_paths(
     paths: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut executable_paths = BTreeSet::new();
-    for command in commands.iter().filter(|command| command.name == "chmod") {
+    for command in commands
+        .iter()
+        .filter(|command| command_basename(&command.name) == "chmod")
+    {
         if !command
             .arguments
             .iter()
