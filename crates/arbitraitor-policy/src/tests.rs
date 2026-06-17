@@ -198,6 +198,33 @@ fn blocks_when_no_rule_matches_because_evidence_is_unavailable() {
 }
 
 #[test]
+fn unavailable_evidence_not_overridden_by_later_pass_rule() {
+    let policy = r#"
+version = 1
+
+[defaults]
+action = "block"
+fail_closed_on_unavailable = true
+
+[[rules]]
+id = "block-malware"
+action = "block"
+[rules.when.finding]
+category = "malware-signature"
+
+[[rules]]
+id = "allow-context"
+action = "pass"
+[rules.when]
+all = [{ field = "context.artifact_type", equals = "shell-script" }]
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+    let ctx = interactive_https_ctx().with_artifact_type("shell-script");
+    let verdict = engine.evaluate(&[], &ctx);
+    assert_eq!(verdict, Verdict::Block);
+}
+
+#[test]
 fn non_interactive_prompt_becomes_block() {
     let engine = PolicyEngine::load(EXAMPLE_POLICY).unwrap();
     // Non-interactive context → prompt upgraded to block

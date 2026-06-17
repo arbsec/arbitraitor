@@ -83,19 +83,32 @@ impl PolicyEngine {
             return Verdict::Block;
         }
 
+        let fail_closed_on_unavailable = self.policy.defaults.fail_closed_on_unavailable;
         let mut saw_unavailable = false;
+        let mut best_non_block = None;
         for rule in &self.policy.rules {
             match rule_matches(&rule.when, findings, context) {
                 TriState::Matched => {
-                    return resolve_action(rule.action, context, &self.policy.defaults);
+                    let verdict = resolve_action(rule.action, context, &self.policy.defaults);
+                    if verdict == Verdict::Block {
+                        return verdict;
+                    }
+                    if !saw_unavailable || !fail_closed_on_unavailable {
+                        return verdict;
+                    }
+                    best_non_block = Some(verdict);
                 }
                 TriState::Unavailable => saw_unavailable = true,
                 TriState::NotMatched => {}
             }
         }
 
-        if saw_unavailable && self.policy.defaults.fail_closed_on_unavailable {
+        if saw_unavailable && fail_closed_on_unavailable {
             return Verdict::Block;
+        }
+
+        if let Some(verdict) = best_non_block {
+            return verdict;
         }
 
         // --- Default action ---
