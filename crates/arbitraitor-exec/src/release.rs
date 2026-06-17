@@ -10,9 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileTypeExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_store::{ContentStore, StoreError};
@@ -24,6 +22,7 @@ use cap_std::fs::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 const PRIVATE_RELEASE_MODE: u32 = 0o600;
 const COPY_BUFFER_BYTES: usize = 8192;
@@ -39,8 +38,6 @@ const O_NOFOLLOW: i32 = 0o400_000;
     target_os = "openbsd"
 ))]
 const O_NOFOLLOW: i32 = 0x0000_0100;
-
-static TEMP_NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Policy gates for destination release.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -170,6 +167,8 @@ enum ReleaseFsMode {
     Normal,
     #[cfg(test)]
     ForceNonAtomicForTest,
+    #[cfg(test)]
+    ForceNonAtomicCopyFailureForTest,
 }
 
 fn release_artifact_inner(
@@ -198,6 +197,10 @@ fn release_artifact_inner(
     let bytes_written = write_and_verify_temp(&handle, scanned_digest, &temp.file)?;
     let method = publish_temp(&parent, temp, destination, policy, fs_mode)?;
     verify_final_destination(&parent.dir, &parent.name, destination, scanned_digest)?;
+    // TODO(provenance): implement per ADR 0015 — tracked in follow-up issue.
+    // Release must preserve or add platform provenance markers such as macOS
+    // quarantine xattrs and Windows Mark of the Web instead of silently losing
+    // download-origin evidence at this filesystem boundary.
 
     let mut warnings = Vec::new();
     if method == ReleaseMethod::NonAtomicCopy {
@@ -236,13 +239,7 @@ impl DestinationParent {
             .ok_or_else(|| ReleaseError::UnsafeDestination {
                 path: destination.to_path_buf(),
             })?;
-        reject_parent_indirection(parent)?;
-        let dir = Dir::open_ambient_dir(parent, ambient_authority()).map_err(|source| {
-            ReleaseError::Io {
-                stage: "open-destination-parent",
-                source,
-            }
-        })?;
+        let dir = open_parent_capability(parent)?;
         let metadata = dir.dir_metadata().map_err(|source| ReleaseError::Io {
             stage: "metadata-destination-parent",
             source,
@@ -274,11 +271,7 @@ impl SiblingTemp {
             source,
         })?;
         for _attempt in 0..128 {
-            let counter = TEMP_NAME_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let name = OsString::from(format!(
-                ".arbitraitor-release-{}-{counter}.tmp",
-                std::process::id()
-            ));
+            let name = random_temp_name();
             let mut options = OpenOptions::new();
             options.read(true).write(true).create_new(true);
             options.mode(PRIVATE_RELEASE_MODE);
@@ -337,31 +330,76 @@ impl Drop for SiblingTemp {
     }
 }
 
-fn reject_parent_indirection(parent: &Path) -> Result<(), ReleaseError> {
-    let mut current = PathBuf::new();
+fn random_temp_name() -> OsString {
+    OsString::from(format!(
+        ".arbitraitor-release-{}.tmp",
+        Uuid::new_v4().as_simple()
+    ))
+}
+
+fn open_parent_capability(parent: &Path) -> Result<Dir, ReleaseError> {
+    let root = if parent.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut dir =
+        Dir::open_ambient_dir(root, ambient_authority()).map_err(|source| ReleaseError::Io {
+            stage: "open-destination-root",
+            source,
+        })?;
+    let mut current = if parent.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        PathBuf::new()
+    };
     for component in parent.components() {
         match component {
-            Component::RootDir | Component::Prefix(_) => current.push(component.as_os_str()),
-            Component::CurDir => continue,
-            Component::Normal(part) => current.push(part),
-            Component::ParentDir => {
+            Component::RootDir | Component::CurDir => {}
+            Component::Prefix(_) | Component::ParentDir => {
                 return Err(ReleaseError::UnsafeDestination {
                     path: parent.to_path_buf(),
                 });
             }
-        }
-        if current.as_os_str().is_empty() {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&current).map_err(|source| ReleaseError::Io {
-            stage: "metadata-destination-parent-component",
-            source,
-        })?;
-        if metadata.file_type().is_symlink() || is_forbidden_special_std(&metadata) {
-            return Err(ReleaseError::ForbiddenIndirection { path: current });
+            Component::Normal(part) => {
+                current.push(part);
+                dir = open_child_dir_nofollow(&dir, part, &current)?;
+            }
         }
     }
-    Ok(())
+    Ok(dir)
+}
+
+fn open_child_dir_nofollow(
+    parent: &Dir,
+    part: &OsStr,
+    component_path: &Path,
+) -> Result<Dir, ReleaseError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(O_NOFOLLOW);
+    let file = parent.open_with(part, &options).map_err(|source| {
+        if source.kind() == io::ErrorKind::Other {
+            ReleaseError::ForbiddenIndirection {
+                path: component_path.to_path_buf(),
+            }
+        } else {
+            ReleaseError::Io {
+                stage: "open-destination-parent-component",
+                source,
+            }
+        }
+    })?;
+    let metadata = file.metadata().map_err(|source| ReleaseError::Io {
+        stage: "metadata-destination-parent-component",
+        source,
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() || is_forbidden_special(&metadata) {
+        return Err(ReleaseError::ForbiddenIndirection {
+            path: component_path.to_path_buf(),
+        });
+    }
+    Ok(Dir::from_std_file(file.into_std()))
 }
 
 fn reject_existing_destination(
@@ -408,14 +446,6 @@ fn reject_destination_metadata(
 }
 
 fn is_forbidden_special(metadata: &cap_std::fs::Metadata) -> bool {
-    let file_type = metadata.file_type();
-    file_type.is_block_device()
-        || file_type.is_char_device()
-        || file_type.is_fifo()
-        || file_type.is_socket()
-}
-
-fn is_forbidden_special_std(metadata: &fs::Metadata) -> bool {
     let file_type = metadata.file_type();
     file_type.is_block_device()
         || file_type.is_char_device()
@@ -516,8 +546,11 @@ fn publish_temp(
     fs_mode: ReleaseFsMode,
 ) -> Result<ReleaseMethod, ReleaseError> {
     #[cfg(test)]
-    if fs_mode == ReleaseFsMode::ForceNonAtomicForTest {
-        return publish_non_atomic(parent, &mut temp, destination, policy);
+    if matches!(
+        fs_mode,
+        ReleaseFsMode::ForceNonAtomicForTest | ReleaseFsMode::ForceNonAtomicCopyFailureForTest
+    ) {
+        return publish_non_atomic(parent, &mut temp, destination, policy, fs_mode);
     }
     let _ = fs_mode;
     if policy.allow_overwrite {
@@ -529,7 +562,7 @@ fn publish_temp(
                 Ok(ReleaseMethod::AtomicRename)
             }
             Err(error) if is_cross_filesystem(&error) => {
-                publish_non_atomic(parent, &mut temp, destination, policy)
+                publish_non_atomic(parent, &mut temp, destination, policy, fs_mode)
             }
             Err(source) => Err(ReleaseError::Io {
                 stage: "rename-release-temp",
@@ -549,7 +582,7 @@ fn publish_temp(
                 })
             }
             Err(error) if is_cross_filesystem(&error) => {
-                publish_non_atomic(parent, &mut temp, destination, policy)
+                publish_non_atomic(parent, &mut temp, destination, policy, fs_mode)
             }
             Err(source) => Err(ReleaseError::Io {
                 stage: "link-release-temp",
@@ -564,6 +597,7 @@ fn publish_non_atomic(
     temp: &mut SiblingTemp,
     destination: &Path,
     policy: &ReleasePolicy,
+    fs_mode: ReleaseFsMode,
 ) -> Result<ReleaseMethod, ReleaseError> {
     if !policy.allow_non_atomic_copy {
         return Err(ReleaseError::NonAtomicCopyNotApproved {
@@ -572,20 +606,7 @@ fn publish_non_atomic(
     }
     warn!(destination = %destination.display(), "using policy-approved non-atomic release copy");
     reject_existing_destination(&parent.dir, &parent.name, destination, policy)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(!policy.allow_overwrite);
-    if policy.allow_overwrite {
-        options.create(true).truncate(true);
-    }
-    options.mode(PRIVATE_RELEASE_MODE);
-    options.custom_flags(O_NOFOLLOW);
-    let mut output = parent
-        .dir
-        .open_with(&parent.name, &options)
-        .map_err(|source| ReleaseError::Io {
-            stage: "open-non-atomic-destination",
-            source,
-        })?;
+    let mut output = open_non_atomic_destination(parent, destination, policy)?;
     let mut input = temp.file.try_clone().map_err(|source| ReleaseError::Io {
         stage: "clone-release-temp-for-copy",
         source,
@@ -596,7 +617,102 @@ fn publish_non_atomic(
             stage: "rewind-release-temp-for-copy",
             source,
         })?;
-    copy_stream(&mut input, &mut output)?;
+    let copy_result = copy_and_sync_non_atomic(&mut input, &mut output, fs_mode);
+    if let Err(error) = copy_result {
+        cleanup_partial_non_atomic_destination(parent, destination);
+        return Err(error);
+    }
+    temp.remove()?;
+    sync_parent_dir(&parent.path)?;
+    Ok(ReleaseMethod::NonAtomicCopy)
+}
+
+fn open_non_atomic_destination(
+    parent: &DestinationParent,
+    destination: &Path,
+    policy: &ReleasePolicy,
+) -> Result<File, ReleaseError> {
+    if policy.allow_overwrite {
+        open_existing_or_create_non_atomic_destination(parent, destination)
+    } else {
+        create_new_non_atomic_destination(parent, destination)
+    }
+}
+
+fn open_existing_or_create_non_atomic_destination(
+    parent: &DestinationParent,
+    destination: &Path,
+) -> Result<File, ReleaseError> {
+    let mut existing_options = OpenOptions::new();
+    existing_options.write(true);
+    existing_options.mode(PRIVATE_RELEASE_MODE);
+    existing_options.custom_flags(O_NOFOLLOW);
+    match parent.dir.open_with(&parent.name, &existing_options) {
+        Ok(file) => {
+            reject_open_file_metadata(destination, &file)?;
+            file.set_len(0).map_err(|source| ReleaseError::Io {
+                stage: "truncate-non-atomic-destination",
+                source,
+            })?;
+            Ok(file)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_new_non_atomic_destination(parent, destination)
+        }
+        Err(source) => Err(ReleaseError::Io {
+            stage: "open-non-atomic-destination",
+            source,
+        }),
+    }
+}
+
+fn create_new_non_atomic_destination(
+    parent: &DestinationParent,
+    destination: &Path,
+) -> Result<File, ReleaseError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    options.mode(PRIVATE_RELEASE_MODE);
+    options.custom_flags(O_NOFOLLOW);
+    let file = parent
+        .dir
+        .open_with(&parent.name, &options)
+        .map_err(|source| ReleaseError::Io {
+            stage: "open-non-atomic-destination",
+            source,
+        })?;
+    reject_open_file_metadata(destination, &file)?;
+    Ok(file)
+}
+
+fn reject_open_file_metadata(destination: &Path, file: &File) -> Result<(), ReleaseError> {
+    let metadata = file.metadata().map_err(|source| ReleaseError::Io {
+        stage: "metadata-open-destination",
+        source,
+    })?;
+    reject_destination_metadata(destination, &metadata)
+}
+
+fn copy_and_sync_non_atomic(
+    input: &mut File,
+    output: &mut File,
+    fs_mode: ReleaseFsMode,
+) -> Result<(), ReleaseError> {
+    #[cfg(test)]
+    if fs_mode == ReleaseFsMode::ForceNonAtomicCopyFailureForTest {
+        output
+            .write_all(b"partial")
+            .map_err(|source| ReleaseError::Io {
+                stage: "write-non-atomic-copy",
+                source,
+            })?;
+        return Err(ReleaseError::Io {
+            stage: "write-non-atomic-copy",
+            source: io::Error::other("simulated non-atomic copy failure"),
+        });
+    }
+    let _ = fs_mode;
+    copy_stream(input, output)?;
     output.flush().map_err(|source| ReleaseError::Io {
         stage: "flush-non-atomic-destination",
         source,
@@ -604,10 +720,17 @@ fn publish_non_atomic(
     output.sync_all().map_err(|source| ReleaseError::Io {
         stage: "fsync-non-atomic-destination",
         source,
-    })?;
-    temp.remove()?;
-    sync_parent_dir(&parent.path)?;
-    Ok(ReleaseMethod::NonAtomicCopy)
+    })
+}
+
+fn cleanup_partial_non_atomic_destination(parent: &DestinationParent, destination: &Path) {
+    if let Err(source) = parent.dir.remove_file(&parent.name) {
+        warn!(
+            destination = %destination.display(),
+            error = %source,
+            "best-effort cleanup of partial non-atomic release destination failed"
+        );
+    }
 }
 
 fn verify_final_destination(
@@ -616,13 +739,6 @@ fn verify_final_destination(
     destination: &Path,
     expected: &Sha256Digest,
 ) -> Result<(), ReleaseError> {
-    let metadata = parent
-        .symlink_metadata(name)
-        .map_err(|source| ReleaseError::Io {
-            stage: "metadata-final-destination",
-            source,
-        })?;
-    reject_destination_metadata(destination, &metadata)?;
     let mut options = OpenOptions::new();
     options.read(true);
     options.custom_flags(O_NOFOLLOW);
@@ -632,6 +748,7 @@ fn verify_final_destination(
             stage: "open-final-destination",
             source,
         })?;
+    reject_open_file_metadata(destination, &file)?;
     verify_reader_digest(&mut file, expected, "verify-final-destination")
 }
 
@@ -728,6 +845,9 @@ mod tests {
         MetadataExt as StdMetadataExt, PermissionsExt as StdPermissionsExt, symlink,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
 
     use super::*;
 
@@ -864,6 +984,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hard_link_destination_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("hardlink-destination")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"replacement bytes").await?;
+        let destination = root.join("linked-destination");
+        let alias = root.join("linked-alias");
+        fs::write(&destination, b"do not truncate")?;
+        fs::hard_link(&destination, &alias)?;
+
+        let result = release_artifact(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                allow_overwrite: true,
+                allow_non_atomic_copy: false,
+            },
+        );
+
+        assert!(matches!(result, Err(ReleaseError::HardLinkSurprise { .. })));
+        assert_eq!(fs::read(&destination)?, b"do not truncate");
+        assert_eq!(fs::read(&alias)?, b"do not truncate");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn temp_file_names_are_unpredictable_across_calls() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("temp-random")?;
+        let parent = Dir::open_ambient_dir(&root, ambient_authority())?;
+        let mut first = SiblingTemp::create(&parent)?;
+        let mut second = SiblingTemp::create(&parent)?;
+
+        assert_ne!(first.name, second.name);
+        assert!(
+            first
+                .name
+                .to_string_lossy()
+                .starts_with(".arbitraitor-release-")
+        );
+        assert!(
+            second
+                .name
+                .to_string_lossy()
+                .starts_with(".arbitraitor-release-")
+        );
+        first.remove()?;
+        second.remove()?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_atomic_partial_copy_failure_removes_destination()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("partial-cleanup")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"bytes that will fail mid-copy").await?;
+        let destination = root.join("partial-output");
+
+        let result = release_artifact_inner(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                allow_overwrite: false,
+                allow_non_atomic_copy: true,
+            },
+            ReleaseFsMode::ForceNonAtomicCopyFailureForTest,
+        );
+
+        assert!(matches!(result, Err(ReleaseError::Io { .. })));
+        assert!(!destination.exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn fd_link_count_validation_rejects_linked_destination_before_truncate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("fd-link-count")?;
+        let destination = root.join("destination");
+        let alias = root.join("alias");
+        fs::write(&destination, b"preserve")?;
+        fs::hard_link(&destination, &alias)?;
+        let parent = DestinationParent::open(&destination)?;
+
+        let result = open_non_atomic_destination(
+            &parent,
+            &destination,
+            &ReleasePolicy {
+                allow_overwrite: true,
+                allow_non_atomic_copy: true,
+            },
+        );
+
+        assert!(matches!(result, Err(ReleaseError::HardLinkSurprise { .. })));
+        assert_eq!(fs::read(&destination)?, b"preserve");
+        assert_eq!(fs::read(&alias)?, b"preserve");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cross_filesystem_fallback_is_gated_by_policy() -> Result<(), Box<dyn std::error::Error>>
     {
         let root = temp_root("fallback")?;
@@ -899,6 +1123,35 @@ mod tests {
         assert_eq!(receipt.warnings.len(), 1);
         assert_eq!(read_std_digest(&approved_destination)?, digest);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn released_file_digest_matches_scanned_digest_for_arbitrary_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let mut runner = TestRunner::default();
+        let strategy = proptest::collection::vec(any::<u8>(), 0..4096);
+
+        runner.run(&strategy, |bytes| {
+            let root = temp_root("digest-property")
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let store = ContentStore::open(&root.join("store"))
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let digest = runtime
+                .block_on(store_bytes(&store, &bytes))
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let destination = root.join("released.bin");
+
+            release_artifact(&store, &digest, &destination, &ReleasePolicy::default())
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let released =
+                fs::read(&destination).map_err(|error| TestCaseError::fail(error.to_string()))?;
+            prop_assert_eq!(digest_bytes(&released), digest);
+            prop_assert_eq!(released, bytes);
+            fs::remove_dir_all(root).map_err(|error| TestCaseError::fail(error.to_string()))?;
+            Ok(())
+        })?;
         Ok(())
     }
 }

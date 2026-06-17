@@ -147,10 +147,12 @@ dependencies = [
  "arbitraitor-store",
  "cap-std",
  "cap-tempfile",
+ "proptest",
  "sha2",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
