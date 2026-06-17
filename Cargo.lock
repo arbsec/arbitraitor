@@ -278,6 +278,8 @@ name = "arbitraitor-shell"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "base64",
+ "sha2",
  "thiserror",
  "tracing",
  "tree-sitter",

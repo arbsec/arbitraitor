@@ -18,6 +18,13 @@ use thiserror::Error;
 use tracing::{debug, warn};
 use tree_sitter::{LanguageError, Node, Parser, Point, Tree};
 
+mod normalization;
+
+pub use normalization::{
+    DecodeKind, DecodedArtifact, ExtractedCommand, ExtractedUrl, NormalizationResult,
+    NormalizeError, PipeGraph, ShellAst, normalize,
+};
+
 const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_DEPTH: usize = 128;
 const DEFAULT_MAX_NODES: usize = 100_000;
