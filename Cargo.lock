@@ -232,7 +232,10 @@ name = "arbitraitor-policy"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "proptest",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
  "toml",
 ]
