@@ -14,7 +14,10 @@ workspace = true
 [dependencies]
 arbitraitor-core = { workspace = true }
 arbitraitor-model = { workspace = true }
+arbitraitor-store = { workspace = true }
+cap-std = { workspace = true }
 cap-tempfile = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
