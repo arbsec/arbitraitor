@@ -288,7 +288,9 @@ dependencies = [
 name = "arbitraitor-store"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-fetch",
  "arbitraitor-model",
+ "async-trait",
  "cap-std",
  "cap-tempfile",
  "hex",
