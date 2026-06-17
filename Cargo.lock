@@ -145,7 +145,7 @@ dependencies = [
  "cap-tempfile",
  "libc",
  "proptest",
- "sha2",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
  "tracing",
@@ -237,7 +237,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "thiserror",
  "toml",
 ]
