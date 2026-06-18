@@ -728,8 +728,9 @@ fn lex_shell_words(input: &str) -> Vec<ShellWord> {
                 continue;
             }
             if byte == b'$' && bytes.get(index.saturating_add(1)) == Some(&b'(') {
-                raw.push_str("$()");
-                index = skip_balanced(input, index.saturating_add(2));
+                let end = skip_balanced(input, index.saturating_add(2));
+                raw.push_str(&input[index..end.min(input.len())]);
+                index = end;
                 continue;
             }
             raw.push(char::from(byte));
@@ -846,8 +847,20 @@ fn expand_escapes_and_variables(
                 None => output.push('\\'),
             },
             '$' => {
+                if chars.peek().is_some_and(|character| *character == '\'') {
+                    chars.next();
+                    let quoted = read_until_single_quote(&mut chars)?;
+                    output.push_str(&expand_backslash_escapes(&quoted)?);
+                    continue;
+                }
                 if chars.peek().is_some_and(|character| *character == '(') {
-                    return None;
+                    chars.next();
+                    let substitution = read_command_substitution(&mut chars)?;
+                    output.push_str(&resolve_static_command_substitution(
+                        &substitution,
+                        bindings,
+                    )?);
+                    continue;
                 }
                 match read_variable_reference(&mut chars) {
                     Some(reference) => {
@@ -862,6 +875,115 @@ fn expand_escapes_and_variables(
             }
             '`' => return None,
             _ => output.push(character),
+        }
+    }
+    Some(output)
+}
+
+fn read_until_single_quote<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
+where
+    I: Iterator<Item = char>,
+{
+    let mut output = String::new();
+    for character in chars.by_ref() {
+        if character == '\'' {
+            return Some(output);
+        }
+        output.push(character);
+    }
+    None
+}
+
+fn read_command_substitution<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
+where
+    I: Iterator<Item = char>,
+{
+    let mut output = String::new();
+    let mut depth = 1_usize;
+    while let Some(character) = chars.next() {
+        match character {
+            '(' => {
+                depth = depth.saturating_add(1);
+                output.push(character);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(output);
+                }
+                output.push(character);
+            }
+            '\'' => {
+                output.push(character);
+                output.push_str(&read_until_single_quote(chars)?);
+                output.push('\'');
+            }
+            _ => output.push(character),
+        }
+    }
+    None
+}
+
+fn resolve_static_command_substitution(
+    substitution: &str,
+    bindings: &BTreeMap<String, String>,
+) -> Option<String> {
+    let words = lex_shell_words(substitution);
+    let [command, arguments @ ..] = words.as_slice() else {
+        return None;
+    };
+    let command_name = canonical_command_name(&resolve_token(&command.raw, bindings)?);
+    if command_name != "printf" || arguments.is_empty() {
+        return None;
+    }
+
+    let mut resolved = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        resolved.push(resolve_token(&argument.raw, bindings)?);
+    }
+    printf_constant_output(&resolved)
+}
+
+fn printf_constant_output(arguments: &[String]) -> Option<String> {
+    let (format, values) = arguments.split_first()?;
+    if format == "%s" {
+        return Some(values.concat());
+    }
+    if values.is_empty() {
+        expand_backslash_escapes(format)
+    } else {
+        None
+    }
+}
+
+fn expand_backslash_escapes(value: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('x') => {
+                chars.next();
+                let high = chars.next()?;
+                let low = chars.next()?;
+                output.push(char::from(decode_hex_pair(high, low)?));
+            }
+            Some('n') => {
+                chars.next();
+                output.push('\n');
+            }
+            Some('t') => {
+                chars.next();
+                output.push('\t');
+            }
+            Some(next) => {
+                chars.next();
+                output.push(next);
+            }
+            None => output.push('\\'),
         }
     }
     Some(output)

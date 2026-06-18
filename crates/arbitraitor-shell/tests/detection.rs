@@ -55,6 +55,33 @@ fn detects_quoted_concatenated_eval_usage() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn detects_ansi_c_quoted_hex_eval_usage() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source(r#"$'\x65\x76\x61\x6c' "$payload""#)?;
+    let finding = first_with_tag(&findings, "eval").ok_or("missing ANSI-C eval finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::Critical);
+    Ok(())
+}
+
+#[test]
+fn detects_printf_command_substitution_eval_usage() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source(r#"$(printf '\x65\x76\x61\x6c') "$payload""#)?;
+    let finding = first_with_tag(&findings, "eval").ok_or("missing printf eval finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::Critical);
+    Ok(())
+}
+
+#[test]
+fn detects_variable_concatenated_eval_usage() -> Result<(), Box<dyn std::error::Error>> {
+    let findings = detect_source(r#"a=ev; b=al; $a$b "$payload""#)?;
+    let finding = first_with_tag(&findings, "eval").ok_or("missing variable eval finding")?;
+    assert_eq!(finding.category, FindingCategory::DynamicCodeExecution);
+    assert_eq!(finding.severity, Severity::Critical);
+    Ok(())
+}
+
+#[test]
 fn detects_source_from_writable_path() -> Result<(), Box<dyn std::error::Error>> {
     let findings = detect_source(". /tmp/installer.sh")?;
     let finding =
