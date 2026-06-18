@@ -1,9 +1,15 @@
 //! Threat intelligence feed management.
 //!
 //! See `.spec/` for the full specification.
+//!
+//! Feed retrieval is delegated to [`arbitraitor_fetch::Fetcher`]; no reqwest
+//! types cross this crate boundary (see ADR 0003).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod feed;
+pub mod urlhaus;
 
 use std::fs;
 use std::io;
@@ -14,6 +20,9 @@ use arbitraitor_model::verdict::{Confidence, Severity};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
+
+pub use feed::{FeedAdapter, IngestionReport, ingest_entries, ingest_feed};
+pub use urlhaus::UrlhausAdapter;
 
 /// Current threat-intelligence feed entry schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -293,6 +302,36 @@ impl IntelStore {
         self.persist()
     }
 
+    /// Merge many entries by identifier, persisting once.
+    ///
+    /// Returns `(entries_added, entries_updated)` where an entry is "updated"
+    /// when its identifier already existed and "added" otherwise. Existing
+    /// entries are replaced in place; new entries are appended in input order.
+    ///
+    /// This performs a single [`IntelStore::persist`] regardless of entry count
+    /// so that bulk feed ingestion does not rewrite the store file once per
+    /// row. The identifier lookup is linear per row to match [`IntelStore::add_entry`];
+    /// a future index may speed up large feeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated store cannot be encoded or written.
+    pub fn merge_entries(&mut self, entries: Vec<FeedEntry>) -> Result<(usize, usize)> {
+        let mut added = 0_usize;
+        let mut updated = 0_usize;
+        for entry in entries {
+            if let Some(existing) = self.entries.iter_mut().find(|stored| stored.id == entry.id) {
+                *existing = entry;
+                updated += 1;
+            } else {
+                self.entries.push(entry);
+                added += 1;
+            }
+        }
+        self.persist()?;
+        Ok((added, updated))
+    }
+
     /// Query entries matching an indicator by exact indicator type and value.
     #[must_use]
     pub fn query(&self, indicator: &Indicator) -> Vec<&FeedEntry> {
@@ -525,7 +564,7 @@ fn enforcement_precedence(disposition: Disposition) -> u8 {
 /// Result type for intelligence store operations.
 pub type Result<T> = std::result::Result<T, IntelError>;
 
-/// Errors produced by intelligence feed storage.
+/// Errors produced by intelligence feed storage and ingestion.
 #[derive(Debug, Error)]
 pub enum IntelError {
     /// Store file I/O failed.
@@ -537,16 +576,46 @@ pub enum IntelError {
     /// Store JSON encoding failed.
     #[error("intelligence store encode failed: {0}")]
     Encode(serde_json::Error),
+    /// Feed retrieval through the [`arbitraitor_fetch::Fetcher`] trait failed.
+    #[error("feed fetch failed: {0}")]
+    Fetch(#[from] arbitraitor_fetch::FetchError),
+    /// Feed payload could not be decoded as a known format (invalid UTF-8,
+    /// malformed JSON, missing CSV header, or unrecognized structure).
+    #[error("feed decode failed: {reason}")]
+    FeedDecode {
+        /// Safe diagnostic context naming the format and failure.
+        reason: String,
+    },
+    /// An individual feed row could not be parsed after the payload decoded.
+    #[error("feed row {row} could not be parsed: {reason}")]
+    FeedRow {
+        /// 1-based row number within the payload, when attributable.
+        row: u64,
+        /// Safe diagnostic context for the parse failure.
+        reason: String,
+    },
 }
 
-fn current_utc_timestamp() -> String {
-    let seconds = SystemTime::now()
+/// Returns the current Unix timestamp in seconds since the UTC epoch.
+///
+/// Failures (system clock before epoch) yield `0`, matching the behavior used
+/// by [`current_utc_timestamp`].
+#[must_use]
+pub fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    format_unix_timestamp(seconds)
+        .map_or(0, |duration| duration.as_secs())
 }
 
-fn format_unix_timestamp(seconds: u64) -> String {
+/// Returns the current UTC time as an RFC 3339 string.
+#[must_use]
+pub fn current_utc_timestamp() -> String {
+    format_unix_timestamp(current_unix_timestamp())
+}
+
+/// Formats a Unix `seconds` value as an RFC 3339 UTC timestamp.
+#[must_use]
+pub fn format_unix_timestamp(seconds: u64) -> String {
     let days = seconds / 86_400;
     let seconds_of_day = seconds % 86_400;
     let (year, month, day) = civil_from_days(days);
