@@ -6,8 +6,9 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use arbitraitor_artifact::ArtifactType;
@@ -16,6 +17,7 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 use tar::Archive;
 use thiserror::Error;
 use xz2::read::XzDecoder;
@@ -199,6 +201,226 @@ pub fn open_archive_with_limits(
         ArtifactType::Bzip2Compressed => Ok(Box::new(CompressedReader::bzip2(data, limits))),
         ArtifactType::ZstdCompressed => Ok(Box::new(CompressedReader::zstd(data, limits))),
         _ => Err(ArchiveError::UnsupportedArtifactType { artifact_type }),
+    }
+}
+
+/// Metadata for a regular file extracted under archive resource limits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedFile {
+    /// Filesystem path of the extracted file.
+    pub path: PathBuf,
+    /// Entry name as stored in the archive after path validation.
+    pub original_name: String,
+    /// Number of bytes written to `path`.
+    pub size: u64,
+    /// SHA-256 digest of the extracted bytes.
+    pub sha256: Sha256Digest,
+}
+
+/// Extracts regular archive files into a restricted analysis directory.
+///
+/// The directory is created with owner-only permissions on Unix platforms. The caller owns the
+/// directory after a successful extraction and must remove it after analysis. If extraction fails,
+/// this function removes the partially populated inspection directory before returning the error.
+///
+/// # Errors
+///
+/// Returns an error if the archive contains unsupported entries, unsafe paths, I/O failures, or if
+/// any configured resource limit is exceeded while extracting.
+pub fn extract_to_inspection_dir(
+    reader: &mut dyn ArchiveReader,
+    limits: &ArchiveLimits,
+    inspection_dir: &Path,
+) -> Result<Vec<ExtractedFile>, ArchiveError> {
+    let result = extract_to_directory(reader, limits, inspection_dir, DirectoryMode::Private);
+    if result.is_err() {
+        let _ = fs::remove_dir_all(inspection_dir);
+    }
+    result
+}
+
+/// Extracts regular archive files into a caller-selected destination directory.
+///
+/// This is intended for explicit release/unpack flows, not analysis-time scratch extraction. The
+/// original archive bytes remain the authoritative artifact identity; extracted files are derived
+/// outputs and must not replace the original release payload.
+///
+/// # Errors
+///
+/// Returns an error if the archive contains unsupported entries, unsafe paths, I/O failures, or if
+/// any configured resource limit is exceeded while extracting.
+pub fn extract_to_output_dir(
+    reader: &mut dyn ArchiveReader,
+    limits: &ArchiveLimits,
+    output_dir: &Path,
+) -> Result<Vec<ExtractedFile>, ArchiveError> {
+    extract_to_directory(reader, limits, output_dir, DirectoryMode::Normal)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DirectoryMode {
+    Private,
+    Normal,
+}
+
+fn extract_to_directory(
+    reader: &mut dyn ArchiveReader,
+    limits: &ArchiveLimits,
+    destination: &Path,
+    directory_mode: DirectoryMode,
+) -> Result<Vec<ExtractedFile>, ArchiveError> {
+    create_destination_dir(destination, directory_mode)?;
+    let entries = reader.entries()?;
+    let mut metadata_tracker = LimitTracker::new(limits);
+    for entry in &entries {
+        metadata_tracker.record_entry(&entry.name, entry.size, entry.compressed_size)?;
+        validate_extractable_entry(entry)?;
+    }
+
+    let mut extraction_tracker = LimitTracker::new(limits);
+    let mut extracted = Vec::new();
+    for entry in entries.iter().filter(|entry| !entry.is_dir) {
+        extraction_tracker.record_file_metadata(&entry.name)?;
+        let output_path = safe_output_path(destination, &entry.name)?;
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let partial_path = partial_output_path(&output_path);
+        let mut writer = HashingLimitWriter::new(
+            File::create(&partial_path)?,
+            &mut extraction_tracker,
+            entry.compressed_size,
+        );
+        let extraction_result = reader.extract_entry(&entry.name, &mut writer);
+        let extracted_file = match extraction_result {
+            Ok(()) => writer.finish(output_path.clone(), entry.name.clone()),
+            Err(error) => {
+                let _ = fs::remove_file(&partial_path);
+                return Err(error);
+            }
+        };
+        fs::rename(&partial_path, &output_path)?;
+        extracted.push(extracted_file);
+    }
+
+    Ok(extracted)
+}
+
+fn create_destination_dir(path: &Path, mode: DirectoryMode) -> Result<(), ArchiveError> {
+    fs::create_dir_all(path)?;
+    if matches!(mode, DirectoryMode::Private) {
+        set_private_directory_permissions(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path) -> Result<(), ArchiveError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_directory_permissions(_path: &Path) -> Result<(), ArchiveError> {
+    Ok(())
+}
+
+fn validate_extractable_entry(entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+    if entry.is_dir {
+        return Ok(());
+    }
+    if entry.entry_type != ArchiveEntryType::File || entry.is_symlink || entry.is_encrypted {
+        return Err(ArchiveError::UnsupportedEntry(entry.name.clone()));
+    }
+    Ok(())
+}
+
+fn safe_output_path(root: &Path, name: &str) -> Result<PathBuf, ArchiveError> {
+    let safe_name = safe_entry_name(name)?;
+    let mut path = root.to_path_buf();
+    for component in safe_name.split('/') {
+        path.push(component);
+    }
+    Ok(path)
+}
+
+fn partial_output_path(path: &Path) -> PathBuf {
+    let mut partial = path.to_path_buf();
+    let extension = path.extension().map_or_else(
+        || "arbitraitor-partial".into(),
+        |extension| {
+            let mut value = extension.to_os_string();
+            value.push(".arbitraitor-partial");
+            value
+        },
+    );
+    partial.set_extension(extension);
+    partial
+}
+
+struct HashingLimitWriter<'limits, 'tracker> {
+    file: File,
+    tracker: &'tracker mut LimitTracker<'limits>,
+    hasher: Sha256,
+    size: u64,
+    compressed_size: Option<u64>,
+}
+
+impl<'limits, 'tracker> HashingLimitWriter<'limits, 'tracker> {
+    fn new(
+        file: File,
+        tracker: &'tracker mut LimitTracker<'limits>,
+        compressed_size: Option<u64>,
+    ) -> Self {
+        Self {
+            file,
+            tracker,
+            hasher: Sha256::new(),
+            size: 0,
+            compressed_size,
+        }
+    }
+
+    fn finish(self, path: PathBuf, original_name: String) -> ExtractedFile {
+        ExtractedFile {
+            path,
+            original_name,
+            size: self.size,
+            sha256: Sha256Digest::new(self.hasher.finalize().into()),
+        }
+    }
+}
+
+impl Write for HashingLimitWriter<'_, '_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.tracker.check_time().map_err(io::Error::other)?;
+        let bytes = u64::try_from(buffer.len()).map_err(io::Error::other)?;
+        let next_size = self.size.checked_add(bytes).ok_or_else(|| {
+            io::Error::other(ArchiveError::LimitExceeded {
+                limit: "max_single_file_bytes",
+            })
+        })?;
+        self.tracker
+            .check_single_file(next_size)
+            .map_err(io::Error::other)?;
+        self.tracker
+            .add_unpacked_bytes(bytes)
+            .map_err(io::Error::other)?;
+        self.tracker
+            .check_ratio(next_size, self.compressed_size)
+            .map_err(io::Error::other)?;
+
+        self.file.write_all(buffer)?;
+        self.hasher.update(buffer);
+        self.size = next_size;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -1052,6 +1274,11 @@ impl<'a> LimitTracker<'a> {
             return Ok(());
         };
         if compressed_size == 0 {
+            if unpacked_size > 0 {
+                return Err(ArchiveError::LimitExceeded {
+                    limit: "max_compression_ratio",
+                });
+            }
             return Ok(());
         }
         if unpacked_size / compressed_size > u64::from(self.limits.max_compression_ratio) {
@@ -1109,10 +1336,24 @@ fn copy_with_limits(
             });
         }
         tracker.check_ratio(copied, compressed_size)?;
-        sink.write_all(&buffer[..read])?;
+        write_all_archive(sink, &buffer[..read])?;
     }
 
     Ok(copied)
+}
+
+fn write_all_archive(sink: &mut dyn Write, buffer: &[u8]) -> Result<(), ArchiveError> {
+    sink.write_all(buffer).map_err(archive_error_from_io)
+}
+
+fn archive_error_from_io(error: io::Error) -> ArchiveError {
+    if let Some(ArchiveError::LimitExceeded { limit }) = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ArchiveError>())
+    {
+        return ArchiveError::LimitExceeded { limit };
+    }
+    ArchiveError::Io(error)
 }
 
 fn decompress_to_vec(
@@ -1173,7 +1414,7 @@ fn is_tar(data: &[u8]) -> bool {
 mod tests {
     use super::{
         ArchiveEntry, ArchiveEntryType, ArchiveError, ArchiveLimits, detect_archive_hazards,
-        open_archive, open_archive_with_limits,
+        extract_to_inspection_dir, open_archive, open_archive_with_limits,
     };
     use arbitraitor_artifact::ArtifactType;
     use arbitraitor_model::finding::FindingCategory;
@@ -1181,7 +1422,9 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::error::Error;
+    use std::fs;
     use std::io::{Cursor, Write};
+    use std::path::PathBuf;
     use std::time::Duration;
     use tar::{Builder, EntryType, Header};
     use zip::ZipWriter;
@@ -1278,6 +1521,92 @@ mod tests {
                 limit: "max_single_file_bytes"
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn extraction_enforces_total_bytes_limit() -> Result<(), Box<dyn Error>> {
+        let data = zip_bytes(&[("one.txt", b"1234"), ("two.txt", b"5678")])?;
+        let limits = ArchiveLimits {
+            max_total_unpacked_bytes: 7,
+            ..test_limits()
+        };
+        let mut reader = open_archive_with_limits(&data, ArtifactType::ZipArchive, limits.clone())?;
+
+        let result = extract_to_inspection_dir(&mut *reader, &limits, &unique_temp_path("total"));
+
+        assert!(matches!(
+            result,
+            Err(ArchiveError::LimitExceeded {
+                limit: "max_total_unpacked_bytes"
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn extraction_enforces_file_count_limit() -> Result<(), Box<dyn Error>> {
+        let data = zip_bytes(&[("one.txt", b"1"), ("two.txt", b"2")])?;
+        let limits = ArchiveLimits {
+            max_files: 1,
+            ..test_limits()
+        };
+        let mut reader = open_archive_with_limits(&data, ArtifactType::ZipArchive, limits.clone())?;
+
+        let result = extract_to_inspection_dir(&mut *reader, &limits, &unique_temp_path("files"));
+
+        assert!(matches!(
+            result,
+            Err(ArchiveError::LimitExceeded { limit: "max_files" })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn extraction_enforces_time_limit() -> Result<(), Box<dyn Error>> {
+        let data = zip_bytes(&[("one.txt", b"1")])?;
+        let limits = ArchiveLimits {
+            max_processing_time: Duration::ZERO,
+            ..test_limits()
+        };
+        let mut reader = open_archive_with_limits(&data, ArtifactType::ZipArchive, limits.clone())?;
+
+        let result = extract_to_inspection_dir(&mut *reader, &limits, &unique_temp_path("time"));
+
+        assert!(matches!(
+            result,
+            Err(ArchiveError::LimitExceeded {
+                limit: "max_processing_time"
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_directory_is_private_and_cleaned_after_failure() -> Result<(), Box<dyn Error>> {
+        let data = zip_bytes(&[("../escape.txt", b"no")])?;
+        let limits = test_limits();
+        let inspection_dir = unique_temp_path("cleanup");
+        let mut reader = open_archive_with_limits(&data, ArtifactType::ZipArchive, limits.clone())?;
+
+        assert!(extract_to_inspection_dir(&mut *reader, &limits, &inspection_dir).is_err());
+        assert!(!inspection_dir.exists());
+
+        let private_dir = unique_temp_path("private");
+        let data = zip_bytes(&[("safe.txt", b"yes")])?;
+        let mut reader = open_archive_with_limits(&data, ArtifactType::ZipArchive, limits.clone())?;
+        let extracted = extract_to_inspection_dir(&mut *reader, &limits, &private_dir)?;
+
+        assert_eq!(extracted.len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&private_dir)?.permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        fs::remove_dir_all(private_dir)?;
         Ok(())
     }
 
@@ -1416,6 +1745,20 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data)?;
         Ok(encoder.finish()?)
+    }
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbitraitor-archive-{label}-{}-{}",
+            std::process::id(),
+            timestamp_nanos()
+        ))
+    }
+
+    fn timestamp_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
     }
 
     fn limits_with_file_count(max_files: u32) -> ArchiveLimits {

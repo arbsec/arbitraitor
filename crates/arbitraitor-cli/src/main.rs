@@ -2,12 +2,15 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arbitraitor_analysis::{
     AnalysisCoordinator, ArtifactDetector, RetrievalInfo as AnalysisRetrievalInfo, ShellDetector,
 };
+use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
+use arbitraitor_artifact::classify;
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::ids::Sha256Digest;
@@ -22,7 +25,7 @@ use arbitraitor_receipt::{
 };
 use arbitraitor_store::ContentStore;
 use arbitraitor_yarax::{RulePackManager, RuleSource, YaraDetector};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
 
@@ -40,27 +43,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Inspect {
-        url: String,
-        #[arg(long)]
-        receipt: Option<PathBuf>,
-        #[arg(long)]
-        cas_dir: Option<PathBuf>,
-        #[arg(long, value_name = "HEX")]
-        sha256: Option<Sha256Digest>,
-        #[arg(long, value_name = "DIR")]
-        rules: Option<PathBuf>,
-        #[arg(long, value_name = "PATH")]
-        minisign_sig: Vec<PathBuf>,
-        #[arg(long, value_name = "KEY")]
-        minisign_key: Vec<String>,
-        #[arg(long, value_name = "PATH")]
-        cosign_bundle: Vec<PathBuf>,
-        #[arg(long, value_name = "IDENTITY")]
-        cosign_identity: Vec<String>,
-        #[arg(long, value_name = "ISSUER")]
-        cosign_issuer: Vec<String>,
-    },
+    Inspect(Box<InspectCommand>),
+    Unpack(UnpackCommand),
+}
+
+#[derive(Args)]
+struct InspectCommand {
+    url: String,
+    #[arg(long)]
+    receipt: Option<PathBuf>,
+    #[arg(long)]
+    cas_dir: Option<PathBuf>,
+    #[arg(long, value_name = "HEX")]
+    sha256: Option<Sha256Digest>,
+    #[arg(long, value_name = "DIR")]
+    rules: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    minisign_sig: Vec<PathBuf>,
+    #[arg(long, value_name = "KEY")]
+    minisign_key: Vec<String>,
+    #[arg(long, value_name = "PATH")]
+    cosign_bundle: Vec<PathBuf>,
+    #[arg(long, value_name = "IDENTITY")]
+    cosign_identity: Vec<String>,
+    #[arg(long, value_name = "ISSUER")]
+    cosign_issuer: Vec<String>,
+}
+
+#[derive(Args)]
+struct UnpackCommand {
+    archive: PathBuf,
+    #[arg(long, value_name = "DIR")]
+    output: PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -98,18 +112,19 @@ async fn main() -> Result<()> {
     tracing::info!("arbitraitor initialized");
 
     match cli.command {
-        Command::Inspect {
-            url,
-            receipt,
-            cas_dir,
-            sha256,
-            rules,
-            minisign_sig,
-            minisign_key,
-            cosign_bundle,
-            cosign_identity,
-            cosign_issuer,
-        } => {
+        Command::Inspect(command) => {
+            let InspectCommand {
+                url,
+                receipt,
+                cas_dir,
+                sha256,
+                rules,
+                minisign_sig,
+                minisign_key,
+                cosign_bundle,
+                cosign_identity,
+                cosign_issuer,
+            } = *command;
             let signatures = signature_inputs(
                 minisign_sig,
                 minisign_key,
@@ -127,8 +142,61 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Command::Unpack(command) => {
+            unpack(&command.archive, &command.output)?;
+        }
     }
 
+    Ok(())
+}
+
+fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
+    let bytes = std::fs::read(archive_path).into_diagnostic()?;
+    let artifact_type = classify(&bytes).artifact_type;
+    let limits = ArchiveLimits::default();
+    let mut reader =
+        arbitraitor_archive::open_archive_with_limits(&bytes, artifact_type, limits.clone())
+            .into_diagnostic()?;
+    let entries = reader.entries().into_diagnostic()?;
+    let hazards = detect_archive_hazards(&entries, &limits);
+    if !hazards.is_empty() {
+        write_unpack_hazards(&mut std::io::stderr().lock(), &hazards)?;
+        miette::bail!("archive hazards block hardened unpack");
+    }
+
+    let mut reader =
+        arbitraitor_archive::open_archive_with_limits(&bytes, artifact_type, limits.clone())
+            .into_diagnostic()?;
+    let extracted =
+        extract_to_output_dir(reader.as_mut(), &limits, output_dir).into_diagnostic()?;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "extracted_files: {}", extracted.len()).into_diagnostic()?;
+    for file in extracted {
+        writeln!(
+            stdout,
+            "- {} size={} sha256={}",
+            file.path.display(),
+            file.size,
+            file.sha256
+        )
+        .into_diagnostic()?;
+    }
+    Ok(())
+}
+
+fn write_unpack_hazards(
+    writer: &mut impl std::io::Write,
+    hazards: &[arbitraitor_model::finding::Finding],
+) -> Result<()> {
+    writeln!(writer, "archive_hazards: {}", hazards.len()).into_diagnostic()?;
+    for hazard in hazards {
+        writeln!(
+            writer,
+            "- [{} {:?}/{:?}] {}",
+            hazard.id, hazard.severity, hazard.confidence, hazard.title
+        )
+        .into_diagnostic()?;
+    }
     Ok(())
 }
 
@@ -475,6 +543,11 @@ fn timestamp() -> String {
 mod tests {
     use super::{Cli, Command};
     use clap::Parser;
+    use std::fs;
+    use std::io::{Cursor, Write};
+    use std::path::PathBuf;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn inspect_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
@@ -487,8 +560,15 @@ mod tests {
             &digest,
         ])?;
 
-        let Command::Inspect { sha256, .. } = cli.command;
-        assert_eq!(sha256.ok_or("missing parsed digest")?.to_string(), digest);
+        match cli.command {
+            Command::Inspect(command) => {
+                assert_eq!(
+                    command.sha256.ok_or("missing parsed digest")?.to_string(),
+                    digest
+                );
+            }
+            Command::Unpack(_) => return Err("parsed wrong command".into()),
+        }
         Ok(())
     }
 
@@ -515,11 +595,15 @@ mod tests {
             "/tmp/rules",
         ])?;
 
-        let Command::Inspect { rules, .. } = cli.command;
-        assert_eq!(
-            rules.ok_or("missing rules path")?,
-            std::path::PathBuf::from("/tmp/rules")
-        );
+        match cli.command {
+            Command::Inspect(command) => {
+                assert_eq!(
+                    command.rules.ok_or("missing rules path")?,
+                    std::path::PathBuf::from("/tmp/rules")
+                );
+            }
+            Command::Unpack(_) => return Err("parsed wrong command".into()),
+        }
         Ok(())
     }
 
@@ -541,19 +625,45 @@ mod tests {
             "https://issuer.example.test",
         ])?;
 
-        let Command::Inspect {
-            minisign_sig,
-            minisign_key,
-            cosign_bundle,
-            cosign_identity,
-            cosign_issuer,
-            ..
-        } = cli.command;
-        assert_eq!(minisign_sig.len(), 1);
-        assert_eq!(minisign_key, ["RWQexamplekeymaterial"]);
-        assert_eq!(cosign_bundle.len(), 1);
-        assert_eq!(cosign_identity, ["builder@example.test"]);
-        assert_eq!(cosign_issuer, ["https://issuer.example.test"]);
+        match cli.command {
+            Command::Inspect(command) => {
+                assert_eq!(command.minisign_sig.len(), 1);
+                assert_eq!(command.minisign_key, ["RWQexamplekeymaterial"]);
+                assert_eq!(command.cosign_bundle.len(), 1);
+                assert_eq!(command.cosign_identity, ["builder@example.test"]);
+                assert_eq!(command.cosign_issuer, ["https://issuer.example.test"]);
+            }
+            Command::Unpack(_) => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unpack_accepts_archive_and_output_flags() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "unpack", "archive.zip", "--output", "out"])?;
+
+        match cli.command {
+            Command::Unpack(command) => {
+                assert_eq!(command.archive, PathBuf::from("archive.zip"));
+                assert_eq!(command.output, PathBuf::from("out"));
+            }
+            Command::Inspect(_) => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unpack_command_extracts_safe_archive() -> Result<(), Box<dyn std::error::Error>> {
+        let root = unique_temp_path("cli-unpack");
+        fs::create_dir_all(&root)?;
+        let archive_path = root.join("archive.zip");
+        let output_dir = root.join("out");
+        fs::write(&archive_path, zip_bytes(&[("nested/file.txt", b"safe")])?)?;
+
+        super::unpack(&archive_path, &output_dir)?;
+
+        assert_eq!(fs::read(output_dir.join("nested/file.txt"))?, b"safe");
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -568,5 +678,29 @@ mod tests {
         );
 
         assert!(signatures.is_err());
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        for (name, data) in entries {
+            writer.start_file(*name, SimpleFileOptions::default())?;
+            writer.write_all(data)?;
+        }
+        Ok(writer.finish()?.into_inner())
+    }
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbitraitor-cli-{label}-{}-{}",
+            std::process::id(),
+            timestamp_nanos()
+        ))
+    }
+
+    fn timestamp_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
     }
 }
