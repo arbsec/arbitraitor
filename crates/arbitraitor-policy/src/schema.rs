@@ -37,6 +37,10 @@ pub struct Policy {
     #[serde(default)]
     pub limits: LimitsConfig,
 
+    /// Integrity constraints applied to artifact retrieval.
+    #[serde(default)]
+    pub integrity: IntegrityConfig,
+
     /// Ordered rules evaluated top-to-bottom; first match wins.
     #[serde(default)]
     pub rules: Vec<Rule>,
@@ -162,6 +166,15 @@ fn default_max_download_bytes() -> String {
 
 fn default_max_analysis_time() -> String {
     "120s".to_owned()
+}
+
+/// Artifact integrity requirements.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrityConfig {
+    /// Require a caller-provided expected SHA-256 digest before retrieval.
+    #[serde(default)]
+    pub require_digest: bool,
 }
 
 fn default_true() -> bool {

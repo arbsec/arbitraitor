@@ -31,6 +31,9 @@ allow_https_to_http = false
 max_download_bytes = "1GiB"
 max_analysis_time = "120s"
 
+[integrity]
+require_digest = false
+
 [[rules]]
 id = "block-confirmed-malware"
 action = "block"
@@ -110,6 +113,30 @@ fn parses_example_policy_from_spec() {
     // Limits
     assert_eq!(policy.limits.max_download_bytes, "1GiB");
     assert_eq!(policy.limits.max_analysis_time, "120s");
+    assert!(!policy.integrity.require_digest);
+}
+
+#[test]
+fn parses_integrity_require_digest() {
+    let policy = r"
+version = 1
+
+[integrity]
+require_digest = true
+";
+    let engine = PolicyEngine::load(policy).unwrap();
+
+    assert!(engine.policy().integrity.require_digest);
+}
+
+#[test]
+fn integrity_require_digest_defaults_to_false() {
+    let policy = r"
+version = 1
+";
+    let engine = PolicyEngine::load(policy).unwrap();
+
+    assert!(!engine.policy().integrity.require_digest);
 }
 
 #[test]

@@ -133,6 +133,8 @@ pub struct FetchRequest {
     pub source: FetchSource,
     /// Transport and byte-limit policy.
     pub policy: FetchPolicy,
+    /// Expected SHA-256 digest of the fetched artifact bytes.
+    pub expected_sha256: Option<Sha256Digest>,
 }
 
 impl FetchRequest {
@@ -142,6 +144,7 @@ impl FetchRequest {
         Self {
             source: FetchSource::Url(url),
             policy,
+            expected_sha256: None,
         }
     }
 
@@ -151,6 +154,7 @@ impl FetchRequest {
         Self {
             source: FetchSource::File(path),
             policy,
+            expected_sha256: None,
         }
     }
 
@@ -160,7 +164,15 @@ impl FetchRequest {
         Self {
             source: FetchSource::Stdin,
             policy,
+            expected_sha256: None,
         }
+    }
+
+    /// Sets the expected SHA-256 digest for integrity pinning.
+    #[must_use]
+    pub fn with_expected_sha256(mut self, digest: Sha256Digest) -> Self {
+        self.expected_sha256 = Some(digest);
+        self
     }
 }
 
@@ -190,6 +202,8 @@ pub struct FetchPolicy {
     /// This is fail-closed by default. It does not allow private, link-local,
     /// metadata, multicast, benchmarking, or other IANA special-purpose ranges.
     pub allow_loopback_addresses: bool,
+    /// Requires callers to provide an expected SHA-256 digest before fetching.
+    pub require_digest: bool,
 }
 
 impl Default for FetchPolicy {
@@ -203,6 +217,7 @@ impl Default for FetchPolicy {
             max_redirects: 0,
             allowed_schemes: vec![FetchScheme::Https, FetchScheme::File, FetchScheme::Stdin],
             allow_loopback_addresses: false,
+            require_digest: false,
         }
     }
 }
@@ -349,6 +364,17 @@ pub enum FetchError {
         /// Blocked address.
         address: IpAddr,
     },
+    /// Policy requires a pinned digest but none was provided.
+    #[error("fetch policy requires an expected SHA-256 digest")]
+    RequiredDigestMissing,
+    /// Fetched bytes did not match the pinned digest.
+    #[error("SHA-256 digest mismatch: expected {expected}, actual {actual}")]
+    DigestMismatch {
+        /// Expected pinned digest.
+        expected: Sha256Digest,
+        /// Actual digest of bytes delivered to the sink.
+        actual: Sha256Digest,
+    },
     /// Local I/O failed.
     #[error("I/O failure during {stage}: {source}")]
     Io {
@@ -448,7 +474,8 @@ impl Fetcher for HttpFetcher {
             });
         };
 
-        let future = self.fetch_inner(url, &request.policy, sink);
+        ensure_required_digest(request.expected_sha256.as_ref(), &request.policy)?;
+        let future = self.fetch_inner(url, &request.policy, request.expected_sha256.as_ref(), sink);
         tokio::time::timeout(request.policy.total_timeout, future)
             .await
             .map_err(|_| FetchError::Timeout { stage: "total" })?
@@ -460,6 +487,7 @@ impl HttpFetcher {
         &self,
         url: FetchUrl,
         policy: &FetchPolicy,
+        expected_sha256: Option<&Sha256Digest>,
         sink: &mut dyn ArtifactSink,
     ) -> Result<FetchReceipt, FetchError> {
         ensure_scheme_allowed(
@@ -505,6 +533,7 @@ impl HttpFetcher {
             return stream_response(
                 response,
                 policy,
+                expected_sha256,
                 sink,
                 resolved_ips,
                 FetchUrl(current),
@@ -545,13 +574,21 @@ impl Fetcher for FileFetcher {
                 scheme: request.source.scheme().as_str().to_owned(),
             });
         };
+        ensure_required_digest(request.expected_sha256.as_ref(), &request.policy)?;
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|source| FetchError::Io {
                 stage: "open",
                 source,
             })?;
-        stream_reader(file, &request.policy, sink, FetchMetadata::default()).await
+        stream_reader(
+            file,
+            &request.policy,
+            request.expected_sha256.as_ref(),
+            sink,
+            FetchMetadata::default(),
+        )
+        .await
     }
 }
 
@@ -581,9 +618,11 @@ impl Fetcher for StdinFetcher {
                 scheme: request.source.scheme().as_str().to_owned(),
             });
         }
+        ensure_required_digest(request.expected_sha256.as_ref(), &request.policy)?;
         stream_reader(
             tokio::io::stdin(),
             &request.policy,
+            request.expected_sha256.as_ref(),
             sink,
             FetchMetadata::default(),
         )
@@ -640,6 +679,7 @@ async fn execute_request(
 async fn stream_response(
     mut response: reqwest::Response,
     policy: &FetchPolicy,
+    expected_sha256: Option<&Sha256Digest>,
     sink: &mut dyn ArtifactSink,
     resolved_ips: Vec<IpAddr>,
     final_url: FetchUrl,
@@ -677,12 +717,13 @@ async fn stream_response(
     {
         write_checked_chunk(&mut state, policy, sink, &chunk).await?;
     }
-    Ok(state.finish(metadata))
+    state.finish(metadata, expected_sha256)
 }
 
 async fn stream_reader<R: AsyncRead + Unpin>(
     mut reader: R,
     policy: &FetchPolicy,
+    expected_sha256: Option<&Sha256Digest>,
     sink: &mut dyn ArtifactSink,
     metadata: FetchMetadata,
 ) -> Result<FetchReceipt, FetchError> {
@@ -697,7 +738,7 @@ async fn stream_reader<R: AsyncRead + Unpin>(
                 source,
             })?;
         if read == 0 {
-            return Ok(state.finish(metadata));
+            return state.finish(metadata, expected_sha256);
         }
         write_checked_chunk(&mut state, policy, sink, &buffer[..read]).await?;
     }
@@ -710,14 +751,26 @@ struct StreamState {
 }
 
 impl StreamState {
-    fn finish(self, metadata: FetchMetadata) -> FetchReceipt {
+    fn finish(
+        self,
+        metadata: FetchMetadata,
+        expected_sha256: Option<&Sha256Digest>,
+    ) -> Result<FetchReceipt, FetchError> {
         let digest = Sha256Digest::new(self.hasher.finalize().into());
-        FetchReceipt {
+        if let Some(expected) = expected_sha256
+            && expected != &digest
+        {
+            return Err(FetchError::DigestMismatch {
+                expected: expected.clone(),
+                actual: digest,
+            });
+        }
+        Ok(FetchReceipt {
             artifact_id: ArtifactId(digest.clone()),
             sha256: digest,
             bytes_written: self.bytes_written,
             metadata,
-        }
+        })
     }
 }
 
@@ -891,6 +944,16 @@ fn ensure_policy_allows(scheme: FetchScheme, policy: &FetchPolicy) -> Result<(),
     Err(FetchError::InvalidScheme {
         scheme: scheme.as_str().to_owned(),
     })
+}
+
+fn ensure_required_digest(
+    expected_sha256: Option<&Sha256Digest>,
+    policy: &FetchPolicy,
+) -> Result<(), FetchError> {
+    if policy.require_digest && expected_sha256.is_none() {
+        return Err(FetchError::RequiredDigestMissing);
+    }
+    Ok(())
 }
 
 fn ensure_scheme_allowed(
