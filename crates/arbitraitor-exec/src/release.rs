@@ -15,6 +15,8 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
 use std::path::{Component, Path, PathBuf};
 
 use arbitraitor_model::ids::Sha256Digest;
@@ -34,6 +36,8 @@ const COPY_BUFFER_BYTES: usize = 8192;
 
 const OPEN_NOFOLLOW_FLAGS: i32 = libc::O_NOFOLLOW;
 const OPEN_DIR_NOFOLLOW_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_DIRECTORY;
+#[cfg(target_os = "linux")]
+const OPEN_TMPFILE_FLAGS: i32 = libc::O_TMPFILE;
 
 /// Policy gates for destination release.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -165,6 +169,8 @@ enum ReleaseFsMode {
     ForceNonAtomicForTest,
     #[cfg(test)]
     ForceNonAtomicCopyFailureForTest,
+    #[cfg(test)]
+    ForceNamedTempForTest,
 }
 
 fn release_artifact_inner(
@@ -189,8 +195,8 @@ fn release_artifact_inner(
     )?;
     let parent = DestinationParent::open(destination)?;
     reject_existing_destination(&parent.dir, &parent.name, destination, policy)?;
-    let temp = SiblingTemp::create(&parent.dir)?;
-    let bytes_written = write_and_verify_temp(&handle, scanned_digest, &temp.file)?;
+    let temp = SiblingTemp::create(&parent.dir, fs_mode)?;
+    let bytes_written = write_and_verify_temp(&handle, scanned_digest, &temp)?;
     let method = publish_temp(&parent, temp, destination, policy, fs_mode)?;
     verify_final_destination(&parent.dir, &parent.name, destination, scanned_digest)?;
     // TODO(provenance): implement per ADR 0015 — tracked in follow-up issue.
@@ -262,13 +268,63 @@ impl DestinationParent {
 
 struct SiblingTemp {
     dir: Dir,
-    name: OsString,
+    name: Option<OsString>,
     file: File,
     removed: bool,
+    kind: SiblingTempKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SiblingTempKind {
+    Anonymous,
+    Named,
 }
 
 impl SiblingTemp {
-    fn create(parent: &Dir) -> Result<Self, ReleaseError> {
+    fn create(parent: &Dir, fs_mode: ReleaseFsMode) -> Result<Self, ReleaseError> {
+        #[cfg(target_os = "linux")]
+        if !force_named_temp(fs_mode) {
+            match Self::create_anonymous(parent) {
+                Ok(temp) => return Ok(temp),
+                Err(error) if is_otmpfile_unsupported(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let _ = fs_mode;
+        Self::create_named(parent)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_anonymous(parent: &Dir) -> Result<Self, ReleaseError> {
+        let dir = parent.try_clone().map_err(|source| ReleaseError::Io {
+            stage: "clone-destination-parent",
+            source,
+        })?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        options.mode(PRIVATE_RELEASE_MODE);
+        options.custom_flags(OPEN_TMPFILE_FLAGS);
+        let file = dir
+            .open_with(".", &options)
+            .map_err(|source| ReleaseError::Io {
+                stage: "create-anonymous-release-temp",
+                source,
+            })?;
+        file.set_permissions(Permissions::from_mode(PRIVATE_RELEASE_MODE))
+            .map_err(|source| ReleaseError::Io {
+                stage: "chmod-release-temp",
+                source,
+            })?;
+        Ok(Self {
+            dir,
+            name: None,
+            file,
+            removed: false,
+            kind: SiblingTempKind::Anonymous,
+        })
+    }
+
+    fn create_named(parent: &Dir) -> Result<Self, ReleaseError> {
         let dir = parent.try_clone().map_err(|source| ReleaseError::Io {
             stage: "clone-destination-parent",
             source,
@@ -279,14 +335,14 @@ impl SiblingTemp {
             options.read(true).write(true).create_new(true);
             options.mode(PRIVATE_RELEASE_MODE);
             options.custom_flags(OPEN_NOFOLLOW_FLAGS);
-            // SECURITY NOTE: A same-UID attacker actively watching the
-            // destination directory can hard-link this named temporary file
-            // before the later `nlink()` check. The UUID name prevents
-            // pre-creation but does not defeat active watching. Linux
-            // `O_TMPFILE` would avoid a linkable temporary name, but stable Rust
-            // std/cap-std do not expose it here; this is a known MVP
-            // limitation. The post-write link-count check remains
-            // defense-in-depth, not a complete same-UID guarantee.
+            // SECURITY NOTE: This named fallback is used only when Linux
+            // `O_TMPFILE` is unavailable or unsupported by the destination
+            // filesystem, and on non-Linux platforms. A same-UID attacker
+            // actively watching the destination directory can hard-link this
+            // named temporary file before the later `nlink()` check. The UUID
+            // name prevents pre-creation but does not defeat active watching.
+            // The post-write link-count check remains defense-in-depth for the
+            // fallback path, not a complete same-UID guarantee.
             match dir.open_with(&name, &options) {
                 Ok(file) => {
                     file.set_permissions(Permissions::from_mode(PRIVATE_RELEASE_MODE))
@@ -296,9 +352,10 @@ impl SiblingTemp {
                         })?;
                     return Ok(Self {
                         dir,
-                        name,
+                        name: Some(name),
                         file,
                         removed: false,
+                        kind: SiblingTempKind::Named,
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -320,9 +377,11 @@ impl SiblingTemp {
     }
 
     fn remove(&mut self) -> Result<(), ReleaseError> {
-        if !self.removed {
+        if !self.removed
+            && let Some(name) = &self.name
+        {
             self.dir
-                .remove_file(&self.name)
+                .remove_file(name)
                 .map_err(|source| ReleaseError::Io {
                     stage: "remove-release-temp",
                     source,
@@ -331,14 +390,57 @@ impl SiblingTemp {
         }
         Ok(())
     }
+
+    fn expected_nlink_after_write(&self) -> u64 {
+        match self.kind {
+            SiblingTempKind::Anonymous => 0,
+            SiblingTempKind::Named => 1,
+        }
+    }
+
+    fn named_path(&self) -> Result<&OsStr, ReleaseError> {
+        self.name.as_deref().ok_or_else(|| ReleaseError::Io {
+            stage: "release-temp-name",
+            source: io::Error::other("anonymous release temporary file has no sibling name"),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn force_named_temp(fs_mode: ReleaseFsMode) -> bool {
+    #[cfg(test)]
+    {
+        fs_mode == ReleaseFsMode::ForceNamedTempForTest
+    }
+    #[cfg(not(test))]
+    {
+        let _ = fs_mode;
+        false
+    }
 }
 
 impl Drop for SiblingTemp {
     fn drop(&mut self) {
-        if !self.removed {
-            let _cleanup_result = self.dir.remove_file(&self.name);
+        if !self.removed
+            && let Some(name) = &self.name
+        {
+            let _cleanup_result = self.dir.remove_file(name);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_otmpfile_unsupported(error: &ReleaseError) -> bool {
+    matches!(
+        error,
+        ReleaseError::Io {
+            stage: "create-anonymous-release-temp",
+            source,
+        } if matches!(
+            source.raw_os_error(),
+            Some(libc::EOPNOTSUPP | libc::EINVAL | libc::EISDIR | libc::ENOENT | libc::ENOTDIR)
+        )
+    )
 }
 
 fn random_temp_name() -> OsString {
@@ -346,6 +448,78 @@ fn random_temp_name() -> OsString {
         ".arbitraitor-release-{}.tmp",
         Uuid::new_v4().as_simple()
     ))
+}
+
+fn publish_no_replace(temp: &mut SiblingTemp, parent: &Dir, name: &OsStr) -> io::Result<()> {
+    match temp.kind {
+        SiblingTempKind::Named => match &temp.name {
+            Some(temp_name) => temp.dir.hard_link(temp_name, parent, name),
+            None => Err(io::Error::other(
+                "named release temporary file has no sibling name",
+            )),
+        },
+        #[cfg(target_os = "linux")]
+        SiblingTempKind::Anonymous => link_anonymous_temp(temp, parent, name),
+        #[cfg(not(target_os = "linux"))]
+        SiblingTempKind::Anonymous => Err(io::Error::other(
+            "anonymous release temporary files are Linux-only",
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn link_anonymous_temp(temp: &SiblingTemp, parent: &Dir, name: &OsStr) -> io::Result<()> {
+    rustix::fs::linkat(
+        temp.file.as_fd(),
+        "",
+        parent.as_fd(),
+        name,
+        rustix::fs::AtFlags::EMPTY_PATH,
+    )
+    .map_err(rustix_to_io)
+}
+
+#[cfg(target_os = "linux")]
+fn link_anonymous_temp_to_unique_sibling(temp: &mut SiblingTemp) -> Result<(), ReleaseError> {
+    for _attempt in 0..128 {
+        let name = random_temp_name();
+        match link_anonymous_temp(temp, &temp.dir, &name) {
+            Ok(()) => {
+                let metadata = temp.file.metadata().map_err(|source| ReleaseError::Io {
+                    stage: "metadata-release-temp-after-link",
+                    source,
+                })?;
+                if metadata.nlink() != 1 {
+                    let _cleanup_result = temp.dir.remove_file(&name);
+                    return Err(ReleaseError::HardLinkSurprise {
+                        path: PathBuf::from("release temporary file"),
+                    });
+                }
+                temp.name = Some(name);
+                temp.kind = SiblingTempKind::Named;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(ReleaseError::Io {
+                    stage: "link-anonymous-release-temp",
+                    source,
+                });
+            }
+        }
+    }
+    Err(ReleaseError::Io {
+        stage: "link-anonymous-release-temp",
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "unable to create unique sibling release temporary file link",
+        ),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn rustix_to_io(error: rustix::io::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error.raw_os_error())
 }
 
 fn open_parent_capability(parent: &Path) -> Result<Dir, ReleaseError> {
@@ -467,8 +641,9 @@ fn is_forbidden_special(metadata: &cap_std::fs::Metadata) -> bool {
 fn write_and_verify_temp(
     handle: &arbitraitor_store::ArtifactHandle,
     expected: &Sha256Digest,
-    temp_file: &File,
+    temp: &SiblingTemp,
 ) -> Result<u64, ReleaseError> {
+    let temp_file = &temp.file;
     let mut source = handle
         .read()
         .try_clone()
@@ -541,7 +716,7 @@ fn write_and_verify_temp(
         stage: "metadata-release-temp",
         source,
     })?;
-    if metadata.nlink() != 1 {
+    if metadata.nlink() != temp.expected_nlink_after_write() {
         return Err(ReleaseError::HardLinkSurprise {
             path: PathBuf::from("release temporary file"),
         });
@@ -566,7 +741,13 @@ fn publish_temp(
     let _ = fs_mode;
     if policy.allow_overwrite {
         reject_existing_destination(&parent.dir, &parent.name, destination, policy)?;
-        match temp.dir.rename(&temp.name, &parent.dir, &parent.name) {
+        if temp.kind == SiblingTempKind::Anonymous {
+            link_anonymous_temp_to_unique_sibling(&mut temp)?;
+        }
+        match temp
+            .dir
+            .rename(temp.named_path()?, &parent.dir, &parent.name)
+        {
             Ok(()) => {
                 temp.removed = true;
                 sync_parent_dir(&parent.path)?;
@@ -581,9 +762,13 @@ fn publish_temp(
             }),
         }
     } else {
-        match temp.dir.hard_link(&temp.name, &parent.dir, &parent.name) {
+        match publish_no_replace(&mut temp, &parent.dir, &parent.name) {
             Ok(()) => {
-                temp.remove()?;
+                if temp.kind == SiblingTempKind::Named {
+                    temp.remove()?;
+                } else {
+                    temp.removed = true;
+                }
                 sync_parent_dir(&parent.path)?;
                 Ok(ReleaseMethod::AtomicNoReplaceLink)
             }
@@ -852,6 +1037,8 @@ impl fmt::Display for ReleaseMethod {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::{
         MetadataExt as StdMetadataExt, PermissionsExt as StdPermissionsExt, symlink,
     };
@@ -1025,24 +1212,88 @@ mod tests {
     fn temp_file_names_are_unpredictable_across_calls() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("temp-random")?;
         let parent = Dir::open_ambient_dir(&root, ambient_authority())?;
-        let mut first = SiblingTemp::create(&parent)?;
-        let mut second = SiblingTemp::create(&parent)?;
+        let mut first = SiblingTemp::create(&parent, ReleaseFsMode::ForceNamedTempForTest)?;
+        let mut second = SiblingTemp::create(&parent, ReleaseFsMode::ForceNamedTempForTest)?;
 
         assert_ne!(first.name, second.name);
-        assert!(
-            first
-                .name
-                .to_string_lossy()
-                .starts_with(".arbitraitor-release-")
-        );
-        assert!(
-            second
-                .name
-                .to_string_lossy()
-                .starts_with(".arbitraitor-release-")
-        );
+        assert!(matches!(
+            first.name.as_deref(),
+            Some(name) if name.to_string_lossy().starts_with(".arbitraitor-release-")
+        ));
+        assert!(matches!(
+            second.name.as_deref(),
+            Some(name) if name.to_string_lossy().starts_with(".arbitraitor-release-")
+        ));
         first.remove()?;
         second.remove()?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn otmpfile_temp_has_no_visible_name_before_publish() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = temp_root("otmpfile-invisible")?;
+        let parent = Dir::open_ambient_dir(&root, ambient_authority())?;
+        let temp = SiblingTemp::create(&parent, ReleaseFsMode::Normal)?;
+
+        assert_eq!(temp.kind, SiblingTempKind::Anonymous);
+        assert_eq!(temp.name, None);
+        assert_eq!(temp.file.metadata()?.nlink(), 0);
+        let entries = fs::read_dir(&root)?.collect::<Result<Vec<_>, _>>()?;
+        assert!(entries.is_empty());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn otmpfile_temp_cannot_be_hard_linked_through_std_procfd()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("otmpfile-hardlink")?;
+        let parent = Dir::open_ambient_dir(&root, ambient_authority())?;
+        let temp = SiblingTemp::create(&parent, ReleaseFsMode::Normal)?;
+        let proc_path = PathBuf::from(format!("/proc/self/fd/{}", temp.file.as_raw_fd()));
+        let alias = root.join("attacker-link");
+
+        let result = fs::hard_link(proc_path, &alias);
+
+        assert!(result.is_err());
+        assert!(!alias.exists());
+        assert_eq!(temp.file.metadata()?.nlink(), 0);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forced_named_temp_fallback_releases_and_cleans_up()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("named-fallback")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"named fallback bytes").await?;
+        let destination = root.join("released.bin");
+
+        let receipt = release_artifact_inner(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy::default(),
+            ReleaseFsMode::ForceNamedTempForTest,
+        )?;
+
+        assert_eq!(receipt.method, ReleaseMethod::AtomicNoReplaceLink);
+        assert_eq!(read_std_digest(&destination)?, digest);
+        let leftover_temp_count = fs::read_dir(&root)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".arbitraitor-release-")
+            })
+            .count();
+        assert_eq!(leftover_temp_count, 0);
         fs::remove_dir_all(root)?;
         Ok(())
     }
