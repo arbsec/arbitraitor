@@ -791,6 +791,7 @@ fn publish_temp(
     let _ = fs_mode;
     if policy.allow_overwrite {
         reject_existing_destination(&parent.dir, &parent.name, destination, policy)?;
+        #[cfg(target_os = "linux")]
         if temp.kind == SiblingTempKind::Anonymous {
             link_anonymous_temp_to_unique_sibling(&mut temp)?;
         }
@@ -1221,6 +1222,7 @@ impl fmt::Display for ReleaseMethod {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;

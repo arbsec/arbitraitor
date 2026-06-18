@@ -378,10 +378,12 @@ mod tests {
         let mut value = plan();
         value.state = OperationState::Complete;
 
-        let error = value
-            .transition_to(OperationState::Fetching)
-            .expect_err("terminal states must reject outgoing transitions");
-
+        let result = value.transition_to(OperationState::Fetching);
+        assert!(
+            result.is_err(),
+            "terminal states must reject outgoing transitions"
+        );
+        let error = result.err().unwrap_or_else(|| unreachable!());
         assert_eq!(error.from(), OperationState::Complete);
         assert_eq!(error.to(), OperationState::Fetching);
         assert_eq!(value.state, OperationState::Complete);

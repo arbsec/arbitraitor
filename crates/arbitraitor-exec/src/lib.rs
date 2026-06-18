@@ -1071,7 +1071,7 @@ fn running_as_root() -> Result<bool, ExecError> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use arbitraitor_model::ids::{ArtifactId, OperationId, Sha256Digest};
