@@ -24,6 +24,13 @@ use xz2::read::XzDecoder;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
+mod payload;
+
+pub use payload::{
+    ArtifactNode, ArtifactOrigin, DEFAULT_MAX_PAYLOAD_DEPTH, NodeStatus, PayloadError,
+    PayloadIssue, PayloadNode, discover_payloads, is_archive_type, walk_payloads,
+};
+
 const DEFAULT_MAX_DEPTH: u32 = 32;
 const DEFAULT_MAX_FILES: u32 = 10_000;
 const DEFAULT_MAX_TOTAL_UNPACKED_BYTES: u64 = 1_073_741_824;
