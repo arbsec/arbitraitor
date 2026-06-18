@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arbitraitor_model::verdict::{Confidence, Severity};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 
 /// Current threat-intelligence feed entry schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -149,6 +150,8 @@ pub struct FeedEntry {
     pub confidence: Confidence,
     /// Suggested disposition for matches.
     pub disposition: Disposition,
+    /// Trust class of the feed source for policy enforcement.
+    pub source_class: FeedSourceClass,
     /// First observed timestamp as an RFC 3339 string.
     pub first_seen: String,
     /// Last observed timestamp as an RFC 3339 string.
@@ -161,6 +164,41 @@ pub struct FeedEntry {
     pub evidence: FeedEvidence,
     /// Review metadata for this entry.
     pub review: ReviewStatus,
+}
+
+/// Indicator match result with its policy specificity class.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchResult {
+    /// Feed entry that matched the queried indicator.
+    pub entry: FeedEntry,
+    /// Specificity bucket for the matching indicator relationship.
+    pub specificity: MatchSpecificity,
+}
+
+/// Policy specificity bucket for an indicator match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatchSpecificity {
+    /// SHA-256 content digest match.
+    Exact,
+    /// Exact URL or package coordinate match.
+    Precise,
+    /// Signer identity or URL prefix match.
+    Moderate,
+    /// Hostname, registrable domain, IP address, or CIDR match.
+    Broad,
+}
+
+/// Source-class policy evaluation result for matched intelligence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnforcementResult {
+    /// Enforcement disposition selected by the policy table.
+    pub disposition: Disposition,
+    /// Finding severity selected by the policy table.
+    pub severity: Severity,
+    /// Confidence selected by the policy table.
+    pub confidence: Confidence,
+    /// Source class responsible for the decision.
+    pub deciding_source_class: FeedSourceClass,
 }
 
 impl FeedEntry {
@@ -295,6 +333,195 @@ impl IntelStore {
     }
 }
 
+/// Match a queried indicator against live intelligence entries.
+///
+/// Results are sorted by the specification ordering: exact hash, exact URL,
+/// package coordinate, signer identity, URL prefix, hostname, domain, then IP/CIDR.
+#[must_use]
+pub fn match_indicator(store: &IntelStore, indicator: &Indicator) -> Vec<MatchResult> {
+    let now = current_utc_timestamp();
+    let mut matches: Vec<(u8, MatchResult)> = store
+        .entries()
+        .iter()
+        .filter(|entry| !entry.is_expired_at(&now))
+        .filter_map(|entry| match_rank(entry, indicator).map(|rank| (rank, entry)))
+        .map(|(rank, entry)| {
+            (
+                rank,
+                MatchResult {
+                    entry: entry.clone(),
+                    specificity: specificity_for_rank(rank),
+                },
+            )
+        })
+        .collect();
+
+    matches.sort_by_key(|(rank, result)| (*rank, result.entry.id.clone()));
+    matches.into_iter().map(|(_rank, result)| result).collect()
+}
+
+/// Evaluate matched indicators using the default source-class enforcement table.
+#[must_use]
+pub fn evaluate_matches(matches: &[MatchResult]) -> Option<EnforcementResult> {
+    matches
+        .iter()
+        .map(|matched| enforcement_for_source_class(matched.entry.source_class))
+        .max_by_key(|result| enforcement_precedence(result.disposition))
+}
+
+fn match_rank(entry: &FeedEntry, queried: &Indicator) -> Option<u8> {
+    let stored = &entry.indicator;
+    match stored.indicator_type {
+        IndicatorType::Sha256 if stored == queried => Some(0),
+        IndicatorType::ExactUrl | IndicatorType::NormalizedUrl
+            if is_url_indicator(queried) && stored.value == queried.value =>
+        {
+            Some(1)
+        }
+        IndicatorType::PackageCoordinate if stored == queried => Some(2),
+        IndicatorType::SignerIdentity if stored == queried => Some(3),
+        IndicatorType::UrlPrefix
+            if is_url_indicator(queried) && queried.value.starts_with(&stored.value) =>
+        {
+            Some(4)
+        }
+        IndicatorType::Hostname if host_matches_indicator(&stored.value, queried) => Some(5),
+        IndicatorType::RegistrableDomain if domain_matches_indicator(&stored.value, queried) => {
+            Some(6)
+        }
+        IndicatorType::IpAddress if ip_matches_indicator(&stored.value, queried) => Some(7),
+        IndicatorType::CidrRange if cidr_matches_indicator(&stored.value, queried) => Some(7),
+        _ => None,
+    }
+}
+
+fn specificity_for_rank(rank: u8) -> MatchSpecificity {
+    match rank {
+        0 => MatchSpecificity::Exact,
+        1 | 2 => MatchSpecificity::Precise,
+        3 | 4 => MatchSpecificity::Moderate,
+        _ => MatchSpecificity::Broad,
+    }
+}
+
+fn is_url_indicator(indicator: &Indicator) -> bool {
+    matches!(
+        indicator.indicator_type,
+        IndicatorType::ExactUrl | IndicatorType::NormalizedUrl | IndicatorType::UrlPrefix
+    )
+}
+
+fn host_matches_indicator(stored_host: &str, queried: &Indicator) -> bool {
+    match queried.indicator_type {
+        IndicatorType::Hostname => stored_host.eq_ignore_ascii_case(&queried.value),
+        IndicatorType::ExactUrl | IndicatorType::NormalizedUrl | IndicatorType::UrlPrefix => {
+            url_host(&queried.value).is_some_and(|host| stored_host.eq_ignore_ascii_case(&host))
+        }
+        _ => false,
+    }
+}
+
+fn domain_matches_indicator(stored_domain: &str, queried: &Indicator) -> bool {
+    let parsed_host;
+    let host = match queried.indicator_type {
+        IndicatorType::Hostname | IndicatorType::RegistrableDomain => queried.value.as_str(),
+        IndicatorType::ExactUrl | IndicatorType::NormalizedUrl | IndicatorType::UrlPrefix => {
+            parsed_host = url_host(&queried.value);
+            parsed_host.as_deref().unwrap_or_default()
+        }
+        _ => return false,
+    };
+    domain_suffix_matches(host, stored_domain)
+}
+
+fn ip_matches_indicator(stored_ip: &str, queried: &Indicator) -> bool {
+    queried.indicator_type == IndicatorType::IpAddress && stored_ip == queried.value
+}
+
+fn cidr_matches_indicator(stored_cidr: &str, queried: &Indicator) -> bool {
+    if queried.indicator_type != IndicatorType::IpAddress {
+        return false;
+    }
+    let Some((network, prefix)) = stored_cidr.split_once('/') else {
+        return false;
+    };
+    let (Ok(network), Ok(address), Ok(prefix)) = (
+        network.parse::<std::net::IpAddr>(),
+        queried.value.parse::<std::net::IpAddr>(),
+        prefix.parse::<u8>(),
+    ) else {
+        return false;
+    };
+    ip_in_prefix(network, address, prefix)
+}
+
+fn ip_in_prefix(network: std::net::IpAddr, address: std::net::IpAddr, prefix: u8) -> bool {
+    match (network, address) {
+        (std::net::IpAddr::V4(network), std::net::IpAddr::V4(address)) if prefix <= 32 => {
+            let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+            u32::from(network) & mask == u32::from(address) & mask
+        }
+        (std::net::IpAddr::V6(network), std::net::IpAddr::V6(address)) if prefix <= 128 => {
+            let mask = u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
+            u128::from(network) & mask == u128::from(address) & mask
+        }
+        _ => false,
+    }
+}
+
+fn url_host(value: &str) -> Option<String> {
+    Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+}
+
+fn domain_suffix_matches(host: &str, domain: &str) -> bool {
+    host.eq_ignore_ascii_case(domain)
+        || host
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", domain.to_ascii_lowercase()))
+}
+
+fn enforcement_for_source_class(source_class: FeedSourceClass) -> EnforcementResult {
+    match source_class {
+        FeedSourceClass::EnterpriseDeny => EnforcementResult {
+            disposition: Disposition::Block,
+            severity: Severity::Critical,
+            confidence: Confidence::Confirmed,
+            deciding_source_class: source_class,
+        },
+        FeedSourceClass::ArbitraitorReviewed | FeedSourceClass::Authoritative => {
+            EnforcementResult {
+                disposition: Disposition::Block,
+                severity: Severity::High,
+                confidence: Confidence::High,
+                deciding_source_class: source_class,
+            }
+        }
+        FeedSourceClass::CorroboratedCommunity => EnforcementResult {
+            disposition: Disposition::Warn,
+            severity: Severity::Medium,
+            confidence: Confidence::Medium,
+            deciding_source_class: source_class,
+        },
+        FeedSourceClass::SingleUnreviewed => EnforcementResult {
+            disposition: Disposition::Informational,
+            severity: Severity::Informational,
+            confidence: Confidence::Low,
+            deciding_source_class: source_class,
+        },
+    }
+}
+
+fn enforcement_precedence(disposition: Disposition) -> u8 {
+    match disposition {
+        Disposition::Block => 3,
+        Disposition::Warn => 2,
+        Disposition::Informational => 1,
+        Disposition::Allow => 0,
+    }
+}
+
 /// Result type for intelligence store operations.
 pub type Result<T> = std::result::Result<T, IntelError>;
 
@@ -373,6 +600,7 @@ mod tests {
             severity: Severity::High,
             confidence: Confidence::Confirmed,
             disposition: Disposition::Block,
+            source_class: FeedSourceClass::ArbitraitorReviewed,
             first_seen: "2026-06-01T00:00:00Z".to_owned(),
             last_seen: "2026-06-17T00:00:00Z".to_owned(),
             expires_at: None,
@@ -463,8 +691,114 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_rejects_extra_feed_entry_fields() {
-        let json = r#"{"schema_version":1,"id":"entry-1","indicator":{"indicator_type":"sha256","value":"abababababababababababababababababababababababababababababababab"},"classification":"malicious","severity":"high","confidence":"confirmed","disposition":"block","first_seen":"2026-06-01T00:00:00Z","last_seen":"2026-06-17T00:00:00Z","expires_at":null,"sources":[],"evidence":{"malware_family":null,"notes":null},"review":{"status":"reviewed","reviewers":[]},"extra":true}"#;
+        let json = r#"{"schema_version":1,"id":"entry-1","indicator":{"indicator_type":"sha256","value":"abababababababababababababababababababababababababababababababab"},"classification":"malicious","severity":"high","confidence":"confirmed","disposition":"block","source_class":"arbitraitor-reviewed","first_seen":"2026-06-01T00:00:00Z","last_seen":"2026-06-17T00:00:00Z","expires_at":null,"sources":[],"evidence":{"malware_family":null,"notes":null},"review":{"status":"reviewed","reviewers":[]},"extra":true}"#;
         assert!(serde_json::from_str::<FeedEntry>(json).is_err());
+    }
+
+    #[test]
+    fn match_indicator_orders_exact_hash_before_hostname() -> std::result::Result<(), Box<dyn Error>>
+    {
+        let path = temp_store_path("specificity");
+        let mut store = IntelStore::open(&path)?;
+        let hash = sample_indicator(IndicatorType::Sha256, &"ef".repeat(32));
+        store.add_entry(sample_entry(sample_indicator(
+            IndicatorType::Hostname,
+            "example.invalid",
+        )))?;
+        store.add_entry(sample_entry(hash.clone()))?;
+
+        let matches = match_indicator(&store, &hash);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].specificity, MatchSpecificity::Exact);
+        assert_eq!(matches[0].entry.indicator, hash);
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn match_indicator_matches_url_prefix_hostname_and_domain()
+    -> std::result::Result<(), Box<dyn Error>> {
+        let path = temp_store_path("url-broad");
+        let mut store = IntelStore::open(&path)?;
+        store.add_entry(sample_entry(sample_indicator(
+            IndicatorType::UrlPrefix,
+            "https://example.invalid/releases/",
+        )))?;
+        store.add_entry(sample_entry(sample_indicator(
+            IndicatorType::Hostname,
+            "example.invalid",
+        )))?;
+        store.add_entry(sample_entry(sample_indicator(
+            IndicatorType::RegistrableDomain,
+            "invalid",
+        )))?;
+
+        let matches = match_indicator(
+            &store,
+            &sample_indicator(
+                IndicatorType::ExactUrl,
+                "https://example.invalid/releases/a.sh",
+            ),
+        );
+        let specificities: Vec<MatchSpecificity> =
+            matches.iter().map(|matched| matched.specificity).collect();
+        assert_eq!(
+            specificities,
+            vec![
+                MatchSpecificity::Moderate,
+                MatchSpecificity::Broad,
+                MatchSpecificity::Broad
+            ]
+        );
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn evaluate_matches_enforces_source_class_table() {
+        let mut enterprise =
+            sample_entry(sample_indicator(IndicatorType::Sha256, &"12".repeat(32)));
+        enterprise.source_class = FeedSourceClass::EnterpriseDeny;
+        let mut community = sample_entry(sample_indicator(
+            IndicatorType::ExactUrl,
+            "https://example.invalid/a",
+        ));
+        community.source_class = FeedSourceClass::CorroboratedCommunity;
+
+        let result = evaluate_matches(&[
+            MatchResult {
+                entry: community,
+                specificity: MatchSpecificity::Precise,
+            },
+            MatchResult {
+                entry: enterprise,
+                specificity: MatchSpecificity::Exact,
+            },
+        ]);
+
+        assert_eq!(
+            result,
+            Some(EnforcementResult {
+                disposition: Disposition::Block,
+                severity: Severity::Critical,
+                confidence: Confidence::Confirmed,
+                deciding_source_class: FeedSourceClass::EnterpriseDeny,
+            })
+        );
+    }
+
+    #[test]
+    fn expired_entries_are_ignored_by_match_indicator() -> std::result::Result<(), Box<dyn Error>> {
+        let path = temp_store_path("match-expiry");
+        let indicator = sample_indicator(IndicatorType::Sha256, &"34".repeat(32));
+        let mut expired = sample_entry(indicator.clone());
+        expired.expires_at = Some("1970-01-01T00:00:00Z".to_owned());
+        let mut store = IntelStore::open(&path)?;
+        store.add_entry(expired)?;
+
+        assert!(match_indicator(&store, &indicator).is_empty());
+        let _ = fs::remove_file(path);
+        Ok(())
     }
 
     #[test]
