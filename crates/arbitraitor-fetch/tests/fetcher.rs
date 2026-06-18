@@ -25,6 +25,7 @@ fn http_policy() -> FetchPolicy {
         max_redirects: 0,
         allowed_schemes: vec![FetchScheme::Http],
         allow_loopback_addresses: true,
+        require_digest: false,
     }
 }
 
@@ -155,6 +156,75 @@ async fn http_fetch_streams_exact_response_bytes() -> Result<(), Box<dyn std::er
     );
     assert!(receipt.metadata.connected_ip.is_some());
     assert!(!receipt.metadata.resolved_ips.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_digest_match_allows_fetch() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let bytes = b"pinned artifact";
+    let url = server
+        .binary_response(bytes, "application/octet-stream")
+        .await;
+    let mut sink = VecSink::new();
+
+    let receipt = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_policy())
+                .with_expected_sha256(sha256(bytes)),
+            &mut sink,
+        )
+        .await?;
+
+    assert_eq!(sink.as_bytes(), bytes);
+    assert_eq!(receipt.sha256, sha256(bytes));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_digest_mismatch_fails_fetch() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let bytes = b"actual artifact";
+    let expected = sha256(b"different artifact");
+    let actual = sha256(bytes);
+    let url = server
+        .binary_response(bytes, "application/octet-stream")
+        .await;
+    let mut sink = VecSink::new();
+
+    let error = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_policy())
+                .with_expected_sha256(expected.clone()),
+            &mut sink,
+        )
+        .await
+        .err()
+        .ok_or("digest mismatch should fail")?;
+
+    assert!(
+        matches!(error, FetchError::DigestMismatch { expected: got_expected, actual: got_actual } if got_expected == expected && got_actual == actual)
+    );
+    assert_eq!(sink.as_bytes(), bytes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_digest_missing_fails_before_fetch() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let url = server.binary_response(b"unused", "text/plain").await;
+    let mut policy = http_policy();
+    policy.require_digest = true;
+    let mut sink = VecSink::new();
+
+    let error = HttpFetcher::new()
+        .fetch(FetchRequest::url(FetchUrl::parse(&url)?, policy), &mut sink)
+        .await
+        .err()
+        .ok_or("missing required digest should fail")?;
+
+    assert!(matches!(error, FetchError::RequiredDigestMissing));
+    assert!(sink.as_bytes().is_empty());
     Ok(())
 }
 

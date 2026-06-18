@@ -37,6 +37,8 @@ enum Command {
         receipt: Option<PathBuf>,
         #[arg(long)]
         cas_dir: Option<PathBuf>,
+        #[arg(long, value_name = "HEX")]
+        sha256: Option<Sha256Digest>,
     },
 }
 
@@ -60,15 +62,24 @@ async fn main() -> Result<()> {
             url,
             receipt,
             cas_dir,
-        } => inspect(&url, receipt.as_deref(), cas_dir.as_deref()).await?,
+            sha256,
+        } => inspect(&url, receipt.as_deref(), cas_dir.as_deref(), sha256).await?,
     }
 
     Ok(())
 }
 
-async fn inspect(url: &str, receipt_path: Option<&Path>, cas_dir: Option<&Path>) -> Result<()> {
+async fn inspect(
+    url: &str,
+    receipt_path: Option<&Path>,
+    cas_dir: Option<&Path>,
+    expected_sha256: Option<Sha256Digest>,
+) -> Result<()> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
-    let request = FetchRequest::url(fetch_url, FetchPolicy::default());
+    let mut request = FetchRequest::url(fetch_url, FetchPolicy::default());
+    if let Some(digest) = expected_sha256 {
+        request = request.with_expected_sha256(digest);
+    }
     let mut fetch_sink = VecSink::new();
     let fetch_receipt = HttpFetcher::new()
         .fetch(request, &mut fetch_sink)
@@ -241,5 +252,40 @@ fn timestamp() -> String {
             error.duration().as_secs(),
             error.duration().subsec_nanos()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn inspect_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "ab".repeat(32);
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--sha256",
+            &digest,
+        ])?;
+
+        let Command::Inspect { sha256, .. } = cli.command;
+        assert_eq!(sha256.ok_or("missing parsed digest")?.to_string(), digest);
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_rejects_invalid_sha256_flag() {
+        let result = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--sha256",
+            "not-a-digest",
+        ]);
+
+        assert!(result.is_err());
     }
 }
