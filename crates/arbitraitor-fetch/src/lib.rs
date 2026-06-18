@@ -769,7 +769,7 @@ async fn resolve_url_addrs(url: &Url, policy: &FetchPolicy) -> Result<Vec<Socket
     // If the host is an IP literal, validate it directly before any DNS
     // resolution. This ensures consistent SSRF enforcement across platforms
     // (tokio::net::lookup_host behaves differently for IP literals on Windows).
-    if let Some(ip) = host.parse::<IpAddr>().ok() {
+    if let Ok(ip) = host.parse::<IpAddr>() {
         validate_ip_for_policy(ip, policy)?;
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
