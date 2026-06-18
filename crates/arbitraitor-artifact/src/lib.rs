@@ -52,6 +52,8 @@ pub enum ArtifactType {
     GzipCompressed,
     /// XZ-compressed payload.
     XzCompressed,
+    /// Bzip2-compressed payload.
+    Bzip2Compressed,
     /// Zstandard-compressed payload.
     ZstdCompressed,
     /// Plain text without a more specific recognized structure.
@@ -220,6 +222,9 @@ fn detect_magic(data: &[u8]) -> Option<ArtifactType> {
     if data.starts_with(b"\xfd7zXZ\0") {
         return Some(ArtifactType::XzCompressed);
     }
+    if data.starts_with(b"BZh") {
+        return Some(ArtifactType::Bzip2Compressed);
+    }
     if data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         return Some(ArtifactType::ZstdCompressed);
     }
@@ -337,6 +342,7 @@ fn detect_infer_binary(mime_hint: Option<&str>) -> Option<ArtifactType> {
         Some("application/zip") => Some(ArtifactType::ZipArchive),
         Some("application/gzip" | "application/x-gzip") => Some(ArtifactType::GzipCompressed),
         Some("application/x-xz") => Some(ArtifactType::XzCompressed),
+        Some("application/x-bzip2" | "application/bzip2") => Some(ArtifactType::Bzip2Compressed),
         Some("application/zstd" | "application/x-zstd") => Some(ArtifactType::ZstdCompressed),
         Some("application/x-executable" | "application/x-elf") => Some(ArtifactType::ElfExecutable),
         Some("application/x-msdownload" | "application/vnd.microsoft.portable-executable") => {

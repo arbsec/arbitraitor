@@ -481,6 +481,7 @@ fn artifact_kind(artifact_type: ArtifactType) -> ArtifactKind {
         ArtifactType::ZipArchive => ArtifactKind::Zip,
         ArtifactType::TarArchive => ArtifactKind::Tar(TarCompression::None),
         ArtifactType::GzipCompressed => ArtifactKind::Gzip,
+        ArtifactType::Bzip2Compressed => ArtifactKind::Bzip2,
         ArtifactType::XzCompressed => ArtifactKind::Xz,
         ArtifactType::ZstdCompressed => ArtifactKind::Zstd,
         ArtifactType::GenericText | ArtifactType::Unknown => ArtifactKind::GenericText,

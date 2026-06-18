@@ -12,6 +12,13 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-artifact = { workspace = true }
 arbitraitor-model = { workspace = true }
+bzip2 = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+xz2 = { workspace = true }
+zip = { workspace = true }
+zstd = { workspace = true }
