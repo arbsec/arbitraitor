@@ -257,7 +257,9 @@ dependencies = [
 name = "arbitraitor-mcp"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-analysis",
  "arbitraitor-core",
+ "arbitraitor-fetch",
  "arbitraitor-model",
  "serde",
  "serde_json",
