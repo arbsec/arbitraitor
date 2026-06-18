@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
+use arbitraitor_analysis::{
+    AnalysisCoordinator, ArtifactDetector, RetrievalInfo as AnalysisRetrievalInfo, ShellDetector,
+};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_receipt::{
@@ -13,6 +15,7 @@ use arbitraitor_receipt::{
     RetrievalInfo as ReceiptRetrievalInfo, VerdictInfo,
 };
 use arbitraitor_store::ContentStore;
+use arbitraitor_yarax::{RulePackManager, RuleSource, YaraDetector};
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
@@ -39,6 +42,8 @@ enum Command {
         cas_dir: Option<PathBuf>,
         #[arg(long, value_name = "HEX")]
         sha256: Option<Sha256Digest>,
+        #[arg(long, value_name = "DIR")]
+        rules: Option<PathBuf>,
     },
 }
 
@@ -63,7 +68,17 @@ async fn main() -> Result<()> {
             receipt,
             cas_dir,
             sha256,
-        } => inspect(&url, receipt.as_deref(), cas_dir.as_deref(), sha256).await?,
+            rules,
+        } => {
+            inspect(
+                &url,
+                receipt.as_deref(),
+                cas_dir.as_deref(),
+                sha256,
+                rules.as_deref(),
+            )
+            .await?;
+        }
     }
 
     Ok(())
@@ -74,6 +89,7 @@ async fn inspect(
     receipt_path: Option<&Path>,
     cas_dir: Option<&Path>,
     expected_sha256: Option<Sha256Digest>,
+    rules_dir: Option<&Path>,
 ) -> Result<()> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let mut request = FetchRequest::url(fetch_url, FetchPolicy::default());
@@ -109,8 +125,8 @@ async fn inspect(
     }
 
     let analysis_retrieval = analysis_retrieval_info(url, &fetch_receipt);
-    let result =
-        AnalysisCoordinator::new().analyze_with_retrieval(&bytes, Some(analysis_retrieval));
+    let (coordinator, rule_pack_versions) = analysis_coordinator(rules_dir)?;
+    let result = coordinator.analyze_with_retrieval(&bytes, Some(analysis_retrieval));
     write_report(
         &mut std::io::stderr().lock(),
         &result,
@@ -119,12 +135,43 @@ async fn inspect(
     )?;
 
     if let Some(path) = receipt_path {
-        let receipt = build_receipt(url, &fetch_receipt, &result, &artifact_sha256, bytes.len())?;
+        let receipt = build_receipt(
+            url,
+            &fetch_receipt,
+            &result,
+            &artifact_sha256,
+            bytes.len(),
+            &rule_pack_versions,
+        )?;
         let json = serde_json::to_vec_pretty(&receipt).into_diagnostic()?;
         std::fs::write(path, json).into_diagnostic()?;
     }
 
     Ok(())
+}
+
+fn analysis_coordinator(
+    rules_dir: Option<&Path>,
+) -> Result<(AnalysisCoordinator, Vec<DetectorVersion>)> {
+    let Some(rules_dir) = rules_dir else {
+        return Ok((AnalysisCoordinator::new(), Vec::new()));
+    };
+
+    let mut manager = RulePackManager::with_built_in().into_diagnostic()?;
+    manager
+        .load_directory(rules_dir, RuleSource::FileSystem(rules_dir.to_path_buf()))
+        .into_diagnostic()?;
+    let rule_pack_versions = manager.pack_versions();
+    let scanner = manager.compile_all().into_diagnostic()?;
+    let detector = YaraDetector::from_scanner(&scanner).into_diagnostic()?;
+    Ok((
+        AnalysisCoordinator::with_detectors(vec![
+            Box::new(ArtifactDetector),
+            Box::new(ShellDetector),
+            Box::new(detector),
+        ]),
+        rule_pack_versions,
+    ))
 }
 
 fn default_cas_dir() -> PathBuf {
@@ -181,6 +228,7 @@ fn build_receipt(
     result: &arbitraitor_analysis::AnalysisResult,
     artifact_sha256: &Sha256Digest,
     artifact_size: usize,
+    rule_pack_versions: &[DetectorVersion],
 ) -> Result<arbitraitor_receipt::Receipt> {
     let artifact_size = u64::try_from(artifact_size).into_diagnostic()?;
     let now = timestamp();
@@ -207,6 +255,9 @@ fn build_receipt(
             id: detector_result.metadata.id.clone(),
             version: detector_result.metadata.version.clone(),
         });
+    }
+    for rule_pack_version in rule_pack_versions {
+        builder = builder.detector_version(rule_pack_version.clone());
     }
 
     Ok(builder.build())
@@ -287,5 +338,23 @@ mod tests {
         ]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--rules",
+            "/tmp/rules",
+        ])?;
+
+        let Command::Inspect { rules, .. } = cli.command;
+        assert_eq!(
+            rules.ok_or("missing rules path")?,
+            std::path::PathBuf::from("/tmp/rules")
+        );
+        Ok(())
     }
 }

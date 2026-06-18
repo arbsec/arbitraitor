@@ -177,6 +177,7 @@ dependencies = [
  "arbitraitor-model",
  "arbitraitor-receipt",
  "arbitraitor-store",
+ "arbitraitor-yarax",
  "clap",
  "miette",
  "serde_json",
@@ -422,6 +423,8 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-model",
+ "arbitraitor-receipt",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tracing",
  "yara-x",
