@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ArtifactId, OperationId};
+use crate::ids::{ArtifactId, OperationId, PluginId, Sha256Digest};
+
+/// Identity of the plugin that initiated an operation.
+pub type PluginIdentity = PluginId;
 
 /// Operation plan describing an artifact and requested execution context.
-// TODO: spec-required binding fields (plugin identity, argv digest, policy snapshot) — see #30.
-// TODO: state machine transitions — see #30.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationPlan {
@@ -28,7 +29,170 @@ pub struct OperationPlan {
     pub sandbox_enabled: bool,
     /// Optional timestamp string at which this plan expires.
     pub expiry: Option<String>,
+    /// Current lifecycle state for this operation.
+    #[serde(default)]
+    pub state: OperationState,
+    /// Plugin that initiated this operation, when the request came from a plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_identity: Option<PluginIdentity>,
+    /// SHA-256 digest binding the execution argv for execute operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv_digest: Option<Sha256Digest>,
+    /// Digest or stable reference for the policy snapshot used to evaluate this operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_digest: Option<String>,
 }
+
+impl OperationPlan {
+    /// Validates whether this operation can move to `next_state`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationTransitionError`] for invalid lifecycle edges.
+    pub fn validate_transition(
+        &self,
+        next_state: OperationState,
+    ) -> Result<(), OperationTransitionError> {
+        self.state.validate_transition(next_state)
+    }
+
+    /// Moves this operation into `next_state` after validating the lifecycle edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationTransitionError`] and leaves the state unchanged for invalid edges.
+    pub fn transition_to(
+        &mut self,
+        next_state: OperationState,
+    ) -> Result<(), OperationTransitionError> {
+        self.validate_transition(next_state)?;
+        self.state = next_state;
+        Ok(())
+    }
+
+    /// Returns a copy of this operation moved into `next_state`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationTransitionError`] for invalid lifecycle edges.
+    pub fn transitioned_to(
+        mut self,
+        next_state: OperationState,
+    ) -> Result<Self, OperationTransitionError> {
+        self.transition_to(next_state)?;
+        Ok(self)
+    }
+}
+
+/// Lifecycle state for a planned operation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationState {
+    /// Operation was created but has not started.
+    #[default]
+    Pending,
+    /// Artifact bytes are being retrieved.
+    Fetching,
+    /// Retrieved bytes are being written to content-addressed storage.
+    Storing,
+    /// Detectors are analyzing the stored artifact.
+    Analyzing,
+    /// Policy is computing a verdict for the analyzed artifact.
+    EvaluatingPolicy,
+    /// Approved bytes are being released to their destination.
+    Releasing,
+    /// Operation finished successfully.
+    Complete,
+    /// Operation terminated with an error.
+    Failed,
+    /// Operation was cancelled by a user or the system.
+    Cancelled,
+}
+
+impl OperationState {
+    /// Returns whether this state is terminal.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
+    }
+
+    /// Validates whether `self` can transition to `next_state`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationTransitionError`] for invalid lifecycle edges.
+    pub const fn validate_transition(
+        self,
+        next_state: Self,
+    ) -> Result<(), OperationTransitionError> {
+        if self.is_valid_transition_to(next_state) {
+            Ok(())
+        } else {
+            Err(OperationTransitionError::new(self, next_state))
+        }
+    }
+
+    /// Returns whether `self` can transition to `next_state`.
+    #[must_use]
+    pub const fn is_valid_transition_to(self, next_state: Self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+
+        if matches!(next_state, Self::Failed | Self::Cancelled) {
+            return true;
+        }
+
+        matches!(
+            (self, next_state),
+            (Self::Pending, Self::Fetching)
+                | (Self::Fetching, Self::Storing | Self::Complete)
+                | (Self::Storing, Self::Analyzing | Self::Complete)
+                | (Self::Analyzing, Self::EvaluatingPolicy | Self::Complete)
+                | (Self::EvaluatingPolicy, Self::Releasing | Self::Complete)
+                | (Self::Releasing, Self::Complete)
+        )
+    }
+}
+
+/// Error returned when an operation lifecycle transition is invalid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OperationTransitionError {
+    from: OperationState,
+    to: OperationState,
+}
+
+impl OperationTransitionError {
+    /// Creates an invalid transition error.
+    #[must_use]
+    pub const fn new(from: OperationState, to: OperationState) -> Self {
+        Self { from, to }
+    }
+
+    /// State from which the invalid transition was requested.
+    #[must_use]
+    pub const fn from(&self) -> OperationState {
+        self.from
+    }
+
+    /// State to which the invalid transition was requested.
+    #[must_use]
+    pub const fn to(&self) -> OperationState {
+        self.to
+    }
+}
+
+impl core::fmt::Display for OperationTransitionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "invalid operation state transition from {:?} to {:?}",
+            self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for OperationTransitionError {}
 
 /// Type of operation requested for an artifact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -153,10 +317,10 @@ impl ResolvedOperation {
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityGrant, CapabilityRequest, GrantedCapabilities, OperationPlan, OperationType,
-        PlannedOperation, RequestedCapabilities, ResolvedOperation,
+        CapabilityGrant, CapabilityRequest, GrantedCapabilities, OperationPlan, OperationState,
+        OperationType, PlannedOperation, RequestedCapabilities, ResolvedOperation,
     };
-    use crate::ids::{ArtifactId, OperationId, Sha256Digest};
+    use crate::ids::{ArtifactId, OperationId, PluginId, Sha256Digest};
 
     fn plan() -> OperationPlan {
         OperationPlan {
@@ -169,6 +333,10 @@ mod tests {
             network_allowed: false,
             sandbox_enabled: true,
             expiry: Some("9999-12-31T23:59:59Z".to_owned()),
+            state: OperationState::Pending,
+            plugin_identity: None,
+            argv_digest: None,
+            policy_digest: None,
         }
     }
 
@@ -184,6 +352,48 @@ mod tests {
     #[test]
     fn operation_plan_round_trips_with_generated_id() -> Result<(), Box<dyn std::error::Error>> {
         let value = plan();
+        assert_eq!(
+            serde_json::from_str::<OperationPlan>(&serde_json::to_string(&value)?)?,
+            value
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_transitions_advance_pending_to_fetching_to_complete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = plan();
+
+        value.transition_to(OperationState::Fetching)?;
+        assert_eq!(value.state, OperationState::Fetching);
+
+        value.transition_to(OperationState::Complete)?;
+        assert_eq!(value.state, OperationState::Complete);
+
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_transition_from_complete_to_fetching_is_rejected() {
+        let mut value = plan();
+        value.state = OperationState::Complete;
+
+        let error = value
+            .transition_to(OperationState::Fetching)
+            .expect_err("terminal states must reject outgoing transitions");
+
+        assert_eq!(error.from(), OperationState::Complete);
+        assert_eq!(error.to(), OperationState::Fetching);
+        assert_eq!(value.state, OperationState::Complete);
+    }
+
+    #[test]
+    fn binding_fields_round_trip_when_populated() -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = plan();
+        value.plugin_identity = Some(PluginId("plugin.example.fetcher".to_owned()));
+        value.argv_digest = Some(Sha256Digest::new([0x11; 32]));
+        value.policy_digest = Some("policy-sha256:example".to_owned());
+
         assert_eq!(
             serde_json::from_str::<OperationPlan>(&serde_json::to_string(&value)?)?,
             value
