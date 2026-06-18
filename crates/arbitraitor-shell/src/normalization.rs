@@ -1,12 +1,17 @@
 //! Semantic normalization post-pass for parsed shell source.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read as _,
+};
 
 use arbitraitor_model::ids::Sha256Digest;
 use base64::Engine as _;
+use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tree_sitter::LanguageError;
+use xz2::read::XzDecoder;
 
 use crate::{ShellNode, SourceSpan};
 
@@ -73,9 +78,11 @@ pub enum DecodeKind {
     Base64,
     /// Hex decoding through `xxd -r -p`.
     Hex,
-    // TODO: Add Gzip and Xz variants when bounded decompression is implemented
-    // with proper size/depth limits. See issue #38 for tracking.
-    /// OpenSSL base64 decoding through `openssl enc -d -base64`.
+    /// Gzip decompression through `gzip -d`, `gunzip`, `zcat`, or embedded gzip bytes.
+    Gzip,
+    /// Xz decompression through `xz -d`, `unxz`, `xzcat`, or embedded xz bytes.
+    Xz,
+    /// OpenSSL decoding through `openssl enc -d -base64`.
     OpenSsl,
     /// Heredoc body extraction.
     Heredoc,
@@ -175,6 +182,7 @@ pub fn normalize(ast: &ShellAst, source: &str) -> Result<NormalizationResult, No
     state.extract_pipeline_edges(&events);
     state.detect_decode_chains(&events);
     state.decode_heredocs(&events);
+    state.detect_embedded_compressed_artifacts();
 
     Ok(NormalizationResult {
         commands: state.commands,
@@ -435,6 +443,29 @@ impl NormalizerState<'_> {
                 continue;
             };
             self.push_decoded(kind, bytes, command_span, Some(command_index));
+        }
+    }
+
+    fn detect_embedded_compressed_artifacts(&mut self) {
+        let mut cursor = 0;
+        while let Some(artifact) = self.decoded_artifacts.get(cursor).cloned() {
+            cursor = cursor.saturating_add(1);
+            let Some((kind, content)) = decompress_magic(&artifact.content) else {
+                continue;
+            };
+            if self
+                .decoded_artifacts
+                .iter()
+                .any(|existing| existing.kind == kind && existing.content == content)
+            {
+                continue;
+            }
+            self.push_decoded(
+                kind,
+                content,
+                artifact.parent_span,
+                artifact.source_command_index,
+            );
         }
     }
 
@@ -929,6 +960,14 @@ fn decode_command(command: &ExtractedCommand, input: &[u8]) -> Option<(DecodeKin
         "openssl" if is_openssl_base64_decode(&command.arguments) => {
             decode_base64(input).map(|bytes| (DecodeKind::OpenSsl, bytes))
         }
+        "gzip" if gzip_decode_flags(&command.arguments) => {
+            decode_gzip(input).map(|bytes| (DecodeKind::Gzip, bytes))
+        }
+        "gunzip" | "zcat" => decode_gzip(input).map(|bytes| (DecodeKind::Gzip, bytes)),
+        "xz" if xz_decode_flags(&command.arguments) => {
+            decode_xz(input).map(|bytes| (DecodeKind::Xz, bytes))
+        }
+        "unxz" | "xzcat" => decode_xz(input).map(|bytes| (DecodeKind::Xz, bytes)),
         "xxd" if xxd_reverse_plain_flags(&command.arguments) => {
             decode_hex(input).map(|bytes| (DecodeKind::Hex, bytes))
         }
@@ -969,9 +1008,37 @@ fn xxd_reverse_plain_flags(arguments: &[String]) -> bool {
 fn is_openssl_base64_decode(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| argument == "enc")
         && arguments.iter().any(|argument| argument == "-d")
-        && arguments
-            .iter()
-            .any(|argument| argument == "-base64" || argument == "-a")
+        && arguments.iter().any(|argument| {
+            argument == "-base64" || argument == "-a" || is_openssl_cipher(argument)
+        })
+}
+
+fn is_openssl_cipher(argument: &str) -> bool {
+    argument.starts_with("-aes-") || argument.starts_with("-des") || argument.starts_with("-bf-")
+}
+
+fn gzip_decode_flags(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        let lower = argument.to_ascii_lowercase();
+        lower == "--decompress"
+            || lower == "--uncompress"
+            || lower == "-d"
+            || (lower.starts_with('-')
+                && !lower.starts_with("--")
+                && lower.chars().skip(1).any(|flag| flag == 'd'))
+    })
+}
+
+fn xz_decode_flags(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        let lower = argument.to_ascii_lowercase();
+        lower == "--decompress"
+            || lower == "--uncompress"
+            || lower == "-d"
+            || (lower.starts_with('-')
+                && !lower.starts_with("--")
+                && lower.chars().skip(1).any(|flag| flag == 'd'))
+    })
 }
 
 fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
@@ -1010,6 +1077,50 @@ fn decode_hex(input: &[u8]) -> Option<Vec<u8>> {
         output.push(decode_hex_pair(high, low)?);
     }
     Some(output)
+}
+
+fn decompress_magic(input: &[u8]) -> Option<(DecodeKind, Vec<u8>)> {
+    if is_gzip(input) {
+        return decode_gzip(input).map(|bytes| (DecodeKind::Gzip, bytes));
+    }
+    if is_xz(input) {
+        return decode_xz(input).map(|bytes| (DecodeKind::Xz, bytes));
+    }
+    None
+}
+
+fn decode_gzip(input: &[u8]) -> Option<Vec<u8>> {
+    if !is_gzip(input) {
+        return None;
+    }
+    read_bounded(GzDecoder::new(input))
+}
+
+fn decode_xz(input: &[u8]) -> Option<Vec<u8>> {
+    if !is_xz(input) {
+        return None;
+    }
+    read_bounded(XzDecoder::new(input))
+}
+
+fn read_bounded<R: std::io::Read>(reader: R) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    reader
+        .take(u64::try_from(MAX_DECODED_BYTES).ok()?.saturating_add(1))
+        .read_to_end(&mut output)
+        .ok()?;
+    if output.len() > MAX_DECODED_BYTES {
+        return None;
+    }
+    Some(output)
+}
+
+fn is_gzip(input: &[u8]) -> bool {
+    input.starts_with(&[0x1f, 0x8b])
+}
+
+fn is_xz(input: &[u8]) -> bool {
+    input.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00])
 }
 
 fn heredoc_uses_tab_stripping(source: &str, body_start: usize) -> bool {
