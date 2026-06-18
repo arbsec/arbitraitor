@@ -120,6 +120,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "arbitraitor-analysis"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-archive",
  "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-model",

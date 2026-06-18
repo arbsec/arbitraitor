@@ -5,11 +5,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
 use arbitraitor_artifact::ArtifactType;
+use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
+use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::verdict::{Confidence, Severity};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -28,6 +32,36 @@ const COPY_BUFFER_SIZE: usize = 16 * 1024;
 const SINGLE_FILE_ENTRY_NAME: &str = "payload";
 const TAR_MAGIC_OFFSET: usize = 257;
 const TAR_MAGIC: &[u8] = b"ustar";
+const DETECTOR_ID: &str = "arbitraitor-archive.hazards";
+const ARCHIVE_HAZARD_REFERENCE: &str = "Arbitraitor spec section 19.3";
+const SETUID_BIT: u32 = 0o4000;
+const SETGID_BIT: u32 = 0o2000;
+const UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
+const ARCHIVE_SUFFIXES: &[&str] = &[
+    ".zip", ".jar", ".war", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz",
+    ".tbz2", ".tar.zst", ".gz", ".xz", ".bz2", ".zst",
+];
+
+/// Format-neutral archive entry type metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveEntryType {
+    /// Regular file payload.
+    File,
+    /// Directory entry.
+    Directory,
+    /// Symbolic link entry.
+    Symlink,
+    /// Hard link entry.
+    Hardlink,
+    /// FIFO / named pipe entry.
+    Fifo,
+    /// Character device node entry.
+    CharacterDevice,
+    /// Block device node entry.
+    BlockDevice,
+    /// Entry type was not recognized or is not extractable to a regular file.
+    Other,
+}
 
 /// Format-neutral archive entry metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,8 +76,14 @@ pub struct ArchiveEntry {
     pub is_dir: bool,
     /// Whether the entry is a symbolic link.
     pub is_symlink: bool,
+    /// Format-neutral entry type.
+    pub entry_type: ArchiveEntryType,
+    /// Symbolic or hard link target when present in archive metadata.
+    pub link_target: Option<String>,
     /// Unix permissions when present in the archive metadata.
     pub permissions: Option<u32>,
+    /// Whether ZIP metadata marks this member as encrypted.
+    pub is_encrypted: bool,
 }
 
 /// Resource limits applied while listing and extracting archives.
@@ -183,6 +223,13 @@ impl ArchiveReader for ZipReader {
             let is_dir = file.is_dir();
             let permissions = file.unix_mode();
             let is_symlink = permissions.is_some_and(is_unix_symlink_mode);
+            let entry_type = if is_dir {
+                ArchiveEntryType::Directory
+            } else if is_symlink {
+                ArchiveEntryType::Symlink
+            } else {
+                ArchiveEntryType::File
+            };
 
             tracker.record_entry(&name, size, Some(compressed_size))?;
             entries.push(ArchiveEntry {
@@ -191,7 +238,10 @@ impl ArchiveReader for ZipReader {
                 compressed_size: Some(compressed_size),
                 is_dir,
                 is_symlink,
+                entry_type,
+                link_target: None,
                 permissions,
+                is_encrypted: file.encrypted(),
             });
         }
 
@@ -316,7 +366,10 @@ impl ArchiveReader for CompressedReader {
             compressed_size: Some(self.data.len() as u64),
             is_dir: false,
             is_symlink: false,
+            entry_type: ArchiveEntryType::File,
+            link_target: None,
             permissions: None,
+            is_encrypted: false,
         }])
     }
 
@@ -366,6 +419,11 @@ fn list_tar_entries(
         let is_dir = entry_type.is_dir();
         let is_symlink = entry_type.is_symlink();
         let permissions = header.mode().ok();
+        let link_target = header
+            .link_name()
+            .ok()
+            .flatten()
+            .map(|target| target.to_string_lossy().into_owned());
 
         tracker.record_entry(&name, size, None)?;
         entries.push(ArchiveEntry {
@@ -374,7 +432,10 @@ fn list_tar_entries(
             compressed_size: None,
             is_dir,
             is_symlink,
+            entry_type: tar_entry_type(entry_type),
+            link_target,
             permissions,
+            is_encrypted: false,
         });
     }
 
@@ -408,6 +469,503 @@ fn extract_tar_entry(
     }
 
     Err(ArchiveError::EntryNotFound(name.to_owned()))
+}
+
+/// Scans archive metadata for extraction and archive-processing hazards.
+#[must_use]
+pub fn detect_archive_hazards(entries: &[ArchiveEntry], limits: &ArchiveLimits) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut exact_names = HashSet::new();
+    let mut normalized_names = HashMap::<String, String>::new();
+    let mut total_unpacked_bytes = 0_u64;
+
+    if entries.len() > limits.max_files as usize {
+        findings.push(hazard_finding(
+            "archive.hazard.excessive-file-count",
+            Severity::High,
+            "Archive contains too many entries",
+            format!(
+                "Archive contains {} entries, exceeding the configured limit of {}.",
+                entries.len(),
+                limits.max_files
+            ),
+            "max_files",
+            Some(format!(
+                "entries={}; limit={}",
+                entries.len(),
+                limits.max_files
+            )),
+        ));
+    }
+
+    for (index, entry) in entries.iter().enumerate() {
+        detect_path_hazards(entry, index, &mut findings);
+        detect_metadata_hazards(entry, index, limits, &mut findings);
+        detect_entry_type_hazards(entry, index, &mut findings);
+
+        if !exact_names.insert(entry.name.clone()) {
+            findings.push(entry_hazard_finding(
+                index,
+                "overwriting-entry",
+                Severity::High,
+                "Archive contains duplicate entry names",
+                "Multiple entries share the same archive path and may overwrite each other during extraction.",
+                entry,
+            ));
+        }
+
+        let normalized_name = normalized_collision_key(&entry.name);
+        if let Some(previous) = normalized_names.insert(normalized_name, entry.name.clone())
+            && previous != entry.name
+        {
+            findings.push(entry_hazard_finding(
+                index,
+                "case-unicode-collision",
+                Severity::High,
+                "Archive paths collide after case or Unicode normalization",
+                "This entry can collide with another entry on case-insensitive or Unicode-normalizing filesystems.",
+                entry,
+            ));
+        }
+
+        total_unpacked_bytes = if let Some(total) = total_unpacked_bytes.checked_add(entry.size) {
+            total
+        } else {
+            findings.push(entry_hazard_finding(
+                index,
+                "malformed-size-overflow",
+                Severity::High,
+                "Archive entry sizes overflow metadata accounting",
+                "The advertised uncompressed sizes overflow total size accounting.",
+                entry,
+            ));
+            total_unpacked_bytes
+        };
+    }
+
+    if total_unpacked_bytes > limits.max_total_unpacked_bytes {
+        findings.push(hazard_finding(
+            "archive.hazard.excessive-total-size",
+            Severity::High,
+            "Archive expands beyond total unpacked byte limit",
+            format!(
+                "Archive advertises {total_unpacked_bytes} unpacked bytes, exceeding the configured limit of {}.",
+                limits.max_total_unpacked_bytes
+            ),
+            "max_total_unpacked_bytes",
+            Some(format!(
+                "unpacked_bytes={total_unpacked_bytes}; limit={}",
+                limits.max_total_unpacked_bytes
+            )),
+        ));
+    }
+
+    findings
+}
+
+fn detect_path_hazards(entry: &ArchiveEntry, index: usize, findings: &mut Vec<Finding>) {
+    if entry.name.starts_with('/') {
+        findings.push(entry_hazard_finding(
+            index,
+            "absolute-path",
+            Severity::Critical,
+            "Archive entry uses an absolute path",
+            "Absolute paths can write outside the intended extraction root.",
+            entry,
+        ));
+    }
+    if entry.name.contains("..") {
+        findings.push(entry_hazard_finding(
+            index,
+            "parent-traversal",
+            Severity::Critical,
+            "Archive entry contains parent-directory traversal",
+            "Parent-directory components can write outside the intended extraction root.",
+            entry,
+        ));
+    }
+    if is_windows_absolute_path(&entry.name) {
+        findings.push(entry_hazard_finding(
+            index,
+            "windows-absolute-path",
+            Severity::Critical,
+            "Archive entry uses a Windows absolute path",
+            "Windows drive or UNC paths can write outside the intended extraction root.",
+            entry,
+        ));
+    }
+    if is_reserved_windows_name(&entry.name) {
+        findings.push(entry_hazard_finding(
+            index,
+            "reserved-device-name",
+            Severity::High,
+            "Archive entry uses a reserved Windows device name",
+            "Reserved device names can target special devices instead of normal files on Windows.",
+            entry,
+        ));
+    }
+    if executable_hidden_by_extension(&entry.name) {
+        findings.push(entry_hazard_finding(
+            index,
+            "hidden-executable-extension",
+            Severity::High,
+            "Archive entry hides an executable behind a benign extension",
+            "Double extensions can disguise executable content as a document or media file.",
+            entry,
+        ));
+    }
+    if is_nested_archive_name(&entry.name) {
+        findings.push(entry_hazard_finding(
+            index,
+            "nested-archive",
+            Severity::Medium,
+            "Archive entry is itself an archive",
+            "Nested archives require bounded recursive inspection before release.",
+            entry,
+        ));
+    }
+    if entry.is_symlink && symlink_target_escapes(entry) {
+        findings.push(entry_hazard_finding(
+            index,
+            "symlink-escape",
+            Severity::Critical,
+            "Archive symlink target escapes the extraction root",
+            "A symlink can redirect extraction or later access outside the archive root.",
+            entry,
+        ));
+    }
+}
+
+fn detect_metadata_hazards(
+    entry: &ArchiveEntry,
+    index: usize,
+    limits: &ArchiveLimits,
+    findings: &mut Vec<Finding>,
+) {
+    if entry.name.is_empty() {
+        findings.push(entry_hazard_finding(
+            index,
+            "malformed-empty-name",
+            Severity::High,
+            "Archive entry has an empty name",
+            "Empty entry names are malformed and cannot be mapped safely to an extraction path.",
+            entry,
+        ));
+    }
+    if entry.size > limits.max_single_file_bytes {
+        findings.push(entry_hazard_finding(
+            index,
+            "excessive-entry-size",
+            Severity::High,
+            "Archive entry exceeds single-file byte limit",
+            "The advertised uncompressed size exceeds the configured per-file limit.",
+            entry,
+        ));
+    }
+    if compression_ratio_exceeded(entry, limits) {
+        findings.push(entry_hazard_finding(
+            index,
+            "excessive-compression-ratio",
+            Severity::Critical,
+            "Archive entry has an excessive compression ratio",
+            "The advertised compressed and uncompressed sizes match zip-bomb characteristics.",
+            entry,
+        ));
+    }
+    if entry.size > 0 && entry.compressed_size == Some(0) {
+        findings.push(entry_hazard_finding(
+            index,
+            "malformed-zero-compressed-size",
+            Severity::High,
+            "Archive entry has suspicious size metadata",
+            "A non-empty entry advertises a zero compressed size.",
+            entry,
+        ));
+    }
+    if entry.is_encrypted {
+        findings.push(entry_hazard_finding(
+            index,
+            "encrypted-member",
+            Severity::High,
+            "Archive entry is encrypted",
+            "Encrypted members prevent content inspection and must fail closed.",
+            entry,
+        ));
+    }
+    if entry
+        .permissions
+        .is_some_and(|mode| mode & (SETUID_BIT | SETGID_BIT) != 0)
+    {
+        findings.push(entry_hazard_finding(
+            index,
+            "setuid-setgid-bits",
+            Severity::High,
+            "Archive entry sets setuid or setgid permission bits",
+            "setuid and setgid bits can alter privilege boundaries after extraction.",
+            entry,
+        ));
+    }
+}
+
+fn detect_entry_type_hazards(entry: &ArchiveEntry, index: usize, findings: &mut Vec<Finding>) {
+    if matches!(
+        entry.entry_type,
+        ArchiveEntryType::Fifo | ArchiveEntryType::CharacterDevice | ArchiveEntryType::BlockDevice
+    ) || entry.permissions.is_some_and(is_unix_special_file_mode)
+    {
+        findings.push(entry_hazard_finding(
+            index,
+            "device-or-fifo",
+            Severity::Critical,
+            "Archive entry is a device node or FIFO",
+            "Device nodes and FIFOs are not safe regular filesystem payloads.",
+            entry,
+        ));
+    } else if matches!(
+        entry.entry_type,
+        ArchiveEntryType::Hardlink | ArchiveEntryType::Other
+    ) {
+        findings.push(entry_hazard_finding(
+            index,
+            "unsupported-entry-type",
+            Severity::High,
+            "Archive entry uses a non-regular file type",
+            "Non-regular entries require explicit policy handling before extraction.",
+            entry,
+        ));
+    }
+}
+
+fn hazard_finding(
+    id: &str,
+    severity: Severity,
+    title: &str,
+    description: String,
+    tag: &str,
+    evidence_content: Option<String>,
+) -> Finding {
+    Finding {
+        id: id.to_owned(),
+        detector: DETECTOR_ID.to_owned(),
+        category: FindingCategory::ArchiveHazard,
+        severity,
+        confidence: Confidence::Confirmed,
+        title: title.to_owned(),
+        description,
+        evidence: vec![Evidence {
+            kind: EvidenceKind::Other,
+            description: "archive metadata".to_owned(),
+            content: evidence_content,
+        }],
+        artifact_sha256: Sha256Digest::new([0_u8; 32]),
+        location: None,
+        remediation: Some("Do not extract or release this archive until the hazardous entries are removed or policy explicitly handles them under containment.".to_owned()),
+        references: vec![ARCHIVE_HAZARD_REFERENCE.to_owned()],
+        tags: vec!["archive-hazard".to_owned(), tag.to_owned()],
+    }
+}
+
+fn entry_hazard_finding(
+    index: usize,
+    tag: &str,
+    severity: Severity,
+    title: &str,
+    description: &str,
+    entry: &ArchiveEntry,
+) -> Finding {
+    hazard_finding(
+        &format!("archive.hazard.{tag}.{index}"),
+        severity,
+        title,
+        description.to_owned(),
+        tag,
+        Some(entry_evidence(entry)),
+    )
+}
+
+fn entry_evidence(entry: &ArchiveEntry) -> String {
+    format!(
+        "name={:?}; size={}; compressed_size={:?}; entry_type={:?}; link_target={:?}; permissions={:?}; encrypted={}",
+        entry.name,
+        entry.size,
+        entry.compressed_size,
+        entry.entry_type,
+        entry.link_target,
+        entry.permissions,
+        entry.is_encrypted
+    )
+}
+
+fn compression_ratio_exceeded(entry: &ArchiveEntry, limits: &ArchiveLimits) -> bool {
+    let Some(compressed_size) = entry.compressed_size else {
+        return false;
+    };
+    if compressed_size == 0 {
+        return entry.size > 0;
+    }
+    entry.size / compressed_size > u64::from(limits.max_compression_ratio)
+}
+
+fn is_windows_absolute_path(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+        || name.starts_with("\\\\")
+        || name.starts_with("//")
+}
+
+fn is_reserved_windows_name(name: &str) -> bool {
+    let Some(file_name) = name.rsplit(['/', '\\']).next() else {
+        return false;
+    };
+    let stem = file_name
+        .trim_end_matches([' ', '.'])
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || numbered_reserved_name(&stem, "COM")
+        || numbered_reserved_name(&stem, "LPT")
+}
+
+fn numbered_reserved_name(value: &str, prefix: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return false;
+    };
+    matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+}
+
+fn executable_hidden_by_extension(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let parts: Vec<&str> = lower
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .split('.')
+        .collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let executable = parts.last().copied().unwrap_or_default();
+    let disguised = parts.get(parts.len() - 2).copied().unwrap_or_default();
+    matches!(
+        executable,
+        "exe" | "scr" | "com" | "bat" | "cmd" | "ps1" | "vbs" | "js" | "msi"
+    ) && matches!(
+        disguised,
+        "txt"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "csv"
+            | "rtf"
+    )
+}
+
+fn is_nested_archive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ARCHIVE_SUFFIXES
+        .iter()
+        .any(|suffix| lower.as_bytes().ends_with(suffix.as_bytes()))
+}
+
+fn symlink_target_escapes(entry: &ArchiveEntry) -> bool {
+    let Some(target) = entry.link_target.as_deref() else {
+        return false;
+    };
+    if target.starts_with('/') || is_windows_absolute_path(target) {
+        return true;
+    }
+
+    let mut depth = entry.name.split(['/', '\\']).count().saturating_sub(1);
+    for component in target
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+    {
+        match component {
+            "." => {}
+            ".." if depth == 0 => return true,
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
+    false
+}
+
+fn normalized_collision_key(name: &str) -> String {
+    name.chars()
+        .filter(|character| !matches!(*character, '\u{0300}'..='\u{036f}'))
+        .flat_map(normalized_collision_chars)
+        .collect()
+}
+
+fn normalized_collision_chars(character: char) -> Vec<char> {
+    let folded = match character {
+        'À'..='Å' | 'à'..='å' | 'Ā' | 'ā' | 'Ă' | 'ă' | 'Ą' | 'ą' => "a",
+        'Ç' | 'ç' | 'Ć' | 'ć' | 'Ĉ' | 'ĉ' | 'Ċ' | 'ċ' | 'Č' | 'č' => "c",
+        'È'..='Ë' | 'è'..='ë' | 'Ē' | 'ē' | 'Ĕ' | 'ĕ' | 'Ė' | 'ė' | 'Ę' | 'ę' | 'Ě' | 'ě' => {
+            "e"
+        }
+        'Ì'..='Ï' | 'ì'..='ï' | 'Ĩ' | 'ĩ' | 'Ī' | 'ī' | 'Ĭ' | 'ĭ' | 'Į' | 'į' | 'İ' => {
+            "i"
+        }
+        'Ñ' | 'ñ' | 'Ń' | 'ń' | 'Ņ' | 'ņ' | 'Ň' | 'ň' => "n",
+        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' | 'Ō' | 'ō' | 'Ŏ' | 'ŏ' | 'Ő' | 'ő' => "o",
+        'Ù'..='Ü'
+        | 'ù'..='ü'
+        | 'Ũ'
+        | 'ũ'
+        | 'Ū'
+        | 'ū'
+        | 'Ŭ'
+        | 'ŭ'
+        | 'Ů'
+        | 'ů'
+        | 'Ű'
+        | 'ű'
+        | 'Ų'
+        | 'ų' => "u",
+        'Ý' | 'ý' | 'ÿ' | 'Ŷ' | 'ŷ' => "y",
+        'ß' => "ss",
+        _ => return character.to_lowercase().collect(),
+    };
+    folded.chars().collect()
+}
+
+fn is_unix_special_file_mode(mode: u32) -> bool {
+    matches!(
+        mode & UNIX_FILE_TYPE_MASK,
+        0o010_000 | 0o020_000 | 0o060_000
+    )
+}
+
+fn tar_entry_type(entry_type: tar::EntryType) -> ArchiveEntryType {
+    if entry_type.is_file() {
+        ArchiveEntryType::File
+    } else if entry_type.is_dir() {
+        ArchiveEntryType::Directory
+    } else if entry_type.is_symlink() {
+        ArchiveEntryType::Symlink
+    } else if entry_type.is_hard_link() {
+        ArchiveEntryType::Hardlink
+    } else if entry_type.is_fifo() {
+        ArchiveEntryType::Fifo
+    } else if entry_type.is_character_special() {
+        ArchiveEntryType::CharacterDevice
+    } else if entry_type.is_block_special() {
+        ArchiveEntryType::BlockDevice
+    } else {
+        ArchiveEntryType::Other
+    }
 }
 
 struct LimitTracker<'a> {
@@ -613,8 +1171,13 @@ fn is_tar(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveError, ArchiveLimits, open_archive, open_archive_with_limits};
+    use super::{
+        ArchiveEntry, ArchiveEntryType, ArchiveError, ArchiveLimits, detect_archive_hazards,
+        open_archive, open_archive_with_limits,
+    };
     use arbitraitor_artifact::ArtifactType;
+    use arbitraitor_model::finding::FindingCategory;
+    use arbitraitor_model::verdict::Severity;
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::error::Error;
@@ -744,6 +1307,76 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn hazard_detection_flags_path_traversal_entry() {
+        let findings = detect_archive_hazards(&[entry("../escape.txt")], &test_limits());
+
+        assert_hazard(&findings, "parent-traversal", Severity::Critical);
+    }
+
+    #[test]
+    fn hazard_detection_flags_symlink_escape() {
+        let mut entry = entry("links/outside");
+        entry.is_symlink = true;
+        entry.entry_type = ArchiveEntryType::Symlink;
+        entry.link_target = Some("../../etc/passwd".to_owned());
+
+        let findings = detect_archive_hazards(&[entry], &test_limits());
+
+        assert_hazard(&findings, "symlink-escape", Severity::Critical);
+    }
+
+    #[test]
+    fn hazard_detection_flags_zip_bomb_ratio() {
+        let mut entry = entry("payload.bin");
+        entry.size = 10_000;
+        entry.compressed_size = Some(10);
+        let limits = ArchiveLimits {
+            max_compression_ratio: 10,
+            ..test_limits()
+        };
+
+        let findings = detect_archive_hazards(&[entry], &limits);
+
+        assert_hazard(&findings, "excessive-compression-ratio", Severity::Critical);
+    }
+
+    #[test]
+    fn hazard_detection_flags_setuid_bit() {
+        let mut entry = entry("bin/helper");
+        entry.permissions = Some(0o4755);
+
+        let findings = detect_archive_hazards(&[entry], &test_limits());
+
+        assert_hazard(&findings, "setuid-setgid-bits", Severity::High);
+    }
+
+    #[test]
+    fn hazard_detection_flags_encrypted_zip_entry() {
+        let mut entry = entry("secret.txt");
+        entry.is_encrypted = true;
+
+        let findings = detect_archive_hazards(&[entry], &test_limits());
+
+        assert_hazard(&findings, "encrypted-member", Severity::High);
+    }
+
+    #[test]
+    fn hazard_detection_allows_clean_archive_metadata() {
+        let mut first = entry("docs/readme.txt");
+        first.size = 12;
+        first.compressed_size = Some(10);
+        first.permissions = Some(0o644);
+        let mut second = entry("bin/tool");
+        second.size = 20;
+        second.compressed_size = Some(20);
+        second.permissions = Some(0o755);
+
+        let findings = detect_archive_hazards(&[first, second], &test_limits());
+
+        assert!(findings.is_empty());
+    }
+
     fn zip_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn Error>> {
         let cursor = Cursor::new(Vec::new());
         let mut writer = ZipWriter::new(cursor);
@@ -808,5 +1441,31 @@ mod tests {
             max_compression_ratio: 1_000,
             max_processing_time: Duration::from_secs(5),
         }
+    }
+
+    fn entry(name: &str) -> ArchiveEntry {
+        ArchiveEntry {
+            name: name.to_owned(),
+            size: 1,
+            compressed_size: Some(1),
+            is_dir: false,
+            is_symlink: false,
+            entry_type: ArchiveEntryType::File,
+            link_target: None,
+            permissions: Some(0o644),
+            is_encrypted: false,
+        }
+    }
+
+    fn assert_hazard(
+        findings: &[arbitraitor_model::finding::Finding],
+        tag: &str,
+        severity: Severity,
+    ) {
+        assert!(findings.iter().any(|finding| {
+            finding.category == FindingCategory::ArchiveHazard
+                && finding.severity == severity
+                && finding.tags.iter().any(|finding_tag| finding_tag == tag)
+        }));
     }
 }

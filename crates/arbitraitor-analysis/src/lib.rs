@@ -10,6 +10,9 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use arbitraitor_archive::{
+    ArchiveError, ArchiveLimits, detect_archive_hazards, open_archive_with_limits,
+};
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, ShellKind, classify};
 use arbitraitor_model::artifact::{ArtifactKind, ShellDialect, TarCompression};
 use arbitraitor_model::finding::{
@@ -21,6 +24,7 @@ use arbitraitor_shell::{ParserConfig, ShellParser, detect, detect_system_threats
 use sha2::{Digest, Sha256};
 
 const ARTIFACT_DETECTOR_ID: &str = "arbitraitor-analysis.artifact";
+const ARCHIVE_DETECTOR_ID: &str = "arbitraitor-analysis.archive-hazards";
 const SHELL_DETECTOR_ID: &str = "arbitraitor-analysis.shell";
 
 /// Detector trait implemented by analysis stages.
@@ -102,7 +106,11 @@ impl AnalysisCoordinator {
     /// Creates a coordinator with the default MVP detectors.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_detectors(vec![Box::new(ArtifactDetector), Box::new(ShellDetector)])
+        Self::with_detectors(vec![
+            Box::new(ArchiveHazardDetector),
+            Box::new(ArtifactDetector),
+            Box::new(ShellDetector),
+        ])
     }
 
     /// Creates a coordinator from explicit detectors sorted by detector id.
@@ -317,6 +325,47 @@ impl Detector for ArtifactDetector {
     }
 }
 
+/// Detector that lists archive members and emits archive hazard findings.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArchiveHazardDetector;
+
+impl Detector for ArchiveHazardDetector {
+    fn metadata(&self) -> DetectorMetadata {
+        DetectorMetadata {
+            id: ARCHIVE_DETECTOR_ID.to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            supported_artifact_kinds: archive_artifact_kinds(),
+            capabilities: vec![
+                "archive-list".to_owned(),
+                "archive-hazard-detection".to_owned(),
+            ],
+            is_local: true,
+            may_upload: false,
+            default_timeout_ms: 5_000,
+            is_deterministic: true,
+        }
+    }
+
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+        let limits = ArchiveLimits::default();
+        let mut reader = match open_archive_with_limits(
+            ctx.artifact_bytes,
+            ctx.classification.artifact_type,
+            limits.clone(),
+        ) {
+            Ok(reader) => reader,
+            Err(error) => return vec![archive_error_finding(ctx, &error)],
+        };
+        match reader.entries() {
+            Ok(entries) => rewrite_artifact_digest(
+                detect_archive_hazards(&entries, &limits),
+                &ctx.artifact_sha256,
+            ),
+            Err(error) => vec![archive_error_finding(ctx, &error)],
+        }
+    }
+}
+
 /// Detector that runs shell parsing, normalization, and shell detection rules.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShellDetector;
@@ -459,6 +508,52 @@ fn shell_error_finding(
             "incomplete-analysis".to_owned(),
         ],
     }
+}
+
+fn archive_error_finding(ctx: &AnalysisContext<'_>, error: &ArchiveError) -> Finding {
+    let (category, limit_tag) = match error {
+        ArchiveError::LimitExceeded { limit } => {
+            (FindingCategory::ResourceLimitEvent, Some(*limit))
+        }
+        _ => (FindingCategory::ParserError, None),
+    };
+    let mut tags = vec![
+        "archive-analysis".to_owned(),
+        "incomplete-analysis".to_owned(),
+    ];
+    if let Some(limit) = limit_tag {
+        tags.push(limit.to_owned());
+    }
+    Finding {
+        id: "archive.analysis-error".to_owned(),
+        detector: ARCHIVE_DETECTOR_ID.to_owned(),
+        category,
+        severity: Severity::High,
+        confidence: Confidence::Confirmed,
+        title: "Archive analysis failed".to_owned(),
+        description: "Archive contents could not be listed safely, so archive analysis coverage is incomplete.".to_owned(),
+        evidence: vec![Evidence {
+            kind: EvidenceKind::Other,
+            description: "safe archive diagnostic".to_owned(),
+            content: Some(error.to_string()),
+        }],
+        artifact_sha256: ctx.artifact_sha256.clone(),
+        location: None,
+        remediation: Some("Fail closed until archive contents can be listed and checked for hazards.".to_owned()),
+        references: Vec::new(),
+        tags,
+    }
+}
+
+fn archive_artifact_kinds() -> Vec<ArtifactKind> {
+    vec![
+        ArtifactKind::Zip,
+        ArtifactKind::Tar(TarCompression::None),
+        ArtifactKind::Gzip,
+        ArtifactKind::Bzip2,
+        ArtifactKind::Xz,
+        ArtifactKind::Zstd,
+    ]
 }
 
 fn shell_artifact_kinds() -> Vec<ArtifactKind> {
