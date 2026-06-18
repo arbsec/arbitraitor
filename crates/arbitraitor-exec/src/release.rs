@@ -1330,7 +1330,7 @@ mod tests {
             .split(|byte| *byte == 0)
             .filter(|name| !name.is_empty())
             .filter(|name| should_clear_linux_xattr(name))
-            .map(|name| name.to_vec())
+            .map(<[u8]>::to_vec)
             .collect())
     }
 

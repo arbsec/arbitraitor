@@ -25,6 +25,9 @@ use thiserror::Error;
 use tracing::debug;
 
 pub mod release;
+pub mod script;
+
+pub use script::{ExecutionResult, ScriptExecution};
 
 static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -104,6 +107,29 @@ pub enum ExecError {
     /// Root detection failed.
     #[error("failed to determine current uid")]
     RootDetection {
+        /// Source I/O error.
+        #[source]
+        source: io::Error,
+    },
+    /// The interpreter process could not be spawned.
+    #[error("failed to spawn interpreter process")]
+    Spawn {
+        /// Source I/O error from `Command::spawn`.
+        #[source]
+        source: io::Error,
+    },
+    /// The interpreter process exit status or captured output could not be collected.
+    #[error("failed to collect interpreter process output")]
+    Wait {
+        /// Source I/O error from `Child::wait_with_output`.
+        #[source]
+        source: io::Error,
+    },
+    /// Piping the script bytes to the interpreter's standard input failed.
+    #[error("script input I/O failure during {stage}")]
+    ScriptIo {
+        /// Operation stage identifier (e.g. `"write-script-stdin"`).
+        stage: &'static str,
         /// Source I/O error.
         #[source]
         source: io::Error,
