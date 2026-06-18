@@ -69,6 +69,7 @@ miette = "7.6"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+yara-x = { version = "1.17", default-features = false }
 
 # CLI
 clap = { version = "4.6", features = ["derive", "env"] }
