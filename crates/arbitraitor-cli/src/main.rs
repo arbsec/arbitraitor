@@ -12,6 +12,7 @@ use arbitraitor_analysis::{
 use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
 use arbitraitor_artifact::classify;
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
+use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
 use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
@@ -45,6 +46,7 @@ struct Cli {
 enum Command {
     Inspect(Box<InspectCommand>),
     Unpack(UnpackCommand),
+    Intel(IntelCommand),
 }
 
 #[derive(Args)]
@@ -75,6 +77,32 @@ struct UnpackCommand {
     archive: PathBuf,
     #[arg(long, value_name = "DIR")]
     output: PathBuf,
+}
+
+/// `arbitraitor intel` — manage local threat-intelligence feeds.
+#[derive(Args)]
+struct IntelCommand {
+    #[command(subcommand)]
+    subcommand: IntelSubcommand,
+}
+
+#[derive(Subcommand)]
+enum IntelSubcommand {
+    /// Fetch and ingest one or more feeds into the local intel store.
+    Update(UpdateCommand),
+}
+
+#[derive(Args)]
+struct UpdateCommand {
+    /// Ingest the `URLhaus` malicious-URL feed.
+    #[arg(long)]
+    urlhaus: bool,
+    /// Override the `URLhaus` feed URL (CSV or JSON).
+    #[arg(long, value_name = "URL")]
+    urlhaus_url: Option<String>,
+    /// Override the local intel store path.
+    #[arg(long, value_name = "PATH")]
+    intel_store: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -145,6 +173,9 @@ async fn main() -> Result<()> {
         Command::Unpack(command) => {
             unpack(&command.archive, &command.output)?;
         }
+        Command::Intel(command) => {
+            intel(command).await?;
+        }
     }
 
     Ok(())
@@ -180,6 +211,42 @@ fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
             file.sha256
         )
         .into_diagnostic()?;
+    }
+    Ok(())
+}
+
+async fn intel(command: IntelCommand) -> Result<()> {
+    let IntelSubcommand::Update(update) = command.subcommand;
+    if !update.urlhaus {
+        miette::bail!("no feed selected; pass --urlhaus to ingest the URLhaus feed");
+    }
+    let adapter = match update.urlhaus_url {
+        Some(url) => UrlhausAdapter::with_url(url),
+        None => UrlhausAdapter::new(),
+    };
+    let store_path = update
+        .intel_store
+        .unwrap_or_else(|| PathBuf::from(".arbitraitor/intel.json"));
+    let mut store = IntelStore::open(&store_path).into_diagnostic()?;
+    let report = ingest_feed(
+        &adapter,
+        &HttpFetcher::new(),
+        &mut store,
+        &FetchPolicy::default(),
+    )
+    .await
+    .into_diagnostic()?;
+    write_intel_report(&mut std::io::stderr().lock(), &report)
+}
+
+fn write_intel_report(writer: &mut impl std::io::Write, report: &IngestionReport) -> Result<()> {
+    writeln!(writer, "source: {}", report.source).into_diagnostic()?;
+    writeln!(writer, "added: {}", report.entries_added).into_diagnostic()?;
+    writeln!(writer, "updated: {}", report.entries_updated).into_diagnostic()?;
+    writeln!(writer, "expired: {}", report.entries_expired).into_diagnostic()?;
+    writeln!(writer, "errors: {}", report.errors.len()).into_diagnostic()?;
+    for error in &report.errors {
+        writeln!(writer, "- {error}").into_diagnostic()?;
     }
     Ok(())
 }
@@ -567,7 +634,7 @@ mod tests {
                     digest
                 );
             }
-            Command::Unpack(_) => return Err("parsed wrong command".into()),
+            Command::Unpack(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
         }
         Ok(())
     }
@@ -602,7 +669,7 @@ mod tests {
                     std::path::PathBuf::from("/tmp/rules")
                 );
             }
-            Command::Unpack(_) => return Err("parsed wrong command".into()),
+            Command::Unpack(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
         }
         Ok(())
     }
@@ -633,7 +700,7 @@ mod tests {
                 assert_eq!(command.cosign_identity, ["builder@example.test"]);
                 assert_eq!(command.cosign_issuer, ["https://issuer.example.test"]);
             }
-            Command::Unpack(_) => return Err("parsed wrong command".into()),
+            Command::Unpack(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
         }
         Ok(())
     }
@@ -647,7 +714,7 @@ mod tests {
                 assert_eq!(command.archive, PathBuf::from("archive.zip"));
                 assert_eq!(command.output, PathBuf::from("out"));
             }
-            Command::Inspect(_) => return Err("parsed wrong command".into()),
+            Command::Inspect(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
         }
         Ok(())
     }
@@ -678,6 +745,55 @@ mod tests {
         );
 
         assert!(signatures.is_err());
+    }
+
+    #[test]
+    fn intel_update_parses_urlhaus_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "intel",
+            "update",
+            "--urlhaus",
+            "--intel-store",
+            "/tmp/intel.json",
+        ])?;
+
+        match cli.command {
+            Command::Intel(super::IntelCommand {
+                subcommand: super::IntelSubcommand::Update(update),
+            }) => {
+                assert!(update.urlhaus);
+                assert_eq!(update.intel_store, Some(PathBuf::from("/tmp/intel.json")));
+                assert!(update.urlhaus_url.is_none());
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn intel_update_parses_custom_urlhaus_url() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "intel",
+            "update",
+            "--urlhaus",
+            "--urlhaus-url",
+            "https://mirror.example/urlhaus.csv",
+        ])?;
+
+        match cli.command {
+            Command::Intel(super::IntelCommand {
+                subcommand: super::IntelSubcommand::Update(update),
+            }) => {
+                assert_eq!(
+                    update.urlhaus_url.as_deref(),
+                    Some("https://mirror.example/urlhaus.csv")
+                );
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
     }
 
     fn zip_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
