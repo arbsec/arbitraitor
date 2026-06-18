@@ -5,12 +5,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fmt::Write as _;
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arbitraitor_analysis::{AnalysisContext, Detector};
+use arbitraitor_artifact::ArtifactType;
 use arbitraitor_model::artifact::ArtifactKind;
 use arbitraitor_model::finding::{
     DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
@@ -57,6 +60,9 @@ pub enum YaraError {
     /// Rule pack metadata is invalid.
     #[error("invalid YARA-X rule pack: {0}")]
     InvalidPack(String),
+    /// Rule pack authentication failed.
+    #[error("failed to authenticate YARA-X rule pack: {0}")]
+    Auth(String),
 }
 
 /// Origin of a YARA-X rule pack.
@@ -74,6 +80,21 @@ pub enum RuleSource {
     UserLocal,
 }
 
+/// Authentication status for a loaded YARA-X rule pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RulePackAuth {
+    /// Pack was verified with a configured trusted public key.
+    Signed {
+        /// Minisign key identifier as uppercase hexadecimal.
+        key_id: String,
+    },
+    /// Pack was accepted without a trusted signature.
+    Unsigned {
+        /// Safe reason explaining why unsigned rules were accepted.
+        reason: String,
+    },
+}
+
 /// Text-based YARA-X rule pack with receipt-ready version metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RulePack {
@@ -87,6 +108,8 @@ pub struct RulePack {
     pub rules_text: String,
     /// SHA-256 digest of [`Self::rules_text`].
     pub digest: Sha256Digest,
+    /// Authentication status for this pack.
+    pub auth: RulePackAuth,
 }
 
 impl RulePack {
@@ -99,6 +122,27 @@ impl RulePack {
         rules_text: impl Into<String>,
     ) -> Self {
         let rules_text = rules_text.into();
+        Self::with_auth(
+            source,
+            namespace,
+            version,
+            rules_text,
+            RulePackAuth::Unsigned {
+                reason: "no detached minisign signature verified".to_owned(),
+            },
+        )
+    }
+
+    /// Creates a rule pack with explicit authentication metadata.
+    #[must_use]
+    pub fn with_auth(
+        source: RuleSource,
+        namespace: impl Into<String>,
+        version: impl Into<String>,
+        rules_text: impl Into<String>,
+        auth: RulePackAuth,
+    ) -> Self {
+        let rules_text = rules_text.into();
         let digest = digest_rules(&rules_text);
         Self {
             source,
@@ -106,21 +150,75 @@ impl RulePack {
             version: version.into(),
             rules_text,
             digest,
+            auth,
         }
     }
 }
+
+/// Configured trusted minisign public key for external YARA-X rule packs.
+#[derive(Clone)]
+pub struct TrustedRulePackKey {
+    public_key: minisign::PublicKey,
+}
+
+impl TrustedRulePackKey {
+    /// Creates a trusted rule-pack verification key.
+    #[must_use]
+    pub const fn new(public_key: minisign::PublicKey) -> Self {
+        Self { public_key }
+    }
+
+    /// Returns the minisign key identifier as uppercase hexadecimal.
+    #[must_use]
+    pub fn key_id(&self) -> String {
+        minisign_key_id(&self.public_key)
+    }
+}
+
+impl std::fmt::Debug for TrustedRulePackKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TrustedRulePackKey")
+            .field("key_id", &self.key_id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for TrustedRulePackKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key_id() == other.key_id()
+    }
+}
+
+impl Eq for TrustedRulePackKey {}
 
 /// Ordered collection of YARA-X rule packs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RulePackManager {
     packs: Vec<RulePack>,
+    trusted_keys: Vec<TrustedRulePackKey>,
 }
 
 impl RulePackManager {
     /// Creates an empty rule pack manager.
     #[must_use]
     pub fn new() -> Self {
-        Self { packs: Vec::new() }
+        Self {
+            packs: Vec::new(),
+            trusted_keys: Vec::new(),
+        }
+    }
+
+    /// Adds a trusted minisign public key for external rule pack sidecars.
+    #[must_use]
+    pub fn with_trusted_key(mut self, public_key: minisign::PublicKey) -> Self {
+        self.trusted_keys.push(TrustedRulePackKey::new(public_key));
+        self
+    }
+
+    /// Adds a trusted minisign public key for external rule pack sidecars.
+    pub fn add_trusted_key(&mut self, public_key: minisign::PublicKey) {
+        self.trusted_keys.push(TrustedRulePackKey::new(public_key));
     }
 
     /// Creates a manager with built-in rule packs loaded first.
@@ -192,15 +290,60 @@ impl RulePackManager {
             let rules_text = fs::read_to_string(&path).map_err(|error| {
                 YaraError::Io(format!("failed to read {}: {error}", path.display()))
             })?;
-            let pack = RulePack::new(
+            let auth = self.authenticate_filesystem_pack(&path, rules_text.as_bytes())?;
+            let pack = RulePack::with_auth(
                 filesystem_source(source.clone(), &path),
                 namespace_from_path(&path)?,
                 version_from_rules(&rules_text),
                 rules_text,
+                auth,
             );
             self.add_pack(pack)?;
         }
         Ok(())
+    }
+
+    fn authenticate_filesystem_pack(
+        &self,
+        path: &Path,
+        rules_bytes: &[u8],
+    ) -> Result<RulePackAuth, YaraError> {
+        let signature_path = minisign_sidecar_path(path);
+        if !signature_path.exists() {
+            return Ok(RulePackAuth::Unsigned {
+                reason: "no .minisig sidecar found for user-local rule pack".to_owned(),
+            });
+        }
+
+        let signature = fs::read(&signature_path).map_err(|error| {
+            YaraError::Io(format!(
+                "failed to read {}: {error}",
+                signature_path.display()
+            ))
+        })?;
+        if self.trusted_keys.is_empty() {
+            tracing::warn!(
+                rule_pack = %path.display(),
+                signature = %signature_path.display(),
+                "YARA-X rule pack has a minisign sidecar but no trusted rule-pack key is configured; accepting as user-local unsigned rules"
+            );
+            return Ok(RulePackAuth::Unsigned {
+                reason: "minisign sidecar present but no trusted key configured".to_owned(),
+            });
+        }
+
+        for key in &self.trusted_keys {
+            if verify_rule_pack_signature(rules_bytes, &signature, &key.public_key).is_ok() {
+                return Ok(RulePackAuth::Signed {
+                    key_id: key.key_id(),
+                });
+            }
+        }
+
+        Err(YaraError::Auth(format!(
+            "minisign verification failed for {}",
+            path.display()
+        )))
     }
 
     /// Compiles all packs into a scanner, preserving pack priority order.
@@ -224,6 +367,12 @@ impl RulePackManager {
             })
             .collect()
     }
+
+    /// Returns loaded rule packs in compilation order.
+    #[must_use]
+    pub fn packs(&self) -> &[RulePack] {
+        &self.packs
+    }
 }
 
 /// Safe summary of a YARA-X rule match.
@@ -237,6 +386,17 @@ pub struct YaraMatch {
     pub metadata: Vec<(String, String)>,
     /// Rule tags.
     pub tags: Vec<String>,
+    /// Offset-only summaries for matched byte ranges.
+    pub matched_ranges: Vec<YaraMatchedRange>,
+}
+
+/// Safe location and length summary for a matched string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YaraMatchedRange {
+    /// Absolute offset in the scanned artifact.
+    pub offset: usize,
+    /// Matched byte length.
+    pub length: usize,
 }
 
 /// Compiles YARA-X rules and scans in-memory artifact bytes.
@@ -322,6 +482,7 @@ impl YaraScanner {
     pub fn rule_pack_versions(&self) -> Vec<DetectorVersion> {
         RulePackManager {
             packs: self.rule_packs.clone(),
+            trusted_keys: Vec::new(),
         }
         .pack_versions()
     }
@@ -349,6 +510,28 @@ impl YaraScanner {
     /// Returns [`YaraError::ResourceLimit`] for configured byte limits or
     /// YARA-X timeouts, and [`YaraError::Scan`] for other scanner errors.
     pub fn scan_result(&self, data: &[u8]) -> Result<Vec<YaraMatch>, YaraError> {
+        self.scan_result_inner(data, None)
+    }
+
+    /// Scans data using only rules selected for the supplied artifact type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`YaraError::ResourceLimit`] for configured byte limits or
+    /// YARA-X timeouts, and [`YaraError::Scan`] for other scanner errors.
+    pub fn scan_result_for_artifact(
+        &self,
+        data: &[u8],
+        artifact_type: ArtifactType,
+    ) -> Result<Vec<YaraMatch>, YaraError> {
+        self.scan_result_inner(data, Some(artifact_type))
+    }
+
+    fn scan_result_inner(
+        &self,
+        data: &[u8],
+        artifact_type: Option<ArtifactType>,
+    ) -> Result<Vec<YaraMatch>, YaraError> {
         if data.len() > self.max_scan_bytes {
             return Err(YaraError::ResourceLimit(format!(
                 "artifact size {} exceeds configured scan limit {}",
@@ -361,11 +544,14 @@ impl YaraScanner {
         scanner
             .set_timeout(self.timeout)
             .max_matches_per_pattern(self.max_matches_per_pattern)
-            .fast_scan(true);
+            .fast_scan(false);
 
         let results = scanner.scan(data).map_err(map_scan_error)?;
         Ok(results
             .matching_rules()
+            .filter(|rule| {
+                artifact_type.is_none_or(|artifact_type| rule_matches_artifact(rule, artifact_type))
+            })
             .map(|rule| rule_to_match(&rule))
             .collect())
     }
@@ -428,7 +614,11 @@ impl YaraDetector {
         self
     }
 
-    fn scan_result(&self, data: &[u8]) -> Result<Vec<YaraMatch>, YaraError> {
+    fn scan_result(
+        &self,
+        data: &[u8],
+        artifact_type: ArtifactType,
+    ) -> Result<Vec<YaraMatch>, YaraError> {
         if data.len() > self.max_scan_bytes {
             return Err(YaraError::ResourceLimit(format!(
                 "artifact size {} exceeds configured scan limit {}",
@@ -441,11 +631,12 @@ impl YaraDetector {
         scanner
             .set_timeout(self.timeout)
             .max_matches_per_pattern(self.max_matches_per_pattern)
-            .fast_scan(true);
+            .fast_scan(false);
 
         let results = scanner.scan(data).map_err(map_scan_error)?;
         Ok(results
             .matching_rules()
+            .filter(|rule| rule_matches_artifact(rule, artifact_type))
             .map(|rule| rule_to_match(&rule))
             .collect())
     }
@@ -466,7 +657,7 @@ impl Detector for YaraDetector {
     }
 
     fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
-        match self.scan_result(ctx.artifact_bytes) {
+        match self.scan_result(ctx.artifact_bytes, ctx.classification.artifact_type) {
             Ok(matches) => matches
                 .iter()
                 .map(|matched| yara_match_to_finding(matched, &ctx.artifact_sha256))
@@ -474,6 +665,34 @@ impl Detector for YaraDetector {
             Err(error) => vec![scanner_error_finding(&error, &ctx.artifact_sha256)],
         }
     }
+}
+
+/// Public handle describing a rule selected for an artifact class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleHandle {
+    /// Matched rule identifier.
+    pub identifier: String,
+    /// Rule namespace.
+    pub namespace: String,
+    /// Rule tags.
+    pub tags: Vec<String>,
+    /// Optional artifact class required by rule metadata.
+    pub artifact_class: Option<String>,
+}
+
+/// Returns handles for rules whose `artifact_class` metadata allows scanning an artifact type.
+#[must_use]
+pub fn select_rules_for_artifact(rules: &Rules, artifact_type: ArtifactType) -> Vec<RuleHandle> {
+    rules
+        .iter()
+        .filter(|rule| rule_matches_artifact(rule, artifact_type))
+        .map(|rule| RuleHandle {
+            identifier: rule.identifier().to_owned(),
+            namespace: rule.namespace().to_owned(),
+            tags: rule.tags().map(|tag| tag.identifier().to_owned()).collect(),
+            artifact_class: artifact_class_metadata(&rule).map(ToOwned::to_owned),
+        })
+        .collect()
 }
 
 /// Converts a YARA-X match summary into a detector finding.
@@ -580,6 +799,40 @@ fn namespace_from_path(path: &Path) -> Result<String, YaraError> {
     Ok(namespace)
 }
 
+fn minisign_sidecar_path(path: &Path) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".minisig");
+    PathBuf::from(sidecar)
+}
+
+fn verify_rule_pack_signature(
+    rules_bytes: &[u8],
+    signature: &[u8],
+    public_key: &minisign::PublicKey,
+) -> Result<(), YaraError> {
+    let signature_text = std::str::from_utf8(signature)
+        .map_err(|error| YaraError::Auth(format!("malformed minisign signature: {error}")))?;
+    let signature_box = minisign::SignatureBox::from_string(signature_text)
+        .map_err(|error| YaraError::Auth(format!("malformed minisign signature: {error}")))?;
+    minisign::verify(
+        public_key,
+        &signature_box,
+        Cursor::new(rules_bytes),
+        true,
+        false,
+        false,
+    )
+    .map_err(|error| YaraError::Auth(error.to_string()))
+}
+
+fn minisign_key_id(public_key: &minisign::PublicKey) -> String {
+    let mut output = String::with_capacity(public_key.keynum().len() * 2);
+    for byte in public_key.keynum() {
+        let _ = write!(output, "{byte:02X}");
+    }
+    output
+}
+
 fn map_scan_error(error: ScanError) -> YaraError {
     match error {
         ScanError::Timeout => YaraError::ResourceLimit("scan timeout elapsed".to_owned()),
@@ -596,6 +849,60 @@ fn rule_to_match(rule: &yara_x::Rule<'_, '_>) -> YaraMatch {
             .map(|(key, value)| (key.to_owned(), safe_meta_value(&value)))
             .collect(),
         tags: rule.tags().map(|tag| tag.identifier().to_owned()).collect(),
+        matched_ranges: matched_ranges(rule),
+    }
+}
+
+fn matched_ranges(rule: &yara_x::Rule<'_, '_>) -> Vec<YaraMatchedRange> {
+    rule.patterns()
+        .flat_map(|pattern| pattern.matches())
+        .map(|matched| {
+            let range = matched.range();
+            YaraMatchedRange {
+                offset: range.start,
+                length: range.end.saturating_sub(range.start),
+            }
+        })
+        .collect()
+}
+
+fn rule_matches_artifact(rule: &yara_x::Rule<'_, '_>, artifact_type: ArtifactType) -> bool {
+    artifact_class_metadata(rule)
+        .is_none_or(|artifact_class| artifact_class == artifact_class_label(artifact_type))
+}
+
+fn artifact_class_metadata<'rule>(rule: &yara_x::Rule<'_, 'rule>) -> Option<&'rule str> {
+    rule.metadata().find_map(|(key, value)| {
+        if key == "artifact_class"
+            && let MetaValue::String(value) = value
+        {
+            return Some(value);
+        }
+        None
+    })
+}
+
+fn artifact_class_label(artifact_type: ArtifactType) -> &'static str {
+    match artifact_type {
+        ArtifactType::ShellScript(_) => "shell_script",
+        ArtifactType::PowerShellScript => "powershell_script",
+        ArtifactType::PythonScript => "python_script",
+        ArtifactType::JavaScript => "javascript",
+        ArtifactType::PeExecutable => "pe_executable",
+        ArtifactType::ElfExecutable => "elf_executable",
+        ArtifactType::MachOExecutable => "macho_executable",
+        ArtifactType::ZipArchive => "zip_archive",
+        ArtifactType::TarArchive => "tar_archive",
+        ArtifactType::GzipCompressed => "gzip_compressed",
+        ArtifactType::XzCompressed => "xz_compressed",
+        ArtifactType::Bzip2Compressed => "bzip2_compressed",
+        ArtifactType::ZstdCompressed => "zstd_compressed",
+        ArtifactType::GenericText => "generic_text",
+        ArtifactType::GenericBinary => "generic_binary",
+        ArtifactType::HtmlDocument => "html_document",
+        ArtifactType::JsonDocument => "json_document",
+        ArtifactType::XmlDocument => "xml_document",
+        ArtifactType::Unknown => "unknown",
     }
 }
 
@@ -616,12 +923,24 @@ fn match_evidence(matched: &YaraMatch) -> String {
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let ranges = matched
+        .matched_ranges
+        .iter()
+        .map(|range| {
+            format!(
+                "matched at offset {}, length {}",
+                range.offset, range.length
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     bounded_text(&format!(
-        "rule={} namespace={} tags=[{}] metadata=[{}] raw_matches=omitted",
+        "rule={} namespace={} tags=[{}] metadata=[{}] matches=[{}] raw_matches=omitted",
         matched.rule_identifier,
         matched.namespace,
         matched.tags.join(","),
-        metadata
+        metadata,
+        ranges
     ))
 }
 
@@ -642,7 +961,8 @@ fn scanner_error_finding(error: &YaraError, artifact_sha256: &Sha256Digest) -> F
         YaraError::Compile(_)
         | YaraError::Scan(_)
         | YaraError::Io(_)
-        | YaraError::InvalidPack(_) => (FindingCategory::ParserError, "YARA-X scanner failed"),
+        | YaraError::InvalidPack(_)
+        | YaraError::Auth(_) => (FindingCategory::ParserError, "YARA-X scanner failed"),
     };
 
     Finding {
@@ -702,13 +1022,18 @@ fn supported_artifact_kinds() -> Vec<ArtifactKind> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use std::time::Duration;
 
     use arbitraitor_analysis::AnalysisCoordinator;
+    use arbitraitor_artifact::ArtifactType;
     use arbitraitor_model::finding::FindingCategory;
 
-    use super::{RulePack, RulePackManager, RuleSource, YaraDetector, YaraError, YaraScanner};
+    use super::{
+        RulePack, RulePackAuth, RulePackManager, RuleSource, YaraDetector, YaraError, YaraScanner,
+        minisign_key_id, minisign_sidecar_path, select_rules_for_artifact,
+    };
 
     const TEST_RULE: &str = r#"
 rule Arbitraitor_Test_Malware : malware unit_test
@@ -719,6 +1044,24 @@ rule Arbitraitor_Test_Malware : malware unit_test
     $marker = "arbitraitor-malware-marker" ascii
   condition:
     $marker
+}
+"#;
+
+    const SHELL_ONLY_RULE: &str = r#"
+rule Shell_Only
+{
+  meta:
+    artifact_class = "shell_script"
+  condition:
+    true
+}
+"#;
+
+    const UNTAGGED_RULE: &str = r#"
+rule Untagged_All_Artifacts
+{
+  condition:
+    true
 }
 "#;
 
@@ -738,6 +1081,11 @@ rule Arbitraitor_Test_Malware : malware unit_test
                 .content
                 .as_deref()
                 .is_none_or(|content| !content.contains("arbitraitor-malware-marker"))
+        }));
+        assert!(finding.evidence.iter().any(|evidence| {
+            evidence.content.as_deref().is_some_and(|content| {
+                content.contains("matched at offset") && content.contains("length")
+            })
         }));
         Ok(())
     }
@@ -805,6 +1153,101 @@ rule Arbitraitor_Test_Malware : malware unit_test
 
         assert_eq!(scanner.scan(b"arbitraitor-malware-marker").len(), 1);
         fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn signed_pack_with_valid_signature_loads_as_signed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = test_dir("signed-valid-rules")?;
+        let rule_path = dir.join("signed.yar");
+        fs::write(&rule_path, TEST_RULE)?;
+        let key = minisign::KeyPair::generate_unencrypted_keypair()?;
+        write_minisign_sidecar(&rule_path, TEST_RULE.as_bytes(), &key)?;
+        let mut manager = RulePackManager::new().with_trusted_key(key.pk.clone());
+
+        manager.load_directory(&dir, RuleSource::FileSystem(dir.clone()))?;
+
+        assert_eq!(manager.packs().len(), 1);
+        assert_eq!(
+            manager.packs()[0].auth,
+            RulePackAuth::Signed {
+                key_id: minisign_key_id(&key.pk)
+            }
+        );
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn signed_pack_with_invalid_signature_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = test_dir("signed-invalid-rules")?;
+        let rule_path = dir.join("signed.yar");
+        fs::write(&rule_path, TEST_RULE)?;
+        let signing_key = minisign::KeyPair::generate_unencrypted_keypair()?;
+        let trusted_key = minisign::KeyPair::generate_unencrypted_keypair()?;
+        write_minisign_sidecar(&rule_path, TEST_RULE.as_bytes(), &signing_key)?;
+        let mut manager = RulePackManager::new().with_trusted_key(trusted_key.pk.clone());
+
+        let error = manager.load_directory(&dir, RuleSource::FileSystem(dir.clone()));
+
+        assert!(matches!(error, Err(YaraError::Auth(_))));
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_pack_loads_as_user_local_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = test_dir("unsigned-rules")?;
+        fs::write(dir.join("external.yar"), TEST_RULE)?;
+        let mut manager = RulePackManager::new();
+
+        manager.load_directory(&dir, RuleSource::FileSystem(dir.clone()))?;
+
+        assert_eq!(manager.packs().len(), 1);
+        assert!(matches!(
+            &manager.packs()[0].auth,
+            RulePackAuth::Unsigned { reason } if reason.contains("user-local")
+        ));
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn shell_script_rule_does_not_match_pe_artifact() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = YaraDetector::from_rules(SHELL_ONLY_RULE)?;
+        let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(detector)]);
+
+        let result = coordinator.analyze(b"MZ\x90\0pe-like bytes");
+
+        assert!(result.findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn untagged_rule_scans_all_artifact_types() -> Result<(), Box<dyn std::error::Error>> {
+        let scanner = YaraScanner::empty()?;
+        let mut scanner = scanner;
+        scanner.add_rules(UNTAGGED_RULE)?;
+
+        let matches = scanner
+            .scan_result_for_artifact(b"MZ\x90\0pe-like bytes", ArtifactType::PeExecutable)?;
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_identifier, "Untagged_All_Artifacts");
+        Ok(())
+    }
+
+    #[test]
+    fn rule_selection_returns_only_applicable_handles() -> Result<(), Box<dyn std::error::Error>> {
+        let mut scanner = YaraScanner::empty()?;
+        scanner.add_rules(&format!("{SHELL_ONLY_RULE}\n{UNTAGGED_RULE}"))?;
+        let rules = scanner.rules();
+
+        let selected = select_rules_for_artifact(&rules, ArtifactType::PeExecutable);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].identifier, "Untagged_All_Artifacts");
         Ok(())
     }
 
@@ -882,5 +1325,21 @@ rule Duplicate_Rule
         }
         fs::create_dir_all(&dir)?;
         Ok(dir)
+    }
+
+    fn write_minisign_sidecar(
+        rule_path: &std::path::Path,
+        rules_bytes: &[u8],
+        key: &minisign::KeyPair,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let signature = minisign::sign(
+            Some(&key.pk),
+            &key.sk,
+            Cursor::new(rules_bytes),
+            Some("arbitraitor YARA-X rule pack"),
+            Some("signature from arbitraitor rule-pack key"),
+        )?;
+        fs::write(minisign_sidecar_path(rule_path), signature.to_bytes())?;
+        Ok(())
     }
 }
