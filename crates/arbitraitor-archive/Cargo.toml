@@ -16,6 +16,7 @@ arbitraitor-artifact = { workspace = true }
 arbitraitor-model = { workspace = true }
 bzip2 = { workspace = true }
 flate2 = { workspace = true }
+sha2 = { workspace = true }
 tar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

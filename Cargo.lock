@@ -140,6 +140,7 @@ dependencies = [
  "arbitraitor-model",
  "bzip2 0.4.4",
  "flate2",
+ "sha2 0.11.0",
  "tar",
  "thiserror 2.0.18",
  "tokio",
@@ -173,6 +174,8 @@ name = "arbitraitor-cli"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-analysis",
+ "arbitraitor-archive",
+ "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-fetch",
  "arbitraitor-model",
@@ -187,6 +190,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
