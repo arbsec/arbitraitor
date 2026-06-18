@@ -13,7 +13,7 @@ use arbitraitor_exec::{
 };
 use arbitraitor_model::ids::{ArtifactId, OperationId, Sha256Digest};
 use arbitraitor_model::operation::{
-    CapabilityGrant, GrantedCapabilities, OperationPlan, OperationType,
+    CapabilityGrant, GrantedCapabilities, OperationPlan, OperationState, OperationType,
 };
 
 fn plan() -> OperationPlan {
@@ -27,6 +27,10 @@ fn plan() -> OperationPlan {
         network_allowed: false,
         sandbox_enabled: true,
         expiry: None,
+        state: OperationState::Pending,
+        plugin_identity: None,
+        argv_digest: None,
+        policy_digest: None,
     }
 }
 

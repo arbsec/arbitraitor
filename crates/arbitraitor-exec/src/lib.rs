@@ -1049,7 +1049,7 @@ fn running_as_root() -> Result<bool, ExecError> {
 mod tests {
     use super::*;
     use arbitraitor_model::ids::{ArtifactId, OperationId, Sha256Digest};
-    use arbitraitor_model::operation::{CapabilityGrant, OperationType};
+    use arbitraitor_model::operation::{CapabilityGrant, OperationState, OperationType};
 
     fn plan() -> OperationPlan {
         OperationPlan {
@@ -1062,6 +1062,10 @@ mod tests {
             network_allowed: false,
             sandbox_enabled: true,
             expiry: None,
+            state: OperationState::Pending,
+            plugin_identity: None,
+            argv_digest: None,
+            policy_digest: None,
         }
     }
 
