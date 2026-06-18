@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 arbitraitor-model = { workspace = true }
-minisign = "0.9.1" # Receipt signing API; MIT, pure Rust, no network behavior, no native build.
+minisign = { workspace = true } # Receipt signing API; MIT, pure Rust, no network behavior, no native build.
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_json_canonicalizer = "0.3.2" # RFC 8785 JCS canonical receipt bytes for signatures.

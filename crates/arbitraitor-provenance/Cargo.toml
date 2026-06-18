@@ -13,4 +13,5 @@ workspace = true
 
 [dependencies]
 arbitraitor-model = { workspace = true }
+minisign = { workspace = true }
 thiserror = { workspace = true }

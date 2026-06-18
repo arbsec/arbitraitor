@@ -9,7 +9,13 @@ use arbitraitor_analysis::{
     AnalysisCoordinator, ArtifactDetector, RetrievalInfo as AnalysisRetrievalInfo, ShellDetector,
 };
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
+use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::verdict::{Confidence, Severity};
+use arbitraitor_provenance::{
+    SignatureSystem, SignatureVerification, parse_minisign_public_key, verify_cosign,
+    verify_minisign,
+};
 use arbitraitor_receipt::{
     DetectorVersion, FindingSummary, ReceiptBuilder, ReceiptTimestamps,
     RetrievalInfo as ReceiptRetrievalInfo, VerdictInfo,
@@ -42,9 +48,42 @@ enum Command {
         cas_dir: Option<PathBuf>,
         #[arg(long, value_name = "HEX")]
         sha256: Option<Sha256Digest>,
+<<<<<<< HEAD
         #[arg(long, value_name = "DIR")]
         rules: Option<PathBuf>,
+||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
+=======
+        #[arg(long, value_name = "PATH")]
+        minisign_sig: Vec<PathBuf>,
+        #[arg(long, value_name = "KEY")]
+        minisign_key: Vec<String>,
+        #[arg(long, value_name = "PATH")]
+        cosign_bundle: Vec<PathBuf>,
+        #[arg(long, value_name = "IDENTITY")]
+        cosign_identity: Vec<String>,
+        #[arg(long, value_name = "ISSUER")]
+        cosign_issuer: Vec<String>,
+>>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
     },
+}
+
+#[derive(Debug, Default)]
+struct SignatureInputs {
+    minisign: Vec<MinisignInput>,
+    cosign: Vec<CosignInput>,
+}
+
+#[derive(Debug)]
+struct MinisignInput {
+    signature_path: PathBuf,
+    public_key: String,
+}
+
+#[derive(Debug)]
+struct CosignInput {
+    bundle_path: PathBuf,
+    identity: String,
+    issuer: String,
 }
 
 #[tokio::main]
@@ -68,6 +107,7 @@ async fn main() -> Result<()> {
             receipt,
             cas_dir,
             sha256,
+<<<<<<< HEAD
             rules,
         } => {
             inspect(
@@ -76,6 +116,29 @@ async fn main() -> Result<()> {
                 cas_dir.as_deref(),
                 sha256,
                 rules.as_deref(),
+||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
+        } => inspect(&url, receipt.as_deref(), cas_dir.as_deref(), sha256).await?,
+=======
+            minisign_sig,
+            minisign_key,
+            cosign_bundle,
+            cosign_identity,
+            cosign_issuer,
+        } => {
+            let signatures = signature_inputs(
+                minisign_sig,
+                minisign_key,
+                cosign_bundle,
+                cosign_identity,
+                cosign_issuer,
+            )?;
+            inspect(
+                &url,
+                receipt.as_deref(),
+                cas_dir.as_deref(),
+                sha256,
+                signatures,
+>>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
             )
             .await?;
         }
@@ -89,7 +152,12 @@ async fn inspect(
     receipt_path: Option<&Path>,
     cas_dir: Option<&Path>,
     expected_sha256: Option<Sha256Digest>,
+<<<<<<< HEAD
     rules_dir: Option<&Path>,
+||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
+=======
+    signatures: SignatureInputs,
+>>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
 ) -> Result<()> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let mut request = FetchRequest::url(fetch_url, FetchPolicy::default());
@@ -124,6 +192,8 @@ async fn inspect(
         );
     }
 
+    let signature_verifications = verify_signatures(&bytes, &signatures)?;
+
     let analysis_retrieval = analysis_retrieval_info(url, &fetch_receipt);
     let (coordinator, rule_pack_versions) = analysis_coordinator(rules_dir)?;
     let result = coordinator.analyze_with_retrieval(&bytes, Some(analysis_retrieval));
@@ -132,6 +202,7 @@ async fn inspect(
         &result,
         &artifact_sha256,
         &cas_root,
+        &signature_verifications,
     )?;
 
     if let Some(path) = receipt_path {
@@ -141,7 +212,13 @@ async fn inspect(
             &result,
             &artifact_sha256,
             bytes.len(),
+<<<<<<< HEAD
             &rule_pack_versions,
+||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
+        let receipt = build_receipt(url, &fetch_receipt, &result, &artifact_sha256, bytes.len())?;
+=======
+            &signature_verifications,
+>>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
         )?;
         let json = serde_json::to_vec_pretty(&receipt).into_diagnostic()?;
         std::fs::write(path, json).into_diagnostic()?;
@@ -200,6 +277,7 @@ fn write_report(
     result: &arbitraitor_analysis::AnalysisResult,
     digest: &Sha256Digest,
     cas_root: &Path,
+    signature_verifications: &[SignatureVerification],
 ) -> Result<()> {
     writeln!(writer, "artifact_sha256: {digest}").into_diagnostic()?;
     writeln!(writer, "cas_dir: {}", cas_root.display()).into_diagnostic()?;
@@ -210,6 +288,21 @@ fn write_report(
     )
     .into_diagnostic()?;
     writeln!(writer, "verdict: {:?}", result.verdict).into_diagnostic()?;
+    writeln!(
+        writer,
+        "signatures_verified: {}",
+        signature_verifications.len()
+    )
+    .into_diagnostic()?;
+    for verification in signature_verifications {
+        writeln!(
+            writer,
+            "- signature: {} identity={}",
+            verification.system.as_str(),
+            verification.identity.as_deref().unwrap_or("<none>")
+        )
+        .into_diagnostic()?;
+    }
     writeln!(writer, "findings: {}", result.findings.len()).into_diagnostic()?;
     for finding in &result.findings {
         writeln!(
@@ -228,7 +321,12 @@ fn build_receipt(
     result: &arbitraitor_analysis::AnalysisResult,
     artifact_sha256: &Sha256Digest,
     artifact_size: usize,
+<<<<<<< HEAD
     rule_pack_versions: &[DetectorVersion],
+||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
+=======
+    signature_verifications: &[SignatureVerification],
+>>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
 ) -> Result<arbitraitor_receipt::Receipt> {
     let artifact_size = u64::try_from(artifact_size).into_diagnostic()?;
     let now = timestamp();
@@ -248,7 +346,13 @@ fn build_receipt(
     )
     .artifact_type(format!("{:?}", result.classification.artifact_type))
     .retrieval(receipt_retrieval_info(requested_url, fetch_receipt))
-    .findings(result.findings.iter().map(FindingSummary::from));
+    .findings(result.findings.iter().map(FindingSummary::from))
+    .findings(
+        signature_verifications
+            .iter()
+            .enumerate()
+            .map(|(index, verification)| signature_finding(index, verification)),
+    );
 
     for detector_result in &result.detector_results {
         builder = builder.detector_version(DetectorVersion {
@@ -261,6 +365,95 @@ fn build_receipt(
     }
 
     Ok(builder.build())
+}
+
+fn signature_inputs(
+    minisign_sig: Vec<PathBuf>,
+    minisign_key: Vec<String>,
+    cosign_bundle: Vec<PathBuf>,
+    cosign_identity: Vec<String>,
+    cosign_issuer: Vec<String>,
+) -> Result<SignatureInputs> {
+    if minisign_sig.len() != minisign_key.len() {
+        miette::bail!("each --minisign-sig requires exactly one --minisign-key");
+    }
+    if cosign_bundle.len() != cosign_identity.len() || cosign_bundle.len() != cosign_issuer.len() {
+        miette::bail!(
+            "each --cosign-bundle requires exactly one --cosign-identity and --cosign-issuer"
+        );
+    }
+
+    Ok(SignatureInputs {
+        minisign: minisign_sig
+            .into_iter()
+            .zip(minisign_key)
+            .map(|(signature_path, public_key)| MinisignInput {
+                signature_path,
+                public_key,
+            })
+            .collect(),
+        cosign: cosign_bundle
+            .into_iter()
+            .zip(cosign_identity)
+            .zip(cosign_issuer)
+            .map(|((bundle_path, identity), issuer)| CosignInput {
+                bundle_path,
+                identity,
+                issuer,
+            })
+            .collect(),
+    })
+}
+
+fn verify_signatures(
+    artifact_bytes: &[u8],
+    signatures: &SignatureInputs,
+) -> Result<Vec<SignatureVerification>> {
+    let mut verifications = Vec::with_capacity(signatures.minisign.len() + signatures.cosign.len());
+    for minisign_input in &signatures.minisign {
+        let signature = std::fs::read(&minisign_input.signature_path).into_diagnostic()?;
+        let public_key = parse_minisign_public_key(&minisign_input.public_key).into_diagnostic()?;
+        verifications
+            .push(verify_minisign(artifact_bytes, &signature, &public_key).into_diagnostic()?);
+    }
+    for cosign_input in &signatures.cosign {
+        verifications.push(
+            verify_cosign(
+                artifact_bytes,
+                &cosign_input.bundle_path,
+                &cosign_input.identity,
+                &cosign_input.issuer,
+            )
+            .into_diagnostic()?,
+        );
+    }
+    Ok(verifications)
+}
+
+fn signature_finding(index: usize, verification: &SignatureVerification) -> FindingSummary {
+    FindingSummary {
+        id: format!(
+            "provenance.signature.{}.{}",
+            verification.system.as_str(),
+            index + 1
+        ),
+        category: FindingCategory::Provenance,
+        severity: Severity::Informational,
+        confidence: Confidence::Confirmed,
+        title: signature_title(verification),
+        location: None,
+    }
+}
+
+fn signature_title(verification: &SignatureVerification) -> String {
+    let system = match verification.system {
+        SignatureSystem::Minisign => "minisign",
+        SignatureSystem::Cosign => "cosign",
+    };
+    match verification.identity.as_deref() {
+        Some(identity) => format!("{system} signature verified for {identity}"),
+        None => format!("{system} signature verified"),
+    }
 }
 
 fn receipt_retrieval_info(
@@ -341,6 +534,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Error>> {
         let cli = Cli::try_parse_from([
             "arbitraitor",
@@ -356,5 +550,52 @@ mod tests {
             std::path::PathBuf::from("/tmp/rules")
         );
         Ok(())
+||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
+=======
+    fn inspect_accepts_signature_flags() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--minisign-sig",
+            "artifact.minisig",
+            "--minisign-key",
+            "RWQexamplekeymaterial",
+            "--cosign-bundle",
+            "artifact.bundle",
+            "--cosign-identity",
+            "builder@example.test",
+            "--cosign-issuer",
+            "https://issuer.example.test",
+        ])?;
+
+        let Command::Inspect {
+            minisign_sig,
+            minisign_key,
+            cosign_bundle,
+            cosign_identity,
+            cosign_issuer,
+            ..
+        } = cli.command;
+        assert_eq!(minisign_sig.len(), 1);
+        assert_eq!(minisign_key, ["RWQexamplekeymaterial"]);
+        assert_eq!(cosign_bundle.len(), 1);
+        assert_eq!(cosign_identity, ["builder@example.test"]);
+        assert_eq!(cosign_issuer, ["https://issuer.example.test"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unpaired_signature_flags() {
+        let signatures = super::signature_inputs(
+            vec!["artifact.minisig".into()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(signatures.is_err());
+>>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
     }
 }
