@@ -6,6 +6,9 @@
 #![warn(missing_docs)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, ShellKind, classify};
 use arbitraitor_model::artifact::{ArtifactKind, ShellDialect, TarCompression};
@@ -92,7 +95,7 @@ pub enum DetectorStatus {
 
 /// Sequential deterministic detector coordinator.
 pub struct AnalysisCoordinator {
-    detectors: Vec<Box<dyn Detector>>,
+    detectors: Vec<Arc<dyn Detector>>,
 }
 
 impl AnalysisCoordinator {
@@ -106,6 +109,7 @@ impl AnalysisCoordinator {
     #[must_use]
     pub fn with_detectors(mut detectors: Vec<Box<dyn Detector>>) -> Self {
         detectors.sort_by(|left, right| left.metadata().id.cmp(&right.metadata().id));
+        let detectors = detectors.into_iter().map(Arc::from).collect();
         Self { detectors }
     }
 
@@ -124,8 +128,8 @@ impl AnalysisCoordinator {
     ) -> AnalysisResult {
         let classification = classify(artifact_bytes);
         let artifact_sha256 = digest(artifact_bytes);
-        let ctx = AnalysisContext {
-            artifact_bytes,
+        let ctx = OwnedAnalysisContext {
+            artifact_bytes: artifact_bytes.to_vec(),
             classification: classification.clone(),
             retrieval,
             artifact_sha256,
@@ -140,7 +144,7 @@ impl AnalysisCoordinator {
                 continue;
             }
 
-            let execution = run_detector(detector.as_ref(), &ctx, metadata);
+            let execution = run_detector(Arc::clone(detector), ctx.clone(), metadata);
             findings.extend(execution.findings);
             detector_results.push(execution.result);
         }
@@ -166,18 +170,45 @@ struct DetectorExecution {
     result: DetectorResult,
 }
 
+#[derive(Clone, Debug)]
+struct OwnedAnalysisContext {
+    artifact_bytes: Vec<u8>,
+    classification: ClassificationResult,
+    retrieval: Option<RetrievalInfo>,
+    artifact_sha256: Sha256Digest,
+}
+
+impl OwnedAnalysisContext {
+    fn as_context(&self) -> AnalysisContext<'_> {
+        AnalysisContext {
+            artifact_bytes: &self.artifact_bytes,
+            classification: self.classification.clone(),
+            retrieval: self.retrieval.clone(),
+            artifact_sha256: self.artifact_sha256.clone(),
+        }
+    }
+}
+
 fn run_detector(
-    detector: &dyn Detector,
-    ctx: &AnalysisContext<'_>,
+    detector: Arc<dyn Detector>,
+    ctx: OwnedAnalysisContext,
     metadata: DetectorMetadata,
 ) -> DetectorExecution {
-    match catch_unwind(AssertUnwindSafe(|| detector.analyze(ctx))) {
-        Ok(raw_findings) => {
+    let timeout = Duration::from_millis(metadata.default_timeout_ms);
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| detector.analyze(&ctx.as_context())));
+        let _ = tx.send((result, ctx.artifact_sha256));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok((Ok(raw_findings), artifact_sha256)) => {
             // Enforce finding digest integrity centrally: every finding must
             // reference the artifact SHA-256 from the analysis context,
             // regardless of what the detector set. This prevents buggy or
             // compromised detectors from attributing findings to wrong artifacts.
-            let findings = rewrite_artifact_digest(raw_findings, &ctx.artifact_sha256);
+            let findings = rewrite_artifact_digest(raw_findings, &artifact_sha256);
             DetectorExecution {
                 result: DetectorResult {
                     metadata,
@@ -187,11 +218,27 @@ fn run_detector(
                 findings,
             }
         }
-        Err(payload) => DetectorExecution {
+        Ok((Err(payload), _artifact_sha256)) => DetectorExecution {
             findings: Vec::new(),
             result: DetectorResult {
                 metadata,
                 status: DetectorStatus::Error(panic_message(payload.as_ref())),
+                finding_count: 0,
+            },
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => DetectorExecution {
+            findings: Vec::new(),
+            result: DetectorResult {
+                metadata,
+                status: DetectorStatus::Timeout,
+                finding_count: 0,
+            },
+        },
+        Err(mpsc::RecvTimeoutError::Disconnected) => DetectorExecution {
+            findings: Vec::new(),
+            result: DetectorResult {
+                metadata,
+                status: DetectorStatus::Error("detector thread disconnected".to_owned()),
                 finding_count: 0,
             },
         },
@@ -464,6 +511,8 @@ mod tests {
     use arbitraitor_model::artifact::ArtifactKind;
     use arbitraitor_model::finding::{DetectorMetadata, Evidence, Finding, FindingCategory};
     use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn default_pipeline_detects_shell_download_to_execute() {
@@ -526,6 +575,74 @@ mod tests {
             result.detector_results[0].status,
             DetectorStatus::Error(_)
         ));
+    }
+
+    #[test]
+    fn detector_completing_within_timeout_is_ok() {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(SlowDetector {
+            id: "prompt.detector",
+            sleep_ms: 1,
+            timeout_ms: 100,
+        })]);
+
+        let result = coordinator.analyze(b"not empty");
+
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.detector_results.len(), 1);
+        assert!(matches!(
+            result.detector_results[0].status,
+            DetectorStatus::Ok
+        ));
+    }
+
+    #[test]
+    fn slow_detector_timeout_is_recorded_and_verdict_is_incomplete() {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(SlowDetector {
+            id: "timeout.detector",
+            sleep_ms: 100,
+            timeout_ms: 5,
+        })]);
+
+        let result = coordinator.analyze(b"not empty");
+
+        assert!(result.findings.is_empty());
+        assert_eq!(result.verdict, Verdict::Incomplete);
+        assert_eq!(result.detector_results.len(), 1);
+        assert!(matches!(
+            result.detector_results[0].status,
+            DetectorStatus::Timeout
+        ));
+    }
+
+    #[test]
+    fn timed_out_detector_does_not_prevent_others_from_running() {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![
+            Box::new(SlowDetector {
+                id: "a.timeout.detector",
+                sleep_ms: 100,
+                timeout_ms: 5,
+            }),
+            Box::new(RecordingDetector::new("b.survivor.detector")),
+        ]);
+
+        let result = coordinator.analyze(b"not empty");
+
+        assert_eq!(result.detector_results.len(), 2);
+        assert!(matches!(
+            result.detector_results[0].status,
+            DetectorStatus::Timeout
+        ));
+        assert!(matches!(
+            result.detector_results[1].status,
+            DetectorStatus::Ok
+        ));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.detector == "b.survivor.detector")
+        );
+        assert_eq!(result.verdict, Verdict::Incomplete);
     }
 
     #[test]
@@ -631,6 +748,25 @@ mod tests {
         fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
             assert!(ctx.artifact_bytes.is_empty(), "forced detector failure");
             Vec::new()
+        }
+    }
+
+    struct SlowDetector {
+        id: &'static str,
+        sleep_ms: u64,
+        timeout_ms: u64,
+    }
+
+    impl Detector for SlowDetector {
+        fn metadata(&self) -> DetectorMetadata {
+            let mut metadata = test_metadata(self.id);
+            metadata.default_timeout_ms = self.timeout_ms;
+            metadata
+        }
+
+        fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+            thread::sleep(Duration::from_millis(self.sleep_ms));
+            vec![test_finding(self.id, ctx, "slow detector completed")]
         }
     }
 
