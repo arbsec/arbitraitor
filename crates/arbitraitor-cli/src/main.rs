@@ -48,11 +48,8 @@ enum Command {
         cas_dir: Option<PathBuf>,
         #[arg(long, value_name = "HEX")]
         sha256: Option<Sha256Digest>,
-<<<<<<< HEAD
         #[arg(long, value_name = "DIR")]
         rules: Option<PathBuf>,
-||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
-=======
         #[arg(long, value_name = "PATH")]
         minisign_sig: Vec<PathBuf>,
         #[arg(long, value_name = "KEY")]
@@ -63,7 +60,6 @@ enum Command {
         cosign_identity: Vec<String>,
         #[arg(long, value_name = "ISSUER")]
         cosign_issuer: Vec<String>,
->>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
     },
 }
 
@@ -107,18 +103,7 @@ async fn main() -> Result<()> {
             receipt,
             cas_dir,
             sha256,
-<<<<<<< HEAD
             rules,
-        } => {
-            inspect(
-                &url,
-                receipt.as_deref(),
-                cas_dir.as_deref(),
-                sha256,
-                rules.as_deref(),
-||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
-        } => inspect(&url, receipt.as_deref(), cas_dir.as_deref(), sha256).await?,
-=======
             minisign_sig,
             minisign_key,
             cosign_bundle,
@@ -137,8 +122,8 @@ async fn main() -> Result<()> {
                 receipt.as_deref(),
                 cas_dir.as_deref(),
                 sha256,
+                rules.as_deref(),
                 signatures,
->>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
             )
             .await?;
         }
@@ -152,12 +137,8 @@ async fn inspect(
     receipt_path: Option<&Path>,
     cas_dir: Option<&Path>,
     expected_sha256: Option<Sha256Digest>,
-<<<<<<< HEAD
     rules_dir: Option<&Path>,
-||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
-=======
     signatures: SignatureInputs,
->>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
 ) -> Result<()> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let mut request = FetchRequest::url(fetch_url, FetchPolicy::default());
@@ -212,13 +193,8 @@ async fn inspect(
             &result,
             &artifact_sha256,
             bytes.len(),
-<<<<<<< HEAD
             &rule_pack_versions,
-||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
-        let receipt = build_receipt(url, &fetch_receipt, &result, &artifact_sha256, bytes.len())?;
-=======
             &signature_verifications,
->>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
         )?;
         let json = serde_json::to_vec_pretty(&receipt).into_diagnostic()?;
         std::fs::write(path, json).into_diagnostic()?;
@@ -321,12 +297,8 @@ fn build_receipt(
     result: &arbitraitor_analysis::AnalysisResult,
     artifact_sha256: &Sha256Digest,
     artifact_size: usize,
-<<<<<<< HEAD
     rule_pack_versions: &[DetectorVersion],
-||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
-=======
     signature_verifications: &[SignatureVerification],
->>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
 ) -> Result<arbitraitor_receipt::Receipt> {
     let artifact_size = u64::try_from(artifact_size).into_diagnostic()?;
     let now = timestamp();
@@ -534,7 +506,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Error>> {
         let cli = Cli::try_parse_from([
             "arbitraitor",
@@ -550,8 +521,9 @@ mod tests {
             std::path::PathBuf::from("/tmp/rules")
         );
         Ok(())
-||||||| parent of 6818d20 (feat(provenance): minisign and cosign signature verification)
-=======
+    }
+
+    #[test]
     fn inspect_accepts_signature_flags() -> Result<(), Box<dyn std::error::Error>> {
         let cli = Cli::try_parse_from([
             "arbitraitor",
@@ -596,6 +568,5 @@ mod tests {
         );
 
         assert!(signatures.is_err());
->>>>>>> 6818d20 (feat(provenance): minisign and cosign signature verification)
     }
 }
