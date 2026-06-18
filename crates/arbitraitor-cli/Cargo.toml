@@ -22,6 +22,7 @@ arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-receipt = { workspace = true }
 arbitraitor-store = { workspace = true }
+arbitraitor-yarax = { workspace = true }
 clap = { workspace = true }
 miette = { workspace = true }
 serde_json = { workspace = true }

@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +17,8 @@ use arbitraitor_model::finding::{
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
+use arbitraitor_receipt::DetectorVersion;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use yara_x::{Compiler, MetaValue, Rules, ScanError, Scanner};
 
@@ -24,45 +28,16 @@ const DEFAULT_MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_MATCHES_PER_PATTERN: usize = 64;
 const MAX_EVIDENCE_CHARS: usize = 512;
 
+/// Built-in suspicious shell YARA-X rules.
+pub const BUILT_IN_SUSPICIOUS_SHELL_RULES: &str = include_str!("../rules/suspicious-shell.yar");
+/// Built-in known bad URL YARA-X rules.
+pub const BUILT_IN_KNOWN_BAD_URL_RULES: &str = include_str!("../rules/known-bad-urls.yar");
 /// Built-in MVP YARA-X rules for high-signal malware and suspicious installer patterns.
-pub const BUILT_IN_RULES: &str = r#"
-rule Arbitraitor_Suspicious_CurlPipeShell : suspicious_shell downloader
-{
-  meta:
-    description = "Downloads content and pipes it directly into a shell"
-    source = "arbitraitor-builtin"
-  strings:
-    $curl = "curl" ascii nocase
-    $wget = "wget" ascii nocase
-    $pipe_sh = /\|\s*(sudo\s+)?(ba)?sh\b/ ascii
-  condition:
-    any of ($curl, $wget) and $pipe_sh
-}
-
-rule Arbitraitor_Suspicious_Powershell_DownloadCradle : suspicious_powershell downloader
-{
-  meta:
-    description = "PowerShell download cradle pattern"
-    source = "arbitraitor-builtin"
-  strings:
-    $webclient = "System.Net.WebClient" ascii nocase
-    $download = "DownloadString" ascii nocase
-    $iex = "IEX" ascii nocase
-  condition:
-    $webclient and $download and $iex
-}
-
-rule Arbitraitor_Known_Eicar_Test_String : malware test_signature
-{
-  meta:
-    description = "EICAR anti-malware test string"
-    source = "arbitraitor-builtin"
-  strings:
-    $eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*" ascii
-  condition:
-    $eicar
-}
-"#;
+pub const BUILT_IN_RULES: &str = concat!(
+    include_str!("../rules/suspicious-shell.yar"),
+    "\n",
+    include_str!("../rules/known-bad-urls.yar")
+);
 
 /// Errors returned by YARA-X scanner setup and scanning.
 #[derive(Debug, Error)]
@@ -76,6 +51,179 @@ pub enum YaraError {
     /// Scanning exceeded an explicit resource limit.
     #[error("YARA-X resource limit exceeded: {0}")]
     ResourceLimit(String),
+    /// Rule pack input/output failed.
+    #[error("failed to load YARA-X rule pack: {0}")]
+    Io(String),
+    /// Rule pack metadata is invalid.
+    #[error("invalid YARA-X rule pack: {0}")]
+    InvalidPack(String),
+}
+
+/// Origin of a YARA-X rule pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleSource {
+    /// Rules shipped with Arbitraitor.
+    BuiltIn,
+    /// Rules loaded from a local filesystem path.
+    FileSystem(PathBuf),
+    /// Enterprise-managed rules.
+    Enterprise,
+    /// Community-maintained rules.
+    Community,
+    /// User-local rules.
+    UserLocal,
+}
+
+/// Text-based YARA-X rule pack with receipt-ready version metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RulePack {
+    /// Pack origin.
+    pub source: RuleSource,
+    /// Compiler namespace for all rules in this pack.
+    pub namespace: String,
+    /// Human or content-derived pack version.
+    pub version: String,
+    /// Raw YARA-X rules text.
+    pub rules_text: String,
+    /// SHA-256 digest of [`Self::rules_text`].
+    pub digest: Sha256Digest,
+}
+
+impl RulePack {
+    /// Creates a rule pack and computes its rules text digest.
+    #[must_use]
+    pub fn new(
+        source: RuleSource,
+        namespace: impl Into<String>,
+        version: impl Into<String>,
+        rules_text: impl Into<String>,
+    ) -> Self {
+        let rules_text = rules_text.into();
+        let digest = digest_rules(&rules_text);
+        Self {
+            source,
+            namespace: namespace.into(),
+            version: version.into(),
+            rules_text,
+            digest,
+        }
+    }
+}
+
+/// Ordered collection of YARA-X rule packs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RulePackManager {
+    packs: Vec<RulePack>,
+}
+
+impl RulePackManager {
+    /// Creates an empty rule pack manager.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { packs: Vec::new() }
+    }
+
+    /// Creates a manager with built-in rule packs loaded first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`YaraError::InvalidPack`] if built-in pack metadata is invalid.
+    pub fn with_built_in() -> Result<Self, YaraError> {
+        let mut manager = Self::new();
+        manager.add_pack(RulePack::new(
+            RuleSource::BuiltIn,
+            "arbitraitor_builtin_shell",
+            env!("CARGO_PKG_VERSION"),
+            BUILT_IN_SUSPICIOUS_SHELL_RULES,
+        ))?;
+        manager.add_pack(RulePack::new(
+            RuleSource::BuiltIn,
+            "arbitraitor_builtin_urls",
+            env!("CARGO_PKG_VERSION"),
+            BUILT_IN_KNOWN_BAD_URL_RULES,
+        ))?;
+        Ok(manager)
+    }
+
+    /// Adds a rule pack after validating metadata and rule syntax.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`YaraError::InvalidPack`] for invalid metadata or
+    /// [`YaraError::Compile`] for invalid YARA-X syntax.
+    pub fn add_pack(&mut self, pack: RulePack) -> Result<(), YaraError> {
+        validate_pack(&pack)?;
+        let mut candidate = self.packs.clone();
+        candidate.push(pack);
+        compile_packs(&candidate)?;
+        self.packs = candidate;
+        Ok(())
+    }
+
+    /// Loads all `.yar` files from a directory as ordered filesystem packs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`YaraError::Io`] when directory traversal or file reading fails,
+    /// and [`YaraError::Compile`] when any loaded rule is invalid.
+    pub fn load_directory(&mut self, dir: &Path, source: RuleSource) -> Result<(), YaraError> {
+        if !dir.is_dir() {
+            return Err(YaraError::Io(format!(
+                "{} is not a directory",
+                dir.display()
+            )));
+        }
+        let source = match source {
+            RuleSource::FileSystem(_) => RuleSource::FileSystem(dir.to_path_buf()),
+            other => other,
+        };
+
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(dir).map_err(|error| YaraError::Io(error.to_string()))? {
+            let entry = entry.map_err(|error| YaraError::Io(error.to_string()))?;
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "yar") {
+                entries.push(path);
+            }
+        }
+        entries.sort();
+
+        for path in entries {
+            let rules_text = fs::read_to_string(&path).map_err(|error| {
+                YaraError::Io(format!("failed to read {}: {error}", path.display()))
+            })?;
+            let pack = RulePack::new(
+                filesystem_source(source.clone(), &path),
+                namespace_from_path(&path)?,
+                version_from_rules(&rules_text),
+                rules_text,
+            );
+            self.add_pack(pack)?;
+        }
+        Ok(())
+    }
+
+    /// Compiles all packs into a scanner, preserving pack priority order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`YaraError::Compile`] when combined rule compilation fails.
+    pub fn compile_all(&self) -> Result<YaraScanner, YaraError> {
+        let rules = compile_packs(&self.packs)?;
+        Ok(YaraScanner::from_rule_packs(self.packs.clone(), rules))
+    }
+
+    /// Returns receipt detector-version entries for loaded rule packs.
+    #[must_use]
+    pub fn pack_versions(&self) -> Vec<DetectorVersion> {
+        self.packs
+            .iter()
+            .map(|pack| DetectorVersion {
+                id: format!("{DETECTOR_ID}.rules.{}", pack.namespace),
+                version: pack.version.clone(),
+            })
+            .collect()
+    }
 }
 
 /// Safe summary of a YARA-X rule match.
@@ -95,7 +243,7 @@ pub struct YaraMatch {
 pub struct YaraScanner {
     compiler: Compiler<'static>,
     rules: Arc<Rules>,
-    rule_sources: Vec<String>,
+    rule_packs: Vec<RulePack>,
     timeout: Duration,
     max_scan_bytes: usize,
     max_matches_per_pattern: usize,
@@ -108,9 +256,7 @@ impl YaraScanner {
     ///
     /// Returns [`YaraError::Compile`] if a built-in rule fails to compile.
     pub fn new() -> Result<Self, YaraError> {
-        let mut scanner = Self::empty()?;
-        scanner.add_rules(BUILT_IN_RULES)?;
-        Ok(scanner)
+        RulePackManager::with_built_in()?.compile_all()
     }
 
     /// Creates a scanner with no rules loaded.
@@ -120,15 +266,26 @@ impl YaraScanner {
     /// Returns [`YaraError::Compile`] if the empty baseline rule set fails to build.
     pub fn empty() -> Result<Self, YaraError> {
         let compiler = Compiler::new();
-        let rules = compile_sources(&[])?;
+        let rules = compile_packs(&[])?;
         Ok(Self {
             compiler,
             rules: Arc::new(rules),
-            rule_sources: Vec::new(),
+            rule_packs: Vec::new(),
             timeout: DEFAULT_SCAN_TIMEOUT,
             max_scan_bytes: DEFAULT_MAX_SCAN_BYTES,
             max_matches_per_pattern: DEFAULT_MAX_MATCHES_PER_PATTERN,
         })
+    }
+
+    fn from_rule_packs(rule_packs: Vec<RulePack>, rules: Rules) -> Self {
+        Self {
+            compiler: Compiler::new(),
+            rules: Arc::new(rules),
+            rule_packs,
+            timeout: DEFAULT_SCAN_TIMEOUT,
+            max_scan_bytes: DEFAULT_MAX_SCAN_BYTES,
+            max_matches_per_pattern: DEFAULT_MAX_MATCHES_PER_PATTERN,
+        }
     }
 
     /// Sets scan timeout and byte limits for subsequent scans.
@@ -146,13 +303,27 @@ impl YaraScanner {
     /// Returns [`YaraError::Compile`] and leaves existing rules unchanged when the
     /// supplied source or the combined rule set is invalid.
     pub fn add_rules(&mut self, rules: &str) -> Result<(), YaraError> {
-        let mut sources = self.rule_sources.clone();
-        sources.push(rules.to_owned());
-        let compiled = compile_sources(&sources)?;
-        self.rule_sources = sources;
+        let mut packs = self.rule_packs.clone();
+        packs.push(RulePack::new(
+            RuleSource::UserLocal,
+            "default",
+            version_from_rules(rules),
+            rules,
+        ));
+        let compiled = compile_packs(&packs)?;
+        self.rule_packs = packs;
         self.rules = Arc::new(compiled);
         self.compiler = Compiler::new();
         Ok(())
+    }
+
+    /// Returns receipt detector-version entries for loaded rule packs.
+    #[must_use]
+    pub fn rule_pack_versions(&self) -> Vec<DetectorVersion> {
+        RulePackManager {
+            packs: self.rule_packs.clone(),
+        }
+        .pack_versions()
     }
 
     /// Scans data and returns matching rule summaries.
@@ -332,14 +503,81 @@ pub fn yara_match_to_finding(matched: &YaraMatch, artifact_sha256: &Sha256Digest
     }
 }
 
-fn compile_sources(sources: &[String]) -> Result<Rules, YaraError> {
+fn compile_packs(packs: &[RulePack]) -> Result<Rules, YaraError> {
     let mut compiler = Compiler::new();
-    for source in sources {
+    for pack in packs {
         compiler
-            .add_source(source.as_str())
+            .new_namespace(&pack.namespace)
+            .add_source(pack.rules_text.as_str())
             .map_err(|error| YaraError::Compile(error.to_string()))?;
     }
     Ok(compiler.build())
+}
+
+fn validate_pack(pack: &RulePack) -> Result<(), YaraError> {
+    if pack.namespace.is_empty() {
+        return Err(YaraError::InvalidPack(
+            "rule pack namespace must not be empty".to_owned(),
+        ));
+    }
+    if !pack
+        .namespace
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(YaraError::InvalidPack(format!(
+            "rule pack namespace {} contains unsupported characters",
+            pack.namespace
+        )));
+    }
+    if pack.rules_text.trim().is_empty() {
+        return Err(YaraError::InvalidPack(format!(
+            "rule pack namespace {} has no rules",
+            pack.namespace
+        )));
+    }
+    Ok(())
+}
+
+fn digest_rules(rules_text: &str) -> Sha256Digest {
+    Sha256Digest::new(Sha256::digest(rules_text.as_bytes()).into())
+}
+
+fn version_from_rules(rules_text: &str) -> String {
+    format!("sha256:{}", digest_rules(rules_text))
+}
+
+fn filesystem_source(source: RuleSource, path: &Path) -> RuleSource {
+    match source {
+        RuleSource::FileSystem(_) => RuleSource::FileSystem(path.to_path_buf()),
+        other => other,
+    }
+}
+
+fn namespace_from_path(path: &Path) -> Result<String, YaraError> {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            YaraError::InvalidPack(format!("{} has no valid UTF-8 file stem", path.display()))
+        })?;
+    let namespace = stem
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if namespace.is_empty() {
+        return Err(YaraError::InvalidPack(format!(
+            "{} has empty namespace",
+            path.display()
+        )));
+    }
+    Ok(namespace)
 }
 
 fn map_scan_error(error: ScanError) -> YaraError {
@@ -401,9 +639,10 @@ fn scanner_error_finding(error: &YaraError, artifact_sha256: &Sha256Digest) -> F
             FindingCategory::ResourceLimitEvent,
             "YARA-X scanner resource limit reached",
         ),
-        YaraError::Compile(_) | YaraError::Scan(_) => {
-            (FindingCategory::ParserError, "YARA-X scanner failed")
-        }
+        YaraError::Compile(_)
+        | YaraError::Scan(_)
+        | YaraError::Io(_)
+        | YaraError::InvalidPack(_) => (FindingCategory::ParserError, "YARA-X scanner failed"),
     };
 
     Finding {
@@ -462,12 +701,14 @@ fn supported_artifact_kinds() -> Vec<ArtifactKind> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use arbitraitor_analysis::AnalysisCoordinator;
     use arbitraitor_model::finding::FindingCategory;
 
-    use super::{YaraDetector, YaraError, YaraScanner};
+    use super::{RulePack, RulePackManager, RuleSource, YaraDetector, YaraError, YaraScanner};
 
     const TEST_RULE: &str = r#"
 rule Arbitraitor_Test_Malware : malware unit_test
@@ -536,5 +777,110 @@ rule Arbitraitor_Test_Malware : malware unit_test
             FindingCategory::ResourceLimitEvent
         );
         Ok(())
+    }
+
+    #[test]
+    fn built_in_rules_compile_and_scan() -> Result<(), Box<dyn std::error::Error>> {
+        let scanner = RulePackManager::with_built_in()?.compile_all()?;
+
+        let matches = scanner.scan_result(b"curl https://example.test/install.sh | sh")?;
+
+        assert!(
+            matches
+                .iter()
+                .any(|matched| matched.rule_identifier == "Arbitraitor_Suspicious_CurlPipeShell")
+        );
+        assert!(scanner.rule_pack_versions().len() >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn load_external_rules_from_directory() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = test_dir("external-rules")?;
+        fs::write(dir.join("external.yar"), TEST_RULE)?;
+        let mut manager = RulePackManager::new();
+
+        manager.load_directory(&dir, RuleSource::FileSystem(dir.clone()))?;
+        let scanner = manager.compile_all()?;
+
+        assert_eq!(scanner.scan(b"arbitraitor-malware-marker").len(), 1);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_namespaces_allow_duplicate_rule_names() -> Result<(), Box<dyn std::error::Error>> {
+        let duplicate_rule = r#"
+rule Duplicate_Rule
+{
+  strings:
+    $marker = "shared-marker" ascii
+  condition:
+    $marker
+}
+"#;
+        let mut manager = RulePackManager::new();
+        manager.add_pack(RulePack::new(
+            RuleSource::Community,
+            "community",
+            "1",
+            duplicate_rule,
+        ))?;
+        manager.add_pack(RulePack::new(
+            RuleSource::Enterprise,
+            "enterprise",
+            "2",
+            duplicate_rule,
+        ))?;
+
+        let matches = manager.compile_all()?.scan_result(b"shared-marker")?;
+
+        let namespaces: Vec<&str> = matches
+            .iter()
+            .map(|matched| matched.namespace.as_str())
+            .collect();
+        assert_eq!(namespaces, vec!["community", "enterprise"]);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_rule_file_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = test_dir("invalid-rules")?;
+        fs::write(dir.join("broken.yar"), "rule broken { condition: }")?;
+        let mut manager = RulePackManager::new();
+
+        let error = manager.load_directory(&dir, RuleSource::FileSystem(dir.clone()));
+
+        assert!(matches!(error, Err(YaraError::Compile(_))));
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn pack_versions_track_namespace_and_version() -> Result<(), Box<dyn std::error::Error>> {
+        let mut manager = RulePackManager::new();
+        manager.add_pack(RulePack::new(
+            RuleSource::UserLocal,
+            "local_rules",
+            "2026.06.18",
+            TEST_RULE,
+        ))?;
+
+        let versions = manager.pack_versions();
+
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].id, "arbitraitor-yarax.rules.local_rules");
+        assert_eq!(versions[0].version, "2026.06.18");
+        Ok(())
+    }
+
+    fn test_dir(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("arbitraitor-yarax-{name}-{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 }
