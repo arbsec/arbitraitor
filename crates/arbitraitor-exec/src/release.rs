@@ -11,12 +11,16 @@
 //! race the release operation. Active same-UID directory watchers and writable
 //! ancestor rename races are documented inline as known limitations.
 
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use arbitraitor_model::ids::Sha256Digest;
@@ -46,6 +50,29 @@ pub struct ReleasePolicy {
     pub allow_overwrite: bool,
     /// Permit the non-atomic copy fallback when atomic publication is unavailable.
     pub allow_non_atomic_copy: bool,
+}
+
+/// Platform provenance attributes to apply to a released artifact.
+///
+/// Downloaded artifact bytes do not carry filesystem extended attributes from
+/// the network. Arbitraitor therefore starts releases from a clean provenance
+/// boundary: releasable Linux xattrs are cleared from the destination inode and
+/// only attributes explicitly configured here are added.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProvenanceConfig {
+    /// Linux extended attributes to set after clearing inherited release xattrs.
+    #[cfg(target_os = "linux")]
+    pub linux_xattrs: Vec<LinuxXattr>,
+}
+
+/// Linux extended attribute to set during release provenance application.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinuxXattr {
+    /// Attribute name, for example `security.selinux` or `user.arbitraitor.origin`.
+    pub name: OsString,
+    /// Attribute value bytes.
+    pub value: Vec<u8>,
 }
 
 /// Receipt data emitted for a completed release.
@@ -153,11 +180,35 @@ pub fn release_artifact(
     destination: &Path,
     policy: &ReleasePolicy,
 ) -> Result<ReleaseReceipt, ReleaseError> {
+    release_artifact_with_provenance(
+        store,
+        scanned_digest,
+        destination,
+        policy,
+        &ProvenanceConfig::default(),
+    )
+}
+
+/// Releases the exact CAS bytes with explicit platform provenance attributes.
+///
+/// # Errors
+///
+/// Returns [`ReleaseError`] if CAS verification fails, the destination is unsafe,
+/// digest verification fails, provenance application fails, or an exceptional
+/// publication path lacks explicit policy approval.
+pub fn release_artifact_with_provenance(
+    store: &ContentStore,
+    scanned_digest: &Sha256Digest,
+    destination: &Path,
+    policy: &ReleasePolicy,
+    provenance: &ProvenanceConfig,
+) -> Result<ReleaseReceipt, ReleaseError> {
     release_artifact_inner(
         store,
         scanned_digest,
         destination,
         policy,
+        provenance,
         ReleaseFsMode::Normal,
     )
 }
@@ -178,6 +229,7 @@ fn release_artifact_inner(
     scanned_digest: &Sha256Digest,
     destination: &Path,
     policy: &ReleasePolicy,
+    provenance: &ProvenanceConfig,
     fs_mode: ReleaseFsMode,
 ) -> Result<ReleaseReceipt, ReleaseError> {
     let handle = store.get(scanned_digest)?;
@@ -197,12 +249,9 @@ fn release_artifact_inner(
     reject_existing_destination(&parent.dir, &parent.name, destination, policy)?;
     let temp = SiblingTemp::create(&parent.dir, fs_mode)?;
     let bytes_written = write_and_verify_temp(&handle, scanned_digest, &temp)?;
-    let method = publish_temp(&parent, temp, destination, policy, fs_mode)?;
+    apply_platform_provenance(&temp.file, provenance, "apply-release-temp-provenance")?;
+    let method = publish_temp(&parent, temp, destination, policy, provenance, fs_mode)?;
     verify_final_destination(&parent.dir, &parent.name, destination, scanned_digest)?;
-    // TODO(provenance): implement per ADR 0015 — tracked in follow-up issue.
-    // Release must preserve or add platform provenance markers such as macOS
-    // quarantine xattrs and Windows Mark of the Web instead of silently losing
-    // download-origin evidence at this filesystem boundary.
 
     let mut warnings = Vec::new();
     if method == ReleaseMethod::NonAtomicCopy {
@@ -729,6 +778,7 @@ fn publish_temp(
     mut temp: SiblingTemp,
     destination: &Path,
     policy: &ReleasePolicy,
+    provenance: &ProvenanceConfig,
     fs_mode: ReleaseFsMode,
 ) -> Result<ReleaseMethod, ReleaseError> {
     #[cfg(test)]
@@ -736,7 +786,7 @@ fn publish_temp(
         fs_mode,
         ReleaseFsMode::ForceNonAtomicForTest | ReleaseFsMode::ForceNonAtomicCopyFailureForTest
     ) {
-        return publish_non_atomic(parent, &mut temp, destination, policy, fs_mode);
+        return publish_non_atomic(parent, &mut temp, destination, policy, provenance, fs_mode);
     }
     let _ = fs_mode;
     if policy.allow_overwrite {
@@ -754,7 +804,7 @@ fn publish_temp(
                 Ok(ReleaseMethod::AtomicRename)
             }
             Err(error) if is_cross_filesystem(&error) => {
-                publish_non_atomic(parent, &mut temp, destination, policy, fs_mode)
+                publish_non_atomic(parent, &mut temp, destination, policy, provenance, fs_mode)
             }
             Err(source) => Err(ReleaseError::Io {
                 stage: "rename-release-temp",
@@ -778,7 +828,7 @@ fn publish_temp(
                 })
             }
             Err(error) if is_cross_filesystem(&error) => {
-                publish_non_atomic(parent, &mut temp, destination, policy, fs_mode)
+                publish_non_atomic(parent, &mut temp, destination, policy, provenance, fs_mode)
             }
             Err(source) => Err(ReleaseError::Io {
                 stage: "link-release-temp",
@@ -793,6 +843,7 @@ fn publish_non_atomic(
     temp: &mut SiblingTemp,
     destination: &Path,
     policy: &ReleasePolicy,
+    provenance: &ProvenanceConfig,
     fs_mode: ReleaseFsMode,
 ) -> Result<ReleaseMethod, ReleaseError> {
     if !policy.allow_non_atomic_copy {
@@ -802,7 +853,7 @@ fn publish_non_atomic(
     }
     warn!(destination = %destination.display(), "using policy-approved non-atomic release copy");
     reject_existing_destination(&parent.dir, &parent.name, destination, policy)?;
-    let mut output = open_non_atomic_destination(parent, destination, policy)?;
+    let mut output = open_non_atomic_destination(parent, destination, policy, provenance)?;
     let mut input = temp.file.try_clone().map_err(|source| ReleaseError::Io {
         stage: "clone-release-temp-for-copy",
         source,
@@ -827,17 +878,19 @@ fn open_non_atomic_destination(
     parent: &DestinationParent,
     destination: &Path,
     policy: &ReleasePolicy,
+    provenance: &ProvenanceConfig,
 ) -> Result<File, ReleaseError> {
     if policy.allow_overwrite {
-        open_existing_or_create_non_atomic_destination(parent, destination)
+        open_existing_or_create_non_atomic_destination(parent, destination, provenance)
     } else {
-        create_new_non_atomic_destination(parent, destination)
+        create_new_non_atomic_destination(parent, destination, provenance)
     }
 }
 
 fn open_existing_or_create_non_atomic_destination(
     parent: &DestinationParent,
     destination: &Path,
+    provenance: &ProvenanceConfig,
 ) -> Result<File, ReleaseError> {
     let mut existing_options = OpenOptions::new();
     existing_options.write(true);
@@ -846,6 +899,11 @@ fn open_existing_or_create_non_atomic_destination(
     match parent.dir.open_with(&parent.name, &existing_options) {
         Ok(file) => {
             reject_open_file_metadata(destination, &file)?;
+            apply_platform_provenance(
+                &file,
+                provenance,
+                "apply-non-atomic-destination-provenance",
+            )?;
             file.set_len(0).map_err(|source| ReleaseError::Io {
                 stage: "truncate-non-atomic-destination",
                 source,
@@ -853,7 +911,7 @@ fn open_existing_or_create_non_atomic_destination(
             Ok(file)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            create_new_non_atomic_destination(parent, destination)
+            create_new_non_atomic_destination(parent, destination, provenance)
         }
         Err(source) => Err(ReleaseError::Io {
             stage: "open-non-atomic-destination",
@@ -865,6 +923,7 @@ fn open_existing_or_create_non_atomic_destination(
 fn create_new_non_atomic_destination(
     parent: &DestinationParent,
     destination: &Path,
+    provenance: &ProvenanceConfig,
 ) -> Result<File, ReleaseError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -878,6 +937,7 @@ fn create_new_non_atomic_destination(
             source,
         })?;
     reject_open_file_metadata(destination, &file)?;
+    apply_platform_provenance(&file, provenance, "apply-non-atomic-destination-provenance")?;
     Ok(file)
 }
 
@@ -946,6 +1006,131 @@ fn verify_final_destination(
         })?;
     reject_open_file_metadata(destination, &file)?;
     verify_reader_digest(&mut file, expected, "verify-final-destination")
+}
+
+fn apply_platform_provenance(
+    file: &File,
+    config: &ProvenanceConfig,
+    stage: &'static str,
+) -> Result<(), ReleaseError> {
+    #[cfg(target_os = "linux")]
+    {
+        apply_linux_xattr_provenance(file, config, stage)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, config, stage);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_xattr_provenance(
+    file: &File,
+    config: &ProvenanceConfig,
+    stage: &'static str,
+) -> Result<(), ReleaseError> {
+    clear_releasable_linux_xattrs(file, stage)?;
+    for xattr in &config.linux_xattrs {
+        let name = linux_xattr_name(&xattr.name, stage)?;
+        rustix::fs::fsetxattr(
+            file.as_fd(),
+            name.as_c_str(),
+            &xattr.value,
+            rustix::fs::XattrFlags::empty(),
+        )
+        .map_err(|source| ReleaseError::Io {
+            stage,
+            source: rustix_to_io(source),
+        })?;
+    }
+    file.sync_all()
+        .map_err(|source| ReleaseError::Io { stage, source })
+}
+
+#[cfg(target_os = "linux")]
+fn clear_releasable_linux_xattrs(file: &File, stage: &'static str) -> Result<(), ReleaseError> {
+    for name in releasable_linux_xattr_names(file, stage)? {
+        match rustix::fs::fremovexattr(file.as_fd(), name.as_c_str()) {
+            Ok(()) => {}
+            Err(error) if is_absent_or_unsupported_xattr_error(error) => {}
+            Err(source) => {
+                return Err(ReleaseError::Io {
+                    stage,
+                    source: rustix_to_io(source),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn releasable_linux_xattr_names(
+    file: &File,
+    stage: &'static str,
+) -> Result<Vec<CString>, ReleaseError> {
+    let mut empty = [0_u8; 0];
+    let size = match rustix::fs::flistxattr(file.as_fd(), &mut empty) {
+        Ok(size) => size,
+        Err(error) if is_absent_or_unsupported_xattr_error(error) => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(ReleaseError::Io {
+                stage,
+                source: rustix_to_io(source),
+            });
+        }
+    };
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut names = vec![0_u8; size];
+    let len =
+        rustix::fs::flistxattr(file.as_fd(), &mut names).map_err(|source| ReleaseError::Io {
+            stage,
+            source: rustix_to_io(source),
+        })?;
+    names.truncate(len);
+    names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .filter(|name| should_clear_linux_xattr(name))
+        .map(|name| linux_xattr_name_bytes(name, stage))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn should_clear_linux_xattr(name: &[u8]) -> bool {
+    name.starts_with(b"user.")
+        || name == b"security.capability"
+        || name == b"system.posix_acl_access"
+        || name == b"system.posix_acl_default"
+        || name.starts_with(b"trusted.")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_xattr_name(name: &OsStr, stage: &'static str) -> Result<CString, ReleaseError> {
+    linux_xattr_name_bytes(name.as_bytes(), stage)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_xattr_name_bytes(name: &[u8], stage: &'static str) -> Result<CString, ReleaseError> {
+    if name.is_empty() {
+        return Err(ReleaseError::Io {
+            stage,
+            source: io::Error::new(io::ErrorKind::InvalidInput, "empty Linux xattr name"),
+        });
+    }
+    CString::new(name).map_err(|source| ReleaseError::Io {
+        stage,
+        source: io::Error::new(io::ErrorKind::InvalidInput, source),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn is_absent_or_unsupported_xattr_error(error: rustix::io::Errno) -> bool {
+    matches!(error.raw_os_error(), libc::ENODATA | libc::EOPNOTSUPP)
 }
 
 fn verify_reader_digest(
@@ -1093,6 +1278,62 @@ mod tests {
         Ok(Sha256Digest::new(hasher.finalize().into()))
     }
 
+    #[cfg(target_os = "linux")]
+    fn set_test_xattr(path: &Path, name: &str, value: &[u8]) -> io::Result<bool> {
+        let file = fs::File::options().read(true).write(true).open(path)?;
+        let name = CString::new(name)
+            .map_err(|source| io::Error::new(io::ErrorKind::InvalidInput, source))?;
+        match rustix::fs::fsetxattr(
+            file.as_fd(),
+            name.as_c_str(),
+            value,
+            rustix::fs::XattrFlags::empty(),
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) if is_absent_or_unsupported_xattr_error(error) => Ok(false),
+            Err(error) if error.raw_os_error() == libc::EPERM => Ok(false),
+            Err(error) => Err(rustix_to_io(error)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_test_xattr(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
+        let file = fs::File::open(path)?;
+        let name = CString::new(name)
+            .map_err(|source| io::Error::new(io::ErrorKind::InvalidInput, source))?;
+        let mut empty = [0_u8; 0];
+        let size = match rustix::fs::fgetxattr(file.as_fd(), name.as_c_str(), &mut empty) {
+            Ok(size) => size,
+            Err(error) if is_absent_or_unsupported_xattr_error(error) => return Ok(None),
+            Err(error) => return Err(rustix_to_io(error)),
+        };
+        let mut value = vec![0_u8; size];
+        let len = rustix::fs::fgetxattr(file.as_fd(), name.as_c_str(), &mut value)
+            .map_err(rustix_to_io)?;
+        value.truncate(len);
+        Ok(Some(value))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn releasable_xattr_names(path: &Path) -> io::Result<Vec<Vec<u8>>> {
+        let file = fs::File::open(path)?;
+        let mut empty = [0_u8; 0];
+        let size = match rustix::fs::flistxattr(file.as_fd(), &mut empty) {
+            Ok(size) => size,
+            Err(error) if is_absent_or_unsupported_xattr_error(error) => return Ok(Vec::new()),
+            Err(error) => return Err(rustix_to_io(error)),
+        };
+        let mut names = vec![0_u8; size];
+        let len = rustix::fs::flistxattr(file.as_fd(), &mut names).map_err(rustix_to_io)?;
+        names.truncate(len);
+        Ok(names
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .filter(|name| should_clear_linux_xattr(name))
+            .map(|name| name.to_vec())
+            .collect())
+    }
+
     #[tokio::test]
     async fn released_file_digest_always_equals_scanned_digest()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1177,6 +1418,122 @@ mod tests {
         assert_eq!(receipt.method, ReleaseMethod::AtomicRename);
         assert_eq!(read_std_digest(&destination)?, digest);
         assert_eq!(fs::metadata(&destination)?.nlink(), 1);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn release_has_no_releasable_linux_xattrs_by_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("xattr-clean-new")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"clean xattr bytes").await?;
+        let destination = root.join("released");
+
+        release_artifact(&store, &digest, &destination, &ReleasePolicy::default())?;
+
+        assert_eq!(releasable_xattr_names(&destination)?, Vec::<Vec<u8>>::new());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn overwrite_clears_pre_existing_linux_xattrs() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = temp_root("xattr-clear-overwrite")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"replacement without leaked attrs").await?;
+        let destination = root.join("replace-me");
+        fs::write(&destination, b"old")?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
+        if !set_test_xattr(&destination, "user.arbitraitor-test", b"leak")? {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+
+        release_artifact(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                allow_overwrite: true,
+                allow_non_atomic_copy: false,
+            },
+        )?;
+
+        assert_eq!(get_test_xattr(&destination, "user.arbitraitor-test")?, None);
+        assert_eq!(releasable_xattr_names(&destination)?, Vec::<Vec<u8>>::new());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn non_atomic_overwrite_clears_pre_existing_linux_xattrs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("xattr-clear-non-atomic")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"non atomic replacement").await?;
+        let destination = root.join("replace-me");
+        fs::write(&destination, b"old")?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
+        if !set_test_xattr(&destination, "user.arbitraitor-test", b"leak")? {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+
+        release_artifact_inner(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                allow_overwrite: true,
+                allow_non_atomic_copy: true,
+            },
+            &ProvenanceConfig::default(),
+            ReleaseFsMode::ForceNonAtomicForTest,
+        )?;
+
+        assert_eq!(get_test_xattr(&destination, "user.arbitraitor-test")?, None);
+        assert_eq!(read_std_digest(&destination)?, digest);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn explicit_linux_xattrs_are_applied_after_cleaning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("xattr-configured")?;
+        let probe = root.join("probe");
+        fs::write(&probe, b"probe")?;
+        if !set_test_xattr(&probe, "user.arbitraitor-test", b"probe")? {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"configured provenance").await?;
+        let destination = root.join("released");
+
+        release_artifact_with_provenance(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy::default(),
+            &ProvenanceConfig {
+                linux_xattrs: vec![LinuxXattr {
+                    name: OsString::from("user.arbitraitor-test"),
+                    value: b"configured".to_vec(),
+                }],
+            },
+        )?;
+
+        assert_eq!(
+            get_test_xattr(&destination, "user.arbitraitor-test")?,
+            Some(b"configured".to_vec())
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1279,6 +1636,7 @@ mod tests {
             &digest,
             &destination,
             &ReleasePolicy::default(),
+            &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNamedTempForTest,
         )?;
 
@@ -1314,6 +1672,7 @@ mod tests {
                 allow_overwrite: false,
                 allow_non_atomic_copy: true,
             },
+            &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNonAtomicCopyFailureForTest,
         );
 
@@ -1340,6 +1699,7 @@ mod tests {
                 allow_overwrite: true,
                 allow_non_atomic_copy: true,
             },
+            &ProvenanceConfig::default(),
         );
 
         assert!(matches!(result, Err(ReleaseError::HardLinkSurprise { .. })));
@@ -1362,6 +1722,7 @@ mod tests {
             &digest,
             &denied_destination,
             &ReleasePolicy::default(),
+            &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNonAtomicForTest,
         );
         assert!(matches!(
@@ -1379,6 +1740,7 @@ mod tests {
                 allow_overwrite: false,
                 allow_non_atomic_copy: true,
             },
+            &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNonAtomicForTest,
         )?;
         assert_eq!(receipt.method, ReleaseMethod::NonAtomicCopy);
