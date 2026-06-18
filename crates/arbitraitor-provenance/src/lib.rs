@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Cursor;
@@ -12,7 +13,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arbitraitor_model::ids::Sha256Digest;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Result type for provenance operations.
+pub type Result<T, E = ProvenanceError> = std::result::Result<T, E>;
 
 /// Signature verification system used for an artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +91,499 @@ pub enum ProvenanceError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// JSON serialization or parsing failed.
+    #[error("JSON failure during {stage}: {source}")]
+    Json {
+        /// JSON stage.
+        stage: &'static str,
+        /// Underlying JSON error.
+        source: serde_json::Error,
+    },
+    /// TUF metadata version moved backward relative to locally stored state.
+    #[error("TUF {role} metadata rollback rejected: stored version {stored}, new version {new}")]
+    TufRollback {
+        /// TUF role name.
+        role: String,
+        /// Locally stored version.
+        stored: u32,
+        /// Candidate metadata version.
+        new: u32,
+    },
+    /// TUF metadata is expired at the caller-provided wall-clock time.
+    #[error("TUF {role} metadata expired at {expires}; current time is {now}")]
+    TufExpired {
+        /// TUF role name.
+        role: String,
+        /// Expiration timestamp from metadata.
+        expires: String,
+        /// Current timestamp supplied by caller.
+        now: String,
+    },
+    /// TUF root metadata did not define the requested role.
+    #[error("TUF root metadata does not define role {role}")]
+    TufUnknownRole {
+        /// Missing TUF role name.
+        role: String,
+    },
+    /// TUF role signature threshold was not met.
+    #[error("TUF {role} threshold not met: need {threshold}, got {verified}")]
+    TufThreshold {
+        /// TUF role name.
+        role: String,
+        /// Required unique verified signatures.
+        threshold: u32,
+        /// Unique verified signatures from authorized keys.
+        verified: u32,
+    },
+}
+
+/// Trust-on-first-use pin database backed by a local JSON file.
+///
+/// TOFU is **not cryptographic verification**. It records the artifact identity
+/// first observed at a URL and reports later drift; callers must not present a
+/// TOFU match as a signature, provenance, or trust-root verification result.
+#[derive(Clone, Debug)]
+pub struct TofuStore {
+    path: PathBuf,
+    pins: HashMap<String, TofuPin>,
+}
+
+/// Artifact identity recorded by trust-on-first-use mode.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TofuPin {
+    /// Artifact URL used as the TOFU lookup key.
+    pub url: String,
+    /// Artifact SHA-256 digest observed for the URL.
+    pub sha256: Sha256Digest,
+    /// Optional signer identity observed by independent signature verification.
+    pub signer_identity: Option<String>,
+    /// Optional HTTP content type observed at retrieval time.
+    pub content_type: Option<String>,
+    /// Optional content size in bytes.
+    pub size: Option<u64>,
+    /// Timestamp when the pin was first recorded.
+    pub first_seen: String,
+}
+
+/// Trust-on-first-use comparison result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TofuVerification {
+    /// No prior pin exists for the URL.
+    FirstUse,
+    /// The actual artifact identity matches the stored pin.
+    Matches,
+    /// The actual artifact identity differs from the stored pin.
+    Changed {
+        /// Field-level differences to display prominently to the user.
+        changes: Vec<TofuChange>,
+    },
+}
+
+/// A trust-on-first-use pin difference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TofuChange {
+    /// The artifact SHA-256 digest changed.
+    DigestChanged {
+        /// Pinned digest.
+        old: String,
+        /// Observed digest.
+        new: String,
+    },
+    /// The signer identity changed.
+    SignerChanged {
+        /// Pinned signer identity.
+        old: String,
+        /// Observed signer identity.
+        new: String,
+    },
+    /// The artifact size changed.
+    SizeChanged {
+        /// Pinned size in bytes.
+        old: u64,
+        /// Observed size in bytes.
+        new: u64,
+    },
+}
+
+impl TofuStore {
+    /// Opens a TOFU store from a JSON file, or creates an empty in-memory store
+    /// when the file does not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be read or parsed.
+    pub fn open(path: &Path) -> Result<Self> {
+        let pins = match fs::read(path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|source| ProvenanceError::Json {
+                    stage: "parse TOFU store",
+                    source,
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(source) => {
+                return Err(ProvenanceError::Io {
+                    stage: "read TOFU store",
+                    source,
+                });
+            }
+        };
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            pins,
+        })
+    }
+
+    /// Returns the stored TOFU pin for a URL, if one exists.
+    #[must_use]
+    pub fn check(&self, url: &str) -> Option<&TofuPin> {
+        self.pins.get(url)
+    }
+
+    /// Records or replaces the TOFU pin for a URL and persists the JSON store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be serialized or written.
+    pub fn pin(&mut self, url: &str, mut pin: TofuPin) -> Result<()> {
+        url.clone_into(&mut pin.url);
+        self.pins.insert(url.to_owned(), pin);
+        self.persist()
+    }
+
+    /// Compares an actual artifact identity against a stored TOFU pin.
+    ///
+    /// TOFU comparison is **not cryptographic verification**; [`Self::pin`]
+    /// only stores local history. A `Matches` result means "unchanged since
+    /// first use", not "trusted" or "signed".
+    ///
+    /// # Errors
+    ///
+    /// This method is currently infallible but returns [`ProvenanceError`] so
+    /// callers can use the same error channel as other provenance checks.
+    pub fn verify_against_pin(
+        &self,
+        url: &str,
+        actual: &TofuPin,
+    ) -> Result<TofuVerification, ProvenanceError> {
+        let Some(stored) = self.check(url) else {
+            return Ok(TofuVerification::FirstUse);
+        };
+
+        let mut changes = Vec::new();
+        if stored.sha256 != actual.sha256 {
+            changes.push(TofuChange::DigestChanged {
+                old: stored.sha256.to_string(),
+                new: actual.sha256.to_string(),
+            });
+        }
+        if stored.signer_identity != actual.signer_identity {
+            changes.push(TofuChange::SignerChanged {
+                old: stored.signer_identity.clone().unwrap_or_default(),
+                new: actual.signer_identity.clone().unwrap_or_default(),
+            });
+        }
+        if let (Some(old), Some(new)) = (stored.size, actual.size)
+            && old != new
+        {
+            changes.push(TofuChange::SizeChanged { old, new });
+        }
+
+        if changes.is_empty() {
+            Ok(TofuVerification::Matches)
+        } else {
+            Ok(TofuVerification::Changed { changes })
+        }
+    }
+
+    fn persist(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|source| ProvenanceError::Io {
+                stage: "create TOFU store directory",
+                source,
+            })?;
+        }
+        let bytes =
+            serde_json::to_vec_pretty(&self.pins).map_err(|source| ProvenanceError::Json {
+                stage: "serialize TOFU store",
+                source,
+            })?;
+        fs::write(&self.path, bytes).map_err(|source| ProvenanceError::Io {
+            stage: "write TOFU store",
+            source,
+        })
+    }
+}
+
+/// Simplified TUF root metadata for MVP update security.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufRoot {
+    /// Monotonically increasing root metadata version.
+    pub version: u32,
+    /// Expiration timestamp, compared lexicographically as RFC 3339 UTC text.
+    pub expires: String,
+    /// Public keys known to root metadata.
+    pub keys: Vec<TufKey>,
+    /// Role signature policies keyed by role name.
+    pub roles: HashMap<String, TufRole>,
+    /// Whether target paths use consistent-snapshot naming.
+    pub consistent_snapshot: bool,
+}
+
+/// Simplified TUF public key descriptor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufKey {
+    /// Stable key identifier used in role metadata.
+    pub key_id: String,
+    /// Key type, for example `ed25519`.
+    pub key_type: String,
+    /// Signature scheme, for example `minisign`.
+    pub scheme: String,
+    /// Encoded public key material.
+    pub value: String,
+}
+
+/// Simplified TUF role threshold policy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufRole {
+    /// Authorized key identifiers for this role.
+    pub key_ids: Vec<String>,
+    /// Number of unique authorized signatures required.
+    pub threshold: u32,
+}
+
+/// Simplified TUF targets metadata.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufTargets {
+    /// Monotonically increasing targets metadata version.
+    pub version: u32,
+    /// Expiration timestamp, compared lexicographically as RFC 3339 UTC text.
+    pub expires: String,
+    /// Target metadata keyed by target path.
+    pub targets: HashMap<String, TufTarget>,
+}
+
+/// Simplified TUF target descriptor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufTarget {
+    /// Target SHA-256 digest as lowercase hex text.
+    pub sha256: String,
+    /// Target size in bytes.
+    pub size: u64,
+    /// Optional application-specific target metadata.
+    pub custom: Option<serde_json::Value>,
+}
+
+/// Simplified TUF snapshot metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufSnapshot {
+    /// Monotonically increasing snapshot metadata version.
+    pub version: u32,
+    /// Expiration timestamp, compared lexicographically as RFC 3339 UTC text.
+    pub expires: String,
+    /// Referenced metadata files keyed by metadata path.
+    pub meta: HashMap<String, TufMetaFile>,
+}
+
+/// Simplified TUF timestamp metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufTimestamp {
+    /// Monotonically increasing timestamp metadata version.
+    pub version: u32,
+    /// Expiration timestamp, compared lexicographically as RFC 3339 UTC text.
+    pub expires: String,
+    /// Snapshot metadata file referenced by timestamp metadata.
+    pub snapshot: TufMetaFile,
+}
+
+/// Metadata file descriptor used by simplified snapshot and timestamp roles.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufMetaFile {
+    /// Referenced metadata version.
+    pub version: u32,
+    /// Referenced metadata SHA-256 digest as lowercase hex text.
+    pub sha256: String,
+    /// Referenced metadata size in bytes.
+    pub size: u64,
+}
+
+/// A verified signature key identifier for simplified TUF threshold counting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TufSignature {
+    /// Key identifier whose cryptographic signature was verified by the caller.
+    pub key_id: String,
+}
+
+/// Local TUF role-version state used for rollback protection.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TufVersionStore {
+    versions: HashMap<String, u32>,
+}
+
+impl TufRoot {
+    /// Verifies that a role has enough unique signatures from authorized keys.
+    ///
+    /// This is threshold policy checking only; callers must cryptographically
+    /// verify each signature before passing its key identifier here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the role is undefined or the threshold is not met.
+    pub fn verify_role_threshold(
+        &self,
+        role_name: &str,
+        signatures: &[TufSignature],
+    ) -> Result<()> {
+        let role = self
+            .roles
+            .get(role_name)
+            .ok_or_else(|| ProvenanceError::TufUnknownRole {
+                role: role_name.to_owned(),
+            })?;
+        role.verify_threshold(role_name, signatures)
+    }
+}
+
+impl TufRole {
+    /// Verifies that enough unique authorized keys signed this role metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the threshold is not met.
+    pub fn verify_threshold(&self, role_name: &str, signatures: &[TufSignature]) -> Result<()> {
+        let authorized: HashSet<&str> = self.key_ids.iter().map(String::as_str).collect();
+        let verified = signatures
+            .iter()
+            .filter_map(|signature| {
+                let key_id = signature.key_id.as_str();
+                authorized.contains(key_id).then_some(key_id)
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        let verified = u32::try_from(verified).unwrap_or(u32::MAX);
+
+        if self.threshold > 0 && verified >= self.threshold {
+            Ok(())
+        } else {
+            Err(ProvenanceError::TufThreshold {
+                role: role_name.to_owned(),
+                threshold: self.threshold,
+                verified,
+            })
+        }
+    }
+}
+
+impl TufRoot {
+    /// Rejects this root metadata when its expiration timestamp is not after `now`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the metadata is expired.
+    pub fn ensure_not_expired(&self, now: &str) -> Result<()> {
+        ensure_tuf_not_expired("root", &self.expires, now)
+    }
+}
+
+impl TufTargets {
+    /// Rejects this targets metadata when its expiration timestamp is not after `now`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the metadata is expired.
+    pub fn ensure_not_expired(&self, now: &str) -> Result<()> {
+        ensure_tuf_not_expired("targets", &self.expires, now)
+    }
+}
+
+impl TufSnapshot {
+    /// Rejects this snapshot metadata when its expiration timestamp is not after `now`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the metadata is expired.
+    pub fn ensure_not_expired(&self, now: &str) -> Result<()> {
+        ensure_tuf_not_expired("snapshot", &self.expires, now)
+    }
+}
+
+impl TufTimestamp {
+    /// Rejects this timestamp metadata when its expiration timestamp is not after `now`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the metadata is expired.
+    pub fn ensure_not_expired(&self, now: &str) -> Result<()> {
+        ensure_tuf_not_expired("timestamp", &self.expires, now)
+    }
+}
+
+impl TufVersionStore {
+    /// Creates an empty in-memory rollback-protection store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the stored version for a role, if present.
+    #[must_use]
+    pub fn stored_version(&self, role: &str) -> Option<u32> {
+        self.versions.get(role).copied()
+    }
+
+    /// Rejects metadata whose version is lower than the stored role version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `version < stored_version` for the role.
+    pub fn validate_version(&self, role: &str, version: u32) -> Result<()> {
+        if let Some(stored) = self.stored_version(role)
+            && version < stored
+        {
+            return Err(ProvenanceError::TufRollback {
+                role: role.to_owned(),
+                stored,
+                new: version,
+            });
+        }
+        Ok(())
+    }
+
+    /// Records a role version after rollback validation succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `version < stored_version` for the role.
+    pub fn record_version(&mut self, role: &str, version: u32) -> Result<()> {
+        self.validate_version(role, version)?;
+        self.versions.insert(role.to_owned(), version);
+        Ok(())
+    }
+}
+
+fn ensure_tuf_not_expired(role: &str, expires: &str, now: &str) -> Result<()> {
+    if expires > now {
+        Ok(())
+    } else {
+        Err(ProvenanceError::TufExpired {
+            role: role.to_owned(),
+            expires: expires.to_owned(),
+            now: now.to_owned(),
+        })
+    }
 }
 
 /// Parse a minisign public key from a base64 key or public-key box.
@@ -262,14 +761,21 @@ fn unique_temp_name() -> OsString {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::Cursor;
     use std::path::Path;
     use std::process::Command;
 
-    use super::{ProvenanceError, SignatureSystem, verify_cosign, verify_minisign};
+    use arbitraitor_model::ids::Sha256Digest;
+
+    use super::{
+        ProvenanceError, SignatureSystem, TofuChange, TofuPin, TofuStore, TofuVerification, TufKey,
+        TufRole, TufRoot, TufSignature, TufTargets, TufVersionStore, verify_cosign,
+        verify_minisign,
+    };
 
     #[test]
-    fn minisign_verifies_artifact_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    fn minisign_verifies_artifact_bytes() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let artifact = b"trusted release artifact";
         let signature = minisign::sign(
@@ -289,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn minisign_rejects_wrong_key() -> Result<(), Box<dyn std::error::Error>> {
+    fn minisign_rejects_wrong_key() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let signing_key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let wrong_key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let artifact = b"trusted release artifact";
@@ -309,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_minisign_base64_public_key() -> Result<(), Box<dyn std::error::Error>> {
+    fn parses_minisign_base64_public_key() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let parsed = super::parse_minisign_public_key(&key.pk.to_base64())?;
 
@@ -318,7 +824,8 @@ mod tests {
     }
 
     #[test]
-    fn verifies_all_required_minisign_signatures() -> Result<(), Box<dyn std::error::Error>> {
+    fn verifies_all_required_minisign_signatures()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let first_key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let second_key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let artifact = b"artifact with multiple required signatures";
@@ -366,5 +873,193 @@ mod tests {
             result,
             Err(ProvenanceError::CosignVerification { .. } | ProvenanceError::Io { .. })
         ));
+    }
+
+    #[test]
+    fn tofu_first_use_pins_artifact_identity() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let path = temp_store_path("first-use");
+        let mut store = TofuStore::open(&path)?;
+        let url = "https://example.test/artifact";
+        let pin = tofu_pin(url, 0x11, Some("signer@example.test"), Some(123));
+
+        assert_eq!(
+            store.verify_against_pin(url, &pin)?,
+            TofuVerification::FirstUse
+        );
+        store.pin(url, pin.clone())?;
+        let reopened = TofuStore::open(&path)?;
+
+        assert_eq!(reopened.check(url), Some(&pin));
+        remove_file_if_present(&path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tofu_subsequent_match_passes() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let path = temp_store_path("match");
+        let url = "https://example.test/tool";
+        let pin = tofu_pin(url, 0x22, Some("release@example.test"), Some(42));
+        let mut store = TofuStore::open(&path)?;
+        store.pin(url, pin.clone())?;
+
+        assert_eq!(
+            store.verify_against_pin(url, &pin)?,
+            TofuVerification::Matches
+        );
+        remove_file_if_present(&path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tofu_change_produces_field_diff() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let path = temp_store_path("changed");
+        let url = "https://example.test/tool";
+        let pinned = tofu_pin(url, 0x33, Some("old@example.test"), Some(100));
+        let actual = tofu_pin(url, 0x44, Some("new@example.test"), Some(101));
+        let mut store = TofuStore::open(&path)?;
+        store.pin(url, pinned)?;
+
+        assert_eq!(
+            store.verify_against_pin(url, &actual)?,
+            TofuVerification::Changed {
+                changes: vec![
+                    TofuChange::DigestChanged {
+                        old: digest(0x33).to_string(),
+                        new: digest(0x44).to_string(),
+                    },
+                    TofuChange::SignerChanged {
+                        old: "old@example.test".to_owned(),
+                        new: "new@example.test".to_owned(),
+                    },
+                    TofuChange::SizeChanged { old: 100, new: 101 },
+                ],
+            }
+        );
+        remove_file_if_present(&path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tuf_version_validation_rejects_rollback()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut versions = TufVersionStore::new();
+        versions.record_version("snapshot", 3)?;
+
+        assert!(matches!(
+            versions.validate_version("snapshot", 2),
+            Err(ProvenanceError::TufRollback { .. })
+        ));
+        versions.validate_version("snapshot", 3)?;
+        versions.validate_version("snapshot", 4)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tuf_expiration_rejects_expired_metadata()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let targets = TufTargets {
+            version: 1,
+            expires: "2026-01-01T00:00:00Z".to_owned(),
+            targets: HashMap::new(),
+        };
+
+        assert!(matches!(
+            targets.ensure_not_expired("2026-06-18T00:00:00Z"),
+            Err(ProvenanceError::TufExpired { .. })
+        ));
+        targets.ensure_not_expired("2025-06-18T00:00:00Z")?;
+        Ok(())
+    }
+
+    #[test]
+    fn tuf_threshold_requires_unique_authorized_signatures()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = TufRoot {
+            version: 1,
+            expires: "9999-01-01T00:00:00Z".to_owned(),
+            keys: vec![tuf_key("root-a"), tuf_key("root-b"), tuf_key("unrelated")],
+            roles: HashMap::from([(
+                "root".to_owned(),
+                TufRole {
+                    key_ids: vec!["root-a".to_owned(), "root-b".to_owned()],
+                    threshold: 2,
+                },
+            )]),
+            consistent_snapshot: true,
+        };
+
+        assert!(matches!(
+            root.verify_role_threshold(
+                "root",
+                &[
+                    TufSignature {
+                        key_id: "root-a".to_owned(),
+                    },
+                    TufSignature {
+                        key_id: "root-a".to_owned(),
+                    },
+                    TufSignature {
+                        key_id: "unrelated".to_owned(),
+                    },
+                ],
+            ),
+            Err(ProvenanceError::TufThreshold { .. })
+        ));
+
+        root.verify_role_threshold(
+            "root",
+            &[
+                TufSignature {
+                    key_id: "root-a".to_owned(),
+                },
+                TufSignature {
+                    key_id: "root-b".to_owned(),
+                },
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn tofu_pin(url: &str, byte: u8, signer_identity: Option<&str>, size: Option<u64>) -> TofuPin {
+        TofuPin {
+            url: url.to_owned(),
+            sha256: digest(byte),
+            signer_identity: signer_identity.map(str::to_owned),
+            content_type: Some("application/octet-stream".to_owned()),
+            size,
+            first_seen: "2026-06-18T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn digest(byte: u8) -> Sha256Digest {
+        Sha256Digest::new([byte; 32])
+    }
+
+    fn tuf_key(key_id: &str) -> TufKey {
+        TufKey {
+            key_id: key_id.to_owned(),
+            key_type: "ed25519".to_owned(),
+            scheme: "minisign".to_owned(),
+            value: "public-key".to_owned(),
+        }
+    }
+
+    fn temp_store_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "arbitraitor-tofu-{name}-{}-{}.json",
+            std::process::id(),
+            super::unique_temp_name().to_string_lossy()
+        ));
+        path
+    }
+
+    fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
