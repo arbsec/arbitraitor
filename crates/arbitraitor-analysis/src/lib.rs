@@ -14,6 +14,10 @@ use arbitraitor_archive::{
     ArchiveError, ArchiveLimits, detect_archive_hazards, open_archive_with_limits,
 };
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, ShellKind, classify};
+use arbitraitor_intel::{
+    Disposition, Indicator, IndicatorType, IntelStore, MatchResult, evaluate_matches,
+    match_indicator,
+};
 use arbitraitor_model::artifact::{ArtifactKind, ShellDialect, TarCompression};
 use arbitraitor_model::finding::{
     DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
@@ -25,6 +29,7 @@ use sha2::{Digest, Sha256};
 
 const ARTIFACT_DETECTOR_ID: &str = "arbitraitor-analysis.artifact";
 const ARCHIVE_DETECTOR_ID: &str = "arbitraitor-analysis.archive-hazards";
+const REPUTATION_DETECTOR_ID: &str = "arbitraitor-analysis.reputation";
 const SHELL_DETECTOR_ID: &str = "arbitraitor-analysis.shell";
 
 /// Detector trait implemented by analysis stages.
@@ -370,6 +375,61 @@ impl Detector for ArchiveHazardDetector {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShellDetector;
 
+/// Detector that turns local threat-intelligence matches into reputation findings.
+#[derive(Clone, Debug)]
+pub struct ReputationDetector {
+    store: IntelStore,
+}
+
+impl ReputationDetector {
+    /// Creates a reputation detector backed by the supplied local intelligence store.
+    #[must_use]
+    pub fn new(store: IntelStore) -> Self {
+        Self { store }
+    }
+}
+
+impl Detector for ReputationDetector {
+    fn metadata(&self) -> DetectorMetadata {
+        DetectorMetadata {
+            id: REPUTATION_DETECTOR_ID.to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            supported_artifact_kinds: Vec::new(),
+            capabilities: vec!["local-threat-intel".to_owned()],
+            is_local: true,
+            may_upload: false,
+            default_timeout_ms: 1_000,
+            is_deterministic: true,
+        }
+    }
+
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+        let mut matches = match_indicator(
+            &self.store,
+            &Indicator {
+                indicator_type: IndicatorType::Sha256,
+                value: ctx.artifact_sha256.to_string(),
+            },
+        );
+
+        for url in retrieval_urls(ctx) {
+            matches.extend(match_indicator(
+                &self.store,
+                &Indicator {
+                    indicator_type: IndicatorType::ExactUrl,
+                    value: url,
+                },
+            ));
+        }
+
+        let Some(enforcement) = evaluate_matches(&matches) else {
+            return Vec::new();
+        };
+
+        vec![reputation_finding(ctx, &matches, enforcement)]
+    }
+}
+
 impl Detector for ShellDetector {
     fn metadata(&self) -> DetectorMetadata {
         DetectorMetadata {
@@ -545,6 +605,71 @@ fn archive_error_finding(ctx: &AnalysisContext<'_>, error: &ArchiveError) -> Fin
     }
 }
 
+fn retrieval_urls(ctx: &AnalysisContext<'_>) -> Vec<String> {
+    ctx.retrieval
+        .iter()
+        .flat_map(|retrieval| {
+            [
+                retrieval.requested_location.clone(),
+                retrieval.final_location.clone(),
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .collect()
+}
+
+fn reputation_finding(
+    ctx: &AnalysisContext<'_>,
+    matches: &[MatchResult],
+    enforcement: arbitraitor_intel::EnforcementResult,
+) -> Finding {
+    let disposition = match enforcement.disposition {
+        Disposition::Block => "block",
+        Disposition::Warn => "warn",
+        Disposition::Informational => "informational",
+        Disposition::Allow => "allow",
+    };
+    let evidence = matches
+        .iter()
+        .map(|matched| Evidence {
+            kind: EvidenceKind::Other,
+            description: "threat-intelligence match".to_owned(),
+            content: Some(format!(
+                "entry_id={}; indicator_type={:?}; specificity={:?}; source_class={:?}",
+                matched.entry.id,
+                matched.entry.indicator.indicator_type,
+                matched.specificity,
+                matched.entry.source_class
+            )),
+        })
+        .collect();
+
+    Finding {
+        id: "reputation.intel-match".to_owned(),
+        detector: REPUTATION_DETECTOR_ID.to_owned(),
+        category: FindingCategory::Reputation,
+        severity: enforcement.severity,
+        confidence: enforcement.confidence,
+        title: "Artifact matches threat intelligence".to_owned(),
+        description: format!(
+            "Local intelligence matched this artifact and policy selected {disposition}."
+        ),
+        evidence,
+        artifact_sha256: ctx.artifact_sha256.clone(),
+        location: None,
+        remediation: Some(
+            "Treat this artifact according to the selected reputation policy disposition."
+                .to_owned(),
+        ),
+        references: Vec::new(),
+        tags: vec![
+            "reputation".to_owned(),
+            format!("disposition:{disposition}"),
+        ],
+    }
+}
+
 fn archive_artifact_kinds() -> Vec<ArtifactKind> {
     vec![
         ArtifactKind::Zip,
@@ -601,14 +726,21 @@ fn digest(data: &[u8]) -> Sha256Digest {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalysisContext, AnalysisCoordinator, Detector, DetectorStatus, RetrievalInfo, digest,
+        AnalysisContext, AnalysisCoordinator, Detector, DetectorStatus, ReputationDetector,
+        RetrievalInfo, digest,
     };
     use arbitraitor_artifact::ArtifactType;
+    use arbitraitor_intel::{
+        CURRENT_SCHEMA_VERSION, Classification, Disposition, FeedEntry, FeedEvidence, FeedSource,
+        FeedSourceClass, Indicator, IndicatorType, IntelStore, ReviewState, ReviewStatus,
+    };
     use arbitraitor_model::artifact::ArtifactKind;
     use arbitraitor_model::finding::{DetectorMetadata, Evidence, Finding, FindingCategory};
     use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
+    use std::fs;
+    use std::path::PathBuf;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn default_pipeline_detects_shell_download_to_execute() {
@@ -814,6 +946,101 @@ mod tests {
         assert_eq!(result.findings[0].artifact_sha256, expected);
     }
 
+    #[test]
+    fn reputation_detector_reports_enterprise_sha256_block()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = b"known bad payload";
+        let digest = digest(bytes).to_string();
+        let store = store_with_entries(
+            "enterprise-sha",
+            [entry(
+                IndicatorType::Sha256,
+                &digest,
+                FeedSourceClass::EnterpriseDeny,
+            )],
+        )?;
+        let detector = ReputationDetector::new(store);
+        let ctx = test_context(bytes, None);
+
+        let findings = detector.analyze(&ctx);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Critical);
+        assert_eq!(findings[0].confidence, Confidence::Confirmed);
+        assert!(
+            findings[0]
+                .tags
+                .iter()
+                .any(|tag| tag == "disposition:block")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reputation_detector_reports_community_url_warn() -> Result<(), Box<dyn std::error::Error>> {
+        let url = "https://example.invalid/install.sh";
+        let store = store_with_entries(
+            "community-url",
+            [entry(
+                IndicatorType::ExactUrl,
+                url,
+                FeedSourceClass::CorroboratedCommunity,
+            )],
+        )?;
+        let detector = ReputationDetector::new(store);
+        let ctx = test_context(
+            b"payload",
+            Some(RetrievalInfo {
+                requested_location: Some(url.to_owned()),
+                final_location: None,
+                content_type: None,
+                byte_count: None,
+            }),
+        );
+
+        let findings = detector.analyze(&ctx);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert!(findings[0].tags.iter().any(|tag| tag == "disposition:warn"));
+        Ok(())
+    }
+
+    #[test]
+    fn reputation_detector_reports_no_findings_without_matches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = store_with_entries(
+            "no-match",
+            [entry(
+                IndicatorType::Sha256,
+                &"00".repeat(32),
+                FeedSourceClass::EnterpriseDeny,
+            )],
+        )?;
+        let detector = ReputationDetector::new(store);
+        let ctx = test_context(b"different payload", None);
+
+        assert!(detector.analyze(&ctx).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn reputation_detector_ignores_expired_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = b"formerly bad payload";
+        let mut expired = entry(
+            IndicatorType::Sha256,
+            &digest(bytes).to_string(),
+            FeedSourceClass::EnterpriseDeny,
+        );
+        expired.expires_at = Some("1970-01-01T00:00:00Z".to_owned());
+        let store = store_with_entries("expired", [expired])?;
+        let detector = ReputationDetector::new(store);
+        let ctx = test_context(bytes, None);
+
+        assert!(detector.analyze(&ctx).is_empty());
+        Ok(())
+    }
+
     struct RecordingDetector {
         id: &'static str,
     }
@@ -940,6 +1167,78 @@ mod tests {
             remediation: None,
             references: Vec::new(),
             tags: Vec::new(),
+        }
+    }
+
+    fn test_context<'artifact>(
+        artifact_bytes: &'artifact [u8],
+        retrieval: Option<RetrievalInfo>,
+    ) -> AnalysisContext<'artifact> {
+        AnalysisContext {
+            artifact_bytes,
+            classification: arbitraitor_artifact::classify(artifact_bytes),
+            retrieval,
+            artifact_sha256: digest(artifact_bytes),
+        }
+    }
+
+    fn store_with_entries(
+        name: &str,
+        entries: impl IntoIterator<Item = FeedEntry>,
+    ) -> Result<IntelStore, Box<dyn std::error::Error>> {
+        let path = temp_store_path(name);
+        let mut store = IntelStore::open(&path)?;
+        for entry in entries {
+            store.add_entry(entry)?;
+        }
+        let _ = fs::remove_file(path);
+        Ok(store)
+    }
+
+    fn temp_store_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "arbitraitor-analysis-{name}-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    fn entry(
+        indicator_type: IndicatorType,
+        value: &str,
+        source_class: FeedSourceClass,
+    ) -> FeedEntry {
+        let indicator = Indicator {
+            indicator_type,
+            value: value.to_owned(),
+        };
+        FeedEntry {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: format!("entry:{indicator_type:?}:{value}"),
+            indicator,
+            classification: Classification::Malicious,
+            severity: Severity::High,
+            confidence: Confidence::Confirmed,
+            disposition: Disposition::Block,
+            source_class,
+            first_seen: "2026-06-01T00:00:00Z".to_owned(),
+            last_seen: "2026-06-17T00:00:00Z".to_owned(),
+            expires_at: None,
+            sources: vec![FeedSource {
+                source_type: "test".to_owned(),
+                reference: "analysis-test".to_owned(),
+            }],
+            evidence: FeedEvidence {
+                malware_family: None,
+                notes: None,
+            },
+            review: ReviewStatus {
+                status: ReviewState::Reviewed,
+                reviewers: vec!["test".to_owned()],
+            },
         }
     }
 }
