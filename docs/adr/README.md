@@ -40,6 +40,7 @@ supersede it.
 | [0016](0016-terminal-and-unicode-sanitization.md) | Terminal and Unicode sanitization renderer | Accepted | #11 |
 | [0017](0017-monotonic-project-configuration.md) | Monotonic project configuration | Accepted | #13 |
 | [0018](0018-ssrf-proxy-connected-peer-verification.md) | SSRF, proxy, and connected-peer verification | Accepted | #14 |
+| [0019](0019-catch-unwind-and-panic-abort.md) | catch_unwind and panic=abort interaction | Accepted | #80 |
 
 ## Format
 
