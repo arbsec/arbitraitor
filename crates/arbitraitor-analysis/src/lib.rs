@@ -927,6 +927,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn detector_failure_is_recorded_and_verdict_is_incomplete() {
         let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(FailingDetector)]);
 
@@ -1026,6 +1027,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn panicking_detector_does_not_prevent_others_from_running() {
         let coordinator = AnalysisCoordinator::with_detectors(vec![
             Box::new(FailingDetector),

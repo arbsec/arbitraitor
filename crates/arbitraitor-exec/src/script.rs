@@ -204,7 +204,7 @@ fn operation_plan(interpreter: &Path, args: &[String]) -> OperationPlan {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;

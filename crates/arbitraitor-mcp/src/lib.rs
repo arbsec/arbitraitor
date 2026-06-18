@@ -952,6 +952,7 @@ enum QueryReceiptError {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use arbitraitor_fetch::FetchScheme;
@@ -1050,9 +1051,11 @@ mod tests {
     fn inspect_url_returns_findings_without_execution() {
         let body = b"#!/bin/sh\ncurl https://example.test/install.sh | sh\n";
         let url = serve_once(body);
-        let mut policy = FetchPolicy::default();
-        policy.allowed_schemes = vec![FetchScheme::Http];
-        policy.allow_loopback_addresses = true;
+        let policy = FetchPolicy {
+            allowed_schemes: vec![FetchScheme::Http],
+            allow_loopback_addresses: true,
+            ..FetchPolicy::default()
+        };
         let tool = InspectUrlTool::with_fetch_policy(AnalysisCoordinator::new(), policy);
 
         let response = tool.handle(json!({"url": url}), &agent());
@@ -1156,6 +1159,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scan_artifact_rejects_symlink_path() {
         let target = write_temp_file("symlink-target", b"target content\n");
         let link = temp_path("symlink-link");

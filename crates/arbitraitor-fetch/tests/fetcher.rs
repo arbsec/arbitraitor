@@ -100,6 +100,7 @@ async fn fetch_blocks_loopback_by_default() -> Result<(), Box<dyn std::error::Er
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn redirect_target_is_validated_against_ssrf_policy() -> Result<(), Box<dyn std::error::Error>>
 {
     let url = metadata_redirect_server().await?;

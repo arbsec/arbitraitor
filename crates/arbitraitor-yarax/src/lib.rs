@@ -1057,13 +1057,13 @@ rule Shell_Only
 }
 "#;
 
-    const UNTAGGED_RULE: &str = r#"
+    const UNTAGGED_RULE: &str = r"
 rule Untagged_All_Artifacts
 {
   condition:
     true
 }
-"#;
+";
 
     #[test]
     fn scan_with_matching_rule_produces_finding() -> Result<(), Box<dyn std::error::Error>> {
