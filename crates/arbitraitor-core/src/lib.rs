@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod metrics;
 
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::{ArtifactId, OperationId};

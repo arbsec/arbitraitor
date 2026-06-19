@@ -8,13 +8,14 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arbitraitor_archive::{
     ArchiveError, ArchiveLimits, ArtifactNode, ArtifactOrigin, PayloadIssue, PayloadNode,
     detect_archive_hazards, open_archive_with_limits, walk_payloads,
 };
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, ShellKind, classify};
+use arbitraitor_core::metrics::{OperationMetrics, log_operation};
 use arbitraitor_intel::{
     Disposition, Indicator, IndicatorType, IntelStore, MatchResult, evaluate_matches,
     match_indicator,
@@ -82,6 +83,8 @@ pub struct AnalysisResult {
     pub detector_results: Vec<DetectorResult>,
     /// Fail-closed MVP verdict derived from detector health and findings.
     pub verdict: Verdict,
+    /// Optional metrics for this completed operation.
+    pub metrics: Option<OperationMetrics>,
 }
 
 /// Health record for a single detector execution.
@@ -93,6 +96,8 @@ pub struct DetectorResult {
     pub status: DetectorStatus,
     /// Number of findings emitted by this detector.
     pub finding_count: usize,
+    /// Detector execution duration in milliseconds.
+    pub duration_ms: u64,
 }
 
 /// Execution status for one detector.
@@ -109,6 +114,7 @@ pub enum DetectorStatus {
 /// Sequential deterministic detector coordinator.
 pub struct AnalysisCoordinator {
     detectors: Vec<Arc<dyn Detector>>,
+    metrics_enabled: bool,
 }
 
 impl AnalysisCoordinator {
@@ -127,7 +133,17 @@ impl AnalysisCoordinator {
     pub fn with_detectors(mut detectors: Vec<Box<dyn Detector>>) -> Self {
         detectors.sort_by(|left, right| left.metadata().id.cmp(&right.metadata().id));
         let detectors = detectors.into_iter().map(Arc::from).collect();
-        Self { detectors }
+        Self {
+            detectors,
+            metrics_enabled: true,
+        }
+    }
+
+    /// Enables or disables operation metrics collection and completion logs.
+    #[must_use]
+    pub const fn with_metrics_enabled(mut self, enabled: bool) -> Self {
+        self.metrics_enabled = enabled;
+        self
     }
 
     /// Analyze artifact bytes without retrieval metadata.
@@ -143,6 +159,7 @@ impl AnalysisCoordinator {
         artifact_bytes: &[u8],
         retrieval: Option<RetrievalInfo>,
     ) -> AnalysisResult {
+        let scan_started = Instant::now();
         let classification = classify(artifact_bytes);
         let artifact_sha256 = digest(artifact_bytes);
         let ctx = OwnedAnalysisContext {
@@ -162,16 +179,41 @@ impl AnalysisCoordinator {
             }
 
             let execution = run_detector(Arc::clone(detector), ctx.clone(), metadata);
+            tracing::debug!(
+                target: "arbitraitor.operation.detector",
+                detector_id = %execution.result.metadata.id,
+                duration_ms = execution.result.duration_ms,
+                finding_count = execution.result.finding_count,
+                status = ?execution.result.status,
+                "detector completed"
+            );
             findings.extend(execution.findings);
             detector_results.push(execution.result);
         }
 
         let verdict = derive_verdict(&findings, &detector_results);
+        let metrics = self.metrics_enabled.then(|| {
+            let metrics = OperationMetrics {
+                scan_duration_ms: elapsed_millis(scan_started.elapsed()),
+                finding_count: findings.len(),
+                verdict: format!("{verdict:?}"),
+                artifact_size: usize_to_u64(artifact_bytes.len()),
+                artifact_type: format!("{:?}", classification.artifact_type),
+                detector_count: detector_results.len(),
+                detector_errors: detector_results
+                    .iter()
+                    .filter(|result| !matches!(result.status, DetectorStatus::Ok))
+                    .count(),
+            };
+            log_operation(&metrics);
+            metrics
+        });
         AnalysisResult {
             findings,
             classification,
             detector_results,
             verdict,
+            metrics,
         }
     }
 }
@@ -338,6 +380,7 @@ fn run_detector(
     ctx: OwnedAnalysisContext,
     metadata: DetectorMetadata,
 ) -> DetectorExecution {
+    let started = Instant::now();
     let timeout = Duration::from_millis(metadata.default_timeout_ms);
     let (tx, rx) = mpsc::channel();
 
@@ -358,6 +401,7 @@ fn run_detector(
                     metadata,
                     status: DetectorStatus::Ok,
                     finding_count: findings.len(),
+                    duration_ms: elapsed_millis(started.elapsed()),
                 },
                 findings,
             }
@@ -368,6 +412,7 @@ fn run_detector(
                 metadata,
                 status: DetectorStatus::Error(panic_message(payload.as_ref())),
                 finding_count: 0,
+                duration_ms: elapsed_millis(started.elapsed()),
             },
         },
         Err(mpsc::RecvTimeoutError::Timeout) => DetectorExecution {
@@ -376,6 +421,7 @@ fn run_detector(
                 metadata,
                 status: DetectorStatus::Timeout,
                 finding_count: 0,
+                duration_ms: elapsed_millis(started.elapsed()),
             },
         },
         Err(mpsc::RecvTimeoutError::Disconnected) => DetectorExecution {
@@ -384,9 +430,18 @@ fn run_detector(
                 metadata,
                 status: DetectorStatus::Error("detector thread disconnected".to_owned()),
                 finding_count: 0,
+                duration_ms: elapsed_millis(started.elapsed()),
             },
         },
     }
+}
+
+fn elapsed_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -1024,6 +1079,37 @@ mod tests {
 
         assert_eq!(result.findings.len(), 1);
         assert_eq!(result.findings[0].title, "retrieval metadata observed");
+    }
+
+    #[test]
+    fn analyze_records_operation_metrics() -> Result<(), Box<dyn std::error::Error>> {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(
+            RecordingDetector::new("metrics.detector"),
+        )]);
+
+        let result = coordinator.analyze(b"plain text\n");
+        let Some(metrics) = result.metrics.as_ref() else {
+            return Err("metrics should be enabled".into());
+        };
+        assert_eq!(metrics.finding_count, 1);
+        assert_eq!(metrics.verdict, "Warn");
+        assert_eq!(metrics.artifact_size, 11);
+        assert_eq!(metrics.detector_count, 1);
+        assert_eq!(metrics.detector_errors, 0);
+        assert!(result.detector_results[0].duration_ms <= metrics.scan_duration_ms);
+        Ok(())
+    }
+
+    #[test]
+    fn metrics_can_be_disabled() {
+        let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(
+            RecordingDetector::new("metrics.detector"),
+        )])
+        .with_metrics_enabled(false);
+
+        let result = coordinator.analyze(b"plain text\n");
+
+        assert!(result.metrics.is_none());
     }
 
     #[test]
