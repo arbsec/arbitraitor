@@ -8,12 +8,14 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{ErrorKind as IoErrorKind, Read};
+use std::io::{ErrorKind as IoErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_analysis::{AnalysisCoordinator, DetectorStatus, RetrievalInfo};
+use arbitraitor_exec::script::ScriptExecution;
 use arbitraitor_fetch::{
     FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink, redact_url,
 };
@@ -25,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 const UNTRUSTED_START: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_START>>";
 const UNTRUSTED_END: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_END>>";
@@ -35,6 +38,8 @@ const MAX_UNTRUSTED_CHARS: usize = 4096;
 /// development conventions: every parser and scanner has explicit memory
 /// limits. The coordinator pipeline operates on the bytes in memory.
 pub const MAX_SCAN_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+/// Default approval token lifetime: five minutes.
+pub const DEFAULT_APPROVAL_TOKEN_LIFETIME: Duration = Duration::from_mins(5);
 
 /// MCP tool metadata advertised by this crate.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,8 +99,10 @@ pub struct AgentIdentity {
 pub enum McpCapability {
     /// Read-only inspection. This class never releases or executes artifacts.
     Inspect,
-    /// Human-facing explanation over already-produced structured data.
-    Explain,
+    /// Human approval request capability. This cannot execute artifacts.
+    Approve,
+    /// Execution capability that requires a pre-issued approval token.
+    Execute,
 }
 
 /// Errors returned by MCP server dispatch.
@@ -535,6 +542,513 @@ impl McpToolHandler for QueryReceiptTool {
     }
 }
 
+/// Human approval prompt used by [`RequestApprovalTool`].
+pub trait ApprovalPrompt: Send + Sync {
+    /// Shows the artifact and untrusted plan to a human approval channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalPromptError`] when the approval channel cannot render
+    /// the prompt or read the human response.
+    fn request_confirmation(
+        &self,
+        sha256: &Sha256Digest,
+        plan: &str,
+    ) -> Result<bool, ApprovalPromptError>;
+}
+
+/// Stdin/stderr approval prompt for MVP interactive use.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StdinApprovalPrompt;
+
+impl ApprovalPrompt for StdinApprovalPrompt {
+    fn request_confirmation(
+        &self,
+        sha256: &Sha256Digest,
+        plan: &str,
+    ) -> Result<bool, ApprovalPromptError> {
+        let mut stderr = std::io::stderr().lock();
+        writeln!(stderr, "APPROVAL REQUESTED for artifact {sha256}")
+            .map_err(|error| ApprovalPromptError::write(&error))?;
+        writeln!(stderr, "Plan (untrusted): {}", sanitize_for_agent(plan))
+            .map_err(|error| ApprovalPromptError::write(&error))?;
+        write!(stderr, "Type 'yes' to approve: ")
+            .map_err(|error| ApprovalPromptError::write(&error))?;
+        stderr
+            .flush()
+            .map_err(|error| ApprovalPromptError::write(&error))?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| ApprovalPromptError::read(&error))?;
+        Ok(input.trim() == "yes")
+    }
+}
+
+/// Errors from a human approval prompt channel.
+#[derive(Debug, Error)]
+pub enum ApprovalPromptError {
+    /// The approval prompt could not be written.
+    #[error("approval prompt write failed during {stage}: {message}")]
+    Write {
+        /// I/O stage.
+        stage: &'static str,
+        /// Safe diagnostic message.
+        message: String,
+    },
+    /// The approval response could not be read.
+    #[error("approval prompt read failed during {stage}: {message}")]
+    Read {
+        /// I/O stage.
+        stage: &'static str,
+        /// Safe diagnostic message.
+        message: String,
+    },
+}
+
+impl ApprovalPromptError {
+    fn write(error: &std::io::Error) -> Self {
+        Self::Write {
+            stage: "write-prompt",
+            message: error.to_string(),
+        }
+    }
+
+    fn read(error: &std::io::Error) -> Self {
+        Self::Read {
+            stage: "read-confirmation",
+            message: error.to_string(),
+        }
+    }
+}
+
+/// Issues and validates signed approval tokens.
+#[derive(Clone)]
+pub struct ApprovalTokenIssuer {
+    signing_secret: Arc<[u8]>,
+}
+
+impl ApprovalTokenIssuer {
+    /// Creates an issuer with a process-local random signing secret.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut secret = Vec::with_capacity(32);
+        secret.extend_from_slice(Uuid::new_v4().as_bytes());
+        secret.extend_from_slice(Uuid::new_v4().as_bytes());
+        Self {
+            signing_secret: Arc::from(secret.into_boxed_slice()),
+        }
+    }
+
+    /// Creates an issuer with an explicit signing secret.
+    #[must_use]
+    pub fn with_secret(secret: impl Into<Vec<u8>>) -> Self {
+        Self {
+            signing_secret: Arc::from(secret.into().into_boxed_slice()),
+        }
+    }
+
+    fn issue(
+        &self,
+        sha256: &Sha256Digest,
+        plan: &str,
+        expires_at: SystemTime,
+        agent: &AgentIdentity,
+    ) -> Result<IssuedApprovalToken, ApprovalTokenError> {
+        let expires_at_unix_seconds = unix_seconds(expires_at)?;
+        let payload = ApprovalTokenPayload {
+            schema_version: 1,
+            sha256: sha256.to_string(),
+            plan_digest: canonical_plan_digest(sha256, plan)?,
+            expires_at_unix_seconds,
+            nonce: Uuid::new_v4().to_string(),
+            approval_method: "stdin-human-confirmation".to_owned(),
+            requester_integration: agent.integration.clone(),
+            requester_agent_name: agent.agent_name.clone(),
+            requester_session_id: agent.session_id.clone(),
+        };
+        let payload_bytes = serde_json::to_vec(&payload)?;
+        let signature = self.sign(&payload_bytes);
+        let token = format!(
+            "v1.{}.{}",
+            hex::encode(&payload_bytes),
+            hex::encode(signature)
+        );
+        Ok(IssuedApprovalToken {
+            token,
+            expires_at_unix_seconds,
+        })
+    }
+
+    fn validate(
+        &self,
+        token: &str,
+        sha256: &Sha256Digest,
+        now: SystemTime,
+    ) -> Result<ApprovalTokenPayload, ApprovalTokenError> {
+        let (payload_bytes, signature) = Self::decode_token(token)?;
+        let expected = self.sign(&payload_bytes);
+        if signature != expected {
+            return Err(ApprovalTokenError::InvalidSignature);
+        }
+        let payload: ApprovalTokenPayload = serde_json::from_slice(&payload_bytes)?;
+        if payload.sha256 != sha256.to_string() {
+            return Err(ApprovalTokenError::ArtifactMismatch);
+        }
+        if unix_seconds(now)? >= payload.expires_at_unix_seconds {
+            return Err(ApprovalTokenError::Expired);
+        }
+        Ok(payload)
+    }
+
+    fn decode_token(token: &str) -> Result<(Vec<u8>, Vec<u8>), ApprovalTokenError> {
+        let mut parts = token.split('.');
+        let version = parts.next().ok_or(ApprovalTokenError::MalformedToken)?;
+        let payload_hex = parts.next().ok_or(ApprovalTokenError::MalformedToken)?;
+        let signature_hex = parts.next().ok_or(ApprovalTokenError::MalformedToken)?;
+        if parts.next().is_some() || version != "v1" {
+            return Err(ApprovalTokenError::MalformedToken);
+        }
+        Ok((hex::decode(payload_hex)?, hex::decode(signature_hex)?))
+    }
+
+    fn sign(&self, payload_bytes: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"arbitraitor-mcp-approval-token-v1");
+        hasher.update(self.signing_secret.as_ref());
+        hasher.update(payload_bytes);
+        hasher.update(self.signing_secret.as_ref());
+        hasher.finalize().into()
+    }
+}
+
+impl Default for ApprovalTokenIssuer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct IssuedApprovalToken {
+    token: String,
+    expires_at_unix_seconds: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalTokenPayload {
+    schema_version: u32,
+    sha256: String,
+    plan_digest: String,
+    expires_at_unix_seconds: u64,
+    nonce: String,
+    approval_method: String,
+    requester_integration: String,
+    requester_agent_name: String,
+    requester_session_id: String,
+}
+
+/// Tool that requests human approval for a canonical artifact execution plan.
+pub struct RequestApprovalTool {
+    prompt: Arc<dyn ApprovalPrompt>,
+    issuer: ApprovalTokenIssuer,
+    token_lifetime: Duration,
+}
+
+impl RequestApprovalTool {
+    /// Creates a `request_approval` tool using stdin/stderr confirmation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_prompt(Arc::new(StdinApprovalPrompt), ApprovalTokenIssuer::new())
+    }
+
+    /// Creates a `request_approval` tool with injected prompt and token issuer.
+    #[must_use]
+    pub fn with_prompt(prompt: Arc<dyn ApprovalPrompt>, issuer: ApprovalTokenIssuer) -> Self {
+        Self {
+            prompt,
+            issuer,
+            token_lifetime: DEFAULT_APPROVAL_TOKEN_LIFETIME,
+        }
+    }
+
+    /// Sets the token lifetime. A zero lifetime creates immediately expired tokens.
+    #[must_use]
+    pub const fn with_token_lifetime(mut self, token_lifetime: Duration) -> Self {
+        self.token_lifetime = token_lifetime;
+        self
+    }
+
+    fn request(&self, params: Value, agent: &AgentIdentity) -> Result<Value, RequestApprovalError> {
+        let params: RequestApprovalParams = serde_json::from_value(params)?;
+        let digest: Sha256Digest = params.sha256.parse().map_err(
+            |error: arbitraitor_model::ids::Sha256DigestParseError| {
+                RequestApprovalError::InvalidSha256 {
+                    message: error.to_string(),
+                }
+            },
+        )?;
+        let approved = self.prompt.request_confirmation(&digest, &params.plan)?;
+        let expires_at = SystemTime::now()
+            .checked_add(self.token_lifetime)
+            .ok_or(RequestApprovalError::TimeOverflow)?;
+        let issued = if approved {
+            Some(
+                self.issuer
+                    .issue(&digest, &params.plan, expires_at, agent)?,
+            )
+        } else {
+            None
+        };
+        Ok(json!({
+            "capability": McpCapability::Approve,
+            "execution_performed": false,
+            "release_performed": false,
+            "agent_identity": sanitized_agent(agent),
+            "approved": approved,
+            "approval_token": issued.as_ref().map(|token| token.token.clone()),
+            "expires_at": issued
+                .as_ref()
+                .map_or_else(|| unix_seconds_string(expires_at), |token| token.expires_at_unix_seconds.to_string()),
+            "artifact": { "sha256": digest.to_string() },
+            "plan_digest": canonical_plan_digest(&digest, &params.plan)?,
+        }))
+    }
+}
+
+impl Default for RequestApprovalTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl McpToolHandler for RequestApprovalTool {
+    fn metadata(&self) -> McpTool {
+        McpTool {
+            name: "request_approval".to_owned(),
+            description: "Request human approval for a plan-bound artifact execution token without executing the artifact.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["sha256", "plan"],
+                "properties": {
+                    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+                    "plan": { "type": "string" }
+                }
+            }),
+        }
+    }
+
+    fn handle(&self, params: Value, agent: &AgentIdentity) -> McpToolResponse {
+        match self.request(params, agent) {
+            Ok(json) => json_response(json),
+            Err(error) => error_response(&error.to_string(), agent),
+        }
+    }
+
+    fn capability(&self) -> McpCapability {
+        McpCapability::Approve
+    }
+}
+
+/// Byte lookup for approved artifacts.
+pub trait ArtifactLookup: Send + Sync {
+    /// Returns exact artifact bytes for `sha256`, if available.
+    fn lookup_artifact(&self, sha256: &Sha256Digest) -> Option<Vec<u8>>;
+}
+
+/// In-memory artifact lookup for tests and ephemeral MCP sessions.
+#[derive(Default)]
+pub struct InMemoryArtifactStore {
+    artifacts: Mutex<HashMap<Sha256Digest, Vec<u8>>>,
+}
+
+impl InMemoryArtifactStore {
+    /// Creates an empty artifact store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records bytes by their SHA-256 digest and returns the digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStoreError::Poisoned`] when the internal artifact
+    /// store lock is poisoned.
+    pub fn record(&self, bytes: Vec<u8>) -> Result<Sha256Digest, ArtifactStoreError> {
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let digest = Sha256Digest::new(hasher.finalize().into());
+        self.artifacts
+            .lock()
+            .map_err(|_| ArtifactStoreError::Poisoned)?
+            .insert(digest.clone(), bytes);
+        Ok(digest)
+    }
+}
+
+impl ArtifactLookup for InMemoryArtifactStore {
+    fn lookup_artifact(&self, sha256: &Sha256Digest) -> Option<Vec<u8>> {
+        self.artifacts
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(sha256).cloned())
+    }
+}
+
+/// Errors returned by [`InMemoryArtifactStore`].
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum ArtifactStoreError {
+    /// The artifact store lock was poisoned.
+    #[error("artifact store is poisoned")]
+    Poisoned,
+}
+
+/// Tool that executes an artifact only with a valid approval token.
+pub struct RunApprovedArtifactTool {
+    artifacts: Arc<dyn ArtifactLookup>,
+    issuer: ApprovalTokenIssuer,
+    network_isolated: bool,
+}
+
+impl RunApprovedArtifactTool {
+    /// Creates a `run_approved_artifact` tool backed by an artifact lookup.
+    #[must_use]
+    pub fn new(artifacts: Arc<dyn ArtifactLookup>, issuer: ApprovalTokenIssuer) -> Self {
+        Self {
+            artifacts,
+            issuer,
+            network_isolated: true,
+        }
+    }
+
+    /// Controls network namespace isolation for tests and policy-granted callers.
+    #[must_use]
+    pub const fn with_network_isolated(mut self, network_isolated: bool) -> Self {
+        self.network_isolated = network_isolated;
+        self
+    }
+
+    fn run(&self, params: Value, agent: &AgentIdentity) -> Result<Value, RunApprovedArtifactError> {
+        let params: RunApprovedArtifactParams = serde_json::from_value(params)?;
+        let digest: Sha256Digest = params.sha256.parse().map_err(
+            |error: arbitraitor_model::ids::Sha256DigestParseError| {
+                RunApprovedArtifactError::InvalidSha256 {
+                    message: error.to_string(),
+                }
+            },
+        )?;
+        if params.args.as_ref().is_some_and(|args| !args.is_empty()) {
+            return Err(RunApprovedArtifactError::UnapprovedArguments);
+        }
+        let token_payload =
+            self.issuer
+                .validate(&params.approval_token, &digest, SystemTime::now())?;
+        let bytes = self
+            .artifacts
+            .lookup_artifact(&digest)
+            .ok_or(RunApprovedArtifactError::ArtifactNotFound)?;
+        verify_bytes_digest(&bytes, &digest)?;
+        let execution = ScriptExecution::bash()?.with_network_isolated(self.network_isolated);
+        let result = execution.execute(&bytes)?;
+        Ok(json!({
+            "capability": McpCapability::Execute,
+            "execution_performed": true,
+            "release_performed": false,
+            "agent_identity": sanitized_agent(agent),
+            "artifact": { "sha256": digest.to_string() },
+            "approval": {
+                "plan_digest": token_payload.plan_digest,
+                "expires_at": token_payload.expires_at_unix_seconds.to_string(),
+            },
+            "result": {
+                "exit_code": result.exit_code,
+                "stdout": sanitize_for_agent(&String::from_utf8_lossy(&result.stdout)),
+                "stderr": sanitize_for_agent(&String::from_utf8_lossy(&result.stderr)),
+            }
+        }))
+    }
+}
+
+impl McpToolHandler for RunApprovedArtifactTool {
+    fn metadata(&self) -> McpTool {
+        McpTool {
+            name: "run_approved_artifact".to_owned(),
+            description: "Execute exact artifact bytes only when a valid plan-bound approval token is supplied.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["sha256", "approval_token"],
+                "properties": {
+                    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+                    "approval_token": { "type": "string" },
+                    "args": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        }
+    }
+
+    fn handle(&self, params: Value, agent: &AgentIdentity) -> McpToolResponse {
+        match self.run(params, agent) {
+            Ok(json) => json_response(json),
+            Err(error) => error_response(&error.to_string(), agent),
+        }
+    }
+
+    fn capability(&self) -> McpCapability {
+        McpCapability::Execute
+    }
+}
+
+fn canonical_plan_digest(sha256: &Sha256Digest, plan: &str) -> Result<String, serde_json::Error> {
+    let canonical_plan = CanonicalExecutionPlan {
+        schema_version: 1,
+        artifact_sha256: sha256.to_string(),
+        human_readable_plan: plan.to_owned(),
+        approved_arguments: Vec::new(),
+    };
+    let encoded = serde_json::to_vec(&canonical_plan)?;
+    let mut hasher = Sha256::new();
+    hasher.update(encoded);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[derive(Serialize)]
+struct CanonicalExecutionPlan {
+    schema_version: u32,
+    artifact_sha256: String,
+    human_readable_plan: String,
+    approved_arguments: Vec<String>,
+}
+
+fn verify_bytes_digest(
+    bytes: &[u8],
+    digest: &Sha256Digest,
+) -> Result<(), RunApprovedArtifactError> {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual = Sha256Digest::new(hasher.finalize().into());
+    if &actual == digest {
+        Ok(())
+    } else {
+        Err(RunApprovedArtifactError::ArtifactDigestMismatch)
+    }
+}
+
+fn unix_seconds(time: SystemTime) -> Result<u64, ApprovalTokenError> {
+    time.duration_since(UNIX_EPOCH)
+        .map_err(|_| ApprovalTokenError::TimeBeforeEpoch)
+        .map(|duration| duration.as_secs())
+}
+
+fn unix_seconds_string(time: SystemTime) -> String {
+    time.duration_since(UNIX_EPOCH).map_or_else(
+        |_| "0".to_owned(),
+        |duration| duration.as_secs().to_string(),
+    )
+}
+
 fn read_bounded(path: &Path, max_bytes: u64) -> Result<(Vec<u8>, Sha256Digest), ScanArtifactError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|source| ScanArtifactError::from_io("stat-path", &source))?;
@@ -626,7 +1140,7 @@ impl McpToolHandler for ExplainVerdictTool {
     }
 
     fn capability(&self) -> McpCapability {
-        McpCapability::Explain
+        McpCapability::Inspect
     }
 }
 
@@ -901,6 +1415,21 @@ struct ExplainVerdictParams {
     verdict: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestApprovalParams {
+    sha256: String,
+    plan: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunApprovedArtifactParams {
+    sha256: String,
+    approval_token: String,
+    args: Option<Vec<String>>,
+}
+
 #[derive(Debug, Error)]
 enum InspectUrlError {
     #[error("invalid inspect_url parameters: {0}")]
@@ -951,6 +1480,56 @@ enum QueryReceiptError {
     InvalidSha256 { message: String },
 }
 
+#[derive(Debug, Error)]
+enum RequestApprovalError {
+    #[error("invalid request_approval parameters: {0}")]
+    Params(#[from] serde_json::Error),
+    #[error("invalid sha256: {message}")]
+    InvalidSha256 { message: String },
+    #[error("approval prompt failed: {0}")]
+    Prompt(#[from] ApprovalPromptError),
+    #[error("approval token failure: {0}")]
+    Token(#[from] ApprovalTokenError),
+    #[error("approval expiry overflowed system time")]
+    TimeOverflow,
+}
+
+#[derive(Debug, Error)]
+enum RunApprovedArtifactError {
+    #[error("invalid run_approved_artifact parameters: {0}")]
+    Params(#[from] serde_json::Error),
+    #[error("invalid sha256: {message}")]
+    InvalidSha256 { message: String },
+    #[error("missing or invalid approval token: {0}")]
+    Token(#[from] ApprovalTokenError),
+    #[error("artifact was not found for approved digest")]
+    ArtifactNotFound,
+    #[error("artifact bytes do not match approved digest")]
+    ArtifactDigestMismatch,
+    #[error("runtime args are not part of the approved execution plan")]
+    UnapprovedArguments,
+    #[error("script execution failed: {0}")]
+    Exec(#[from] arbitraitor_exec::ExecError),
+}
+
+#[derive(Debug, Error)]
+enum ApprovalTokenError {
+    #[error("token is malformed")]
+    MalformedToken,
+    #[error("token signature is invalid")]
+    InvalidSignature,
+    #[error("token artifact digest does not match request")]
+    ArtifactMismatch,
+    #[error("token is expired")]
+    Expired,
+    #[error("token time is before Unix epoch")]
+    TimeBeforeEpoch,
+    #[error("token serialization failed: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("token encoding failed: {0}")]
+    Hex(#[from] hex::FromHexError),
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
@@ -974,7 +1553,7 @@ mod tests {
         assert_eq!(tools[0].name, "explain_verdict");
         assert_eq!(
             server.list_capabilities(),
-            vec![("explain_verdict".to_owned(), McpCapability::Explain)]
+            vec![("explain_verdict".to_owned(), McpCapability::Inspect)]
         );
     }
 
@@ -1019,14 +1598,23 @@ mod tests {
     }
 
     #[test]
-    fn capability_separation_exposes_no_execute_tool() {
+    fn capability_separation_exposes_approval_and_execute_tools() {
         let mut server = McpServer::new();
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
         server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
         server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
         server.register(Box::new(QueryReceiptTool::new(Arc::new(
             InMemoryReceiptStore::new(),
         ))));
         server.register(Box::new(ExplainVerdictTool));
+        server.register(Box::new(RequestApprovalTool::with_prompt(
+            Arc::new(StaticApprovalPrompt { approved: true }),
+            issuer.clone(),
+        )));
+        server.register(Box::new(RunApprovedArtifactTool::new(
+            Arc::new(InMemoryArtifactStore::new()),
+            issuer,
+        )));
 
         let names: Vec<String> = server
             .list_tools()
@@ -1034,15 +1622,18 @@ mod tests {
             .map(|tool| tool.name)
             .collect();
 
-        assert!(!names.iter().any(|name| name.contains("execute")));
         assert!(!names.iter().any(|name| name.contains("release")));
+        assert!(names.iter().any(|name| name == "request_approval"));
+        assert!(names.iter().any(|name| name == "run_approved_artifact"));
         assert_eq!(
             server.list_capabilities(),
             vec![
                 ("inspect_url".to_owned(), McpCapability::Inspect),
                 ("scan_artifact".to_owned(), McpCapability::Inspect),
                 ("query_receipt".to_owned(), McpCapability::Inspect),
-                ("explain_verdict".to_owned(), McpCapability::Explain),
+                ("explain_verdict".to_owned(), McpCapability::Inspect),
+                ("request_approval".to_owned(), McpCapability::Approve),
+                ("run_approved_artifact".to_owned(), McpCapability::Execute),
             ]
         );
     }
@@ -1354,6 +1945,166 @@ mod tests {
         assert!(text.contains("Informational findings (0)"));
     }
 
+    #[test]
+    fn request_approval_issues_plan_bound_token() {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let tool = RequestApprovalTool::with_prompt(
+            Arc::new(StaticApprovalPrompt { approved: true }),
+            issuer.clone(),
+        );
+        let sha256 = "11".repeat(32);
+
+        let response = tool.handle(
+            json!({ "sha256": sha256, "plan": "run inspected shell script with no args" }),
+            &agent(),
+        );
+
+        assert!(!response.is_error, "response was {response:?}");
+        let McpContent::Json { json } = &response.content[0] else {
+            panic!("expected json content");
+        };
+        assert_eq!(json["capability"], "approve");
+        assert_eq!(json["approved"], true);
+        assert!(json["approval_token"].is_string());
+        assert!(json["plan_digest"].is_string());
+        let token = json["approval_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("approval_token must be a string"));
+        let digest: Sha256Digest = sha256
+            .parse()
+            .unwrap_or_else(|error| panic!("parse digest: {error}"));
+        assert!(issuer.validate(token, &digest, SystemTime::now()).is_ok());
+    }
+
+    #[test]
+    fn request_approval_denial_returns_no_token() {
+        let tool = RequestApprovalTool::with_prompt(
+            Arc::new(StaticApprovalPrompt { approved: false }),
+            ApprovalTokenIssuer::with_secret(b"test-secret".to_vec()),
+        );
+
+        let response = tool.handle(
+            json!({ "sha256": "22".repeat(32), "plan": "run inspected shell script" }),
+            &agent(),
+        );
+
+        assert!(!response.is_error, "response was {response:?}");
+        let McpContent::Json { json } = &response.content[0] else {
+            panic!("expected json content");
+        };
+        assert_eq!(json["approved"], false);
+        assert!(json["approval_token"].is_null());
+    }
+
+    #[test]
+    fn run_approved_artifact_executes_with_valid_token() {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let store = Arc::new(InMemoryArtifactStore::new());
+        let digest = store
+            .record(b"printf 'approved output'\n".to_vec())
+            .unwrap_or_else(|error| panic!("record artifact: {error}"));
+        let token = approval_token(&issuer, &digest, "run approved script");
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+        let response = tool.handle(
+            json!({ "sha256": digest.to_string(), "approval_token": token }),
+            &agent(),
+        );
+
+        assert!(!response.is_error, "response was {response:?}");
+        let McpContent::Json { json } = &response.content[0] else {
+            panic!("expected json content");
+        };
+        assert_eq!(json["capability"], "execute");
+        assert_eq!(json["execution_performed"], true);
+        assert_eq!(json["result"]["exit_code"], 0);
+        assert!(
+            json["result"]["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("approved output"))
+        );
+    }
+
+    #[test]
+    fn run_approved_artifact_rejects_invalid_token() {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let store = Arc::new(InMemoryArtifactStore::new());
+        let digest = store
+            .record(b"printf 'never run'\n".to_vec())
+            .unwrap_or_else(|error| panic!("record artifact: {error}"));
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+        let response = tool.handle(
+            json!({ "sha256": digest.to_string(), "approval_token": "not-a-token" }),
+            &agent(),
+        );
+
+        assert!(response.is_error);
+        assert_error_contains(&response, "token is malformed");
+    }
+
+    #[test]
+    fn run_approved_artifact_rejects_expired_token() {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let store = Arc::new(InMemoryArtifactStore::new());
+        let digest = store
+            .record(b"printf 'expired'\n".to_vec())
+            .unwrap_or_else(|error| panic!("record artifact: {error}"));
+        let expired_at = SystemTime::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or(UNIX_EPOCH);
+        let token = issuer
+            .issue(&digest, "run expired script", expired_at, &agent())
+            .unwrap_or_else(|error| panic!("issue token: {error}"))
+            .token;
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+        let response = tool.handle(
+            json!({ "sha256": digest.to_string(), "approval_token": token }),
+            &agent(),
+        );
+
+        assert!(response.is_error);
+        assert_error_contains(&response, "token is expired");
+    }
+
+    #[test]
+    fn run_approved_artifact_rejects_missing_token() {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let store = Arc::new(InMemoryArtifactStore::new());
+        let digest = store
+            .record(b"printf 'missing token'\n".to_vec())
+            .unwrap_or_else(|error| panic!("record artifact: {error}"));
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+        let response = tool.handle(json!({ "sha256": digest.to_string() }), &agent());
+
+        assert!(response.is_error);
+        assert_error_contains(&response, "invalid run_approved_artifact parameters");
+    }
+
+    #[test]
+    fn run_approved_artifact_rejects_unapproved_args() {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let store = Arc::new(InMemoryArtifactStore::new());
+        let digest = store
+            .record(b"printf 'args'\n".to_vec())
+            .unwrap_or_else(|error| panic!("record artifact: {error}"));
+        let token = approval_token(&issuer, &digest, "run approved script");
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+        let response = tool.handle(
+            json!({ "sha256": digest.to_string(), "approval_token": token, "args": ["--changed"] }),
+            &agent(),
+        );
+
+        assert!(response.is_error);
+        assert_error_contains(
+            &response,
+            "runtime args are not part of the approved execution plan",
+        );
+    }
+
     fn write_temp_file(name: &str, body: &[u8]) -> String {
         let path = temp_path(name);
         std::fs::write(&path, body).unwrap_or_else(|error| panic!("write temp file: {error}"));
@@ -1396,6 +2147,46 @@ mod tests {
             session_id: "session-1".to_owned(),
             workspace: Some("workspace-1".to_owned()),
         }
+    }
+
+    struct StaticApprovalPrompt {
+        approved: bool,
+    }
+
+    impl ApprovalPrompt for StaticApprovalPrompt {
+        fn request_confirmation(
+            &self,
+            _sha256: &Sha256Digest,
+            _plan: &str,
+        ) -> Result<bool, ApprovalPromptError> {
+            Ok(self.approved)
+        }
+    }
+
+    fn approval_token(issuer: &ApprovalTokenIssuer, digest: &Sha256Digest, plan: &str) -> String {
+        issuer
+            .issue(
+                digest,
+                plan,
+                SystemTime::now()
+                    .checked_add(Duration::from_secs(60))
+                    .unwrap_or(SystemTime::now()),
+                &agent(),
+            )
+            .unwrap_or_else(|error| panic!("issue token: {error}"))
+            .token
+    }
+
+    fn assert_error_contains(response: &McpToolResponse, expected: &str) {
+        let McpContent::Json { json } = &response.content[0] else {
+            panic!("expected json content");
+        };
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(expected)),
+            "response was {response:?}"
+        );
     }
 
     fn serve_once(body: &'static [u8]) -> String {
