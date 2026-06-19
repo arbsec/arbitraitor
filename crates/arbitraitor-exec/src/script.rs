@@ -25,6 +25,12 @@ use tracing::debug;
 
 use crate::{ExecError, ExecutionContext, ExecutionContextBuilder};
 
+#[cfg(target_os = "linux")]
+const UNSHARE_PATH: &str = "/usr/bin/unshare";
+
+#[cfg(target_os = "linux")]
+const UNSHARE_NETWORK_ARGS: [&str; 4] = ["--user", "--map-current-user", "--net", "--"];
+
 /// Result of executing a script through the controlled interpreter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
@@ -45,6 +51,7 @@ pub struct ScriptExecution {
     interpreter: PathBuf,
     interpreter_args: Vec<String>,
     environment: ExecutionContext,
+    network_isolated: bool,
 }
 
 impl ScriptExecution {
@@ -99,7 +106,27 @@ impl ScriptExecution {
             interpreter,
             interpreter_args,
             environment,
+            network_isolated: true,
         })
+    }
+
+    /// Controls whether the interpreter is launched inside an isolated Linux
+    /// network namespace.
+    ///
+    /// Network isolation is enabled by default. Disabling it is intended only
+    /// for policy-granted execution paths and tests that validate the contrast
+    /// between denied and explicitly allowed network access.
+    #[must_use]
+    pub fn with_network_isolated(mut self, isolated: bool) -> Self {
+        self.network_isolated = isolated;
+        self
+    }
+
+    /// Returns true when this execution will request network namespace
+    /// isolation before running the interpreter.
+    #[must_use]
+    pub fn network_isolated(&self) -> bool {
+        self.network_isolated
     }
 
     /// Returns the configured interpreter executable path.
@@ -136,7 +163,11 @@ impl ScriptExecution {
     /// [`ExecError::Wait`] when the interpreter output cannot be collected.
     pub fn execute(&self, script_bytes: &[u8]) -> Result<ExecutionResult, ExecError> {
         let mut command = self.build_command();
-        debug!(interpreter = %self.interpreter.display(), "spawning interpreter");
+        debug!(
+            interpreter = %self.interpreter.display(),
+            network_isolated = self.network_isolated,
+            "spawning interpreter"
+        );
         let mut child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
@@ -168,8 +199,7 @@ impl ScriptExecution {
     }
 
     fn build_command(&self) -> Command {
-        let mut command = Command::new(self.environment.command());
-        command.args(self.environment.arguments());
+        let mut command = self.build_program_command();
         // Fail closed on environment: clear the parent environment entirely
         // and re-establish only the mediated, allowlisted variables produced
         // by the ExecutionContext.
@@ -179,6 +209,33 @@ impl ScriptExecution {
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        command
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_program_command(&self) -> Command {
+        if self.network_isolated {
+            // Use util-linux `unshare` rather than an in-process pre_exec hook:
+            // CommandExt::pre_exec and libc::unshare both require unsafe code,
+            // while this crate forbids unsafe. The absolute helper path avoids
+            // PATH lookup; failure to create the namespace prevents the script
+            // from running, preserving fail-closed network denial.
+            let mut command = Command::new(UNSHARE_PATH);
+            command.args(UNSHARE_NETWORK_ARGS);
+            command.arg(self.environment.command());
+            command.args(self.environment.arguments());
+            command
+        } else {
+            let mut command = Command::new(self.environment.command());
+            command.args(self.environment.arguments());
+            command
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn build_program_command(&self) -> Command {
+        let mut command = Command::new(self.environment.command());
+        command.args(self.environment.arguments());
         command
     }
 }
@@ -208,7 +265,12 @@ fn operation_plan(interpreter: &Path, args: &[String]) -> OperationPlan {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Read;
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::process::Command as StdCommand;
+    use std::sync::mpsc;
+    use std::thread;
 
     fn bash_or_skip() -> Result<ScriptExecution, ExecError> {
         // `/bin/bash` is the documented interpreter path for the mediated
@@ -216,7 +278,14 @@ mod tests {
         if !Path::new("/bin/bash").exists() {
             return Err(ExecError::RunningAsRoot);
         }
-        ScriptExecution::bash()
+        ScriptExecution::bash().map(|script| script.with_network_isolated(false))
+    }
+
+    fn network_isolated_bash_or_skip() -> Result<Option<ScriptExecution>, ExecError> {
+        if !Path::new("/bin/bash").exists() || !network_namespace_supported() {
+            return Ok(None);
+        }
+        ScriptExecution::bash().map(Some)
     }
 
     #[test]
@@ -411,6 +480,77 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn network_isolation_is_enabled_by_default() -> Result<(), Box<dyn std::error::Error>> {
+        let exec = ScriptExecution::new(PathBuf::from("/bin/sh"), ["-u"])?;
+        assert!(exec.network_isolated());
+        assert!(!exec.with_network_isolated(false).network_isolated());
+        Ok(())
+    }
+
+    #[test]
+    fn loopback_connection_succeeds_when_network_isolation_disabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = bash_or_skip()?;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let (sender, receiver) = mpsc::channel();
+        let accept_thread = thread::spawn(move || {
+            let accepted = listener.accept().and_then(|(mut stream, _addr)| {
+                let mut bytes = [0_u8; 4];
+                stream.read_exact(&mut bytes)?;
+                Ok(bytes)
+            });
+            let _send_result = sender.send(accepted);
+        });
+
+        let source = format!("exec 3<>/dev/tcp/127.0.0.1/{port}\nprintf ping >&3\n");
+        let result = script.execute(source.as_bytes())?;
+        assert_eq!(result.exit_code, Some(0));
+
+        match receiver.recv()? {
+            Ok(bytes) => assert_eq!(&bytes, b"ping"),
+            Err(error) => return Err(error.into()),
+        }
+        accept_thread
+            .join()
+            .map_err(|_| "loopback accept thread panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn loopback_connection_fails_when_network_isolated() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(script) = network_isolated_bash_or_skip()? else {
+            return Ok(());
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let source =
+            format!("exec 3<>/dev/tcp/127.0.0.1/{port}\nprintf 'unexpected-connect' >&3\n");
+
+        let result = script.execute(source.as_bytes())?;
+        assert_ne!(
+            result.exit_code,
+            Some(0),
+            "isolated script unexpectedly connected to host loopback listener"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn external_connection_fails_when_network_isolated() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(script) = network_isolated_bash_or_skip()? else {
+            return Ok(());
+        };
+        let result = script.execute(b"exec 3<>/dev/tcp/192.0.2.1/80\nprintf unexpected >&3\n")?;
+        assert_ne!(
+            result.exit_code,
+            Some(0),
+            "isolated script unexpectedly opened an external TCP connection"
+        );
+        Ok(())
+    }
+
     fn list_executable_files_under(
         root: &Path,
     ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -428,5 +568,16 @@ mod tests {
         }
         out.sort();
         Ok(out)
+    }
+
+    fn network_namespace_supported() -> bool {
+        Path::new(UNSHARE_PATH).exists()
+            && StdCommand::new(UNSHARE_PATH)
+                .args(UNSHARE_NETWORK_ARGS)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg("true")
+                .status()
+                .is_ok_and(|status| status.success())
     }
 }
