@@ -11,6 +11,9 @@ use arbitraitor_model::verdict::{Confidence, Severity};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Native executable metadata parsing.
+pub mod executable;
+
 const DETECTOR_ID: &str = "arbitraitor-artifact";
 const TAR_MAGIC_OFFSET: usize = 257;
 const TAR_MAGIC: &[u8] = b"ustar";
