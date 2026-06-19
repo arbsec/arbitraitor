@@ -506,24 +506,24 @@ enabled = false
 
         write_config(
             &home.join(".config/arbitraitor/config.toml"),
-            r#"
+            r"
 [fetch]
 max_redirects = 4
 total_timeout_secs = 45
 
 [execution]
 timeout_secs = 10
-"#,
+",
         )?;
         write_config(
             &project.join(".arbitraitor/config.toml"),
-            r#"
+            r"
 [fetch]
 max_redirects = 8
 
 [execution]
 enabled = true
-"#,
+",
         )?;
 
         let config = Config::load_from_layers(None, Some(&home), &project)?;
@@ -555,10 +555,10 @@ enabled = true
         let path = dir.join("config.toml");
         write_config(
             &path,
-            r#"
+            r"
 [fetch]
 max_redirekts = 2
-"#,
+",
         )?;
 
         let result = Config::load_from_file(&path);

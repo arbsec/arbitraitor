@@ -187,7 +187,7 @@ mod tests {
 
         let summary = collector.summary();
 
-        assert_eq!(summary.error_rate, 0.5);
+        assert!((summary.error_rate - 0.5).abs() < 1e-10);
     }
 
     #[test]
