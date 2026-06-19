@@ -165,6 +165,7 @@ dependencies = [
 name = "arbitraitor-av"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-analysis",
  "arbitraitor-model",
  "thiserror 2.0.18",
  "tokio",
