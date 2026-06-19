@@ -180,6 +180,7 @@ dependencies = [
  "arbitraitor-archive",
  "arbitraitor-artifact",
  "arbitraitor-core",
+ "arbitraitor-daemon",
  "arbitraitor-fetch",
  "arbitraitor-intel",
  "arbitraitor-model",
@@ -207,6 +208,23 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "arbitraitor-daemon"
+version = "0.1.0"
+dependencies = [
+ "arbitraitor-analysis",
+ "arbitraitor-fetch",
+ "arbitraitor-model",
+ "arbitraitor-store",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

@@ -20,6 +20,7 @@ arbitraitor-analysis = { workspace = true }
 arbitraitor-archive = { workspace = true }
 arbitraitor-artifact = { workspace = true }
 arbitraitor-core = { workspace = true }
+arbitraitor-daemon = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-intel = { workspace = true }
 arbitraitor-model = { workspace = true }

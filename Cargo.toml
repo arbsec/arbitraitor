@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/arbitraitor-cli",
     "crates/arbitraitor-core",
+    "crates/arbitraitor-daemon",
     "crates/arbitraitor-model",
     "crates/arbitraitor-policy",
     "crates/arbitraitor-fetch",
@@ -119,6 +120,7 @@ insta = "1.48"
 # Internal crates (version managed by release-plz)
 arbitraitor-model = { path = "crates/arbitraitor-model" }
 arbitraitor-core = { path = "crates/arbitraitor-core" }
+arbitraitor-daemon = { path = "crates/arbitraitor-daemon" }
 arbitraitor-policy = { path = "crates/arbitraitor-policy" }
 arbitraitor-fetch = { path = "crates/arbitraitor-fetch" }
 arbitraitor-store = { path = "crates/arbitraitor-store" }
