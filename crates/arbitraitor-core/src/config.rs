@@ -50,6 +50,8 @@ pub struct Config {
     pub execution: ExecutionConfig,
     /// Artifact integrity requirements.
     pub integrity: IntegrityConfig,
+    /// Metrics collection and structured operation logging settings.
+    pub metrics: MetricsConfig,
 }
 
 /// Fetcher configuration.
@@ -116,6 +118,14 @@ pub struct IntegrityConfig {
     pub require_provenance: bool,
 }
 
+/// Metrics and operation logging configuration.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct MetricsConfig {
+    /// Whether operation metrics collection and completion logs are enabled.
+    pub enabled: bool,
+}
+
 impl Default for FetchConfig {
     fn default() -> Self {
         Self {
@@ -160,6 +170,12 @@ impl Default for ExecutionConfig {
             enabled: false,
             timeout_secs: 60,
         }
+    }
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -240,6 +256,7 @@ impl Config {
             policy: self.policy.merge(overlay.policy),
             execution: self.execution.merge(overlay.execution),
             integrity: self.integrity.merge(overlay.integrity),
+            metrics: self.metrics.merge(overlay.metrics),
         }
     }
 }
@@ -253,6 +270,7 @@ struct ConfigOverlay {
     policy: Option<PolicyOverlay>,
     execution: Option<ExecutionOverlay>,
     integrity: Option<IntegrityOverlay>,
+    metrics: Option<MetricsOverlay>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -300,6 +318,12 @@ struct ExecutionOverlay {
 struct IntegrityOverlay {
     require_digest: Option<bool>,
     require_provenance: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricsOverlay {
+    enabled: Option<bool>,
 }
 
 impl FetchConfig {
@@ -380,6 +404,17 @@ impl IntegrityConfig {
     }
 }
 
+impl MetricsConfig {
+    fn merge(self, overlay: Option<MetricsOverlay>) -> Self {
+        let Some(overlay) = overlay else {
+            return self;
+        };
+        Self {
+            enabled: overlay.enabled.unwrap_or(self.enabled),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -426,6 +461,7 @@ mod tests {
         assert_eq!(config.execution.timeout_secs, 60);
         assert!(!config.integrity.require_digest);
         assert!(!config.integrity.require_provenance);
+        assert!(config.metrics.enabled);
     }
 
     #[test]
@@ -444,6 +480,9 @@ cas_dir = "custom-cas"
 
 [integrity]
 require_digest = true
+
+[metrics]
+enabled = false
 "#,
         )?;
 
@@ -454,6 +493,7 @@ require_digest = true
         assert_eq!(config.fetch.max_bytes, 4096);
         assert_eq!(config.store.cas_dir, Some(PathBuf::from("custom-cas")));
         assert!(config.integrity.require_digest);
+        assert!(!config.metrics.enabled);
         fs::remove_dir_all(dir)?;
         Ok(())
     }
