@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 arbitraitor-core = { workspace = true }
 arbitraitor-model = { workspace = true }
+arbitraitor-sandbox = { workspace = true }
 arbitraitor-store = { workspace = true }
 cap-std = { workspace = true }
 cap-tempfile = { workspace = true }
