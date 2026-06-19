@@ -12,6 +12,7 @@ use arbitraitor_analysis::{
 use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
 use arbitraitor_artifact::classify;
 use arbitraitor_core::config::Config;
+use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
 use arbitraitor_model::finding::FindingCategory;
@@ -50,8 +51,24 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Inspect(Box<InspectCommand>),
+    Daemon(DaemonCommand),
     Unpack(UnpackCommand),
     Intel(IntelCommand),
+}
+
+#[derive(Args)]
+struct DaemonCommand {
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+    #[command(subcommand)]
+    subcommand: DaemonSubcommand,
+}
+
+#[derive(Subcommand)]
+enum DaemonSubcommand {
+    Start,
+    Stop,
+    Status,
 }
 
 #[derive(Args)]
@@ -182,6 +199,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Command::Daemon(command) => {
+            daemon(command).await?;
+        }
         Command::Unpack(command) => {
             unpack(&command.archive, &command.output)?;
         }
@@ -190,6 +210,61 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn daemon(command: DaemonCommand) -> Result<()> {
+    let socket = command.socket.unwrap_or_else(default_socket_path);
+    match command.subcommand {
+        DaemonSubcommand::Start => {
+            Daemon::new(socket).run().await.into_diagnostic()?;
+        }
+        DaemonSubcommand::Stop => {
+            let response = request_once(socket, &DaemonRequest::Shutdown)
+                .await
+                .into_diagnostic()?;
+            write_daemon_response(&mut std::io::stdout().lock(), &response)?;
+            if !response.success {
+                miette::bail!(
+                    response
+                        .error
+                        .unwrap_or_else(|| "daemon stop failed".to_owned())
+                );
+            }
+        }
+        DaemonSubcommand::Status => {
+            let response = request_once(
+                socket,
+                &DaemonRequest::Scan {
+                    path: String::new(),
+                },
+            )
+            .await;
+            let mut stdout = std::io::stdout().lock();
+            match response {
+                Ok(_) => writeln!(stdout, "running").into_diagnostic()?,
+                Err(_) => writeln!(stdout, "stopped").into_diagnostic()?,
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_daemon_response(
+    writer: &mut impl std::io::Write,
+    response: &arbitraitor_daemon::DaemonResponse,
+) -> Result<()> {
+    writeln!(writer, "success: {}", response.success).into_diagnostic()?;
+    if let Some(verdict) = &response.verdict {
+        writeln!(writer, "verdict: {verdict}").into_diagnostic()?;
+    }
+    writeln!(writer, "findings: {}", response.findings_count).into_diagnostic()?;
+    if let Some(sha256) = &response.sha256 {
+        writeln!(writer, "sha256: {sha256}").into_diagnostic()?;
+    }
+    if let Some(error) = &response.error {
+        writeln!(writer, "error: {error}").into_diagnostic()?;
+    }
     Ok(())
 }
 
@@ -666,7 +741,9 @@ mod tests {
                     digest
                 );
             }
-            Command::Unpack(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
+            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) => {
+                return Err("parsed wrong command".into());
+            }
         }
         Ok(())
     }
@@ -715,7 +792,9 @@ mod tests {
                     std::path::PathBuf::from("/tmp/rules")
                 );
             }
-            Command::Unpack(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
+            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) => {
+                return Err("parsed wrong command".into());
+            }
         }
         Ok(())
     }
@@ -746,7 +825,9 @@ mod tests {
                 assert_eq!(command.cosign_identity, ["builder@example.test"]);
                 assert_eq!(command.cosign_issuer, ["https://issuer.example.test"]);
             }
-            Command::Unpack(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
+            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) => {
+                return Err("parsed wrong command".into());
+            }
         }
         Ok(())
     }
@@ -760,7 +841,30 @@ mod tests {
                 assert_eq!(command.archive, PathBuf::from("archive.zip"));
                 assert_eq!(command.output, PathBuf::from("out"));
             }
-            Command::Inspect(_) | Command::Intel(_) => return Err("parsed wrong command".into()),
+            Command::Inspect(_) | Command::Daemon(_) | Command::Intel(_) => {
+                return Err("parsed wrong command".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_accepts_start_stop_status() -> Result<(), Box<dyn std::error::Error>> {
+        for subcommand in ["start", "stop", "status"] {
+            let cli = Cli::try_parse_from([
+                "arbitraitor",
+                "daemon",
+                "--socket",
+                "/tmp/arbitraitor.sock",
+                subcommand,
+            ])?;
+
+            match cli.command {
+                Command::Daemon(command) => {
+                    assert_eq!(command.socket, Some(PathBuf::from("/tmp/arbitraitor.sock")));
+                }
+                _ => return Err("parsed wrong command".into()),
+            }
         }
         Ok(())
     }
