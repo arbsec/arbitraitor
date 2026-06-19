@@ -14,11 +14,14 @@ workspace = true
 [dependencies]
 arbitraitor-analysis = { workspace = true }
 arbitraitor-core = { workspace = true }
+arbitraitor-exec = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-receipt = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true }
