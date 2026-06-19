@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-analysis = { workspace = true }
 arbitraitor-model = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
