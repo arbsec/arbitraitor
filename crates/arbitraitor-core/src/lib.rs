@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod config;
+
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::{ArtifactId, OperationId};
 use arbitraitor_model::operation::OperationPlan;
