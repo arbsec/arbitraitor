@@ -26,7 +26,7 @@ use tracing::debug;
 
 pub mod release;
 pub mod script;
-
+#[cfg(target_os = "linux")]
 pub use script::{ExecutionResult, ScriptExecution};
 
 static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -409,6 +409,35 @@ impl Default for ResourceLimits {
             fd_count: Some(64),
             output_size_bytes: Some(10 * 1024 * 1024), // 10 MB
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ResourceLimits {
+    /// Apply all configured limits to a child process via `prlimit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the kernel rejects a limit.
+    pub fn apply_to(&self, pid: u32) -> std::io::Result<()> {
+        use rustix::process::{Pid, Resource, Rlimit, prlimit};
+        let pid = Pid::from_raw(pid.try_into().unwrap_or(i32::MAX));
+        let apply = |resource: Resource, limit: Option<u64>| -> std::io::Result<()> {
+            if let Some(v) = limit {
+                let rlim = Rlimit {
+                    current: Some(v),
+                    maximum: Some(v),
+                };
+                prlimit(pid, resource, rlim)
+                    .map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+            }
+            Ok(())
+        };
+        apply(Resource::Cpu, self.cpu_time_secs)?;
+        apply(Resource::As, self.memory_bytes)?;
+        apply(Resource::Nproc, self.process_count.map(u64::from))?;
+        apply(Resource::Nofile, self.fd_count.map(u64::from))?;
+        Ok(())
     }
 }
 

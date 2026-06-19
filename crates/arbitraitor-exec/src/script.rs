@@ -52,6 +52,8 @@ pub struct ScriptExecution {
     interpreter_args: Vec<String>,
     environment: ExecutionContext,
     network_isolated: bool,
+    #[cfg(target_os = "linux")]
+    resource_limits: crate::ResourceLimits,
 }
 
 impl ScriptExecution {
@@ -107,6 +109,8 @@ impl ScriptExecution {
             interpreter_args,
             environment,
             network_isolated: true,
+            #[cfg(target_os = "linux")]
+            resource_limits: crate::ResourceLimits::default(),
         })
     }
 
@@ -127,6 +131,14 @@ impl ScriptExecution {
     #[must_use]
     pub fn network_isolated(&self) -> bool {
         self.network_isolated
+    }
+
+    /// Sets the resource limits applied to the child process.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn with_resource_limits(mut self, limits: crate::ResourceLimits) -> Self {
+        self.resource_limits = limits;
+        self
     }
 
     /// Returns the configured interpreter executable path.
@@ -171,6 +183,14 @@ impl ScriptExecution {
         let mut child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
+
+        #[cfg(target_os = "linux")]
+        {
+            let pid = child.id();
+            self.resource_limits
+                .apply_to(pid)
+                .map_err(|source| ExecError::Spawn { source })?;
+        }
         // Drop our write end of the stdin pipe as soon as the script bytes are
         // written so the interpreter observes EOF and completes any pending
         // read-driven control flow before we wait for it.
@@ -278,7 +298,17 @@ mod tests {
         if !Path::new("/bin/bash").exists() {
             return Err(ExecError::RunningAsRoot);
         }
-        ScriptExecution::bash().map(|script| script.with_network_isolated(false))
+        ScriptExecution::bash().map(|script| {
+            script
+                .with_network_isolated(false)
+                .with_resource_limits(crate::ResourceLimits {
+                    cpu_time_secs: None,
+                    memory_bytes: None,
+                    process_count: None,
+                    fd_count: None,
+                    output_size_bytes: None,
+                })
+        })
     }
 
     fn network_isolated_bash_or_skip() -> Result<Option<ScriptExecution>, ExecError> {
