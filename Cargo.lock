@@ -232,6 +232,7 @@ dependencies = [
 name = "arbitraitor-exec"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-model",
  "arbitraitor-sandbox",
