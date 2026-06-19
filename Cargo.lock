@@ -299,6 +299,7 @@ dependencies = [
 name = "arbitraitor-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-intel",
  "arbitraitor-model",
  "serde",
  "serde_json",

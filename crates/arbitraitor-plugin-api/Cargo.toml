@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-intel = { workspace = true }
 arbitraitor-model = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
