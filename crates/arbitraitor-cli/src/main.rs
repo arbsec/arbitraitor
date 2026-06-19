@@ -4,13 +4,14 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_analysis::{
     AnalysisCoordinator, ArtifactDetector, RetrievalInfo as AnalysisRetrievalInfo, ShellDetector,
 };
 use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
 use arbitraitor_artifact::classify;
+use arbitraitor_core::config::Config;
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
 use arbitraitor_model::finding::FindingCategory;
@@ -37,6 +38,10 @@ struct Cli {
     /// Enable verbose output
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Override layered configuration with one TOML file
+    #[arg(long, value_name = "PATH", global = true)]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -139,6 +144,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("arbitraitor initialized");
 
+    let config = match cli.config.as_deref() {
+        Some(path) => Config::load_from_file(path),
+        None => Config::load(),
+    }
+    .into_diagnostic()?;
+
     match cli.command {
         Command::Inspect(command) => {
             let InspectCommand {
@@ -167,6 +178,7 @@ async fn main() -> Result<()> {
                 sha256,
                 rules.as_deref(),
                 signatures,
+                &config,
             )
             .await?;
         }
@@ -274,9 +286,18 @@ async fn inspect(
     expected_sha256: Option<Sha256Digest>,
     rules_dir: Option<&Path>,
     signatures: SignatureInputs,
+    config: &Config,
 ) -> Result<()> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
-    let mut request = FetchRequest::url(fetch_url, FetchPolicy::default());
+    let fetch_policy = FetchPolicy {
+        total_timeout: Duration::from_secs(config.fetch.total_timeout_secs),
+        max_compressed_size: config.fetch.max_bytes,
+        max_uncompressed_size: config.fetch.max_bytes,
+        max_redirects: usize::try_from(config.fetch.max_redirects).into_diagnostic()?,
+        require_digest: config.integrity.require_digest,
+        ..FetchPolicy::default()
+    };
+    let mut request = FetchRequest::url(fetch_url, fetch_policy);
     if let Some(digest) = expected_sha256 {
         request = request.with_expected_sha256(digest);
     }
@@ -286,6 +307,14 @@ async fn inspect(
         .await
         .into_diagnostic()?;
     let bytes = fetch_sink.into_bytes();
+    let artifact_len = u64::try_from(bytes.len()).into_diagnostic()?;
+    if artifact_len > config.store.max_bytes {
+        miette::bail!(
+            "artifact exceeds configured store limit: bytes={}, limit={}",
+            artifact_len,
+            config.store.max_bytes
+        );
+    }
     let artifact_sha256 = Sha256Digest::new(Sha256::digest(&bytes).into());
     if artifact_sha256 != fetch_receipt.sha256 {
         miette::bail!(
@@ -295,7 +324,10 @@ async fn inspect(
         );
     }
 
-    let cas_root = cas_dir.map_or_else(default_cas_dir, Path::to_path_buf);
+    let cas_root = cas_dir
+        .map(Path::to_path_buf)
+        .or_else(|| config.store.cas_dir.clone())
+        .unwrap_or_else(default_cas_dir);
     let store = ContentStore::open(&cas_root).into_diagnostic()?;
     let mut store_sink = store.sink(Some(&artifact_sha256)).into_diagnostic()?;
     store_sink.write_chunk(&bytes).await.into_diagnostic()?;
@@ -650,6 +682,20 @@ mod tests {
         ]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_global_config_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "--config",
+            "arbitraitor.toml",
+            "inspect",
+            "https://example.test/artifact",
+        ])?;
+
+        assert_eq!(cli.config, Some(PathBuf::from("arbitraitor.toml")));
+        Ok(())
     }
 
     #[test]
