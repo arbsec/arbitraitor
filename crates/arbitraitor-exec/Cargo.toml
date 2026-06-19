@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 arbitraitor-core = { workspace = true }
+arbitraitor-artifact = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-sandbox = { workspace = true }
 arbitraitor-store = { workspace = true }

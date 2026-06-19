@@ -24,8 +24,12 @@ use arbitraitor_model::verdict::AssuranceLevel;
 use thiserror::Error;
 use tracing::debug;
 
+#[cfg(target_os = "linux")]
+pub mod native;
 pub mod release;
 pub mod script;
+#[cfg(target_os = "linux")]
+pub use native::{NativeExecution, execute_native};
 #[cfg(target_os = "linux")]
 pub use script::{ExecutionResult, ScriptExecution};
 
@@ -133,6 +137,30 @@ pub enum ExecError {
         /// Source I/O error.
         #[source]
         source: io::Error,
+    },
+    /// Native execution is not supported for this executable on the current host.
+    #[error("native executable is incompatible with the current host")]
+    IncompatibleNativeExecutable,
+    /// The released native binary path is not absolute.
+    #[error("native binary path must be absolute: {path}")]
+    NativePathNotAbsolute {
+        /// Rejected native binary path.
+        path: PathBuf,
+    },
+    /// Applying or verifying native quarantine/provenance metadata failed.
+    #[error("native quarantine failure during {stage}")]
+    NativeQuarantine {
+        /// Operation stage identifier.
+        stage: &'static str,
+        /// Source I/O error.
+        #[source]
+        source: io::Error,
+    },
+    /// Required native quarantine/provenance metadata is absent.
+    #[error("native quarantine metadata missing: {path}")]
+    NativeQuarantineMissing {
+        /// Released binary path missing required quarantine metadata.
+        path: PathBuf,
     },
 }
 
