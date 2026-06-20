@@ -28,8 +28,9 @@ use tracing::debug;
 pub mod native;
 pub mod release;
 pub mod script;
+mod spawn;
 #[cfg(target_os = "linux")]
-pub use native::{NativeExecution, execute_native};
+pub use native::{NativeExecution, NativeExecutionGate, execute_native};
 #[cfg(target_os = "linux")]
 pub use script::{ExecutionResult, ScriptExecution};
 
@@ -161,6 +162,34 @@ pub enum ExecError {
     NativeQuarantineMissing {
         /// Released binary path missing required quarantine metadata.
         path: PathBuf,
+    },
+    /// Applying resource limits to the child process failed.
+    ///
+    /// The child has been killed and reaped before this error is returned; it
+    /// never runs without its limits and cannot become an orphan.
+    #[error("failed to apply resource limits to child: {reason}")]
+    ResourceLimit {
+        /// Human-readable description of the `prlimit` failure.
+        reason: String,
+    },
+    /// Combined stdout/stderr output exceeded the configured cap.
+    ///
+    /// The child was killed when the limit was exceeded and has been reaped.
+    #[error("child output exceeded cap: {actual} bytes > {limit} byte limit")]
+    OutputExceeded {
+        /// Configured maximum combined output size in bytes.
+        limit: u64,
+        /// Actual combined bytes read before the child was killed.
+        actual: u64,
+    },
+    /// The content-addressed store rejected the requested artifact.
+    ///
+    /// This typically means the digest is absent from the CAS or the stored
+    /// bytes no longer hash to the path digest (tampering).
+    #[error("content store rejected artifact: {reason}")]
+    Store {
+        /// Human-readable store error.
+        reason: String,
     },
 }
 
@@ -584,12 +613,12 @@ pub struct ExecutionContext {
     working_tempdir: Option<OwnedTempDir>,
 }
 
-struct OwnedTempDir {
+pub(crate) struct OwnedTempDir {
     path: PathBuf,
 }
 
 impl OwnedTempDir {
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -1052,7 +1081,7 @@ fn materialize_directory(
     }
 }
 
-fn create_temporary_directory() -> Result<OwnedTempDir, ExecError> {
+pub(crate) fn create_temporary_directory() -> Result<OwnedTempDir, ExecError> {
     let base = env::temp_dir();
     for _attempt in 0..128 {
         let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
