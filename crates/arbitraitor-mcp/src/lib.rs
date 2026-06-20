@@ -2412,8 +2412,11 @@ mod tests {
         let digest = store
             .record(b"printf 'approved output'\n".to_vec())
             .unwrap_or_else(|error| panic!("record artifact: {error}"));
-        let token = approval_token(&issuer, &digest, "run approved script");
-        let tool = RunApprovedArtifactTool::new(store, issuer);
+        // Issue and validate under an open (non-isolated) context so the test
+        // does not depend on unshare(2) being permitted by the CI container.
+        let ctx = open_ctx();
+        let token = approval_token_with_ctx(&issuer, &digest, "run approved script", &ctx);
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
 
         let response = tool.handle(
             json!({ "sha256": digest.to_string(), "approval_token": token }),
@@ -2718,12 +2721,25 @@ mod tests {
         PlanContext::for_bash(true, "")
     }
 
+    fn open_ctx() -> PlanContext {
+        PlanContext::for_bash(false, "")
+    }
+
     fn approval_token(issuer: &ApprovalTokenIssuer, digest: &Sha256Digest, plan: &str) -> String {
+        approval_token_with_ctx(issuer, digest, plan, &default_ctx())
+    }
+
+    fn approval_token_with_ctx(
+        issuer: &ApprovalTokenIssuer,
+        digest: &Sha256Digest,
+        plan: &str,
+        ctx: &PlanContext,
+    ) -> String {
         issuer
             .issue(
                 digest,
                 plan,
-                &default_ctx(),
+                ctx,
                 SystemTime::now()
                     .checked_add(Duration::from_mins(1))
                     .unwrap_or(SystemTime::now()),
