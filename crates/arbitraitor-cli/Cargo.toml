@@ -21,9 +21,12 @@ arbitraitor-archive = { workspace = true }
 arbitraitor-artifact = { workspace = true }
 arbitraitor-core = { workspace = true }
 arbitraitor-daemon = { workspace = true }
+arbitraitor-exec = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-intel = { workspace = true }
+arbitraitor-mcp = { workspace = true }
 arbitraitor-model = { workspace = true }
+arbitraitor-policy = { workspace = true }
 arbitraitor-provenance = { workspace = true }
 arbitraitor-receipt = { workspace = true }
 arbitraitor-store = { workspace = true }
@@ -37,4 +40,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 zip = { workspace = true }
