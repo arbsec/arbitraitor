@@ -6,15 +6,16 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use arbitraitor_model::ids::Sha256Digest;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 /// Result type for provenance operations.
@@ -648,16 +649,29 @@ pub fn verify_minisign(
 ///
 /// # Errors
 ///
-/// Returns an error when `cosign` is unavailable, verification fails, or the
-/// temporary artifact file cannot be prepared.
+/// Returns an error when `cosign` is unavailable, verification fails, the
+/// subprocess times out, or the temporary artifact file cannot be prepared.
 pub fn verify_cosign(
     artifact_bytes: &[u8],
     bundle_path: &Path,
     identity: &str,
     issuer: &str,
 ) -> Result<SignatureVerification, ProvenanceError> {
-    let artifact_path = TemporaryArtifact::write(artifact_bytes)?;
-    verify_cosign_subprocess(artifact_path.path(), bundle_path, identity, issuer)?;
+    let mut temp = NamedTempFile::new().map_err(|source| ProvenanceError::Io {
+        stage: "create-temp",
+        source,
+    })?;
+    temp.write_all(artifact_bytes)
+        .map_err(|source| ProvenanceError::Io {
+            stage: "write-temp",
+            source,
+        })?;
+    temp.flush().map_err(|source| ProvenanceError::Io {
+        stage: "flush-temp",
+        source,
+    })?;
+
+    verify_cosign_subprocess(temp.path(), bundle_path, identity, issuer)?;
     Ok(SignatureVerification {
         system: SignatureSystem::Cosign,
         trusted_identity: Some(identity.to_owned()),
@@ -666,13 +680,24 @@ pub fn verify_cosign(
     })
 }
 
+/// Maximum captured bytes per cosign output stream (stdout/stderr).
+///
+/// Bounds memory use when a hostile or broken `cosign` writes unbounded
+/// output. Each stream is drained independently, so worst-case capture is
+/// `2 * COSIGN_MAX_OUTPUT_BYTES`.
+const COSIGN_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Wall-clock seconds before `cosign` is killed.
+const COSIGN_TIMEOUT_SECS: u64 = 60;
+
 fn verify_cosign_subprocess(
     artifact_path: &Path,
     bundle_path: &Path,
     identity: &str,
     issuer: &str,
 ) -> Result<(), ProvenanceError> {
-    let output = Command::new("cosign")
+    let mut command = Command::new("cosign");
+    command
         .arg("verify-blob")
         .arg("--bundle")
         .arg(bundle_path)
@@ -681,39 +706,167 @@ fn verify_cosign_subprocess(
         .arg("--certificate-oidc-issuer")
         .arg(issuer)
         .arg(artifact_path)
-        .output()
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ProvenanceError::CosignUnavailable
-            } else {
-                ProvenanceError::Io {
-                    stage: "run cosign",
-                    source: error,
-                }
-            }
-        })?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    if output.status.success() {
-        return Ok(());
+    let mut child = command.spawn().map_err(|source| {
+        if source.kind() == ErrorKind::NotFound {
+            ProvenanceError::CosignUnavailable
+        } else {
+            ProvenanceError::Io {
+                stage: "spawn-cosign",
+                source,
+            }
+        }
+    })?;
+
+    // Drain stdout and stderr concurrently. Without this, a child that
+    // produces more than the kernel pipe buffer (~64 KiB on Linux) blocks on
+    // write and never exits, defeating the timeout below.
+    let stdout_handle = spawn_drainer(child.stdout.take());
+    let stderr_handle = spawn_drainer(child.stderr.take());
+
+    let deadline = Instant::now() + Duration::from_secs(COSIGN_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Best-effort cleanup: kill, reap, and join the drainers
+                    // so no captured output escapes the cap and no thread is
+                    // left dangling.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(ProvenanceError::CosignVerification {
+                        reason: format!("cosign timed out after {COSIGN_TIMEOUT_SECS}s"),
+                    });
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(source) => {
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(ProvenanceError::Io {
+                    stage: "wait-cosign",
+                    source,
+                });
+            }
+        }
+    };
+
+    let stdout_bounded = join_drainer(stdout_handle, "stdout")?;
+    let stderr_bounded = join_drainer(stderr_handle, "stderr")?;
+
+    if stdout_bounded.truncated || stderr_bounded.truncated {
+        return Err(ProvenanceError::CosignVerification {
+            reason: format!("cosign output exceeded {COSIGN_MAX_OUTPUT_BYTES} byte limit"),
+        });
     }
 
-    Err(ProvenanceError::CosignVerification {
-        reason: bounded_command_output(&output.stderr, &output.stdout),
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ProvenanceError::CosignVerification {
+            reason: bounded_command_output(&stderr_bounded.bytes, &stdout_bounded.bytes),
+        })
+    }
+}
+
+/// Output captured from a single cosign stream, capped at
+/// [`COSIGN_MAX_OUTPUT_BYTES`] bytes. When `truncated` is set, the child
+/// produced more output than the cap; the remainder was still drained from the
+/// pipe (to avoid deadlocking the child) but discarded.
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+/// Reads `reader` to EOF, retaining at most [`COSIGN_MAX_OUTPUT_BYTES`] bytes.
+/// Continues reading past the cap so the child's pipe stays drained and it can
+/// exit normally.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error on a non-interrupted read failure.
+fn drain_to_bound<R: Read>(reader: &mut R) -> std::io::Result<BoundedOutput> {
+    let mut buf = [0u8; 8 * 1024];
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = COSIGN_MAX_OUTPUT_BYTES.saturating_sub(bytes.len());
+                if remaining == 0 {
+                    truncated = true;
+                    continue;
+                }
+                let take = n.min(remaining);
+                bytes.extend_from_slice(&buf[..take]);
+                if take < n {
+                    truncated = true;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(BoundedOutput { bytes, truncated })
+}
+
+/// Spawns a thread that drains `reader` into a [`BoundedOutput`]. `None` is
+/// surfaced as an I/O error so callers cannot silently lose a stream that was
+/// expected to be piped.
+fn spawn_drainer<R: Read + Send + 'static>(
+    reader: Option<R>,
+) -> JoinHandle<std::io::Result<BoundedOutput>> {
+    thread::spawn(move || {
+        let mut reader =
+            reader.ok_or_else(|| std::io::Error::other("cosign output stream was not piped"))?;
+        drain_to_bound(&mut reader)
     })
 }
 
+/// Joins a drainer thread, flattening the panic and I/O results into a single
+/// [`ProvenanceError`] channel.
+fn join_drainer(
+    handle: JoinHandle<std::io::Result<BoundedOutput>>,
+    stream: &'static str,
+) -> Result<BoundedOutput, ProvenanceError> {
+    handle
+        .join()
+        .map_err(|_| ProvenanceError::CosignVerification {
+            reason: format!("cosign {stream} reader panicked"),
+        })?
+        .map_err(|source| ProvenanceError::Io {
+            stage: "read-cosign-output",
+            source,
+        })
+}
+
 fn bounded_command_output(stderr: &[u8], stdout: &[u8]) -> String {
-    const MAX_CHARS: usize = 512;
+    const MAX_BYTES: usize = 512;
     let source = if stderr.is_empty() { stdout } else { stderr };
-    let text = String::from_utf8_lossy(source);
-    let mut bounded: String = text.chars().take(MAX_CHARS).collect();
-    if text.chars().count() > MAX_CHARS {
-        bounded.push('…');
-    }
-    if bounded.trim().is_empty() {
+    // Strip control characters (except newline and tab) so a hostile cosign
+    // cannot inject terminal-control sequences, ANSI escapes, or CRLF
+    // header-splitting into logs and receipt diagnostics.
+    let filtered: Vec<u8> = source
+        .iter()
+        .copied()
+        .filter(|b| *b >= 0x20 || matches!(*b, b'\n' | b'\t'))
+        .collect();
+    let truncated = filtered.len() > MAX_BYTES;
+    let end = filtered.len().min(MAX_BYTES);
+    let text = String::from_utf8_lossy(&filtered[..end]);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         "cosign exited with a non-zero status".to_owned()
+    } else if truncated {
+        format!("{trimmed}…")
     } else {
-        bounded.trim().to_owned()
+        trimmed.to_owned()
     }
 }
 
@@ -724,39 +877,6 @@ fn key_id(public_key: &minisign::PublicKey) -> String {
         let _ = write!(output, "{byte:02X}");
     }
     output
-}
-
-struct TemporaryArtifact {
-    path: PathBuf,
-}
-
-impl TemporaryArtifact {
-    fn write(bytes: &[u8]) -> Result<Self, ProvenanceError> {
-        let mut path = std::env::temp_dir();
-        path.push(unique_temp_name());
-        fs::write(&path, bytes).map_err(|source| ProvenanceError::Io {
-            stage: "write temporary artifact",
-            source,
-        })?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TemporaryArtifact {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn unique_temp_name() -> OsString {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    format!("arbitraitor-cosign-{}-{nanos}.blob", std::process::id()).into()
 }
 
 #[cfg(test)]
@@ -878,7 +998,7 @@ mod tests {
     #[test]
     fn tofu_first_use_pins_artifact_identity() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
-        let path = temp_store_path("first-use");
+        let (_temp_dir, path) = temp_store_path("first-use")?;
         let mut store = TofuStore::open(&path)?;
         let url = "https://example.test/artifact";
         let pin = tofu_pin(url, 0x11, Some("signer@example.test"), Some(123));
@@ -891,13 +1011,12 @@ mod tests {
         let reopened = TofuStore::open(&path)?;
 
         assert_eq!(reopened.check(url), Some(&pin));
-        remove_file_if_present(&path)?;
         Ok(())
     }
 
     #[test]
     fn tofu_subsequent_match_passes() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let path = temp_store_path("match");
+        let (_temp_dir, path) = temp_store_path("match")?;
         let url = "https://example.test/tool";
         let pin = tofu_pin(url, 0x22, Some("release@example.test"), Some(42));
         let mut store = TofuStore::open(&path)?;
@@ -907,13 +1026,12 @@ mod tests {
             store.verify_against_pin(url, &pin)?,
             TofuVerification::Matches
         );
-        remove_file_if_present(&path)?;
         Ok(())
     }
 
     #[test]
     fn tofu_change_produces_field_diff() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let path = temp_store_path("changed");
+        let (_temp_dir, path) = temp_store_path("changed")?;
         let url = "https://example.test/tool";
         let pinned = tofu_pin(url, 0x33, Some("old@example.test"), Some(100));
         let actual = tofu_pin(url, 0x44, Some("new@example.test"), Some(101));
@@ -936,7 +1054,6 @@ mod tests {
                 ],
             }
         );
-        remove_file_if_present(&path)?;
         Ok(())
     }
 
@@ -1021,6 +1138,58 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn drain_to_bound_caps_output_and_marks_truncated() -> std::io::Result<()> {
+        use std::io::Cursor;
+        let payload = vec![b'a'; super::COSIGN_MAX_OUTPUT_BYTES * 2];
+        let mut cursor = Cursor::new(payload);
+        let output = super::drain_to_bound(&mut cursor)?;
+        assert!(output.truncated);
+        assert_eq!(output.bytes.len(), super::COSIGN_MAX_OUTPUT_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn drain_to_bound_marks_not_truncated_under_cap() -> std::io::Result<()> {
+        use std::io::Cursor;
+        let payload = b"short output".to_vec();
+        let mut cursor = Cursor::new(payload);
+        let output = super::drain_to_bound(&mut cursor)?;
+        assert!(!output.truncated);
+        assert_eq!(output.bytes, b"short output");
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_command_output_strips_terminal_control_bytes() {
+        let result = super::bounded_command_output(b"ok\x1b\x07done", b"");
+        assert_eq!(result, "okdone");
+    }
+
+    #[test]
+    fn bounded_command_output_marks_truncated_output() {
+        let long = vec![b'x'; 1024];
+        let result = super::bounded_command_output(&long, b"");
+        assert!(result.ends_with('…'), "got: {result}");
+        assert!(result.len() < long.len());
+    }
+
+    #[test]
+    fn bounded_command_output_falls_back_when_only_whitespace() {
+        assert_eq!(
+            super::bounded_command_output(b"   \n\t\x07\x07", b""),
+            "cosign exited with a non-zero status"
+        );
+    }
+
+    #[test]
+    fn bounded_command_output_prefers_stderr_when_present() {
+        assert_eq!(
+            super::bounded_command_output(b"from stderr", b"from stdout"),
+            "from stderr"
+        );
+    }
+
     fn tofu_pin(url: &str, byte: u8, signer_identity: Option<&str>, size: Option<u64>) -> TofuPin {
         TofuPin {
             url: url.to_owned(),
@@ -1045,21 +1214,9 @@ mod tests {
         }
     }
 
-    fn temp_store_path(name: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "arbitraitor-tofu-{name}-{}-{}.json",
-            std::process::id(),
-            super::unique_temp_name().to_string_lossy()
-        ));
-        path
-    }
-
-    fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
-        match std::fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+    fn temp_store_path(name: &str) -> std::io::Result<(tempfile::TempDir, std::path::PathBuf)> {
+        let dir = tempfile::TempDir::new()?;
+        let path = dir.path().join(format!("{name}.json"));
+        Ok((dir, path))
     }
 }
