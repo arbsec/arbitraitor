@@ -397,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires shell binary in CI"]
     fn native_environment_is_controlled() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("env")?;
         if !xattrs_supported(&root)? {
@@ -420,6 +421,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires process spawning in CI"]
     fn native_resource_limits_are_applied() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("limits")?;
         if !xattrs_supported(&root)? {
