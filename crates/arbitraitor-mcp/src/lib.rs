@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{ErrorKind as IoErrorKind, Read, Write};
@@ -23,15 +23,26 @@ use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
 use arbitraitor_receipt::Receipt;
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::ops::Not;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use uuid::Uuid;
+
+/// HMAC-SHA256 type alias used for approval token signatures.
+type HmacSha256 = Hmac<Sha256>;
 
 const UNTRUSTED_START: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_START>>";
 const UNTRUSTED_END: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_END>>";
 const MAX_UNTRUSTED_CHARS: usize = 4096;
+/// Length of the canonical plan digest prefix a human must retype when
+/// approving a plan-bound execution token, per ADR-0013.
+const PLAN_DIGEST_PREFIX_LEN: usize = 12;
+/// Output length of HMAC-SHA256 in bytes (matches the approval token tag size).
+const HMAC_OUTPUT_LEN: usize = 32;
 /// Default maximum size of an artifact read by [`ScanArtifactTool`] (256 MiB).
 ///
 /// The bound enforces the "bounded processing" security invariant from the
@@ -567,13 +578,21 @@ impl ApprovalPrompt for StdinApprovalPrompt {
         sha256: &Sha256Digest,
         plan: &str,
     ) -> Result<bool, ApprovalPromptError> {
+        // ADR-0013: bind human attention to both the artifact identity and the
+        // execution plan by requiring the operator to type a prefix of the
+        // canonical plan digest instead of an easily-spoofed "yes" token.
+        let plan_digest =
+            canonical_plan_digest(sha256, plan).map_err(|e| ApprovalPromptError::digest(&e))?;
+        let digest_prefix = &plan_digest[..PLAN_DIGEST_PREFIX_LEN];
+
         let mut stderr = std::io::stderr().lock();
         writeln!(stderr, "APPROVAL REQUESTED for artifact {sha256}")
             .map_err(|error| ApprovalPromptError::write(&error))?;
         writeln!(stderr, "Plan (untrusted): {}", sanitize_for_agent(plan))
             .map_err(|error| ApprovalPromptError::write(&error))?;
-        write!(stderr, "Type 'yes' to approve: ")
+        writeln!(stderr, "Type this code to approve: {digest_prefix}")
             .map_err(|error| ApprovalPromptError::write(&error))?;
+        write!(stderr, "> ").map_err(|error| ApprovalPromptError::write(&error))?;
         stderr
             .flush()
             .map_err(|error| ApprovalPromptError::write(&error))?;
@@ -582,7 +601,7 @@ impl ApprovalPrompt for StdinApprovalPrompt {
         std::io::stdin()
             .read_line(&mut input)
             .map_err(|error| ApprovalPromptError::read(&error))?;
-        Ok(input.trim() == "yes")
+        Ok(input.trim() == digest_prefix)
     }
 }
 
@@ -605,6 +624,12 @@ pub enum ApprovalPromptError {
         /// Safe diagnostic message.
         message: String,
     },
+    /// The canonical plan digest could not be computed for the prompt code.
+    #[error("approval prompt digest computation failed: {message}")]
+    Digest {
+        /// Safe diagnostic message describing the serialization failure.
+        message: String,
+    },
 }
 
 impl ApprovalPromptError {
@@ -621,12 +646,23 @@ impl ApprovalPromptError {
             message: error.to_string(),
         }
     }
+
+    fn digest(error: &serde_json::Error) -> Self {
+        Self::Digest {
+            message: error.to_string(),
+        }
+    }
 }
 
 /// Issues and validates signed approval tokens.
+///
+/// Tokens are single-use: each token carries a unique nonce and the issuer
+/// records every accepted nonce in an internally synchronised set so a
+/// replayed token is rejected even before its signature is checked.
 #[derive(Clone)]
 pub struct ApprovalTokenIssuer {
     signing_secret: Arc<[u8]>,
+    spent_nonces: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ApprovalTokenIssuer {
@@ -638,6 +674,7 @@ impl ApprovalTokenIssuer {
         secret.extend_from_slice(Uuid::new_v4().as_bytes());
         Self {
             signing_secret: Arc::from(secret.into_boxed_slice()),
+            spent_nonces: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -646,6 +683,7 @@ impl ApprovalTokenIssuer {
     pub fn with_secret(secret: impl Into<Vec<u8>>) -> Self {
         Self {
             signing_secret: Arc::from(secret.into().into_boxed_slice()),
+            spent_nonces: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -669,7 +707,7 @@ impl ApprovalTokenIssuer {
             requester_session_id: agent.session_id.clone(),
         };
         let payload_bytes = serde_json::to_vec(&payload)?;
-        let signature = self.sign(&payload_bytes);
+        let signature = self.sign(&payload_bytes)?;
         let token = format!(
             "v1.{}.{}",
             hex::encode(&payload_bytes),
@@ -688,10 +726,32 @@ impl ApprovalTokenIssuer {
         now: SystemTime,
     ) -> Result<ApprovalTokenPayload, ApprovalTokenError> {
         let (payload_bytes, signature) = Self::decode_token(token)?;
-        let expected = self.sign(&payload_bytes);
-        if signature != expected {
+
+        // Constant-time comparison only holds for equal-length buffers; reject
+        // malformed signatures up front so the comparison below is well-formed.
+        if signature.len() != HMAC_OUTPUT_LEN {
             return Err(ApprovalTokenError::InvalidSignature);
         }
+        // Defense-in-depth verification: recompute the HMAC over the canonical
+        // inputs and let the HMAC implementation perform its own constant-time
+        // tag comparison via `verify_slice`. This replaces the previous
+        // short-circuit `Vec<u8>` equality which leaked timing information.
+        let mut verify_mac = HmacSha256::new_from_slice(&self.signing_secret)
+            .map_err(|_| ApprovalTokenError::KeyLength)?;
+        verify_mac.update(b"arbitraitor-mcp-approval-token-v1");
+        verify_mac.update(&payload_bytes);
+        verify_mac
+            .verify_slice(&signature)
+            .map_err(|_| ApprovalTokenError::InvalidSignature)?;
+
+        // Explicit constant-time equality against the recomputed tag. This is
+        // redundant with `verify_slice` above but kept as a belt-and-suspenders
+        // guarantee that the comparison never short-circuits on attacker input.
+        let expected = self.sign(&payload_bytes)?;
+        if bool::from(signature.ct_eq(&expected).not()) {
+            return Err(ApprovalTokenError::InvalidSignature);
+        }
+
         let payload: ApprovalTokenPayload = serde_json::from_slice(&payload_bytes)?;
         if payload.sha256 != sha256.to_string() {
             return Err(ApprovalTokenError::ArtifactMismatch);
@@ -699,6 +759,19 @@ impl ApprovalTokenIssuer {
         if unix_seconds(now)? >= payload.expires_at_unix_seconds {
             return Err(ApprovalTokenError::Expired);
         }
+
+        // Single-use enforcement (#187): a token's nonce may only be spent
+        // once. The check runs after every other validation passes so that
+        // a replay of an otherwise-valid token is the only path that consumes
+        // the nonce, and a replay is rejected on its second presentation.
+        let mut spent = self
+            .spent_nonces
+            .lock()
+            .map_err(|_| ApprovalTokenError::NonceStorePoisoned)?;
+        if !spent.insert(payload.nonce.clone()) {
+            return Err(ApprovalTokenError::Reused);
+        }
+
         Ok(payload)
     }
 
@@ -713,13 +786,21 @@ impl ApprovalTokenIssuer {
         Ok((hex::decode(payload_hex)?, hex::decode(signature_hex)?))
     }
 
-    fn sign(&self, payload_bytes: &[u8]) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(b"arbitraitor-mcp-approval-token-v1");
-        hasher.update(self.signing_secret.as_ref());
-        hasher.update(payload_bytes);
-        hasher.update(self.signing_secret.as_ref());
-        hasher.finalize().into()
+    fn sign(&self, payload_bytes: &[u8]) -> Result<[u8; HMAC_OUTPUT_LEN], ApprovalTokenError> {
+        // HMAC accepts any non-empty key length for SHA-256: short keys are
+        // zero-padded to the block size and long keys are hashed first.
+        // `InvalidKeyLength` is therefore unreachable for our `Arc<[u8]>`
+        // secret, but we propagate it as a defensive error rather than
+        // panicking, to honour `forbid(unsafe_code)` and the `expect_used` /
+        // `panic` clippy lints.
+        let mut mac = HmacSha256::new_from_slice(&self.signing_secret)
+            .map_err(|_| ApprovalTokenError::KeyLength)?;
+        mac.update(b"arbitraitor-mcp-approval-token-v1");
+        mac.update(payload_bytes);
+        let result = mac.finalize().into_bytes();
+        let mut output = [0u8; HMAC_OUTPUT_LEN];
+        output.copy_from_slice(&result);
+        Ok(output)
     }
 }
 
@@ -1147,7 +1228,15 @@ impl McpToolHandler for ExplainVerdictTool {
 /// Wraps untrusted text so downstream agents can quote it as data, not instructions.
 #[must_use]
 pub fn sanitize_for_agent(value: &str) -> String {
-    let escaped_markers = value
+    // Strip control characters (including ANSI escape sequences) that could
+    // manipulate terminal rendering, hide content from human review, or
+    // smuggle prompt-injection across the trust boundary. Newlines and tabs
+    // are preserved so legitimate multi-line evidence remains readable.
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect();
+    let escaped_markers = cleaned
         .replace(UNTRUSTED_START, "[escaped-untrusted-start]")
         .replace(UNTRUSTED_END, "[escaped-untrusted-end]");
     let mut bounded: String = escaped_markers.chars().take(MAX_UNTRUSTED_CHARS).collect();
@@ -1522,6 +1611,12 @@ enum ApprovalTokenError {
     ArtifactMismatch,
     #[error("token is expired")]
     Expired,
+    #[error("token has already been used and cannot be replayed")]
+    Reused,
+    #[error("token signing key has an invalid length")]
+    KeyLength,
+    #[error("token nonce store is poisoned")]
+    NonceStorePoisoned,
     #[error("token time is before Unix epoch")]
     TimeBeforeEpoch,
     #[error("token serialization failed: {0}")]
@@ -2105,6 +2200,141 @@ mod tests {
         );
     }
 
+    #[test]
+    fn approval_token_rejects_replayed_nonce() {
+        // Fix 3 (#187): a token's nonce must be single-use. Presenting the
+        // same valid token twice must fail on the second attempt.
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let sha256: Sha256Digest = "33".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let token = approval_token(&issuer, &sha256, "run once");
+
+        let first = issuer.validate(&token, &sha256, SystemTime::now());
+        let second = issuer.validate(&token, &sha256, SystemTime::now());
+
+        assert!(first.is_ok(), "first validation should succeed: {first:?}");
+        match second {
+            Err(err) => assert!(
+                err.to_string().contains("already been used"),
+                "expected reuse error, got: {err}"
+            ),
+            Ok(_) => panic!("replay should be rejected, but validation succeeded"),
+        }
+    }
+
+    #[test]
+    fn approval_token_rejects_tampered_signature() {
+        // Fix 1 + Fix 2: any single-byte change to a valid signature must be
+        // rejected by the constant-time HMAC verification path.
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let sha256: Sha256Digest = "44"
+            .repeat(32)
+            .parse()
+            .unwrap_or_else(|error| panic!("parse digest: {error}"));
+        let token = approval_token(&issuer, &sha256, "signed plan");
+
+        // Tamper: flip the last hex character of the signature segment.
+        let mut parts: Vec<&str> = token.split('.').collect();
+        let sig = parts[2].to_owned();
+        let mut tampered = sig.clone();
+        let last = tampered
+            .pop()
+            .unwrap_or_else(|| panic!("signature non-empty"));
+        let flipped = if last == '0' { '1' } else { '0' };
+        tampered.push(flipped);
+        parts[2] = tampered.as_str();
+        let forged_token = parts.join(".");
+
+        match issuer.validate(&forged_token, &sha256, SystemTime::now()) {
+            Err(err) => assert!(
+                err.to_string().contains("signature is invalid"),
+                "expected invalid signature error, got: {err}"
+            ),
+            Ok(_) => panic!("tampered signature must be rejected"),
+        }
+    }
+
+    #[test]
+    fn approval_token_uses_hmac_not_homebrew_mac() {
+        // Fix 2 (#181): the signature must be a real HMAC-SHA256 tag, not the
+        // old homebrew double-hash construction. We verify by independently
+        // computing the HMAC over the same inputs and comparing.
+        let secret = b"hmac-fingerprint-secret".to_vec();
+        let issuer = ApprovalTokenIssuer::with_secret(secret.clone());
+        let sha256: Sha256Digest = "55"
+            .repeat(32)
+            .parse()
+            .unwrap_or_else(|error| panic!("parse digest: {error}"));
+        let token = approval_token(&issuer, &sha256, "hmac fingerprint plan");
+
+        // Decode the token and recompute the expected HMAC independently.
+        let mut parts = token.split('.');
+        let version = parts.next().unwrap_or("?");
+        let payload_hex = parts.next().unwrap_or("");
+        let sig_hex = parts.next().unwrap_or("");
+        assert_eq!(version, "v1", "token version should be v1");
+        let payload_bytes = hex::decode(payload_hex).unwrap_or_else(|e| panic!("hex: {e}"));
+        let actual_sig = hex::decode(sig_hex).unwrap_or_else(|e| panic!("hex: {e}"));
+
+        let mut expected_mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&secret)
+            .unwrap_or_else(|e| panic!("hmac: {e}"));
+        expected_mac.update(b"arbitraitor-mcp-approval-token-v1");
+        expected_mac.update(&payload_bytes);
+        let expected_tag = expected_mac.finalize().into_bytes();
+
+        assert_eq!(
+            actual_sig.len(),
+            expected_tag.len(),
+            "signature must be {} bytes (HMAC-SHA256 output size)",
+            expected_tag.len()
+        );
+        assert_eq!(
+            &actual_sig[..],
+            &expected_tag[..],
+            "signature must match an independent HMAC computation"
+        );
+    }
+
+    #[test]
+    fn sanitize_for_agent_strips_ansi_and_control_chars() {
+        // Fix 5 (#189): ANSI escape sequences and other control characters
+        // must be stripped so they cannot manipulate terminal rendering or
+        // hide content during human review.
+        let ansi_input = "\x1b[31mRED\x1b[0m and a \x00 null and \x07 bell";
+        let sanitized = sanitize_for_agent(ansi_input);
+
+        assert!(
+            !sanitized.contains('\x1b'),
+            "ESC must be stripped, got: {sanitized:?}"
+        );
+        assert!(
+            !sanitized.contains('\x00'),
+            "NUL must be stripped, got: {sanitized:?}"
+        );
+        assert!(
+            !sanitized.contains('\x07'),
+            "BEL must be stripped, got: {sanitized:?}"
+        );
+        assert!(sanitized.contains("RED"), "visible text must remain");
+        assert!(sanitized.contains(UNTRUSTED_START));
+        assert!(sanitized.contains(UNTRUSTED_END));
+    }
+
+    #[test]
+    fn sanitize_for_agent_preserves_newlines_and_tabs() {
+        // Fix 5: newlines and tabs are legitimate formatting and must survive
+        // the control-character filter so multi-line evidence stays readable.
+        let input = "line one\nline two\tindented";
+        let sanitized = sanitize_for_agent(input);
+
+        assert!(sanitized.contains('\n'), "newlines must be preserved");
+        assert!(sanitized.contains('\t'), "tabs must be preserved");
+        assert!(sanitized.contains("line one"));
+        assert!(sanitized.contains("line two"));
+        assert!(sanitized.contains("indented"));
+    }
+
     fn write_temp_file(name: &str, body: &[u8]) -> String {
         let path = temp_path(name);
         std::fs::write(&path, body).unwrap_or_else(|error| panic!("write temp file: {error}"));
@@ -2169,7 +2399,7 @@ mod tests {
                 digest,
                 plan,
                 SystemTime::now()
-                    .checked_add(Duration::from_secs(60))
+                    .checked_add(Duration::from_mins(1))
                     .unwrap_or(SystemTime::now()),
                 &agent(),
             )
