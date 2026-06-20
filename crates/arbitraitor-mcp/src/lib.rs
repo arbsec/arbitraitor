@@ -553,9 +553,50 @@ impl McpToolHandler for QueryReceiptTool {
     }
 }
 
+/// Execution context bound into an approval token per ADR-0013.
+///
+/// The plan digest is computed over `(artifact_sha256, plan_text, ctx)` so any
+/// material change in the bound execution context — swapping the interpreter,
+/// flipping the network policy, or replacing the policy snapshot — invalidates
+/// a previously issued token. At validation time the caller supplies the
+/// context that will actually be used for execution; if it does not match the
+/// context baked into the token at issue time, validation fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanContext {
+    /// Interpreter path that will be invoked (e.g. `/bin/bash`).
+    pub interpreter: String,
+    /// Whether the spawned interpreter will have its network namespace isolated.
+    pub network_isolated: bool,
+    /// SHA-256 (hex) of the policy TOML snapshot in effect at approval time,
+    /// or an empty string when no policy is configured.
+    pub policy_snapshot_digest: String,
+}
+
+impl PlanContext {
+    /// Canonical mediated-bash context.
+    ///
+    /// Matches [`arbitraitor_exec::script::ScriptExecution::bash`] which hard
+    /// codes `/bin/bash --noprofile --norc`. The interpreter string here is
+    /// the bare binary path so the same value can be derived at issue and
+    /// validation time without disagreements about argument vectors.
+    #[must_use]
+    pub fn for_bash(network_isolated: bool, policy_snapshot_digest: impl Into<String>) -> Self {
+        Self {
+            interpreter: "/bin/bash".to_owned(),
+            network_isolated,
+            policy_snapshot_digest: policy_snapshot_digest.into(),
+        }
+    }
+}
+
 /// Human approval prompt used by [`RequestApprovalTool`].
 pub trait ApprovalPrompt: Send + Sync {
     /// Shows the artifact and untrusted plan to a human approval channel.
+    ///
+    /// `ctx` carries the binding execution context per ADR-0013 so the prompt
+    /// can render the interpreter, network policy, and policy snapshot digest
+    /// alongside the artifact identity. The typed plan-digest prefix the
+    /// operator must enter is derived from `(sha256, plan, ctx)`.
     ///
     /// # Errors
     ///
@@ -565,6 +606,7 @@ pub trait ApprovalPrompt: Send + Sync {
         &self,
         sha256: &Sha256Digest,
         plan: &str,
+        ctx: &PlanContext,
     ) -> Result<bool, ApprovalPromptError>;
 }
 
@@ -577,12 +619,13 @@ impl ApprovalPrompt for StdinApprovalPrompt {
         &self,
         sha256: &Sha256Digest,
         plan: &str,
+        ctx: &PlanContext,
     ) -> Result<bool, ApprovalPromptError> {
         // ADR-0013: bind human attention to both the artifact identity and the
         // execution plan by requiring the operator to type a prefix of the
         // canonical plan digest instead of an easily-spoofed "yes" token.
-        let plan_digest =
-            canonical_plan_digest(sha256, plan).map_err(|e| ApprovalPromptError::digest(&e))?;
+        let plan_digest = canonical_plan_digest(sha256, plan, ctx)
+            .map_err(|e| ApprovalPromptError::digest(&e))?;
         let digest_prefix = &plan_digest[..PLAN_DIGEST_PREFIX_LEN];
 
         let mut stderr = std::io::stderr().lock();
@@ -590,6 +633,12 @@ impl ApprovalPrompt for StdinApprovalPrompt {
             .map_err(|error| ApprovalPromptError::write(&error))?;
         writeln!(stderr, "Plan (untrusted): {}", sanitize_for_agent(plan))
             .map_err(|error| ApprovalPromptError::write(&error))?;
+        writeln!(
+            stderr,
+            "Interpreter: {} (network isolated: {}, policy snapshot: {})",
+            ctx.interpreter, ctx.network_isolated, ctx.policy_snapshot_digest
+        )
+        .map_err(|error| ApprovalPromptError::write(&error))?;
         writeln!(stderr, "Type this code to approve: {digest_prefix}")
             .map_err(|error| ApprovalPromptError::write(&error))?;
         write!(stderr, "> ").map_err(|error| ApprovalPromptError::write(&error))?;
@@ -691,14 +740,18 @@ impl ApprovalTokenIssuer {
         &self,
         sha256: &Sha256Digest,
         plan: &str,
+        ctx: &PlanContext,
         expires_at: SystemTime,
         agent: &AgentIdentity,
     ) -> Result<IssuedApprovalToken, ApprovalTokenError> {
         let expires_at_unix_seconds = unix_seconds(expires_at)?;
         let payload = ApprovalTokenPayload {
-            schema_version: 1,
+            schema_version: 2,
             sha256: sha256.to_string(),
-            plan_digest: canonical_plan_digest(sha256, plan)?,
+            plan_digest: canonical_plan_digest(sha256, plan, ctx)?,
+            interpreter: ctx.interpreter.clone(),
+            network_isolated: ctx.network_isolated,
+            policy_snapshot_digest: ctx.policy_snapshot_digest.clone(),
             expires_at_unix_seconds,
             nonce: Uuid::new_v4().to_string(),
             approval_method: "stdin-human-confirmation".to_owned(),
@@ -723,6 +776,7 @@ impl ApprovalTokenIssuer {
         &self,
         token: &str,
         sha256: &Sha256Digest,
+        ctx: &PlanContext,
         now: SystemTime,
     ) -> Result<ApprovalTokenPayload, ApprovalTokenError> {
         let (payload_bytes, signature) = Self::decode_token(token)?;
@@ -753,11 +807,27 @@ impl ApprovalTokenIssuer {
         }
 
         let payload: ApprovalTokenPayload = serde_json::from_slice(&payload_bytes)?;
+        if payload.schema_version != 2 {
+            return Err(ApprovalTokenError::UnsupportedSchema);
+        }
         if payload.sha256 != sha256.to_string() {
             return Err(ApprovalTokenError::ArtifactMismatch);
         }
         if unix_seconds(now)? >= payload.expires_at_unix_seconds {
             return Err(ApprovalTokenError::Expired);
+        }
+        // ADR-0013 (#188): the bound execution context must match exactly. A
+        // token issued for `/bin/bash` with the network isolated and policy
+        // snapshot X cannot be spent against an execution context that uses a
+        // different interpreter, a different network policy, or a different
+        // policy snapshot. The comparison runs only after authenticity,
+        // artifact, and expiry checks so an attacker cannot use a stolen or
+        // forged token to probe the bound context.
+        if payload.interpreter != ctx.interpreter
+            || payload.network_isolated != ctx.network_isolated
+            || payload.policy_snapshot_digest != ctx.policy_snapshot_digest
+        {
+            return Err(ApprovalTokenError::ContextMismatch);
         }
 
         // Single-use enforcement (#187): a token's nonce may only be spent
@@ -821,6 +891,9 @@ struct ApprovalTokenPayload {
     schema_version: u32,
     sha256: String,
     plan_digest: String,
+    interpreter: String,
+    network_isolated: bool,
+    policy_snapshot_digest: String,
     expires_at_unix_seconds: u64,
     nonce: String,
     approval_method: String,
@@ -834,22 +907,34 @@ pub struct RequestApprovalTool {
     prompt: Arc<dyn ApprovalPrompt>,
     issuer: ApprovalTokenIssuer,
     token_lifetime: Duration,
+    ctx: PlanContext,
 }
 
 impl RequestApprovalTool {
-    /// Creates a `request_approval` tool using stdin/stderr confirmation.
+    /// Creates a `request_approval` tool using stdin/stderr confirmation with
+    /// the default mediated-bash context (network isolated, no policy snapshot).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_prompt(Arc::new(StdinApprovalPrompt), ApprovalTokenIssuer::new())
+        Self::with_prompt(
+            Arc::new(StdinApprovalPrompt),
+            ApprovalTokenIssuer::new(),
+            PlanContext::for_bash(true, ""),
+        )
     }
 
-    /// Creates a `request_approval` tool with injected prompt and token issuer.
+    /// Creates a `request_approval` tool with injected prompt, token issuer,
+    /// and bound execution context.
     #[must_use]
-    pub fn with_prompt(prompt: Arc<dyn ApprovalPrompt>, issuer: ApprovalTokenIssuer) -> Self {
+    pub fn with_prompt(
+        prompt: Arc<dyn ApprovalPrompt>,
+        issuer: ApprovalTokenIssuer,
+        ctx: PlanContext,
+    ) -> Self {
         Self {
             prompt,
             issuer,
             token_lifetime: DEFAULT_APPROVAL_TOKEN_LIFETIME,
+            ctx,
         }
     }
 
@@ -869,14 +954,16 @@ impl RequestApprovalTool {
                 }
             },
         )?;
-        let approved = self.prompt.request_confirmation(&digest, &params.plan)?;
+        let approved = self
+            .prompt
+            .request_confirmation(&digest, &params.plan, &self.ctx)?;
         let expires_at = SystemTime::now()
             .checked_add(self.token_lifetime)
             .ok_or(RequestApprovalError::TimeOverflow)?;
         let issued = if approved {
             Some(
                 self.issuer
-                    .issue(&digest, &params.plan, expires_at, agent)?,
+                    .issue(&digest, &params.plan, &self.ctx, expires_at, agent)?,
             )
         } else {
             None
@@ -892,7 +979,7 @@ impl RequestApprovalTool {
                 .as_ref()
                 .map_or_else(|| unix_seconds_string(expires_at), |token| token.expires_at_unix_seconds.to_string()),
             "artifact": { "sha256": digest.to_string() },
-            "plan_digest": canonical_plan_digest(&digest, &params.plan)?,
+            "plan_digest": canonical_plan_digest(&digest, &params.plan, &self.ctx)?,
         }))
     }
 }
@@ -990,24 +1077,34 @@ pub enum ArtifactStoreError {
 pub struct RunApprovedArtifactTool {
     artifacts: Arc<dyn ArtifactLookup>,
     issuer: ApprovalTokenIssuer,
-    network_isolated: bool,
+    ctx: PlanContext,
 }
 
 impl RunApprovedArtifactTool {
-    /// Creates a `run_approved_artifact` tool backed by an artifact lookup.
+    /// Creates a `run_approved_artifact` tool backed by an artifact lookup,
+    /// using the default mediated-bash context (network isolated, no policy).
     #[must_use]
     pub fn new(artifacts: Arc<dyn ArtifactLookup>, issuer: ApprovalTokenIssuer) -> Self {
         Self {
             artifacts,
             issuer,
-            network_isolated: true,
+            ctx: PlanContext::for_bash(true, ""),
         }
     }
 
     /// Controls network namespace isolation for tests and policy-granted callers.
     #[must_use]
-    pub const fn with_network_isolated(mut self, network_isolated: bool) -> Self {
-        self.network_isolated = network_isolated;
+    pub fn with_network_isolated(mut self, network_isolated: bool) -> Self {
+        self.ctx.network_isolated = network_isolated;
+        self
+    }
+
+    /// Sets the policy snapshot digest the executor will bind approval tokens
+    /// against. Must match the digest configured on the issuing
+    /// [`RequestApprovalTool`] or approval tokens will fail validation.
+    #[must_use]
+    pub fn with_policy_snapshot_digest(mut self, digest: impl Into<String>) -> Self {
+        self.ctx.policy_snapshot_digest = digest.into();
         self
     }
 
@@ -1023,15 +1120,18 @@ impl RunApprovedArtifactTool {
         if params.args.as_ref().is_some_and(|args| !args.is_empty()) {
             return Err(RunApprovedArtifactError::UnapprovedArguments);
         }
-        let token_payload =
-            self.issuer
-                .validate(&params.approval_token, &digest, SystemTime::now())?;
+        let token_payload = self.issuer.validate(
+            &params.approval_token,
+            &digest,
+            &self.ctx,
+            SystemTime::now(),
+        )?;
         let bytes = self
             .artifacts
             .lookup_artifact(&digest)
             .ok_or(RunApprovedArtifactError::ArtifactNotFound)?;
         verify_bytes_digest(&bytes, &digest)?;
-        let execution = ScriptExecution::bash()?.with_network_isolated(self.network_isolated);
+        let execution = ScriptExecution::bash()?.with_network_isolated(self.ctx.network_isolated);
         let result = execution.execute(&bytes)?;
         Ok(json!({
             "capability": McpCapability::Execute,
@@ -1082,12 +1182,19 @@ impl McpToolHandler for RunApprovedArtifactTool {
     }
 }
 
-fn canonical_plan_digest(sha256: &Sha256Digest, plan: &str) -> Result<String, serde_json::Error> {
+fn canonical_plan_digest(
+    sha256: &Sha256Digest,
+    plan: &str,
+    ctx: &PlanContext,
+) -> Result<String, serde_json::Error> {
     let canonical_plan = CanonicalExecutionPlan {
-        schema_version: 1,
+        schema_version: 2,
         artifact_sha256: sha256.to_string(),
         human_readable_plan: plan.to_owned(),
         approved_arguments: Vec::new(),
+        interpreter: ctx.interpreter.clone(),
+        network_isolated: ctx.network_isolated,
+        policy_snapshot_digest: ctx.policy_snapshot_digest.clone(),
     };
     let encoded = serde_json::to_vec(&canonical_plan)?;
     let mut hasher = Sha256::new();
@@ -1101,6 +1208,9 @@ struct CanonicalExecutionPlan {
     artifact_sha256: String,
     human_readable_plan: String,
     approved_arguments: Vec<String>,
+    interpreter: String,
+    network_isolated: bool,
+    policy_snapshot_digest: String,
 }
 
 fn verify_bytes_digest(
@@ -1609,6 +1719,10 @@ enum ApprovalTokenError {
     InvalidSignature,
     #[error("token artifact digest does not match request")]
     ArtifactMismatch,
+    #[error(
+        "token execution context (interpreter, network policy, or policy snapshot) does not match the request"
+    )]
+    ContextMismatch,
     #[error("token is expired")]
     Expired,
     #[error("token has already been used and cannot be replayed")]
@@ -1619,6 +1733,8 @@ enum ApprovalTokenError {
     NonceStorePoisoned,
     #[error("token time is before Unix epoch")]
     TimeBeforeEpoch,
+    #[error("token schema version is unsupported")]
+    UnsupportedSchema,
     #[error("token serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("token encoding failed: {0}")]
@@ -1705,6 +1821,7 @@ mod tests {
         server.register(Box::new(RequestApprovalTool::with_prompt(
             Arc::new(StaticApprovalPrompt { approved: true }),
             issuer.clone(),
+            default_ctx(),
         )));
         server.register(Box::new(RunApprovedArtifactTool::new(
             Arc::new(InMemoryArtifactStore::new()),
@@ -2046,6 +2163,7 @@ mod tests {
         let tool = RequestApprovalTool::with_prompt(
             Arc::new(StaticApprovalPrompt { approved: true }),
             issuer.clone(),
+            default_ctx(),
         );
         let sha256 = "11".repeat(32);
 
@@ -2068,7 +2186,11 @@ mod tests {
         let digest: Sha256Digest = sha256
             .parse()
             .unwrap_or_else(|error| panic!("parse digest: {error}"));
-        assert!(issuer.validate(token, &digest, SystemTime::now()).is_ok());
+        assert!(
+            issuer
+                .validate(token, &digest, &default_ctx(), SystemTime::now())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2076,6 +2198,7 @@ mod tests {
         let tool = RequestApprovalTool::with_prompt(
             Arc::new(StaticApprovalPrompt { approved: false }),
             ApprovalTokenIssuer::with_secret(b"test-secret".to_vec()),
+            default_ctx(),
         );
 
         let response = tool.handle(
@@ -2100,7 +2223,7 @@ mod tests {
             .record(b"printf 'approved output'\n".to_vec())
             .unwrap_or_else(|error| panic!("record artifact: {error}"));
         let token = approval_token(&issuer, &digest, "run approved script");
-        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+        let tool = RunApprovedArtifactTool::new(store, issuer);
 
         let response = tool.handle(
             json!({ "sha256": digest.to_string(), "approval_token": token }),
@@ -2150,7 +2273,13 @@ mod tests {
             .checked_sub(Duration::from_secs(1))
             .unwrap_or(UNIX_EPOCH);
         let token = issuer
-            .issue(&digest, "run expired script", expired_at, &agent())
+            .issue(
+                &digest,
+                "run expired script",
+                &default_ctx(),
+                expired_at,
+                &agent(),
+            )
             .unwrap_or_else(|error| panic!("issue token: {error}"))
             .token;
         let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
@@ -2211,8 +2340,8 @@ mod tests {
         });
         let token = approval_token(&issuer, &sha256, "run once");
 
-        let first = issuer.validate(&token, &sha256, SystemTime::now());
-        let second = issuer.validate(&token, &sha256, SystemTime::now());
+        let first = issuer.validate(&token, &sha256, &default_ctx(), SystemTime::now());
+        let second = issuer.validate(&token, &sha256, &default_ctx(), SystemTime::now());
 
         assert!(first.is_ok(), "first validation should succeed: {first:?}");
         match second {
@@ -2247,7 +2376,7 @@ mod tests {
         parts[2] = tampered.as_str();
         let forged_token = parts.join(".");
 
-        match issuer.validate(&forged_token, &sha256, SystemTime::now()) {
+        match issuer.validate(&forged_token, &sha256, &default_ctx(), SystemTime::now()) {
             Err(err) => assert!(
                 err.to_string().contains("signature is invalid"),
                 "expected invalid signature error, got: {err}"
@@ -2389,9 +2518,14 @@ mod tests {
             &self,
             _sha256: &Sha256Digest,
             _plan: &str,
+            _ctx: &PlanContext,
         ) -> Result<bool, ApprovalPromptError> {
             Ok(self.approved)
         }
+    }
+
+    fn default_ctx() -> PlanContext {
+        PlanContext::for_bash(true, "")
     }
 
     fn approval_token(issuer: &ApprovalTokenIssuer, digest: &Sha256Digest, plan: &str) -> String {
@@ -2399,6 +2533,7 @@ mod tests {
             .issue(
                 digest,
                 plan,
+                &default_ctx(),
                 SystemTime::now()
                     .checked_add(Duration::from_mins(1))
                     .unwrap_or(SystemTime::now()),
@@ -2444,5 +2579,131 @@ mod tests {
                 .unwrap_or_else(|error| panic!("write response body: {error}"));
         });
         format!("http://{addr}/install.sh")
+    }
+
+    #[test]
+    fn approval_token_rejects_mismatched_network_policy() {
+        // ADR-0013 (#188): a token issued for a network-isolated execution
+        // must not be spendable against a context that grants network access.
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let sha256: Sha256Digest = "66".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let token = approval_token(&issuer, &sha256, "isolated plan");
+        let open_ctx = PlanContext::for_bash(false, "");
+        match issuer.validate(&token, &sha256, &open_ctx, SystemTime::now()) {
+            Err(err) => assert!(
+                err.to_string().contains("execution context"),
+                "expected context mismatch, got: {err}"
+            ),
+            Ok(_) => panic!("network policy swap must be rejected"),
+        }
+    }
+
+    #[test]
+    fn approval_token_rejects_mismatched_policy_snapshot() {
+        // ADR-0013 (#188): a token issued under one policy snapshot must not
+        // be spendable once the policy has changed.
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let sha256: Sha256Digest = "77".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let token = approval_token(&issuer, &sha256, "policy-bound plan");
+        let new_policy_ctx = PlanContext::for_bash(true, "abcdef0123456789");
+        match issuer.validate(&token, &sha256, &new_policy_ctx, SystemTime::now()) {
+            Err(err) => assert!(
+                err.to_string().contains("execution context"),
+                "expected context mismatch, got: {err}"
+            ),
+            Ok(_) => panic!("policy snapshot swap must be rejected"),
+        }
+    }
+
+    #[test]
+    fn approval_token_rejects_mismatched_interpreter() {
+        // ADR-0013 (#188): a token issued for /bin/bash must not be spendable
+        // against a different interpreter.
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let sha256: Sha256Digest = "88".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let token = approval_token(&issuer, &sha256, "bash plan");
+        let mut sh_ctx = default_ctx();
+        sh_ctx.interpreter = "/bin/sh".to_owned();
+        match issuer.validate(&token, &sha256, &sh_ctx, SystemTime::now()) {
+            Err(err) => assert!(
+                err.to_string().contains("execution context"),
+                "expected context mismatch, got: {err}"
+            ),
+            Ok(_) => panic!("interpreter swap must be rejected"),
+        }
+    }
+
+    #[test]
+    fn approval_token_rejects_v1_schema_payload() {
+        // Tokens minted under the pre-widening schema (schema_version: 1)
+        // must be rejected to force fresh approval under ADR-0013 v2.
+        let secret = b"test-secret".to_vec();
+        let issuer = ApprovalTokenIssuer::with_secret(secret.clone());
+        let sha256: Sha256Digest = "99".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let legacy_payload = ApprovalTokenPayload {
+            schema_version: 1,
+            sha256: sha256.to_string(),
+            plan_digest: "deadbeef".to_owned(),
+            interpreter: "/bin/bash".to_owned(),
+            network_isolated: true,
+            policy_snapshot_digest: String::new(),
+            expires_at_unix_seconds: unix_seconds(SystemTime::now() + Duration::from_hours(1))
+                .unwrap_or(0),
+            nonce: "legacy-nonce".to_owned(),
+            approval_method: "stdin-human-confirmation".to_owned(),
+            requester_integration: "test".to_owned(),
+            requester_agent_name: "test".to_owned(),
+            requester_session_id: "test".to_owned(),
+        };
+        let payload_bytes =
+            serde_json::to_vec(&legacy_payload).unwrap_or_else(|e| panic!("encode: {e}"));
+        let mut mac = HmacSha256::new_from_slice(&secret)
+            .map_err(|_| "hmac key error")
+            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+        mac.update(b"arbitraitor-mcp-approval-token-v1");
+        mac.update(&payload_bytes);
+        let sig = mac.finalize().into_bytes();
+        let token = format!("v1.{}.{}", hex::encode(payload_bytes), hex::encode(sig));
+        match issuer.validate(&token, &sha256, &default_ctx(), SystemTime::now()) {
+            Err(err) => assert!(
+                err.to_string().contains("schema version is unsupported"),
+                "expected schema error, got: {err}"
+            ),
+            Ok(_) => panic!("legacy v1 token must be rejected"),
+        }
+    }
+
+    #[test]
+    fn plan_digest_changes_with_execution_context() {
+        // ADR-0013 (#188): the plan digest is a function of (artifact, plan,
+        // ctx). Changing any ctx dimension must produce a different digest,
+        // so a human typing a prefix is bound to the full execution context.
+        let sha256: Sha256Digest = "aa".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let plan = "run with isolated network";
+        let isolated = PlanContext::for_bash(true, "");
+        let open = PlanContext::for_bash(false, "");
+        let digest_a = canonical_plan_digest(&sha256, plan, &isolated)
+            .unwrap_or_else(|e| panic!("encode: {e}"));
+        let digest_b =
+            canonical_plan_digest(&sha256, plan, &open).unwrap_or_else(|e| panic!("encode: {e}"));
+        assert_ne!(digest_a, digest_b, "network policy must affect plan digest");
+
+        let with_policy = PlanContext::for_bash(true, "policy123");
+        let digest_c = canonical_plan_digest(&sha256, plan, &with_policy)
+            .unwrap_or_else(|e| panic!("encode: {e}"));
+        assert_ne!(
+            digest_a, digest_c,
+            "policy snapshot must affect plan digest"
+        );
     }
 }
