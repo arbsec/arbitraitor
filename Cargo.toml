@@ -110,6 +110,7 @@ schemars = { version = "1.0", features = ["uuid1", "url2"] }
 # Filesystem
 cap-std = "4.0"
 cap-tempfile = "4.0"
+tempfile = "3"
 libc = "0.2"
 rustix = { version = "1.1", features = ["fs", "process"] }
 
