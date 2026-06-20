@@ -84,6 +84,8 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # Cryptography and identity
 sha2 = "0.11"
 hex = "0.4"
+hmac = "0.13"
+subtle = "2.6"
 minisign = "0.9.1"
 uuid = { version = "1.23", features = ["v4", "serde"] }
 
