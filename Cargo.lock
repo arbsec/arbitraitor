@@ -339,6 +339,8 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-plugin-api",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
