@@ -52,6 +52,7 @@ pub struct ScriptExecution {
     interpreter_args: Vec<String>,
     environment: ExecutionContext,
     network_isolated: bool,
+    sandbox_config: arbitraitor_sandbox::SandboxConfig,
     #[cfg(target_os = "linux")]
     resource_limits: crate::ResourceLimits,
 }
@@ -109,6 +110,7 @@ impl ScriptExecution {
             interpreter_args,
             environment,
             network_isolated: true,
+            sandbox_config: arbitraitor_sandbox::SandboxConfig::default(),
             #[cfg(target_os = "linux")]
             resource_limits: crate::ResourceLimits::default(),
         })
@@ -139,6 +141,38 @@ impl ScriptExecution {
     pub fn with_resource_limits(mut self, limits: crate::ResourceLimits) -> Self {
         self.resource_limits = limits;
         self
+    }
+
+    /// Sets the sandbox hardening applied in the child before `exec`.
+    ///
+    /// The default already enables `no_new_privs`, clears the dumpable flag,
+    /// and closes inherited file descriptors. Callers may loosen or tighten
+    /// these via this builder, but doing so for untrusted scripts is rarely
+    /// appropriate.
+    #[must_use]
+    pub fn with_sandbox_config(mut self, config: arbitraitor_sandbox::SandboxConfig) -> Self {
+        self.sandbox_config = config;
+        self
+    }
+
+    /// Returns the configured sandbox hardening.
+    #[must_use]
+    pub fn sandbox_config(&self) -> arbitraitor_sandbox::SandboxConfig {
+        self.sandbox_config
+    }
+
+    /// Returns the combined stdout/stderr cap that will be enforced.
+    fn output_limit(&self) -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            self.resource_limits
+                .output_size_bytes
+                .unwrap_or(crate::spawn::DEFAULT_OUTPUT_LIMIT)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            crate::spawn::DEFAULT_OUTPUT_LIMIT
+        }
     }
 
     /// Returns the configured interpreter executable path.
@@ -184,16 +218,16 @@ impl ScriptExecution {
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
 
+        // SIGSTOP the child, apply prlimit while frozen, then SIGCONT. If the
+        // limits cannot be applied the child is killed and reaped (see
+        // apply_limits_fenced) so it can never run unbounded.
         #[cfg(target_os = "linux")]
-        {
-            let pid = child.id();
-            self.resource_limits
-                .apply_to(pid)
-                .map_err(|source| ExecError::Spawn { source })?;
-        }
+        crate::spawn::apply_limits_fenced(&mut child, &self.resource_limits)?;
+
         // Drop our write end of the stdin pipe as soon as the script bytes are
         // written so the interpreter observes EOF and completes any pending
-        // read-driven control flow before we wait for it.
+        // read-driven control flow before we wait for it. The child has been
+        // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(script_bytes)
@@ -207,14 +241,13 @@ impl ScriptExecution {
             })?;
         }
 
-        let output = child
-            .wait_with_output()
-            .map_err(|source| ExecError::Wait { source })?;
+        let (exit_code, stdout, stderr) =
+            crate::spawn::read_with_limit(&mut child, self.output_limit())?;
 
         Ok(ExecutionResult {
-            exit_code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            exit_code,
+            stdout,
+            stderr,
         })
     }
 
@@ -229,6 +262,10 @@ impl ScriptExecution {
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        // Apply privilege hardening (no_new_privs, dumpable=0, fd closure) in
+        // the child before exec. The unsafe pre_exec boundary stays inside the
+        // sandbox crate, preserving forbid(unsafe_code) here.
+        arbitraitor_sandbox::configure_command(&mut command, self.sandbox_config);
         command
     }
 
@@ -463,6 +500,37 @@ mod tests {
         let script = bash_or_skip()?;
         let result = script.execute(b"exit 42\n")?;
         assert_eq!(result.exit_code, Some(42));
+        Ok(())
+    }
+
+    #[test]
+    fn script_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new("/proc/self/status").exists() {
+            return Ok(());
+        }
+        let script = bash_or_skip()?;
+        let result = script.execute(b"grep '^NoNewPrivs:' /proc/self/status\n")?;
+        assert_eq!(
+            String::from_utf8(result.stdout)?.trim(),
+            "NoNewPrivs:\t1",
+            "script child must run with NoNewPrivs set"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sandbox_config_defaults_and_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let exec = ScriptExecution::new(PathBuf::from("/bin/sh"), ["-u"])?;
+        assert_eq!(
+            exec.sandbox_config(),
+            arbitraitor_sandbox::SandboxConfig::default()
+        );
+        let relaxed = arbitraitor_sandbox::SandboxConfig {
+            no_new_privs: false,
+            dumpable: true,
+            close_fds: false,
+        };
+        assert_eq!(exec.with_sandbox_config(relaxed).sandbox_config(), relaxed);
         Ok(())
     }
 

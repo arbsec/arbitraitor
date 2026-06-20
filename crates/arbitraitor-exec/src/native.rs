@@ -7,8 +7,9 @@
 
 use std::ffi::{CString, OsStr};
 use std::fs;
+use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use arbitraitor_artifact::executable::{ExecutableInfo, is_compatible};
@@ -18,6 +19,7 @@ use arbitraitor_model::operation::{
 };
 use arbitraitor_model::verdict::AssuranceLevel;
 use arbitraitor_sandbox::SandboxConfig;
+use arbitraitor_store::ContentStore;
 use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
 use tracing::debug;
 
@@ -26,6 +28,36 @@ use crate::{ExecError, ExecutionContext, ExecutionContextBuilder, ResourceLimits
 
 const LINUX_ORIGIN_XATTR: &str = "user.xdg.origin.url";
 const LINUX_ORIGIN_VALUE: &[u8] = b"arbitraitor://native-execution";
+/// Mode for the materialized binary while quarantine xattrs are applied: owner
+/// read + write so the provenance attribute can be set.
+const MATERIALIZE_WRITABLE_MODE: u32 = 0o600;
+/// Final mode for the materialized binary: owner read + execute, no write, so
+/// the child cannot modify its own binary.
+const EXECUTABLE_MODE: u32 = 0o500;
+
+/// Capability marker that must be presented to execute a native binary.
+///
+/// Constructing this value is the explicit opt-in to native execution. The CLI
+/// builds one only after confirming a user-supplied `--native` flag. Passing it
+/// to [`execute_native`] documents, at the type level, that the caller has
+/// authorized running an untrusted binary directly rather than through the
+/// mediated interpreter path. Accidental native execution is impossible without
+/// a `NativeExecutionGate::new()` call site, which is trivially auditable.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeExecutionGate(());
+
+impl NativeExecutionGate {
+    /// Constructs the native-execution opt-in marker.
+    ///
+    /// Only call this after verifying an explicit user/CLI opt-in (for example
+    /// `--native`). There is intentionally no `Default` impl so that every
+    /// opt-in site is a visible `NativeExecutionGate::new()` call.
+    #[must_use]
+    #[allow(clippy::new_without_default)]
+    pub const fn new() -> Self {
+        Self(())
+    }
+}
 
 /// Native binary execution wrapping a mediated [`ExecutionContext`].
 pub struct NativeExecution {
@@ -74,24 +106,38 @@ impl NativeExecution {
         &self.environment
     }
 
-    /// Executes a released native binary after quarantine verification.
+    /// Executes a native binary bound to a verified content-addressed artifact.
+    ///
+    /// The binary is sourced exclusively from `store`: `digest` is re-verified
+    /// against the stored bytes, then the verified bytes are materialized to a
+    /// private executable temporary file (CAS objects are stored `0600` and are
+    /// not executable; `fexecve` would require `unsafe` which this crate
+    /// forbids). Quarantine/provenance attributes are applied and verified on
+    /// the materialized inode immediately before spawn, and sandbox hardening,
+    /// fenced resource limits, and a capped output read are applied to the
+    /// child.
     ///
     /// # Errors
     ///
-    /// Returns [`ExecError`] when the binary path is invalid, quarantine cannot
-    /// be applied and verified, spawning fails, resource limits cannot be
-    /// applied, or output collection fails.
-    pub fn execute(&self, binary_path: &Path) -> Result<crate::ExecutionResult, ExecError> {
-        if !binary_path.is_absolute() {
-            return Err(ExecError::NativePathNotAbsolute {
-                path: binary_path.to_path_buf(),
-            });
-        }
-        reject_privilege_elevation(binary_path, &self.args)?;
-        apply_platform_quarantine(binary_path)?;
-        verify_platform_quarantine(binary_path)?;
+    /// Returns [`ExecError`] when CAS verification fails, materialization
+    /// fails, quarantine cannot be applied and verified, spawning fails,
+    /// resource limits cannot be applied, or output collection fails.
+    pub fn execute(
+        &self,
+        store: &ContentStore,
+        digest: &Sha256Digest,
+    ) -> Result<crate::ExecutionResult, ExecError> {
+        let handle = store.get(digest).map_err(|source| ExecError::Store {
+            reason: source.to_string(),
+        })?;
+        let (dir, binary_path) = materialize_executable(&handle)?;
 
-        let mut command = Command::new(binary_path);
+        reject_privilege_elevation(&binary_path, &self.args)?;
+        apply_platform_quarantine(&binary_path)?;
+        verify_platform_quarantine(&binary_path)?;
+        make_executable(&binary_path)?;
+
+        let mut command = Command::new(&binary_path);
         command.args(&self.args);
         command.env_clear();
         command.envs(self.environment.environment_iter());
@@ -102,20 +148,22 @@ impl NativeExecution {
         arbitraitor_sandbox::configure_command(&mut command, self.sandbox);
 
         debug!(binary = %binary_path.display(), "spawning native binary");
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
-        let pid = child.id();
-        self.resource_limits
-            .apply_to(pid)
-            .map_err(|source| ExecError::Spawn { source })?;
-        let output = child
-            .wait_with_output()
-            .map_err(|source| ExecError::Wait { source })?;
+        crate::spawn::apply_limits_fenced(&mut child, &self.resource_limits)?;
+        let limit = self
+            .resource_limits
+            .output_size_bytes
+            .unwrap_or(crate::spawn::DEFAULT_OUTPUT_LIMIT);
+        let (exit_code, stdout, stderr) = crate::spawn::read_with_limit(&mut child, limit)?;
+        // The materialized binary is cleaned up when `dir` drops here; the
+        // child has already been reaped by read_with_limit.
+        drop(dir);
         Ok(crate::ExecutionResult {
-            exit_code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            exit_code,
+            stdout,
+            stderr,
         })
     }
 
@@ -137,18 +185,22 @@ impl NativeExecution {
 /// Explicit native opt-in helper for released binaries.
 ///
 /// Call this only when the CLI/user supplied the explicit native execution gate
-/// (for example `--native`). The function verifies executable host
-/// compatibility, applies and verifies quarantine/provenance attributes, and
-/// runs the binary with controlled environment, sandbox hardening, and resource
-/// limits.
+/// (for example `--native`). The [`NativeExecutionGate`] parameter makes the
+/// opt-in audible at the type level: there is no path to native execution
+/// without a `NativeExecutionGate::new()` call site. The function verifies
+/// executable host compatibility, binds the binary to the content-addressed
+/// store via `digest`, and runs it with controlled environment, sandbox
+/// hardening, fenced resource limits, and capped output.
 ///
 /// # Errors
 ///
 /// Returns [`ExecError::IncompatibleNativeExecutable`] when `exec_info` is not
-/// compatible with the current host, or another [`ExecError`] from context
-/// construction or execution.
+/// compatible with the current host, or another [`ExecError`] from CAS
+/// verification, context construction, or execution.
 pub fn execute_native(
-    binary_path: &Path,
+    _gate: &NativeExecutionGate,
+    store: &ContentStore,
+    digest: &Sha256Digest,
     args: &[String],
     exec_info: &ExecutableInfo,
     _policy: &ReleasePolicy,
@@ -158,7 +210,66 @@ pub fn execute_native(
     }
     NativeExecution::new()?
         .with_args(args.to_vec())
-        .execute(binary_path)
+        .execute(store, digest)
+}
+
+/// Materializes verified CAS bytes into a private executable temporary file.
+///
+/// Returns the temporary directory guard (which removes the file on drop) and
+/// the path to the executable. The mode is `0500`: owner read + execute, no
+/// write, so the child cannot modify its own binary.
+fn materialize_executable(
+    handle: &arbitraitor_store::ArtifactHandle,
+) -> Result<(crate::OwnedTempDir, PathBuf), ExecError> {
+    use std::os::unix::fs::PermissionsExt as StdPermissionsExt;
+    let dir = crate::create_temporary_directory()?;
+    let path = dir.path().join("native-binary");
+    let mut output = fs::File::create(&path).map_err(|source| ExecError::NativeQuarantine {
+        stage: "create-native-materialize",
+        source,
+    })?;
+    let mut reader = handle
+        .read()
+        .try_clone()
+        .map_err(|source| ExecError::NativeQuarantine {
+            stage: "clone-cas-handle",
+            source,
+        })?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| ExecError::NativeQuarantine {
+            stage: "rewind-cas-handle",
+            source,
+        })?;
+    let copied =
+        std::io::copy(&mut reader, &mut output).map_err(|source| ExecError::NativeQuarantine {
+            stage: "copy-cas-to-materialize",
+            source,
+        })?;
+    if copied != handle.size() {
+        return Err(ExecError::NativeQuarantine {
+            stage: "short-read-cas-handle",
+            source: std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "materialized bytes do not match the verified artifact size",
+            ),
+        });
+    }
+    output
+        .flush()
+        .map_err(|source| ExecError::NativeQuarantine {
+            stage: "flush-materialize",
+            source,
+        })?;
+    // Writable while quarantine/provenance xattrs are applied; execute bit is
+    // added in `execute` after verification.
+    fs::set_permissions(&path, fs::Permissions::from_mode(MATERIALIZE_WRITABLE_MODE)).map_err(
+        |source| ExecError::NativeQuarantine {
+            stage: "chmod-materialize-writable",
+            source,
+        },
+    )?;
+    Ok((dir, path))
 }
 
 fn operation_plan(args: &[String]) -> OperationPlan {
@@ -295,6 +406,16 @@ fn is_missing_xattr(error: rustix::io::Errno) -> bool {
     matches!(error.raw_os_error(), libc::ENODATA | libc::EOPNOTSUPP)
 }
 
+fn make_executable(path: &Path) -> Result<(), ExecError> {
+    use std::os::unix::fs::PermissionsExt as StdPermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(EXECUTABLE_MODE)).map_err(|source| {
+        ExecError::NativeQuarantine {
+            stage: "chmod-materialize-executable",
+            source,
+        }
+    })
+}
+
 fn rustix_to_io(error: rustix::io::Errno) -> std::io::Error {
     std::io::Error::from_raw_os_error(error.raw_os_error())
 }
@@ -303,7 +424,6 @@ fn rustix_to_io(error: rustix::io::Errno) -> std::io::Error {
 mod tests {
     use super::*;
     use std::io;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -324,17 +444,6 @@ mod tests {
         Ok(path)
     }
 
-    fn copy_executable(source: &str, root: &Path, name: &str) -> io::Result<Option<PathBuf>> {
-        let source = Path::new(source);
-        if !source.exists() {
-            return Ok(None);
-        }
-        let destination = root.join(name);
-        fs::copy(source, &destination)?;
-        fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))?;
-        Ok(Some(destination))
-    }
-
     fn xattrs_supported(root: &Path) -> Result<bool, ExecError> {
         let probe = root.join("probe");
         fs::write(&probe, b"probe").map_err(|source| ExecError::NativeQuarantine {
@@ -352,46 +461,57 @@ mod tests {
         }
     }
 
-    fn shell_copy(root: &Path) -> io::Result<Option<PathBuf>> {
-        copy_executable("/bin/sh", root, "native-sh")
+    async fn store_binary(
+        store: &ContentStore,
+        source: &str,
+    ) -> Result<Option<Sha256Digest>, Box<dyn std::error::Error>> {
+        let path = Path::new(source);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(path)?;
+        let mut sink = store.sink(None)?;
+        sink.write_chunk(&bytes).await?;
+        Ok(Some(sink.finish().await?))
     }
 
-    #[test]
-    fn executes_simple_native_binary() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn executes_simple_native_binary() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("echo")?;
         if !xattrs_supported(&root)? {
             fs::remove_dir_all(root)?;
             return Ok(());
         }
-        let Some(binary) = copy_executable("/bin/echo", &root, "native-echo")? else {
+        let store = ContentStore::open(&root.join("store"))?;
+        let Some(digest) = store_binary(&store, "/bin/echo").await? else {
             fs::remove_dir_all(root)?;
             return Ok(());
         };
         let result = NativeExecution::new()?
             .with_args(vec!["hello".to_owned()])
-            .execute(&binary)?;
+            .execute(&store, &digest)?;
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout, b"hello\n");
         assert!(result.stderr.is_empty());
-        verify_platform_quarantine(&binary)?;
         fs::remove_dir_all(root)?;
         Ok(())
     }
 
-    #[test]
-    fn native_environment_is_controlled() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn native_environment_is_controlled() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("env")?;
         if !xattrs_supported(&root)? {
             fs::remove_dir_all(root)?;
             return Ok(());
         }
-        let Some(binary) = shell_copy(&root)? else {
+        let store = ContentStore::open(&root.join("store"))?;
+        let Some(digest) = store_binary(&store, "/bin/sh").await? else {
             fs::remove_dir_all(root)?;
             return Ok(());
         };
         let result = NativeExecution::new()?
             .with_args(vec!["-c".to_owned(), "env -0".to_owned()])
-            .execute(&binary)?;
+            .execute(&store, &digest)?;
         let stdout = String::from_utf8(result.stdout)?;
         assert!(stdout.contains("PATH="));
         assert!(stdout.contains("HOME="));
@@ -401,14 +521,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn native_resource_limits_are_applied() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn native_resource_limits_are_applied() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("limits")?;
         if !xattrs_supported(&root)? {
             fs::remove_dir_all(root)?;
             return Ok(());
         }
-        let Some(binary) = shell_copy(&root)? else {
+        let store = ContentStore::open(&root.join("store"))?;
+        let Some(digest) = store_binary(&store, "/bin/sh").await? else {
             fs::remove_dir_all(root)?;
             return Ok(());
         };
@@ -422,20 +543,21 @@ mod tests {
         let result = NativeExecution::new()?
             .with_resource_limits(limits)
             .with_args(vec!["-c".to_owned(), "sleep 0.1; ulimit -n".to_owned()])
-            .execute(&binary)?;
+            .execute(&store, &digest)?;
         assert_eq!(String::from_utf8(result.stdout)?.trim(), "32");
         fs::remove_dir_all(root)?;
         Ok(())
     }
 
-    #[test]
-    fn native_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn native_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("sandbox")?;
         if !Path::new("/proc/self/status").exists() || !xattrs_supported(&root)? {
             fs::remove_dir_all(root)?;
             return Ok(());
         }
-        let Some(binary) = shell_copy(&root)? else {
+        let store = ContentStore::open(&root.join("store"))?;
+        let Some(digest) = store_binary(&store, "/bin/sh").await? else {
             fs::remove_dir_all(root)?;
             return Ok(());
         };
@@ -444,8 +566,22 @@ mod tests {
                 "-c".to_owned(),
                 "grep '^NoNewPrivs:' /proc/self/status".to_owned(),
             ])
-            .execute(&binary)?;
+            .execute(&store, &digest)?;
         assert_eq!(String::from_utf8(result.stdout)?.trim(), "NoNewPrivs:\t1");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_execute_refuses_absent_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("absent")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let absent = Sha256Digest::new([0xaa; 32]);
+        let result = NativeExecution::new()?.execute(&store, &absent);
+        assert!(
+            matches!(result, Err(ExecError::Store { .. })),
+            "absent digest must be rejected, got {result:?}"
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -458,15 +594,17 @@ mod tests {
         let result = verify_platform_quarantine(&binary);
         assert!(matches!(
             result,
-            Err(ExecError::NativeQuarantineMissing { .. })
-                | Err(ExecError::NativeQuarantine { .. })
+            Err(ExecError::NativeQuarantineMissing { .. } | ExecError::NativeQuarantine { .. })
         ));
         fs::remove_dir_all(root)?;
         Ok(())
     }
 
-    #[test]
-    fn incompatible_architecture_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn incompatible_architecture_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("incompatible")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = Sha256Digest::new([0xbb; 32]);
         let info = ExecutableInfo {
             format: ExecutableFormat::Pe,
             architecture: Architecture::X86_64,
@@ -477,7 +615,9 @@ mod tests {
             signed: false,
         };
         let result = execute_native(
-            Path::new("/no/such/binary"),
+            &NativeExecutionGate::new(),
+            &store,
+            &digest,
             &[],
             &info,
             &ReleasePolicy::default(),
@@ -486,6 +626,7 @@ mod tests {
             result,
             Err(ExecError::IncompatibleNativeExecutable)
         ));
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }
