@@ -8,9 +8,10 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arbitraitor_fetch::{ArtifactSink, ArtifactSinkError};
-use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::ids::{ArtifactId, Sha256Digest};
 use async_trait::async_trait;
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirBuilder, File, OpenOptions};
@@ -20,6 +21,14 @@ use cap_tempfile::TempFile;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{debug, instrument};
+
+pub mod gc;
+pub mod metadata;
+pub mod retention;
+
+pub use gc::{GarbageCollector, GcStats};
+pub use metadata::{MetadataEntry, MetadataIndex};
+pub use retention::RetentionMode;
 
 const OBJECTS_DIR: &str = "objects";
 const LOCKS_DIR: &str = "locks";
@@ -54,7 +63,14 @@ struct StoreInner {
     root: Dir,
     staging: Dir,
     root_path: PathBuf,
-    _db: redb::Database,
+    metadata: MetadataIndex,
+}
+
+/// Guard for an artifact operation lock in the metadata index.
+pub struct ArtifactLock {
+    digest: Sha256Digest,
+    store: Arc<ContentStore>,
+    _lock: Option<LockGuard>,
 }
 
 /// A streaming artifact sink that hashes bytes while writing to a staging file.
@@ -171,25 +187,96 @@ impl ContentStore {
                 source,
             })?;
 
-        let db_path = root.join(META_DB);
-        let db = if db_path.exists() {
-            redb::Database::open(&db_path)
-        } else {
-            redb::Database::create(&db_path)
-        }
-        .map_err(|source| StoreError::Index {
-            stage: "open",
-            message: source.to_string(),
-        })?;
+        let metadata = MetadataIndex::open(&root.join(META_DB))?;
 
         Ok(Self {
             inner: Arc::new(StoreInner {
                 root: cap_root,
                 staging,
                 root_path: root.to_path_buf(),
-                _db: db,
+                metadata,
             }),
         })
+    }
+
+    /// Returns the store's non-authoritative metadata index.
+    #[must_use]
+    pub fn metadata_index(&self) -> &MetadataIndex {
+        &self.inner.metadata
+    }
+
+    /// Stores a complete artifact and records its rebuildable metadata sidecar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if storing bytes, writing the sidecar, or updating
+    /// the non-authoritative metadata index fails.
+    pub fn store_with_metadata(
+        &self,
+        bytes: Vec<u8>,
+        source_url: Option<String>,
+        content_type: Option<String>,
+        retention: RetentionMode,
+    ) -> Result<ArtifactId, StoreError> {
+        let size_bytes = u64::try_from(bytes.len()).map_err(|source| StoreError::Io {
+            stage: "count-metadata-bytes",
+            source: io::Error::new(io::ErrorKind::InvalidData, source),
+        })?;
+        let mut sink = self.sink(None)?;
+        sink.write_chunk_sync(&bytes)?;
+        let digest = Sha256Digest::new(sink.hasher.clone().finalize().into());
+        drop(bytes);
+        sink.lock = Some(self.acquire_lock(&digest)?);
+        sink.commit(digest.clone())?;
+        sink.finished = true;
+        drop(sink.lock.take());
+
+        let entry = MetadataEntry {
+            sha256: digest.to_string(),
+            retrieved_at: unix_timestamp()?,
+            retention_mode: retention,
+            locked: false,
+            source_url,
+            content_type,
+            size_bytes,
+        };
+        entry.write_sidecar(&metadata_sidecar_path(&self.inner.root_path, &digest))?;
+        self.inner.metadata.record(entry)?;
+        Ok(ArtifactId(digest))
+    }
+
+    /// Marks an artifact locked until the returned guard is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the digest lock or metadata update fails.
+    pub fn lock(&self, digest: &Sha256Digest) -> Result<ArtifactLock, StoreError> {
+        let lock = self.acquire_lock(digest)?;
+        self.inner.metadata.set_locked(&digest.to_string(), true)?;
+        Ok(ArtifactLock {
+            digest: digest.clone(),
+            store: Arc::new(self.clone()),
+            _lock: Some(lock),
+        })
+    }
+
+    /// Updates the artifact retention mode in the metadata index and sidecar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the metadata row is absent or cannot be written.
+    pub fn set_retention(
+        &self,
+        digest: &Sha256Digest,
+        mode: RetentionMode,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .metadata
+            .set_retention(&digest.to_string(), mode)?;
+        if let Some(entry) = self.inner.metadata.get(&digest.to_string())? {
+            entry.write_sidecar(&metadata_sidecar_path(&self.inner.root_path, digest))?;
+        }
+        Ok(())
     }
 
     /// Creates a streaming sink for receiving a quarantined artifact.
@@ -533,6 +620,16 @@ impl ArtifactHandle {
     }
 }
 
+impl Drop for ArtifactLock {
+    fn drop(&mut self) {
+        let _ = self
+            .store
+            .inner
+            .metadata
+            .set_locked(&self.digest.to_string(), false);
+    }
+}
+
 struct LockGuard {
     root: Dir,
     path: PathBuf,
@@ -602,6 +699,91 @@ fn object_path(digest: &Sha256Digest) -> PathBuf {
     let hex = digest.to_string();
     debug_assert_eq!(hex.len(), SHA256_HEX_LEN);
     PathBuf::from(OBJECTS_DIR).join(&hex[..2]).join(hex)
+}
+
+pub(crate) fn object_absolute_path(root: &Path, digest: &Sha256Digest) -> PathBuf {
+    root.join(object_path(digest))
+}
+
+pub(crate) fn metadata_sidecar_path(root: &Path, digest: &Sha256Digest) -> PathBuf {
+    let hex = digest.to_string();
+    root.join(OBJECTS_DIR)
+        .join(&hex[..2])
+        .join(format!("{hex}.meta.json"))
+}
+
+pub(crate) fn remove_artifact_files(
+    root: &Path,
+    digest: &Sha256Digest,
+    index: &MetadataIndex,
+) -> Result<u64, StoreError> {
+    let object = object_absolute_path(root, digest);
+    let sidecar = metadata_sidecar_path(root, digest);
+    let object_bytes = std::fs::read(&object).map_err(|source| StoreError::Io {
+        stage: "read-object-before-delete",
+        source,
+    })?;
+    let sidecar_bytes = match std::fs::read(&sidecar) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(StoreError::Io {
+                stage: "read-sidecar-before-delete",
+                source,
+            });
+        }
+    };
+    let freed_bytes = u64::try_from(object_bytes.len()).map_err(|source| StoreError::Io {
+        stage: "count-deleted-bytes",
+        source: io::Error::new(io::ErrorKind::InvalidData, source),
+    })?;
+
+    std::fs::remove_file(&object).map_err(|source| StoreError::Io {
+        stage: "delete-object",
+        source,
+    })?;
+    if let Err(error) = remove_optional_file(&sidecar) {
+        restore_file(
+            &object,
+            &object_bytes,
+            "restore-object-after-sidecar-delete",
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = index.delete(&digest.to_string()) {
+        restore_file(&object, &object_bytes, "restore-object-after-index-delete")?;
+        if let Some(bytes) = &sidecar_bytes {
+            restore_file(&sidecar, bytes, "restore-sidecar-after-index-delete")?;
+        }
+        return Err(error);
+    }
+    Ok(freed_bytes)
+}
+
+fn restore_file(path: &Path, bytes: &[u8], stage: &'static str) -> Result<(), StoreError> {
+    std::fs::write(path, bytes).map_err(|source| StoreError::Io { stage, source })?;
+    set_std_file_private(path, stage)
+}
+
+fn remove_optional_file(path: &Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreError::Io {
+            stage: "delete-sidecar",
+            source,
+        }),
+    }
+}
+
+fn unix_timestamp() -> Result<u64, StoreError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|source| StoreError::Io {
+            stage: "system-time",
+            source: io::Error::new(io::ErrorKind::InvalidData, source),
+        })
+        .map(|duration| duration.as_secs())
 }
 
 fn lock_path(digest: &Sha256Digest) -> PathBuf {
@@ -711,6 +893,18 @@ fn set_file_private(file: &File, stage: &'static str) -> Result<(), StoreError> 
     #[cfg(unix)]
     file.set_permissions(cap_std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
         .map_err(|source| StoreError::Io { stage, source })?;
+    Ok(())
+}
+
+fn set_std_file_private(path: &Path, stage: &'static str) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as StdPermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+            .map_err(|source| StoreError::Io { stage, source })?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, stage);
     Ok(())
 }
 
