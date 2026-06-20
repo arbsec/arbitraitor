@@ -27,6 +27,24 @@ use crate::{ExecError, ExecutionContext, ExecutionContextBuilder, ResourceLimits
 const LINUX_ORIGIN_XATTR: &str = "user.xdg.origin.url";
 const LINUX_ORIGIN_VALUE: &[u8] = b"arbitraitor://native-execution";
 
+/// Capability token proving the caller explicitly opted into native execution.
+#[derive(Debug, Clone)]
+pub struct NativeExecutionGate(());
+
+impl NativeExecutionGate {
+    /// Construct the gate. Only call this from code that verified the `--native` flag.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(())
+    }
+}
+
+impl Default for NativeExecutionGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Native binary execution wrapping a mediated [`ExecutionContext`].
 pub struct NativeExecution {
     args: Vec<String>,
