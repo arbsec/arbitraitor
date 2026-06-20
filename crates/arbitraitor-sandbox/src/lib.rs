@@ -29,52 +29,71 @@ impl Default for SandboxConfig {
     }
 }
 
-/// Apply privilege hardening to the current process via `pre_exec`.
-///
-/// This function is designed to be called from `CommandExt::pre_exec()`.
-/// It must remain async-signal-safe: no allocation, no locks, and no calls into
-/// code that is not safe between `fork` and `exec`.
-///
-/// # Errors
-///
-/// Returns the last OS error when a required `prctl` call fails.
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-pub fn apply_privilege_hardening() -> io::Result<()> {
-    set_no_new_privs()?;
-    set_dumpable(false)
-}
-
 /// Close all inherited file descriptors except stdin, stdout, and stderr.
 ///
 /// This function is designed for use from `CommandExt::pre_exec()`. It first
-/// attempts Linux `close_range(2)` and falls back to a bounded close loop for
-/// older kernels.
+/// attempts Linux `close_range(2)`, passing `u32::MAX` as the upper bound so
+/// the kernel closes every descriptor above the start regardless of any soft
+/// `RLIMIT_NOFILE` the parent may have lowered *after* opening high
+/// descriptors. On kernels that predate `close_range` (Linux < 5.9, signaled
+/// by `ENOSYS`) it falls back to a `getrlimit(RLIMIT_NOFILE)`-bounded close
+/// loop, capped at 1<<20 iterations.
 ///
 /// # Errors
 ///
-/// Returns the OS error reported by `sysconf(_SC_OPEN_MAX)` when that call
-/// fails for a reason other than an indeterminate limit.
+/// Returns the OS error reported by `close_range(2)` when it fails for any
+/// reason other than `ENOSYS`. The fallback paths are best-effort: `close(2)`
+/// errors on unopened descriptors are ignored, which is async-signal-safe.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub fn close_inherited_fds() -> io::Result<()> {
-    // SAFETY: `sysconf`, `syscall(SYS_close_range)`, and `close` are async-signal-safe
-    // libc/kernel calls. File descriptors are raw process-local integers; closing
-    // descriptors >= 3 preserves the stdio descriptors already prepared by `Command`.
+    // SAFETY: `syscall(SYS_close_range)`, `getrlimit`, and `close` are
+    // async-signal-safe libc/kernel calls. They perform no heap allocation,
+    // acquire no locks, and dereference no caller-controlled pointers
+    // (`getrlimit` writes only to a stack-local `rlimit`). File descriptors
+    // are raw process-local integers; closing descriptors >= 3 preserves the
+    // stdio descriptors already prepared by `Command`.
     unsafe {
-        let open_max = libc::sysconf(libc::_SC_OPEN_MAX);
-        let max_fd = if open_max > 0 {
-            u32::try_from(open_max).unwrap_or(u32::MAX)
-        } else {
-            1024
-        };
-
-        let ret = libc::syscall(libc::SYS_close_range, 3_u32, max_fd, 0_u32);
+        // `u32::MAX` instructs the kernel to close every fd >= 3 regardless of
+        // the current `RLIMIT_NOFILE`. A parent that opened high descriptors
+        // and then lowered the soft limit would leak them past a scan bounded
+        // by `sysconf(_SC_OPEN_MAX)` — that is CVE-class bug #192.
+        let ret = libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32);
         if ret == 0 {
             return Ok(());
         }
 
-        for fd in 3..max_fd {
+        // Only fall back on `ENOSYS` (kernel predates `close_range`). Any
+        // other failure — e.g. `EINVAL` from a malformed argument — is a real
+        // bug and must propagate rather than be masked by a silent loop.
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(err);
+        }
+
+        // `ENOSYS`: kernel < 5.9. Bound the loop with the current soft limit,
+        // capped at 1<<20 to avoid pathological iteration on systems whose
+        // `RLIM_INFINITY` resolves to a huge value. `getrlimit` is
+        // async-signal-safe.
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rlim) == 0 {
+            let cap: libc::rlim_t = 1 << 20;
+            let max_fd = u32::try_from(rlim.rlim_cur.min(cap)).unwrap_or(u32::MAX);
+            for fd in 3..max_fd {
+                // EBADF on unopened descriptors is safe to ignore.
+                let _ignored = libc::close(i32::try_from(fd).unwrap_or(i32::MAX));
+            }
+            return Ok(());
+        }
+
+        // Last resort (`getrlimit` failed): scan a small fixed window. This is
+        // best-effort — descriptors above 1024 may leak — but it matches the
+        // historical behavior of portable Unix child-spawning code on kernels
+        // too old to support `close_range`.
+        for fd in 3..1024_u32 {
             let _ignored = libc::close(i32::try_from(fd).unwrap_or(i32::MAX));
         }
     }
@@ -188,6 +207,30 @@ mod tests {
         );
         let status = command.status()?;
         assert!(status.success());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_fds_prevents_fd_inheritance() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs::File;
+        use std::os::unix::io::AsRawFd;
+
+        // Open a probe descriptor in the parent that the child must NOT inherit
+        // when close_fds is enabled. This exercises the close_range path.
+        let probe = File::open("/dev/null")?;
+        let probe_fd = probe.as_raw_fd();
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("test ! -e /proc/self/fd/{probe_fd}"));
+        configure_command(&mut command, SandboxConfig::default());
+        let status = command.status()?;
+        assert!(
+            status.success(),
+            "child inherited fd {probe_fd} from parent despite close_fds = true"
+        );
         Ok(())
     }
 }

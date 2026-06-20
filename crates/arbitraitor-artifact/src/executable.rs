@@ -790,11 +790,11 @@ mod tests {
         put_u16(&mut data, 56, 2);
         put_u32(&mut data, 64, 3);
         put_u64(&mut data, 72, 176);
-        put_u64(&mut data, 80, 0x400000);
+        put_u64(&mut data, 80, 0x0040_0000);
         put_u64(&mut data, 96, u64::try_from(interpreter.len()).unwrap_or(0));
         put_u32(&mut data, 120, 2);
         put_u64(&mut data, 128, 208);
-        put_u64(&mut data, 136, 0x401000);
+        put_u64(&mut data, 136, 0x0040_1000);
         put_u64(&mut data, 152, 16);
         data[176..176 + interpreter.len()].copy_from_slice(interpreter);
         data
