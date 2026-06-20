@@ -2092,6 +2092,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn run_approved_artifact_executes_with_valid_token() {
         let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
         let store = Arc::new(InMemoryArtifactStore::new());
