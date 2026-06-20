@@ -1,6 +1,15 @@
 //! PowerShell script static analysis
 //!
 //! See `.spec/` for the full specification.
+//!
+//! # Known limitations
+//!
+//! - **Backtick line continuation bypass**: PowerShell backtick (&#x60;) line continuation is not
+//!   handled by the tokenizer. Malicious scripts can use backtick continuation to split
+//!   detection keywords across lines. A future tokenizer rewrite will address this.
+//! - **String concatenation bypass**: Dynamic string concatenation (e.g., `$env:co + "nfirmation"`) is
+//!   not evaluated. Scripts can assemble evasion keywords at runtime. Resolving this requires
+//!   expression evaluation, which is deferred to a follow-up effort.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -134,15 +143,21 @@ impl Normalizer {
         while index < command_tokens.len() {
             let token = normalize_token_text(&command_tokens[index].text);
             if is_parameter_name(&token) {
-                let parameter = token.trim_start_matches('-').to_owned();
-                let value = command_tokens
-                    .get(index.saturating_add(1))
-                    .map(|candidate| normalize_token_text(&candidate.text))
-                    .filter(|candidate| !is_parameter_name(candidate))
-                    .unwrap_or_default();
-                if !value.is_empty() {
-                    index = index.saturating_add(1);
-                }
+                let param_text = token.trim_start_matches('-');
+                let (parameter, value) =
+                    if let Some((param_name, param_val)) = param_text.split_once(':') {
+                        (param_name.to_owned(), param_val.to_owned())
+                    } else {
+                        let value = command_tokens
+                            .get(index.saturating_add(1))
+                            .map(|candidate| normalize_token_text(&candidate.text))
+                            .filter(|candidate| !is_parameter_name(candidate))
+                            .unwrap_or_default();
+                        if !value.is_empty() {
+                            index = index.saturating_add(1);
+                        }
+                        (param_text.to_owned(), value)
+                    };
                 self.record_parameter(&name, &parameter, &value);
                 parameters.push((parameter, value));
             } else {
@@ -150,7 +165,9 @@ impl Normalizer {
                 self.record_amsi_bypass(&token);
                 self.record_registry_modification(&name, "", &token);
                 self.record_credential_access(&token, "");
-                self.record_process_injection(&token);
+                if command_tokens[index].kind != TokenKind::String {
+                    self.record_process_injection(&token);
+                }
                 arguments.push(token);
             }
             index = index.saturating_add(1);
@@ -189,6 +206,7 @@ impl Normalizer {
             "invoke-restmethod" | "irm" => Some("Invoke-RestMethod"),
             "start-bitstransfer" => Some("Start-BitsTransfer"),
             "invoke-expression" | "iex" => Some("Invoke-Expression"),
+            "invoke-command" | "icm" => Some("Invoke-Command"),
             _ => None,
         };
         if let Some(pattern) = pattern {
@@ -308,7 +326,6 @@ impl Normalizer {
             "get-credential" => Some("Get-Credential"),
             "convertto-securestring" => Some("ConvertTo-SecureString"),
             "convertfrom-securestring" => Some("ConvertFrom-SecureString"),
-            "get-wmiobject" | "get-ciminstance" => Some(name),
             _ => None,
         };
         if let Some(indicator) = indicator {
@@ -772,6 +789,60 @@ mod tests {
         assert!(result.hidden_window_indicators.is_empty());
         assert!(result.registry_modification_indicators.is_empty());
         assert!(result.credential_access_indicators.is_empty());
+        assert!(result.process_injection_indicators.is_empty());
+    }
+
+    // Regression tests for Issue 2: Invoke-Command detection
+    #[test]
+    fn detects_invoke_command_dynamic_execution() {
+        let result = normalize("Invoke-Command -ScriptBlock { iex \"evil\" }");
+
+        assert!(
+            result
+                .download_patterns
+                .contains(&"Invoke-Command".to_owned())
+        );
+    }
+
+    #[test]
+    fn detects_icm_alias() {
+        let result = normalize("icm -ScriptBlock { Get-Process }");
+
+        assert!(
+            result
+                .download_patterns
+                .contains(&"Invoke-Command".to_owned())
+        );
+    }
+
+    // Regression tests for Issue 4: Colon syntax
+    #[test]
+    fn detects_execution_policy_bypass_colon_syntax() {
+        let result = normalize("powershell -ep:Bypass -File evil.ps1");
+
+        assert!(result.execution_policy_bypass);
+    }
+
+    #[test]
+    fn detects_hidden_window_colon_syntax() {
+        let result = normalize("powershell -w:Hidden -Command evil");
+
+        assert!(!result.hidden_window_indicators.is_empty());
+    }
+
+    // Regression test for Issue 5: Get-WmiObject false positive
+    #[test]
+    fn no_false_positive_get_wmiobject_without_credential() {
+        let result = normalize("Get-WmiObject Win32_Process");
+
+        assert!(result.credential_access_indicators.is_empty());
+    }
+
+    // Regression test for Issue 6: String literal false positive
+    #[test]
+    fn no_false_positive_invoke_mimikatz_string_literal() {
+        let result = normalize("Write-Output \"Invoke-Mimikatz\"");
+
         assert!(result.process_injection_indicators.is_empty());
     }
 }
