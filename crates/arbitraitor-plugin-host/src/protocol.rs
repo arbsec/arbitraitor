@@ -74,6 +74,11 @@ pub enum MessageKind {
     LookupRequest,
     /// Intelligence plugin returns reputation or feed entries.
     LookupResponse,
+    /// Host asks a provenance plugin to verify an artifact's signatures,
+    /// attestations, or digest pins against trusted material.
+    VerifyRequest,
+    /// Provenance plugin returns the verification outcome.
+    VerifyResponse,
     /// Host asks the plugin to exit; no response is expected.
     ShutdownRequest,
     /// Plugin reports a structured error for a prior request.
@@ -130,6 +135,8 @@ mod tests {
             MessageKind::TranslateResponse,
             MessageKind::LookupRequest,
             MessageKind::LookupResponse,
+            MessageKind::VerifyRequest,
+            MessageKind::VerifyResponse,
             MessageKind::ShutdownRequest,
             MessageKind::ErrorResponse,
         ];
