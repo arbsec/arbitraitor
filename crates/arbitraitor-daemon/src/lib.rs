@@ -603,6 +603,7 @@ mod tests {
     use arbitraitor_fetch::FetchScheme;
     use tokio::net::TcpListener;
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn daemon_inspect_request_returns_response() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("inspect")?;
@@ -660,6 +661,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "linux")]
     async fn invalid_request_returns_error_response() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("invalid")?;
         let socket = root.join("daemon.sock");
@@ -685,6 +687,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "linux")]
     async fn shutdown_command_stops_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("shutdown")?;
         let socket = root.join("daemon.sock");

@@ -447,6 +447,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn native_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_root("sandbox")?;
         if !Path::new("/proc/self/status").exists() || !xattrs_supported(&root)? {
