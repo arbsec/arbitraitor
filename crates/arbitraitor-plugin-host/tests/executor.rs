@@ -22,12 +22,47 @@ fn spawn_rejects_missing_binary() {
 }
 
 #[test]
+fn spawn_rejects_relative_binary_path() {
+    let path = PathBuf::from("relative-plugin-binary");
+
+    let result = SubprocessExecutor::new(path.clone()).spawn();
+
+    assert!(matches!(result, Err(ExecutorError::BinaryPathNotAbsolute(found)) if found == path));
+}
+
+#[test]
 fn spawn_rejects_digest_mismatch() {
     let result = SubprocessExecutor::new(mock_plugin())
         .with_expected_digest(Sha256Digest::new([0xAA; 32]))
         .spawn();
 
     assert!(matches!(result, Err(ExecutorError::DigestMismatch { .. })));
+}
+
+#[test]
+fn spawn_rejects_denied_environment_variable() {
+    let result = SubprocessExecutor::new(mock_plugin())
+        .with_env_allowlist(vec!["LD_PRELOAD".to_owned()])
+        .spawn();
+
+    assert!(matches!(
+        result,
+        Err(ExecutorError::DeniedEnvironmentVariable { name })
+            if name == "LD_PRELOAD"
+    ));
+}
+
+#[test]
+fn spawn_rejects_denied_environment_prefix() {
+    let result = SubprocessExecutor::new(mock_plugin())
+        .with_env_allowlist(vec!["DYLD_INSERT_LIBRARIES".to_owned()])
+        .spawn();
+
+    assert!(matches!(
+        result,
+        Err(ExecutorError::DeniedEnvironmentVariable { name })
+            if name == "DYLD_INSERT_LIBRARIES"
+    ));
 }
 
 #[test]

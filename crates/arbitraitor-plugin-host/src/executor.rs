@@ -10,6 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use arbitraitor_exec::EnvDenyList;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_sandbox::{SandboxConfig, configure_command};
 
@@ -32,6 +33,20 @@ pub enum ExecutorError {
     /// The configured plugin executable path does not exist.
     #[error("plugin binary not found: {0}")]
     BinaryNotFound(PathBuf),
+    /// An allowlisted environment variable is blocked by the mandatory denylist.
+    ///
+    /// Variables such as `LD_PRELOAD`, `BASH_ENV`, and `PYTHONPATH` can hijack a
+    /// dynamically-linked plugin binary before `main()` runs, defeating the
+    /// on-disk digest check. They are refused even when the caller allowlists
+    /// them.
+    #[error("environment variable denied by mandatory sandbox policy: {name}")]
+    DeniedEnvironmentVariable {
+        /// The denied variable name.
+        name: String,
+    },
+    /// The configured plugin executable path is not absolute.
+    #[error("plugin binary path must be absolute: {0}")]
+    BinaryPathNotAbsolute(PathBuf),
     /// The configured binary digest did not match the bytes on disk.
     #[error("plugin binary digest mismatch: expected {expected}, got {actual}")]
     DigestMismatch {
@@ -113,10 +128,12 @@ impl SubprocessExecutor {
     /// # Errors
     ///
     /// Returns [`ExecutorError`] when the binary is absent, digest verification
-    /// fails, sandbox setup fails, resource limits cannot be applied, or the
-    /// child cannot be spawned with piped stdin/stdout.
+    /// fails, the environment allowlist contains a mandatory-denied variable,
+    /// sandbox setup fails, resource limits cannot be applied, or the child
+    /// cannot be spawned with piped stdin/stdout.
     pub fn spawn(&self) -> Result<SubprocessPlugin, ExecutorError> {
         self.verify_binary()?;
+        self.verify_env_allowlist()?;
 
         let mut command = Command::new(&self.binary_path);
         command
@@ -173,6 +190,11 @@ impl SubprocessExecutor {
     }
 
     fn verify_binary(&self) -> Result<(), ExecutorError> {
+        if !self.binary_path.is_absolute() {
+            return Err(ExecutorError::BinaryPathNotAbsolute(
+                self.binary_path.clone(),
+            ));
+        }
         if !self.binary_path.is_file() {
             return Err(ExecutorError::BinaryNotFound(self.binary_path.clone()));
         }
@@ -183,6 +205,16 @@ impl SubprocessExecutor {
                     expected: expected.to_string(),
                     actual: actual.to_string(),
                 });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_env_allowlist(&self) -> Result<(), ExecutorError> {
+        let denylist = EnvDenyList::mandatory();
+        for name in &self.env_allowlist {
+            if denylist.denies(name) {
+                return Err(ExecutorError::DeniedEnvironmentVariable { name: name.clone() });
             }
         }
         Ok(())
