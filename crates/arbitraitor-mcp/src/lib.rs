@@ -592,11 +592,17 @@ impl PlanContext {
     /// codes `/bin/bash --noprofile --norc`. The interpreter string here is
     /// the bare binary path so the same value can be derived at issue and
     /// validation time without disagreements about argument vectors.
+    ///
+    /// Per ADR-0013 ("path + digest or signer") and Oracle R2 the returned
+    /// context also pins the SHA-256 of `/bin/bash` (when the file is
+    /// readable) so a token issued against one build cannot be replayed after
+    /// the interpreter is replaced. On platforms where `/bin/bash` is absent
+    /// the digest is left empty and binding is path-only.
     #[must_use]
     pub fn for_bash(network_isolated: bool, policy_snapshot_digest: impl Into<String>) -> Self {
         Self {
             interpreter: "/bin/bash".to_owned(),
-            interpreter_digest: String::new(),
+            interpreter_digest: interpreter_digest_or_empty("/bin/bash"),
             network_isolated,
             policy_snapshot_digest: policy_snapshot_digest.into(),
             detector_snapshot_digest: String::new(),
@@ -1374,6 +1380,27 @@ impl CanonicalExecutionPlan {
     const SANDBOX_CAPABILITIES: &'static str = "prctl NoNewPrivs + close_range fd closure";
     /// No release destination; the MVP path executes inline.
     const RELEASE_DESTINATION: &'static str = "inline-execute";
+}
+
+/// Computes the SHA-256 hex digest of the interpreter binary at `path`, or
+/// returns an empty string when the binary is unreadable.
+///
+/// Per ADR-0013 ("path + digest or signer") and Oracle R2, the default
+/// [`PlanContext`] produced by [`PlanContext::for_bash`] should pin the actual
+/// `/bin/bash` bytes in effect, so a token issued on one host cannot be
+/// replayed after the interpreter is replaced. Failures (missing binary,
+/// permission denied, non-Linux test sandbox) silently fall back to an empty
+/// digest, preserving the path-only binding of the previous MVP. The fallback
+/// is observable via tracing but never panics.
+fn interpreter_digest_or_empty(path: &str) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            hex::encode(hasher.finalize())
+        }
+        Err(_) => String::new(),
+    }
 }
 
 fn verify_bytes_digest(
@@ -2799,6 +2826,28 @@ mod tests {
                 "expected context mismatch, got: {err}"
             ),
             Ok(_) => panic!("interpreter swap must be rejected"),
+        }
+    }
+
+    #[test]
+    fn approval_token_rejects_mismatched_interpreter_digest() {
+        // ADR-0013 (#188, Oracle R2): a token issued against one /bin/bash
+        // build must not be spendable after the interpreter binary is replaced.
+        // The default context populates interpreter_digest from the on-disk
+        // binary; an explicitly different digest must invalidate the token.
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let sha256: Sha256Digest = "9a".repeat(32).parse().unwrap_or_else(|error| {
+            panic!("parse digest: {error}");
+        });
+        let token = approval_token(&issuer, &sha256, "pinned bash plan");
+        let mut swapped_ctx = default_ctx();
+        swapped_ctx.interpreter_digest = "00".repeat(32);
+        match issuer.validate(&token, &sha256, &swapped_ctx, SystemTime::now()) {
+            Err(err) => assert!(
+                err.to_string().contains("execution context"),
+                "expected context mismatch, got: {err}"
+            ),
+            Ok(_) => panic!("interpreter digest swap must be rejected"),
         }
     }
 
