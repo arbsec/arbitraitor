@@ -9,7 +9,9 @@
 #![warn(missing_docs)]
 
 pub mod feed;
+pub mod submission;
 pub mod urlhaus;
+pub mod workflow;
 
 use std::fs;
 use std::io;
