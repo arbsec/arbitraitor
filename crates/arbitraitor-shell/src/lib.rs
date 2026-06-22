@@ -24,6 +24,7 @@ pub mod detection_destructive;
 mod detection_system;
 pub mod explain;
 mod normalization;
+pub mod process_sub;
 pub mod shellcheck;
 mod templates;
 
@@ -35,6 +36,10 @@ pub use explain::{ExplainabilityReport, FindingExplanation, explain_finding};
 pub use normalization::{
     DecodeKind, DecodedArtifact, ExtractedCommand, ExtractedUrl, NormalizationResult,
     NormalizeError, PipeGraph, ShellAst, normalize,
+};
+pub use process_sub::{
+    DataFlowEdge, DataFlowGraph, DataFlowMethod, ProcessSubstitution, ProcessSubstitutionRisk,
+    RiskLevel, RiskPattern, SubstitutionDirection,
 };
 pub use shellcheck::{
     ShellCheckComment, ShellCheckFix, ShellCheckReplacement, ShellCheckReport, to_shellcheck_json,
