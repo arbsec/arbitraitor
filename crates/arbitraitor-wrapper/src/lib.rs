@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod shim;
 pub mod wget;
 
 use arbitraitor_plugin_api::{
