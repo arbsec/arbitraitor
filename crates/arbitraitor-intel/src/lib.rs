@@ -11,6 +11,7 @@
 pub mod feed;
 pub mod review;
 pub mod submission;
+pub mod transparency;
 pub mod urlhaus;
 pub mod workflow;
 
