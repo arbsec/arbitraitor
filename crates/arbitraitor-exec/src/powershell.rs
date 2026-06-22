@@ -561,6 +561,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pwsh and sandbox support unavailable in CI containers"]
     fn execute_restricted_policy() -> Result<(), Box<dyn std::error::Error>> {
         let Some(exec) = pwsh_or_skip() else {
             return Ok(());
@@ -577,6 +578,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pwsh and sandbox support unavailable in CI containers"]
     fn execute_pipes_script_via_stdin() -> Result<(), Box<dyn std::error::Error>> {
         // Structural verification that the invocation reads the script from
         // stdin (`-Command -`) and never uses `-File` or `-EncodedCommand`.
