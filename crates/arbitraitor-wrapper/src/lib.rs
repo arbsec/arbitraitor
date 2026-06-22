@@ -5,6 +5,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod error;
+pub mod wget;
+
 use arbitraitor_plugin_api::{
     CapabilitySet, FilesystemCapability, NetworkCapability, OPERATION_PLAN_PROTOCOL_VERSION,
     OperationPlan, PlannedOperation, PluginIdentity, PluginTrustClass, ProcessCapability,
