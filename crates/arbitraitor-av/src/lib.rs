@@ -5,6 +5,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Microsoft Defender command-line adapter.
+pub mod defender;
+
 use arbitraitor_analysis::{AnalysisContext, Detector};
 use arbitraitor_model::finding::{
     DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
