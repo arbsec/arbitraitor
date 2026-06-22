@@ -18,7 +18,7 @@ use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
-use arbitraitor_model::finding::FindingCategory;
+use arbitraitor_model::finding::{Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
 use arbitraitor_provenance::{
@@ -102,6 +102,21 @@ struct InspectCommand {
     cosign_identity: Vec<String>,
     #[arg(long, value_name = "ISSUER")]
     cosign_issuer: Vec<String>,
+    /// Show an explainability report for detected findings.
+    #[arg(long)]
+    explain: bool,
+    /// Output format for the explainability report (implies --explain).
+    #[arg(long, value_enum)]
+    format: Option<ExplainFormat>,
+}
+
+/// Output format for the `--explain` report.
+#[derive(Clone, Copy, Debug, clap::ValueEnum, Eq, PartialEq)]
+enum ExplainFormat {
+    /// Human-readable text report.
+    Text,
+    /// ShellCheck-compatible JSON.
+    Shellcheck,
 }
 
 #[derive(Args)]
@@ -250,6 +265,8 @@ async fn main() -> Result<()> {
                 cosign_bundle,
                 cosign_identity,
                 cosign_issuer,
+                explain,
+                format,
             } = *command;
             let signatures = signature_inputs(
                 minisign_sig,
@@ -258,6 +275,11 @@ async fn main() -> Result<()> {
                 cosign_identity,
                 cosign_issuer,
             )?;
+            let explain_format = match (explain, format) {
+                (_, Some(f)) => Some(f),
+                (true, None) => Some(ExplainFormat::Text),
+                (false, None) => None,
+            };
             inspect(
                 &url,
                 receipt.as_deref(),
@@ -266,6 +288,7 @@ async fn main() -> Result<()> {
                 rules.as_deref(),
                 signatures,
                 &config,
+                explain_format,
             )
             .await?;
         }
@@ -608,6 +631,7 @@ fn write_unpack_hazards(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn inspect(
     url: &str,
     receipt_path: Option<&Path>,
@@ -616,6 +640,7 @@ async fn inspect(
     rules_dir: Option<&Path>,
     signatures: SignatureInputs,
     config: &Config,
+    explain_format: Option<ExplainFormat>,
 ) -> Result<()> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let fetch_policy = FetchPolicy {
@@ -681,6 +706,10 @@ async fn inspect(
         &cas_root,
         &signature_verifications,
     )?;
+
+    if let Some(format) = explain_format {
+        write_explainability(&result.findings, url, format)?;
+    }
 
     if let Some(path) = receipt_path {
         let receipt = build_receipt(
@@ -783,6 +812,25 @@ fn write_report(
             finding.id, finding.severity, finding.confidence, finding.title
         )
         .into_diagnostic()?;
+    }
+    Ok(())
+}
+
+fn write_explainability(
+    findings: &[Finding],
+    source_name: &str,
+    format: ExplainFormat,
+) -> Result<()> {
+    match format {
+        ExplainFormat::Shellcheck => {
+            let report = arbitraitor_shell::to_shellcheck_json(findings, source_name);
+            let json = serde_json::to_string_pretty(&report).into_diagnostic()?;
+            writeln!(std::io::stdout().lock(), "{json}").into_diagnostic()?;
+        }
+        ExplainFormat::Text => {
+            let report = arbitraitor_shell::ExplainabilityReport::from_findings(findings);
+            write!(std::io::stderr().lock(), "{}", report.to_text()).into_diagnostic()?;
+        }
     }
     Ok(())
 }
@@ -1099,6 +1147,65 @@ mod tests {
             | Command::Wrappers(_) => {
                 return Err("parsed wrong command".into());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_accepts_explain_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--explain",
+        ])?;
+
+        match cli.command {
+            Command::Inspect(command) => {
+                assert!(command.explain);
+                assert!(command.format.is_none());
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_accepts_format_shellcheck_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--explain",
+            "--format",
+            "shellcheck",
+        ])?;
+
+        match cli.command {
+            Command::Inspect(command) => {
+                assert!(command.explain);
+                assert_eq!(command.format, Some(super::ExplainFormat::Shellcheck));
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_accepts_format_text_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "inspect",
+            "https://example.test/artifact",
+            "--format",
+            "text",
+        ])?;
+
+        match cli.command {
+            Command::Inspect(command) => {
+                assert_eq!(command.format, Some(super::ExplainFormat::Text));
+            }
+            _ => return Err("parsed wrong command".into()),
         }
         Ok(())
     }

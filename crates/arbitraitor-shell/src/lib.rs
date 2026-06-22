@@ -22,15 +22,22 @@ pub mod detection;
 pub mod detection_credential;
 pub mod detection_destructive;
 mod detection_system;
+pub mod explain;
 mod normalization;
+pub mod shellcheck;
+mod templates;
 
 pub use detection::detect;
 pub use detection_credential::detect_credential_threats;
 pub use detection_destructive::detect_destructive_threats;
 pub use detection_system::detect_system_threats;
+pub use explain::{ExplainabilityReport, FindingExplanation, explain_finding};
 pub use normalization::{
     DecodeKind, DecodedArtifact, ExtractedCommand, ExtractedUrl, NormalizationResult,
     NormalizeError, PipeGraph, ShellAst, normalize,
+};
+pub use shellcheck::{
+    ShellCheckComment, ShellCheckFix, ShellCheckReplacement, ShellCheckReport, to_shellcheck_json,
 };
 
 /// Compatibility alias for the shell normalization output consumed by detectors.
