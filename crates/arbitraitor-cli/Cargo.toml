@@ -29,6 +29,7 @@ arbitraitor-model = { workspace = true }
 arbitraitor-policy = { workspace = true }
 arbitraitor-provenance = { workspace = true }
 arbitraitor-receipt = { workspace = true }
+arbitraitor-shell = { workspace = true }
 arbitraitor-store = { workspace = true }
 arbitraitor-wrapper = { workspace = true }
 arbitraitor-yarax = { workspace = true }
