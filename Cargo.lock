@@ -227,6 +227,8 @@ dependencies = [
  "arbitraitor-core",
  "arbitraitor-fetch",
  "arbitraitor-model",
+ "arbitraitor-policy",
+ "arbitraitor-receipt",
  "arbitraitor-store",
  "rustix",
  "serde",
