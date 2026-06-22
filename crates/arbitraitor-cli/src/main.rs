@@ -14,6 +14,7 @@ use arbitraitor_analysis::{
 use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
 use arbitraitor_artifact::classify;
 use arbitraitor_core::config::Config;
+use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
@@ -57,6 +58,7 @@ enum Command {
     Daemon(DaemonCommand),
     Unpack(UnpackCommand),
     Intel(IntelCommand),
+    Status(StatusCommand),
 }
 
 #[derive(Args)]
@@ -102,6 +104,20 @@ struct UnpackCommand {
     archive: PathBuf,
     #[arg(long, value_name = "DIR")]
     output: PathBuf,
+}
+
+/// Report Arbitraitor component health and version information.
+#[derive(Args)]
+struct StatusCommand {
+    /// Output the full health report as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Override the content-addressed store root to probe.
+    #[arg(long, value_name = "DIR")]
+    cas_dir: Option<PathBuf>,
+    /// Load YARA-X rule packs from this directory and report their versions.
+    #[arg(long, value_name = "DIR")]
+    rules: Option<PathBuf>,
 }
 
 /// `arbitraitor intel` — manage local threat-intelligence feeds.
@@ -216,6 +232,9 @@ async fn main() -> Result<()> {
         }
         Command::Intel(command) => {
             intel(command).await?;
+        }
+        Command::Status(command) => {
+            status(&command, &config)?;
         }
     }
 
@@ -345,6 +364,82 @@ fn write_intel_report(writer: &mut impl std::io::Write, report: &IngestionReport
         writeln!(writer, "- {error}").into_diagnostic()?;
     }
     Ok(())
+}
+
+fn status(command: &StatusCommand, config: &Config) -> Result<()> {
+    let cas_dir = command
+        .cas_dir
+        .clone()
+        .or_else(|| config.store.cas_dir.clone())
+        .unwrap_or_else(default_cas_dir);
+
+    let mut checker = HealthChecker::new().with_store(cas_dir);
+    if let Some(rules_dir) = command.rules.as_deref() {
+        let versions = rule_pack_versions(rules_dir)?;
+        if let Some(first) = versions.first() {
+            checker = checker.with_rule_pack(first.clone());
+        }
+        checker = checker.with_detector_versions(versions);
+    }
+
+    let report = checker.check();
+
+    if command.json {
+        let json = serde_json::to_vec_pretty(&report).into_diagnostic()?;
+        std::io::stdout()
+            .lock()
+            .write_all(&json)
+            .into_diagnostic()?;
+        return Ok(());
+    }
+
+    write_status_text(&mut std::io::stdout().lock(), &report)
+}
+
+fn rule_pack_versions(rules_dir: &Path) -> Result<Vec<String>> {
+    let mut manager = arbitraitor_yarax::RulePackManager::with_built_in().into_diagnostic()?;
+    manager
+        .load_directory(
+            rules_dir,
+            arbitraitor_yarax::RuleSource::FileSystem(rules_dir.to_path_buf()),
+        )
+        .into_diagnostic()?;
+    Ok(manager
+        .pack_versions()
+        .into_iter()
+        .map(|version| version.version)
+        .collect())
+}
+
+fn write_status_text(
+    writer: &mut impl std::io::Write,
+    report: &arbitraitor_core::health::HealthReport,
+) -> Result<()> {
+    writeln!(writer, "Arbitraitor v{}", report.version).into_diagnostic()?;
+    writeln!(writer, "Overall: {:?}", report.overall).into_diagnostic()?;
+    writeln!(writer).into_diagnostic()?;
+    writeln!(writer, "Component {:<10} Details", "Status").into_diagnostic()?;
+    for component_name in ["store", "detectors", "version"] {
+        if let Some(component) = report.checks.get(component_name) {
+            writeln!(
+                writer,
+                "{:<10} {:<10} {}",
+                capitalize(component_name),
+                format!("{:?}", component.status),
+                component.message
+            )
+            .into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn write_unpack_hazards(
@@ -724,7 +819,7 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, HealthChecker, write_status_text};
     use clap::Parser;
     use std::fs;
     use std::io::{Cursor, Write};
@@ -750,7 +845,11 @@ mod tests {
                     digest
                 );
             }
-            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) | Command::Run(_) => {
+            Command::Daemon(_)
+            | Command::Unpack(_)
+            | Command::Intel(_)
+            | Command::Run(_)
+            | Command::Status(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -801,7 +900,11 @@ mod tests {
                     std::path::PathBuf::from("/tmp/rules")
                 );
             }
-            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) | Command::Run(_) => {
+            Command::Daemon(_)
+            | Command::Unpack(_)
+            | Command::Intel(_)
+            | Command::Run(_)
+            | Command::Status(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -834,7 +937,11 @@ mod tests {
                 assert_eq!(command.cosign_identity, ["builder@example.test"]);
                 assert_eq!(command.cosign_issuer, ["https://issuer.example.test"]);
             }
-            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) | Command::Run(_) => {
+            Command::Daemon(_)
+            | Command::Unpack(_)
+            | Command::Intel(_)
+            | Command::Run(_)
+            | Command::Status(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -850,7 +957,11 @@ mod tests {
                 assert_eq!(command.archive, PathBuf::from("archive.zip"));
                 assert_eq!(command.output, PathBuf::from("out"));
             }
-            Command::Inspect(_) | Command::Daemon(_) | Command::Intel(_) | Command::Run(_) => {
+            Command::Inspect(_)
+            | Command::Daemon(_)
+            | Command::Intel(_)
+            | Command::Run(_)
+            | Command::Status(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -977,5 +1088,70 @@ mod tests {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
+    }
+
+    #[test]
+    fn status_command_parses_text_mode() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "status"])?;
+
+        match cli.command {
+            Command::Status(command) => {
+                assert!(!command.json);
+                assert!(command.cas_dir.is_none());
+                assert!(command.rules.is_none());
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn status_command_parses_json_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "status", "--json"])?;
+
+        match cli.command {
+            Command::Status(command) => assert!(command.json),
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn status_command_outputs_text() -> Result<(), Box<dyn std::error::Error>> {
+        let root = unique_temp_path("status-text");
+        fs::create_dir_all(root.join("objects").join("ab"))?;
+        fs::write(root.join("objects").join("ab").join("object"), b"data")?;
+
+        let report = HealthChecker::new()
+            .with_store(root.clone())
+            .with_rule_pack("v2024.6".to_owned())
+            .check();
+        let mut buffer = Vec::new();
+        write_status_text(&mut buffer, &report)?;
+        let output = String::from_utf8(buffer)?;
+
+        assert!(output.contains("Arbitraitor v"));
+        assert!(output.contains("Store"));
+        assert!(output.contains("Detector"));
+        assert!(output.contains("Version"));
+        assert!(output.contains("Healthy"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn status_command_outputs_json() -> Result<(), Box<dyn std::error::Error>> {
+        let report = HealthChecker::new()
+            .with_rule_pack("v2024.6".to_owned())
+            .check();
+        let json = serde_json::to_value(&report)?;
+        let parsed: arbitraitor_core::health::HealthReport = serde_json::from_value(json.clone())?;
+
+        assert_eq!(parsed.version, report.version);
+        assert!(json.get("checks").is_some());
+        assert!(json["checks"].get("store").is_some());
+        assert!(json["checks"].get("detectors").is_some());
+        assert!(json["checks"].get("version").is_some());
+        Ok(())
     }
 }
