@@ -12,3 +12,4 @@ pub mod error;
 pub mod executor;
 pub mod frame;
 pub mod protocol;
+pub mod registry;
