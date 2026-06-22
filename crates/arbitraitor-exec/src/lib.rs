@@ -26,11 +26,14 @@ use tracing::debug;
 
 #[cfg(target_os = "linux")]
 pub mod native;
+pub mod powershell;
 pub mod release;
 pub mod script;
 mod spawn;
 #[cfg(target_os = "linux")]
 pub use native::{NativeExecution, NativeExecutionGate, execute_native};
+#[cfg(target_os = "linux")]
+pub use powershell::{PowerShellError, PowerShellExecution, PowerShellPolicy};
 #[cfg(target_os = "linux")]
 pub use script::{ExecutionResult, ScriptExecution};
 
