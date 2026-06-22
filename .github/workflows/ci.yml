@@ -9,6 +9,8 @@ on:
       - "Cargo.lock"
       - ".mise.toml"
       - ".github/workflows/ci.yml"
+      - "wit/**"
+      - "**/*.wit"
   pull_request:
     paths: *ci_paths
 

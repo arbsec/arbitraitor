@@ -34,3 +34,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wit-parser = "0.252"
+
+[build-dependencies]
+wit-parser = "0.252"
