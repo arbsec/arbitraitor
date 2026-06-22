@@ -30,6 +30,10 @@ use arbitraitor_receipt::{
     RetrievalInfo as ReceiptRetrievalInfo, VerdictInfo,
 };
 use arbitraitor_store::ContentStore;
+use arbitraitor_wrapper::shim::{
+    ShimConfig, ShimError, WrapperTarget, check_shims, generate_shell_init, install_shims,
+    uninstall_shims,
+};
 use arbitraitor_yarax::{RulePackManager, RuleSource, YaraDetector};
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -59,6 +63,7 @@ enum Command {
     Unpack(UnpackCommand),
     Intel(IntelCommand),
     Status(StatusCommand),
+    Wrappers(WrappersCommand),
 }
 
 #[derive(Args)]
@@ -145,6 +150,52 @@ struct UpdateCommand {
     #[arg(long, value_name = "PATH")]
     intel_store: Option<PathBuf>,
 }
+
+/// `arbitraitor wrappers` — install and manage PATH shims for curl/wget.
+#[derive(Args)]
+struct WrappersCommand {
+    /// Override the shim directory (default: `$HOME/.arbitraitor/shims`).
+    #[arg(long, value_name = "DIR", global = true)]
+    shim_dir: Option<PathBuf>,
+    /// Use wrapper scripts instead of symlinks.
+    #[arg(long, global = true)]
+    use_scripts: bool,
+    #[command(subcommand)]
+    subcommand: WrappersSubcommand,
+}
+
+#[derive(Subcommand)]
+enum WrappersSubcommand {
+    /// Install PATH shims for the specified wrappers (default: all).
+    Install(InstallWrappersCommand),
+    /// Remove previously installed shims.
+    Uninstall(UninstallWrappersCommand),
+    /// Show which shims are currently installed.
+    Status(WrappersStatusCommand),
+    /// Print a shell init snippet for ~/.bashrc or ~/.zshrc.
+    InitScript(InitScriptCommand),
+}
+
+#[derive(Args)]
+struct InstallWrappersCommand {
+    /// Specific wrappers to install (e.g. `curl`, `wget`). Defaults to all.
+    targets: Vec<String>,
+}
+
+#[derive(Args)]
+struct UninstallWrappersCommand {
+    /// Specific wrappers to uninstall. Defaults to all.
+    targets: Vec<String>,
+}
+
+#[derive(Args)]
+struct WrappersStatusCommand {
+    /// Specific wrappers to check. Defaults to all.
+    targets: Vec<String>,
+}
+
+#[derive(Args)]
+struct InitScriptCommand {}
 
 #[derive(Debug, Default)]
 struct SignatureInputs {
@@ -235,6 +286,9 @@ async fn main() -> Result<()> {
         }
         Command::Status(command) => {
             status(&command, &config)?;
+        }
+        Command::Wrappers(command) => {
+            wrappers(command)?;
         }
     }
 
@@ -364,6 +418,102 @@ fn write_intel_report(writer: &mut impl std::io::Write, report: &IngestionReport
         writeln!(writer, "- {error}").into_diagnostic()?;
     }
     Ok(())
+}
+
+fn wrappers(command: WrappersCommand) -> Result<()> {
+    let shim_dir = command.shim_dir.or_else(default_shim_dir).ok_or_else(|| {
+        miette::miette!("could not determine shim directory; pass --shim-dir or set $HOME")
+    })?;
+    let config = ShimConfig {
+        shim_dir: shim_dir.clone(),
+        use_symlinks: !command.use_scripts,
+    };
+    match command.subcommand {
+        WrappersSubcommand::Install(install) => {
+            let targets = resolve_targets(&install.targets)?;
+            let arb = current_arbitraitor_binary()?;
+            let installed = install_shims(&config, &targets, &arb)
+                .map_err(|err| shim_error_to_miette(&err, "install"))?;
+            let mut stdout = std::io::stdout().lock();
+            for path in &installed {
+                writeln!(stdout, "installed: {}", path.display()).into_diagnostic()?;
+            }
+            writeln!(
+                stdout,
+                "{} shim{} installed in {}",
+                installed.len(),
+                if installed.len() == 1 { "" } else { "s" },
+                shim_dir.display()
+            )
+            .into_diagnostic()?;
+        }
+        WrappersSubcommand::Uninstall(uninstall) => {
+            let targets = resolve_targets(&uninstall.targets)?;
+            let removed = uninstall_shims(&config, &targets)
+                .map_err(|err| shim_error_to_miette(&err, "uninstall"))?;
+            let mut stdout = std::io::stdout().lock();
+            writeln!(
+                stdout,
+                "{} shim{} removed from {}",
+                removed,
+                if removed == 1 { "" } else { "s" },
+                shim_dir.display()
+            )
+            .into_diagnostic()?;
+        }
+        WrappersSubcommand::Status(status_cmd) => {
+            let targets = resolve_targets(&status_cmd.targets)?;
+            let statuses = check_shims(&config, &targets);
+            let mut stdout = std::io::stdout().lock();
+            for st in &statuses {
+                let label = match st.state {
+                    arbitraitor_wrapper::shim::ShimState::Script => "installed (script)",
+                    arbitraitor_wrapper::shim::ShimState::Symlink => "installed (symlink)",
+                    arbitraitor_wrapper::shim::ShimState::NotInstalled => "not installed",
+                    arbitraitor_wrapper::shim::ShimState::ForeignFile => "foreign file",
+                };
+                writeln!(stdout, "{}: {label}", st.target.binary_name()).into_diagnostic()?;
+            }
+        }
+        WrappersSubcommand::InitScript(_) => {
+            let arb = current_arbitraitor_binary()?;
+            let snippet = generate_shell_init(&arb, WrapperTarget::ALL);
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(snippet.as_bytes()).into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_targets(names: &[String]) -> Result<Vec<WrapperTarget>> {
+    if names.is_empty() {
+        return Ok(WrapperTarget::ALL.to_vec());
+    }
+    names
+        .iter()
+        .map(|name| {
+            WrapperTarget::from_binary_name(name).ok_or_else(|| {
+                miette::miette!("unknown wrapper target '{name}'; supported: curl, wget")
+            })
+        })
+        .collect()
+}
+
+fn default_shim_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".arbitraitor").join("shims"))
+}
+
+fn current_arbitraitor_binary() -> Result<PathBuf> {
+    let exe = std::env::current_exe().into_diagnostic()?;
+    if exe.is_absolute() {
+        Ok(exe)
+    } else {
+        miette::bail!("could not determine absolute path to arbitraitor binary");
+    }
+}
+
+fn shim_error_to_miette(error: &ShimError, action: &str) -> miette::Report {
+    miette::miette!("shim {action} failed: {error}")
 }
 
 fn status(command: &StatusCommand, config: &Config) -> Result<()> {
@@ -819,7 +969,9 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, HealthChecker, write_status_text};
+    use super::{
+        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, write_status_text,
+    };
     use clap::Parser;
     use std::fs;
     use std::io::{Cursor, Write};
@@ -849,7 +1001,8 @@ mod tests {
             | Command::Unpack(_)
             | Command::Intel(_)
             | Command::Run(_)
-            | Command::Status(_) => {
+            | Command::Status(_)
+            | Command::Wrappers(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -904,7 +1057,8 @@ mod tests {
             | Command::Unpack(_)
             | Command::Intel(_)
             | Command::Run(_)
-            | Command::Status(_) => {
+            | Command::Status(_)
+            | Command::Wrappers(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -941,7 +1095,8 @@ mod tests {
             | Command::Unpack(_)
             | Command::Intel(_)
             | Command::Run(_)
-            | Command::Status(_) => {
+            | Command::Status(_)
+            | Command::Wrappers(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -961,7 +1116,8 @@ mod tests {
             | Command::Daemon(_)
             | Command::Intel(_)
             | Command::Run(_)
-            | Command::Status(_) => {
+            | Command::Status(_)
+            | Command::Wrappers(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1153,5 +1309,102 @@ mod tests {
         assert!(json["checks"].get("detectors").is_some());
         assert!(json["checks"].get("version").is_some());
         Ok(())
+    }
+
+    #[test]
+    fn wrappers_install_parses_all_targets() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "install"])?;
+
+        match cli.command {
+            Command::Wrappers(cmd) => match cmd.subcommand {
+                WrappersSubcommand::Install(install) => {
+                    assert!(install.targets.is_empty());
+                    assert!(!cmd.use_scripts);
+                }
+                _ => return Err("parsed wrong subcommand".into()),
+            },
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrappers_install_parses_specific_target() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "install", "curl"])?;
+
+        match cli.command {
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Install(install),
+                ..
+            }) => {
+                assert_eq!(install.targets, ["curl"]);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrappers_accepts_shim_dir_and_scripts_flags() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "wrappers",
+            "--shim-dir",
+            "/tmp/shims",
+            "--use-scripts",
+            "install",
+        ])?;
+
+        match cli.command {
+            Command::Wrappers(cmd) => {
+                assert_eq!(
+                    cmd.shim_dir.as_deref(),
+                    Some(std::path::Path::new("/tmp/shims"))
+                );
+                assert!(cmd.use_scripts);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrappers_uninstall_status_init_script_parse() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "uninstall"])?;
+        assert!(matches!(
+            cli.command,
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Uninstall(_),
+                ..
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "status"])?;
+        assert!(matches!(
+            cli.command,
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Status(_),
+                ..
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "init-script"])?;
+        assert!(matches!(
+            cli.command,
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::InitScript(_),
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn wrappers_rejects_unknown_target_name() {
+        let result = Cli::try_parse_from(["arbitraitor", "wrappers", "install", "unknown-tool"]);
+        assert!(
+            result.is_ok(),
+            "unknown target is a runtime error, not parse"
+        );
     }
 }

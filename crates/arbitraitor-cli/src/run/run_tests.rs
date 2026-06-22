@@ -35,7 +35,8 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
         | crate::Command::Daemon(_)
         | crate::Command::Unpack(_)
         | crate::Command::Intel(_)
-        | crate::Command::Status(_) => return Err("parsed wrong command".into()),
+        | crate::Command::Status(_)
+        | crate::Command::Wrappers(_) => return Err("parsed wrong command".into()),
     };
 
     // Then: every field reflects the CLI input.

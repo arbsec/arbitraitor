@@ -190,6 +190,7 @@ dependencies = [
  "arbitraitor-provenance",
  "arbitraitor-receipt",
  "arbitraitor-store",
+ "arbitraitor-wrapper",
  "arbitraitor-yarax",
  "clap",
  "miette",
