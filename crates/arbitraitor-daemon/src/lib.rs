@@ -52,12 +52,14 @@ pub enum DaemonRequest {
         /// SHA-256 digest in hexadecimal form.
         sha256: String,
     },
+    /// Report component health (store, detectors, version).
+    Health,
     /// Ask the daemon to stop accepting work and shut down.
     Shutdown,
 }
 
 /// Response returned by the local daemon protocol.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonResponse {
     /// Whether the request completed successfully.
@@ -70,6 +72,9 @@ pub struct DaemonResponse {
     pub sha256: Option<String>,
     /// Safe error message, when the request failed.
     pub error: Option<String>,
+    /// Full health report for `Health` requests; absent for all other requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_report: Option<arbitraitor_core::health::HealthReport>,
 }
 
 /// Local daemon server.
@@ -314,6 +319,7 @@ async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) 
         } => inspect_url(&url, expected_sha256.as_deref(), state).await,
         DaemonRequest::Scan { path } => scan_path(&path, state).await,
         DaemonRequest::QueryReceipt { sha256 } => query_receipt(&sha256, state),
+        DaemonRequest::Health => health_response(state),
         DaemonRequest::Shutdown => {
             state.shutdown.store(true, Ordering::SeqCst);
             state.notify_shutdown.notify_waiters();
@@ -323,6 +329,7 @@ async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) 
                 findings_count: 0,
                 sha256: None,
                 error: None,
+                health_report: None,
             }
         }
     }
@@ -403,6 +410,7 @@ fn query_receipt(sha256: &str, state: &DaemonState) -> DaemonResponse {
             findings_count: 0,
             sha256: Some(handle.digest().to_string()),
             error: None,
+            health_report: None,
         },
         Err(error) => error_response(error.to_string()),
     }
@@ -421,6 +429,7 @@ fn analysis_response(
         findings_count: result.findings.len(),
         sha256: Some(digest.to_string()),
         error: None,
+        health_report: None,
     }
 }
 
@@ -431,6 +440,21 @@ fn error_response(message: impl Into<String>) -> DaemonResponse {
         findings_count: 0,
         sha256: None,
         error: Some(message.into()),
+        health_report: None,
+    }
+}
+
+fn health_response(state: &DaemonState) -> DaemonResponse {
+    let checker =
+        arbitraitor_core::health::HealthChecker::new().with_store(state.store_path.clone());
+    let report = checker.check();
+    DaemonResponse {
+        success: true,
+        verdict: Some(format!("{:?}", report.overall)),
+        findings_count: 0,
+        sha256: None,
+        error: None,
+        health_report: Some(report),
     }
 }
 

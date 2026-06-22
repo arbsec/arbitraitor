@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod health;
 pub mod metrics;
 pub mod secret;
 
