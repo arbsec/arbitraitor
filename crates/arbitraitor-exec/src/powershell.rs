@@ -611,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pwsh and sandbox support unavailable in CI containers"]
     fn network_isolated_prevents_network() -> Result<(), Box<dyn std::error::Error>> {
         let Some(exec) = pwsh_or_skip() else {
             return Ok(());
@@ -637,6 +638,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pwsh and sandbox support unavailable in CI containers"]
     fn output_capped_at_limit() {
         let Some(exec) = pwsh_or_skip() else {
             return;
