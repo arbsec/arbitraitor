@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use arbitraitor_policy::PolicyEngine;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -35,6 +36,32 @@ pub enum ConfigError {
     /// A `secret://` reference in the configuration could not be resolved.
     #[error("failed to resolve secret reference: {0}")]
     SecretResolution(#[from] SecretError),
+
+    /// A configured policy file could not be read.
+    #[error("failed to read policy file {path}: {source}")]
+    PolicyRead {
+        /// Policy path that failed to load.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Inline policy configuration could not be serialized to policy TOML.
+    #[error("failed to serialize inline policy configuration: {source}")]
+    PolicySerialize {
+        /// Underlying TOML serialization error.
+        #[source]
+        source: toml::ser::Error,
+    },
+
+    /// Policy configuration could not be compiled by the policy engine.
+    #[error("failed to compile policy configuration: {source}")]
+    PolicyCompile {
+        /// Underlying policy error.
+        #[source]
+        source: arbitraitor_policy::PolicyError,
+    },
 }
 
 /// Convenient result alias for configuration loading.
@@ -52,6 +79,8 @@ pub struct Config {
     pub analysis: AnalysisConfig,
     /// Policy loading and enforcement defaults.
     pub policy: PolicyConfig,
+    /// Detector selection and detector-specific limits.
+    pub detectors: DetectorConfig,
     /// Execution broker defaults.
     pub execution: ExecutionConfig,
     /// Artifact integrity requirements.
@@ -98,10 +127,96 @@ pub struct AnalysisConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct PolicyConfig {
-    /// Optional default policy file path.
-    pub path: Option<PathBuf>,
-    /// Fail closed when policy or required evidence is unavailable.
-    pub fail_closed: bool,
+    /// Path to a standalone policy TOML file. If set, takes precedence over inline policy.
+    pub policy_file: Option<PathBuf>,
+    /// Default action when no rule matches.
+    #[serde(default = "default_action")]
+    pub default_action: String,
+    /// Action when non-interactive and verdict is Prompt.
+    #[serde(default = "default_non_interactive_action")]
+    pub non_interactive_prompt_action: String,
+    /// Inline rules used when [`Self::policy_file`] is unset.
+    #[serde(default)]
+    pub rules: Vec<InlineRule>,
+}
+
+/// Inline policy rule embedded in the main configuration file.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InlineRule {
+    /// Human-readable rule identifier used in policy traces and diagnostics.
+    pub id: String,
+    /// Policy action for this rule: `pass`, `warn`, `prompt`, or `block`.
+    pub action: String,
+    /// Finding condition that must match for this rule to apply.
+    #[serde(default)]
+    pub when: RuleCondition,
+}
+
+/// Constrained inline rule condition for common finding fields.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct RuleCondition {
+    /// Required finding category, when set.
+    pub category: Option<String>,
+    /// Required finding confidence, when set.
+    pub confidence: Option<String>,
+    /// Required finding severity, when set.
+    pub severity: Option<String>,
+}
+
+/// Detector selection and detector resource limits.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "detector config intentionally exposes independent TOML booleans"
+)]
+pub struct DetectorConfig {
+    /// Paths to YARA-X rule pack directories.
+    #[serde(default)]
+    pub yara_rule_packs: Vec<PathBuf>,
+    /// Enable shell analysis detector.
+    #[serde(default = "default_true")]
+    pub shell_analysis: bool,
+    /// Enable PowerShell analysis detector.
+    #[serde(default = "default_true")]
+    pub powershell_analysis: bool,
+    /// Enable archive inspection detector.
+    #[serde(default = "default_true")]
+    pub archive_inspection: bool,
+    /// Enable provenance verification detector.
+    #[serde(default = "default_true")]
+    pub provenance_verification: bool,
+    /// Maximum nested archive depth.
+    #[serde(default = "default_depth")]
+    pub max_archive_depth: u32,
+    /// Maximum total extraction size in bytes.
+    #[serde(default = "default_max_size")]
+    pub max_extraction_bytes: u64,
+}
+
+/// Effective detector settings selected from configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "detector set mirrors independent configured detector toggles"
+)]
+pub struct DetectorSet {
+    /// Whether shell analysis is enabled.
+    pub shell_analysis: bool,
+    /// Whether PowerShell analysis is enabled.
+    pub powershell_analysis: bool,
+    /// Whether archive inspection is enabled.
+    pub archive_inspection: bool,
+    /// Whether provenance verification is enabled.
+    pub provenance_verification: bool,
+    /// YARA-X rule pack directories to load.
+    pub yara_rule_packs: Vec<PathBuf>,
+    /// Maximum nested archive depth.
+    pub max_archive_depth: u32,
+    /// Maximum total extraction size in bytes.
+    pub max_extraction_bytes: u64,
 }
 
 /// Execution configuration.
@@ -164,10 +279,46 @@ impl Default for AnalysisConfig {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
-            path: None,
-            fail_closed: true,
+            policy_file: None,
+            default_action: default_action(),
+            non_interactive_prompt_action: default_non_interactive_action(),
+            rules: Vec::new(),
         }
     }
+}
+
+impl Default for DetectorConfig {
+    fn default() -> Self {
+        Self {
+            yara_rule_packs: Vec::new(),
+            shell_analysis: true,
+            powershell_analysis: true,
+            archive_inspection: true,
+            provenance_verification: true,
+            max_archive_depth: default_depth(),
+            max_extraction_bytes: default_max_size(),
+        }
+    }
+}
+
+fn default_action() -> String {
+    "prompt".to_owned()
+}
+
+fn default_non_interactive_action() -> String {
+    "block".to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_depth() -> u32 {
+    8
+}
+
+fn default_max_size() -> u64 {
+    DEFAULT_MAX_BYTES
 }
 
 impl Default for ExecutionConfig {
@@ -265,8 +416,45 @@ impl Config {
     /// Returns [`ConfigError::SecretResolution`] if any reference cannot be resolved.
     pub fn resolve_secrets(&mut self, resolver: &SecretResolver) -> ConfigResult<()> {
         resolve_optional_path(&mut self.store.cas_dir, resolver)?;
-        resolve_optional_path(&mut self.policy.path, resolver)?;
+        resolve_optional_path(&mut self.policy.policy_file, resolver)?;
+        resolve_path_vec(&mut self.detectors.yara_rule_packs, resolver)?;
         Ok(())
+    }
+
+    /// Builds a [`PolicyEngine`] from the configured policy section.
+    ///
+    /// When [`PolicyConfig::policy_file`] is set, it takes precedence over any
+    /// inline defaults or rules in the main configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured policy file cannot be read, inline
+    /// policy serialization fails, or the policy engine rejects the policy.
+    pub fn build_policy_engine(&self) -> ConfigResult<PolicyEngine> {
+        let policy_toml = if let Some(path) = self.policy.policy_file.as_ref() {
+            std::fs::read_to_string(path).map_err(|source| ConfigError::PolicyRead {
+                path: path.clone(),
+                source,
+            })?
+        } else {
+            inline_policy_toml(&self.policy)?
+        };
+
+        PolicyEngine::load(&policy_toml).map_err(|source| ConfigError::PolicyCompile { source })
+    }
+
+    /// Returns the set of detector types to enable based on configuration.
+    #[must_use]
+    pub fn enabled_detectors(&self) -> DetectorSet {
+        DetectorSet {
+            shell_analysis: self.detectors.shell_analysis,
+            powershell_analysis: self.detectors.powershell_analysis,
+            archive_inspection: self.detectors.archive_inspection,
+            provenance_verification: self.detectors.provenance_verification,
+            yara_rule_packs: self.detectors.yara_rule_packs.clone(),
+            max_archive_depth: self.detectors.max_archive_depth,
+            max_extraction_bytes: self.detectors.max_extraction_bytes,
+        }
     }
 
     fn merge(self, overlay: ConfigOverlay) -> Self {
@@ -275,6 +463,7 @@ impl Config {
             store: self.store.merge(overlay.store),
             analysis: self.analysis.merge(overlay.analysis),
             policy: self.policy.merge(overlay.policy),
+            detectors: self.detectors.merge(overlay.detectors),
             execution: self.execution.merge(overlay.execution),
             integrity: self.integrity.merge(overlay.integrity),
             metrics: self.metrics.merge(overlay.metrics),
@@ -296,6 +485,68 @@ fn resolve_optional_path(
     Ok(())
 }
 
+fn resolve_path_vec(paths: &mut [PathBuf], resolver: &SecretResolver) -> ConfigResult<()> {
+    for path in paths {
+        let value = path.to_string_lossy();
+        if SecretResolver::is_secret_ref(&value) {
+            *path = PathBuf::from(resolver.resolve(&value)?);
+        }
+    }
+    Ok(())
+}
+
+fn inline_policy_toml(policy: &PolicyConfig) -> ConfigResult<String> {
+    let mut root = toml::value::Table::new();
+    root.insert("version".to_owned(), toml::Value::Integer(1));
+
+    let mut defaults = toml::value::Table::new();
+    defaults.insert(
+        "action".to_owned(),
+        toml::Value::String(policy.default_action.clone()),
+    );
+    defaults.insert(
+        "non_interactive_prompt_action".to_owned(),
+        toml::Value::String(policy.non_interactive_prompt_action.clone()),
+    );
+    root.insert("defaults".to_owned(), toml::Value::Table(defaults));
+
+    let rules = policy
+        .rules
+        .iter()
+        .map(inline_rule_to_toml)
+        .collect::<Vec<_>>();
+    root.insert("rules".to_owned(), toml::Value::Array(rules));
+
+    toml::to_string(&toml::Value::Table(root))
+        .map_err(|source| ConfigError::PolicySerialize { source })
+}
+
+fn inline_rule_to_toml(rule: &InlineRule) -> toml::Value {
+    let mut rule_table = toml::value::Table::new();
+    rule_table.insert("id".to_owned(), toml::Value::String(rule.id.clone()));
+    rule_table.insert(
+        "action".to_owned(),
+        toml::Value::String(rule.action.clone()),
+    );
+
+    let mut finding = toml::value::Table::new();
+    insert_optional_string(&mut finding, "category", rule.when.category.as_ref());
+    insert_optional_string(&mut finding, "confidence", rule.when.confidence.as_ref());
+    insert_optional_string(&mut finding, "severity", rule.when.severity.as_ref());
+
+    let mut when = toml::value::Table::new();
+    when.insert("finding".to_owned(), toml::Value::Table(finding));
+    rule_table.insert("when".to_owned(), toml::Value::Table(when));
+
+    toml::Value::Table(rule_table)
+}
+
+fn insert_optional_string(table: &mut toml::value::Table, key: &str, value: Option<&String>) {
+    if let Some(value) = value {
+        table.insert(key.to_owned(), toml::Value::String(value.clone()));
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigOverlay {
@@ -303,6 +554,7 @@ struct ConfigOverlay {
     store: Option<StoreOverlay>,
     analysis: Option<AnalysisOverlay>,
     policy: Option<PolicyOverlay>,
+    detectors: Option<DetectorOverlay>,
     execution: Option<ExecutionOverlay>,
     integrity: Option<IntegrityOverlay>,
     metrics: Option<MetricsOverlay>,
@@ -337,8 +589,22 @@ struct AnalysisOverlay {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyOverlay {
-    path: Option<PathBuf>,
-    fail_closed: Option<bool>,
+    policy_file: Option<PathBuf>,
+    default_action: Option<String>,
+    non_interactive_prompt_action: Option<String>,
+    rules: Option<Vec<InlineRule>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DetectorOverlay {
+    yara_rule_packs: Option<Vec<PathBuf>>,
+    shell_analysis: Option<bool>,
+    powershell_analysis: Option<bool>,
+    archive_inspection: Option<bool>,
+    provenance_verification: Option<bool>,
+    max_archive_depth: Option<u32>,
+    max_extraction_bytes: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -407,8 +673,37 @@ impl PolicyConfig {
             return self;
         };
         Self {
-            path: overlay.path.or(self.path),
-            fail_closed: overlay.fail_closed.unwrap_or(self.fail_closed),
+            policy_file: overlay.policy_file.or(self.policy_file),
+            default_action: overlay.default_action.unwrap_or(self.default_action),
+            non_interactive_prompt_action: overlay
+                .non_interactive_prompt_action
+                .unwrap_or(self.non_interactive_prompt_action),
+            rules: overlay.rules.unwrap_or(self.rules),
+        }
+    }
+}
+
+impl DetectorConfig {
+    fn merge(self, overlay: Option<DetectorOverlay>) -> Self {
+        let Some(overlay) = overlay else {
+            return self;
+        };
+        Self {
+            yara_rule_packs: overlay.yara_rule_packs.unwrap_or(self.yara_rule_packs),
+            shell_analysis: overlay.shell_analysis.unwrap_or(self.shell_analysis),
+            powershell_analysis: overlay
+                .powershell_analysis
+                .unwrap_or(self.powershell_analysis),
+            archive_inspection: overlay
+                .archive_inspection
+                .unwrap_or(self.archive_inspection),
+            provenance_verification: overlay
+                .provenance_verification
+                .unwrap_or(self.provenance_verification),
+            max_archive_depth: overlay.max_archive_depth.unwrap_or(self.max_archive_depth),
+            max_extraction_bytes: overlay
+                .max_extraction_bytes
+                .unwrap_or(self.max_extraction_bytes),
         }
     }
 }
@@ -456,6 +751,11 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use arbitraitor_model::finding::{Finding, FindingCategory};
+    use arbitraitor_model::ids::Sha256Digest;
+    use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
+    use arbitraitor_policy::EvalContext;
+
     use super::*;
 
     type TestResult = Result<(), Box<dyn Error>>;
@@ -491,7 +791,16 @@ mod tests {
         assert_eq!(config.analysis.max_time_secs, 300);
         assert_eq!(config.analysis.max_depth, 8);
         assert_eq!(config.analysis.max_files, 10_000);
-        assert!(config.policy.fail_closed);
+        assert_eq!(config.policy.default_action, "prompt");
+        assert_eq!(config.policy.non_interactive_prompt_action, "block");
+        assert!(config.policy.policy_file.is_none());
+        assert!(config.policy.rules.is_empty());
+        assert!(config.detectors.shell_analysis);
+        assert!(config.detectors.powershell_analysis);
+        assert!(config.detectors.archive_inspection);
+        assert!(config.detectors.provenance_verification);
+        assert_eq!(config.detectors.max_archive_depth, 8);
+        assert_eq!(config.detectors.max_extraction_bytes, DEFAULT_MAX_BYTES);
         assert!(!config.execution.enabled);
         assert_eq!(config.execution.timeout_secs, 60);
         assert!(!config.integrity.require_digest);
@@ -607,18 +916,190 @@ max_redirekts = 2
     fn config_resolve_secrets_replaces_all_refs() -> TestResult {
         let root = temp_dir("config_secrets")?;
         fs::write(root.join("cas_path.txt"), "/resolved/cas")?;
+        fs::write(root.join("rules_path.txt"), "/resolved/rules")?;
 
         let mut config = Config::default();
         config.store.cas_dir = Some(PathBuf::from("secret://file/cas_path.txt"));
-        config.policy.path = Some(PathBuf::from("not-a-secret-ref"));
+        config.policy.policy_file = Some(PathBuf::from("not-a-secret-ref"));
+        config.detectors.yara_rule_packs = vec![PathBuf::from("secret://file/rules_path.txt")];
 
         let resolver = SecretResolver::new().with_files(true, Some(root.clone()));
         config.resolve_secrets(&resolver)?;
 
         assert_eq!(config.store.cas_dir, Some(PathBuf::from("/resolved/cas")));
-        assert_eq!(config.policy.path, Some(PathBuf::from("not-a-secret-ref")));
+        assert_eq!(
+            config.policy.policy_file,
+            Some(PathBuf::from("not-a-secret-ref"))
+        );
+        assert_eq!(
+            config.detectors.yara_rule_packs,
+            vec![PathBuf::from("/resolved/rules")]
+        );
 
         fs::remove_dir_all(&root)?;
         Ok(())
+    }
+
+    #[test]
+    fn policy_from_inline_rules() -> TestResult {
+        let mut config = Config::default();
+        config.policy.default_action = "pass".to_owned();
+        config.policy.rules = vec![InlineRule {
+            id: "block-confirmed-malware".to_owned(),
+            action: "block".to_owned(),
+            when: RuleCondition {
+                category: Some("malware-signature".to_owned()),
+                confidence: Some("confirmed".to_owned()),
+                severity: None,
+            },
+        }];
+
+        let engine = config.build_policy_engine()?;
+        let finding = malware_finding();
+        let verdict = engine.evaluate(&[finding], &EvalContext::new(true).with_https(true));
+
+        assert_eq!(verdict, Verdict::Block);
+        assert_eq!(engine.policy().rules.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_from_file_overrides_inline() -> TestResult {
+        let dir = temp_dir("policy_file")?;
+        let policy_path = dir.join("policy.toml");
+        fs::write(
+            &policy_path,
+            r#"
+version = 1
+
+[defaults]
+action = "warn"
+non_interactive_prompt_action = "block"
+"#,
+        )?;
+        let mut config = Config::default();
+        config.policy.policy_file = Some(policy_path);
+        config.policy.default_action = "block".to_owned();
+
+        let engine = config.build_policy_engine()?;
+        let verdict = engine.evaluate(&[], &EvalContext::new(true).with_https(true));
+
+        assert_eq!(verdict, Verdict::Warn);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn default_policy_when_unset() -> TestResult {
+        let config = Config::default();
+
+        let engine = config.build_policy_engine()?;
+
+        assert_eq!(engine.policy().version, 1);
+        assert!(engine.policy().rules.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn detector_defaults_all_enabled() {
+        let detectors = Config::default().enabled_detectors();
+
+        assert!(detectors.shell_analysis);
+        assert!(detectors.powershell_analysis);
+        assert!(detectors.archive_inspection);
+        assert!(detectors.provenance_verification);
+        assert!(detectors.yara_rule_packs.is_empty());
+    }
+
+    #[test]
+    fn detector_selective_disable() -> TestResult {
+        let dir = temp_dir("detector_disable")?;
+        let path = dir.join("config.toml");
+        write_config(
+            &path,
+            r"
+[detectors]
+shell_analysis = false
+",
+        )?;
+
+        let detectors = Config::load_from_file(&path)?.enabled_detectors();
+
+        assert!(!detectors.shell_analysis);
+        assert!(detectors.powershell_analysis);
+        assert!(detectors.archive_inspection);
+        assert!(detectors.provenance_verification);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn detector_limits() -> TestResult {
+        let dir = temp_dir("detector_limits")?;
+        let path = dir.join("config.toml");
+        write_config(
+            &path,
+            r#"
+[detectors]
+max_archive_depth = 3
+max_extraction_bytes = 1048576
+yara_rule_packs = ["rules/core", "rules/local"]
+"#,
+        )?;
+
+        let detectors = Config::load_from_file(&path)?.enabled_detectors();
+
+        assert_eq!(detectors.max_archive_depth, 3);
+        assert_eq!(detectors.max_extraction_bytes, 1_048_576);
+        assert_eq!(
+            detectors.yara_rule_packs,
+            vec![PathBuf::from("rules/core"), PathBuf::from("rules/local")]
+        );
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_config_round_trips() -> TestResult {
+        let mut config = Config::default();
+        config.policy.default_action = "warn".to_owned();
+        config.policy.non_interactive_prompt_action = "block".to_owned();
+        config.policy.rules = vec![InlineRule {
+            id: "warn-high-confidence".to_owned(),
+            action: "warn".to_owned(),
+            when: RuleCondition {
+                category: Some("network-behavior".to_owned()),
+                confidence: Some("high".to_owned()),
+                severity: Some("medium".to_owned()),
+            },
+        }];
+        config.detectors.yara_rule_packs = vec![PathBuf::from("rules")];
+        config.detectors.shell_analysis = false;
+        config.detectors.max_archive_depth = 4;
+        config.detectors.max_extraction_bytes = 2_048;
+
+        let encoded = toml::to_string(&config)?;
+        let decoded: Config = toml::from_str(&encoded)?;
+
+        assert_eq!(decoded, config);
+        Ok(())
+    }
+
+    fn malware_finding() -> Finding {
+        Finding {
+            id: "malware.test".to_owned(),
+            detector: "test".to_owned(),
+            category: FindingCategory::MalwareSignature,
+            severity: Severity::Critical,
+            confidence: Confidence::Confirmed,
+            title: "Test malware".to_owned(),
+            description: "Synthetic test finding".to_owned(),
+            evidence: Vec::new(),
+            artifact_sha256: Sha256Digest::new([0x42; 32]),
+            location: None,
+            remediation: None,
+            references: Vec::new(),
+            tags: Vec::new(),
+        }
     }
 }

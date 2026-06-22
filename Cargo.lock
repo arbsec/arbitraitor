@@ -207,6 +207,7 @@ name = "arbitraitor-core"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-policy",
  "proptest",
  "serde",
  "serde_json",
