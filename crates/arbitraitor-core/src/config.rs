@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::secret::{SecretError, SecretResolver};
+
 const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Errors produced while loading Arbitraitor configuration.
@@ -29,6 +31,10 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+
+    /// A `secret://` reference in the configuration could not be resolved.
+    #[error("failed to resolve secret reference: {0}")]
+    SecretResolution(#[from] SecretError),
 }
 
 /// Convenient result alias for configuration loading.
@@ -248,6 +254,21 @@ impl Config {
         Ok(self.merge(overlay))
     }
 
+    /// Resolves all `secret://` references in string-valued configuration fields.
+    ///
+    /// After loading TOML layers, call this to replace secret references with
+    /// their resolved values. Fields that do not contain secret references are
+    /// left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::SecretResolution`] if any reference cannot be resolved.
+    pub fn resolve_secrets(&mut self, resolver: &SecretResolver) -> ConfigResult<()> {
+        resolve_optional_path(&mut self.store.cas_dir, resolver)?;
+        resolve_optional_path(&mut self.policy.path, resolver)?;
+        Ok(())
+    }
+
     fn merge(self, overlay: ConfigOverlay) -> Self {
         Self {
             fetch: self.fetch.merge(overlay.fetch),
@@ -259,6 +280,20 @@ impl Config {
             metrics: self.metrics.merge(overlay.metrics),
         }
     }
+}
+
+/// Resolves a `secret://` reference in an optional path field, if present.
+fn resolve_optional_path(
+    field: &mut Option<PathBuf>,
+    resolver: &SecretResolver,
+) -> ConfigResult<()> {
+    if let Some(path) = field {
+        let value = path.to_string_lossy();
+        if SecretResolver::is_secret_ref(&value) {
+            *field = Some(PathBuf::from(resolver.resolve(&value)?));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -565,6 +600,25 @@ max_redirekts = 2
 
         assert!(matches!(result, Err(ConfigError::Parse { .. })));
         fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn config_resolve_secrets_replaces_all_refs() -> TestResult {
+        let root = temp_dir("config_secrets")?;
+        fs::write(root.join("cas_path.txt"), "/resolved/cas")?;
+
+        let mut config = Config::default();
+        config.store.cas_dir = Some(PathBuf::from("secret://file/cas_path.txt"));
+        config.policy.path = Some(PathBuf::from("not-a-secret-ref"));
+
+        let resolver = SecretResolver::new().with_files(true, Some(root.clone()));
+        config.resolve_secrets(&resolver)?;
+
+        assert_eq!(config.store.cas_dir, Some(PathBuf::from("/resolved/cas")));
+        assert_eq!(config.policy.path, Some(PathBuf::from("not-a-secret-ref")));
+
+        fs::remove_dir_all(&root)?;
         Ok(())
     }
 }
