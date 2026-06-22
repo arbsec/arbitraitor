@@ -16,6 +16,8 @@ arbitraitor-analysis = { workspace = true }
 arbitraitor-core = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
+arbitraitor-policy = { workspace = true }
+arbitraitor-receipt = { workspace = true }
 arbitraitor-store = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
