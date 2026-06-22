@@ -1,0 +1,206 @@
+/// Arbitraitor plugin WIT package.
+///
+/// Defines four separate worlds — one per plugin role — per ADR 0006.
+/// Each world grants only the host imports its role needs:
+///
+/// - `detector`     — analyzes artifact bytes, returns findings.
+/// - `wrapper`      — translates tool commands to operation plans.
+/// - `intelligence` — looks up threat-intel indicators.
+/// - `provenance`   — verifies signatures / attestations over artifact bytes.
+///
+/// A downloader argument parser does NOT automatically gain detector or
+/// network capabilities (ADR 0006, ADR 0011).
+package arbitraitor:plugin;
+
+/// Shared types used across plugin worlds.
+///
+/// Enums with open extension surfaces (category, severity, confidence) are
+/// intentionally modeled as `string` to avoid version coupling between host
+/// and community plugins written in arbitrary Component Model languages.
+interface types {
+    /// Severity of a log message forwarded by a plugin to the host logger.
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Single detector finding.
+    ///
+    /// `category`, `severity`, and `confidence` are free-form strings so that
+    /// community detectors can introduce new taxonomies without breaking the
+    /// WIT contract. The host normalizes them into the typed
+    /// `arbitraitor-model::Finding` at the boundary.
+    record finding {
+        category: string,
+        severity: string,
+        description: string,
+        evidence: option<string>,
+    }
+
+    /// Aggregate result returned by `detector.analyze`.
+    record analysis-result {
+        findings: list<finding>,
+        /// Version of the detector that produced the findings.
+        detector-version: string,
+    }
+
+    /// Aggregate result returned by `wrapper.translate`.
+    record translation-result {
+        /// Canonical operation label (e.g. "retrieve", "execute", "release").
+        operation: string,
+        /// Normalized arguments for the operation.
+        args: list<string>,
+        /// Non-fatal translation warnings surfaced to the host.
+        warnings: list<string>,
+    }
+
+    /// Query for a single intelligence indicator.
+    record indicator-query {
+        /// Indicator type label (e.g. "sha256", "url", "domain").
+        indicator-type: string,
+        /// Indicator value in the canonical form for its type.
+        value: string,
+    }
+
+    /// Reputation result returned by `intelligence.lookup`.
+    record lookup-result {
+        /// Whether the indicator was found in the provider's feed.
+        found: bool,
+        /// Provider-specific reputation label when available.
+        reputation: option<string>,
+        /// Provider confidence label (e.g. "low", "medium", "high").
+        confidence: string,
+    }
+
+    /// Outcome returned by `provenance.verify`.
+    record verification-result {
+        /// Whether the artifact's signature / attestation verified.
+        verified: bool,
+        /// Identity bound by the verified signature, when available.
+        signer: option<string>,
+        /// Diagnostic message when verification could not complete.
+        error: option<string>,
+    }
+}
+
+/// Detector plugin world (ADR 0011: evidence-only, not in verdict TCB).
+///
+/// Analyzes immutable artifact bytes and returns structured findings.
+/// Findings are policy inputs — never direct verdicts.
+world detector {
+    use types.{log-level, analysis-result};
+
+    /// Returns the immutable artifact bytes buffered by the host.
+    ///
+    /// The host controls which artifact is bound to this instance; the plugin
+    /// never receives a raw path. The call is bounded and cancellable per
+    /// ADR 0006 (host-call deadline).
+    import get-artifact-bytes: func() -> list<u8>;
+
+    /// Returns the total size in bytes of the bound artifact.
+    ///
+    /// Cheaper than `get-artifact-bytes` when the plugin only needs to
+    /// make size-gated decisions.
+    import get-artifact-size: func() -> u64;
+
+    /// Forwards a log message to the host structured logger.
+    import log: func(level: log-level, message: string);
+
+    /// Analyzes the bound artifact and returns findings.
+    ///
+    /// Returns an error string when analysis cannot complete.
+    export analyze: func() -> result<analysis-result, string>;
+
+    /// Initializes the plugin with opaque configuration bytes.
+    ///
+    /// Returns an error string when configuration is rejected.
+    export init: func(config: list<u8>) -> result<_, string>;
+
+    /// Releases plugin resources before the host drops the instance.
+    export shutdown: func();
+}
+
+/// Wrapper plugin world (ADR 0011: extended TCB — semantic translator).
+///
+/// Translates a downloader or installer command line into a normalized
+/// operation plan. The core depends on the wrapper faithfully representing
+/// the original tool invocation. Community wrappers default to advisory or
+/// disabled in enforcement mode.
+world wrapper {
+    use types.{log-level, translation-result};
+
+    /// Forwards a log message to the host structured logger.
+    import log: func(level: log-level, message: string);
+
+    /// Translates a tool command line into a normalized operation.
+    ///
+    /// `args` is the raw `argv` of the original invocation. Returns an error
+    /// string when the command cannot be translated.
+    export translate: func(args: list<string>) -> result<translation-result, string>;
+
+    /// Initializes the plugin with opaque configuration bytes.
+    ///
+    /// Returns an error string when configuration is rejected.
+    export init: func(config: list<u8>) -> result<_, string>;
+
+    /// Releases plugin resources before the host drops the instance.
+    export shutdown: func();
+}
+
+/// Intelligence plugin world (ADR 0011: evidence-only provider).
+///
+/// Looks up threat-intelligence indicators. Results are policy inputs.
+world intelligence {
+    use types.{log-level, indicator-query, lookup-result};
+
+    /// Forwards a log message to the host structured logger.
+    import log: func(level: log-level, message: string);
+
+    /// Queries the provider for a single indicator.
+    ///
+    /// Returns an error string when the lookup cannot complete.
+    export lookup: func(indicator: indicator-query) -> result<lookup-result, string>;
+
+    /// Initializes the plugin with opaque configuration bytes.
+    ///
+    /// Returns an error string when configuration is rejected.
+    export init: func(config: list<u8>) -> result<_, string>;
+
+    /// Releases plugin resources before the host drops the instance.
+    export shutdown: func();
+}
+
+/// Provenance plugin world.
+///
+/// Verifies detached signatures or attestations over immutable artifact
+/// bytes. A completed verification with an invalid signature returns `Ok`
+/// with `verification-result.verified` set to `false`.
+world provenance {
+    use types.{log-level, verification-result};
+
+    /// Returns the immutable artifact bytes buffered by the host.
+    ///
+    /// The host controls which artifact is bound to this instance; the plugin
+    /// never receives a raw path.
+    import get-artifact-bytes: func() -> list<u8>;
+
+    /// Forwards a log message to the host structured logger.
+    import log: func(level: log-level, message: string);
+
+    /// Verifies the provenance of the bound artifact.
+    ///
+    /// Returns an error string only when verification cannot complete
+    /// (e.g. malformed signature, missing key). An invalid-but-complete
+    /// verification returns `Ok` with `verified = false`.
+    export verify: func() -> result<verification-result, string>;
+
+    /// Initializes the plugin with opaque configuration bytes.
+    ///
+    /// Returns an error string when configuration is rejected.
+    export init: func(config: list<u8>) -> result<_, string>;
+
+    /// Releases plugin resources before the host drops the instance.
+    export shutdown: func();
+}
