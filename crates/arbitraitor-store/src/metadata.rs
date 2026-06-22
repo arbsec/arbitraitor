@@ -205,6 +205,12 @@ impl MetadataIndex {
     /// Returns [`StoreError`] when the entry is absent or redb write fails.
     pub fn set_retention(&self, sha256: &str, mode: RetentionMode) -> Result<(), StoreError> {
         let mut entry = self.require_entry(sha256)?;
+        if entry.retention_mode == RetentionMode::Forensic && mode != RetentionMode::Forensic {
+            return Err(StoreError::Index {
+                stage: "set-retention",
+                message: "forensic retention cannot be downgraded".to_owned(),
+            });
+        }
         entry.retention_mode = mode;
         self.record(entry)
     }

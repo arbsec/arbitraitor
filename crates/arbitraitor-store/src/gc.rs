@@ -162,6 +162,18 @@ fn collect_entry(
     entry: MetadataEntry,
     stats: &mut GcStats,
 ) -> Result<(), StoreError> {
+    // Re-check the locked flag immediately before deletion to close the
+    // TOCTOU window between the list() snapshot and the actual delete. A
+    // concurrent lock() call may have set locked=true after our snapshot.
+    if entry.locked {
+        stats.retained_locked += 1;
+        return Ok(());
+    }
+    // Also re-read from the index to catch locks acquired after snapshot.
+    if matches!(index.get(&entry.sha256), Ok(Some(fresh)) if fresh.locked) {
+        stats.retained_locked += 1;
+        return Ok(());
+    }
     let MetadataEntry {
         sha256,
         size_bytes: _,
