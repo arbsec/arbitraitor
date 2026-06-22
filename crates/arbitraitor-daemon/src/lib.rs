@@ -4,6 +4,8 @@
 #![warn(missing_docs)]
 
 pub mod api;
+pub mod cache;
+pub mod queue;
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
