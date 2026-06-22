@@ -337,10 +337,14 @@ dependencies = [
 name = "arbitraitor-plugin-host"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-exec",
  "arbitraitor-model",
  "arbitraitor-plugin-api",
+ "arbitraitor-sandbox",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
