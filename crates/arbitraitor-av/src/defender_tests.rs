@@ -75,7 +75,8 @@ fn is_available_returns_false_for_missing_binary() {
 /// A real, executable file on the host is reported as available.
 #[test]
 fn is_available_returns_true_for_existing_binary() {
-    let scanner = DefenderScanner::new(PathBuf::from("/bin/true"));
+    let exe = std::env::current_exe().expect("current_exe always succeeds in tests");
+    let scanner = DefenderScanner::new(exe);
 
     assert!(scanner.is_available());
 }
@@ -84,7 +85,7 @@ fn is_available_returns_true_for_existing_binary() {
 #[test]
 fn with_timeout_sets_timeout() {
     let scanner =
-        DefenderScanner::new(PathBuf::from("/bin/true")).with_timeout(Duration::from_secs(42));
+        DefenderScanner::new(PathBuf::from("/usr/bin/env")).with_timeout(Duration::from_secs(42));
 
     assert_eq!(scanner.timeout, Duration::from_secs(42));
 }
