@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod feed;
+pub mod review;
 pub mod submission;
 pub mod urlhaus;
 pub mod workflow;
