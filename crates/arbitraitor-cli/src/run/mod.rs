@@ -164,7 +164,10 @@ async fn run_with_services(
         ExecutionMode::Script
     };
     let plan = execution_plan(mode, network_isolated);
-    let ctx = PlanContext::for_bash(network_isolated, artifact.policy_digest.clone());
+    let mut ctx = PlanContext::for_bash(network_isolated, artifact.policy_digest.clone());
+    if mode == ExecutionMode::Native {
+        ctx.interpreter = format!("native:{}", artifact.sha256);
+    }
     writeln!(writer, "Plan: {plan}").into_diagnostic()?;
 
     match artifact.verdict {
