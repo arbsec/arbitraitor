@@ -29,3 +29,4 @@ Cargo.lock.bak
 
 # Private specs (not part of the repo)
 .spec/
+.serena/
