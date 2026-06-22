@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod run;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -51,6 +53,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Inspect(Box<InspectCommand>),
+    Run(Box<run::RunCommand>),
     Daemon(DaemonCommand),
     Unpack(UnpackCommand),
     Intel(IntelCommand),
@@ -198,6 +201,12 @@ async fn main() -> Result<()> {
                 &config,
             )
             .await?;
+        }
+        Command::Run(command) => {
+            let exit_code = run::run(*command, &config).await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Command::Daemon(command) => {
             daemon(command).await?;
@@ -741,7 +750,7 @@ mod tests {
                     digest
                 );
             }
-            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) => {
+            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) | Command::Run(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -792,7 +801,7 @@ mod tests {
                     std::path::PathBuf::from("/tmp/rules")
                 );
             }
-            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) => {
+            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) | Command::Run(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -825,7 +834,7 @@ mod tests {
                 assert_eq!(command.cosign_identity, ["builder@example.test"]);
                 assert_eq!(command.cosign_issuer, ["https://issuer.example.test"]);
             }
-            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) => {
+            Command::Daemon(_) | Command::Unpack(_) | Command::Intel(_) | Command::Run(_) => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -841,7 +850,7 @@ mod tests {
                 assert_eq!(command.archive, PathBuf::from("archive.zip"));
                 assert_eq!(command.output, PathBuf::from("out"));
             }
-            Command::Inspect(_) | Command::Daemon(_) | Command::Intel(_) => {
+            Command::Inspect(_) | Command::Daemon(_) | Command::Intel(_) | Command::Run(_) => {
                 return Err("parsed wrong command".into());
             }
         }
