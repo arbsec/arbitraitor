@@ -451,6 +451,7 @@ dependencies = [
 name = "arbitraitor-testkit"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-fetch",
  "arbitraitor-model",
  "arbitraitor-receipt",
  "arbitraitor-store",
