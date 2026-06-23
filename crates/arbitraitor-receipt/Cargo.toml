@@ -20,6 +20,7 @@ serde_json_canonicalizer = "0.3.2" # RFC 8785 JCS canonical receipt bytes for si
 thiserror = { workspace = true }
 url = { workspace = true } # Standards-compliant URL parsing/redaction for receipt transport metadata.
 uuid = { workspace = true }
+arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
 proptest = { workspace = true }

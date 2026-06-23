@@ -12,6 +12,7 @@ members = [
     "crates/arbitraitor-analysis",
     "crates/arbitraitor-shell",
     "crates/arbitraitor-powershell",
+    "crates/arbitraitor-workspace-hack",
     "crates/arbitraitor-yarax",
     "crates/arbitraitor-av",
     "crates/arbitraitor-archive",

@@ -126,6 +126,7 @@ dependencies = [
  "arbitraitor-intel",
  "arbitraitor-model",
  "arbitraitor-shell",
+ "arbitraitor-workspace-hack",
  "async-trait",
  "sha2 0.11.0",
  "thiserror 2.0.18",
@@ -140,6 +141,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "bzip2 0.5.2",
  "flate2",
  "sha2 0.11.0",
@@ -156,6 +158,7 @@ name = "arbitraitor-artifact"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "infer",
  "sha2 0.11.0",
  "thiserror 2.0.18",
@@ -167,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -191,6 +195,7 @@ dependencies = [
  "arbitraitor-receipt",
  "arbitraitor-shell",
  "arbitraitor-store",
+ "arbitraitor-workspace-hack",
  "arbitraitor-wrapper",
  "arbitraitor-yarax",
  "clap",
@@ -210,6 +215,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-policy",
+ "arbitraitor-workspace-hack",
  "proptest",
  "serde",
  "serde_json",
@@ -230,6 +236,7 @@ dependencies = [
  "arbitraitor-policy",
  "arbitraitor-receipt",
  "arbitraitor-store",
+ "arbitraitor-workspace-hack",
  "rustix",
  "serde",
  "serde_json",
@@ -249,6 +256,7 @@ dependencies = [
  "arbitraitor-model",
  "arbitraitor-sandbox",
  "arbitraitor-store",
+ "arbitraitor-workspace-hack",
  "cap-std",
  "cap-tempfile",
  "libc",
@@ -267,6 +275,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-testkit",
+ "arbitraitor-workspace-hack",
  "async-trait",
  "bytes",
  "reqwest",
@@ -284,6 +293,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "async-trait",
  "csv",
  "serde",
@@ -305,6 +315,7 @@ dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
  "arbitraitor-receipt",
+ "arbitraitor-workspace-hack",
  "hex",
  "hmac 0.13.0",
  "serde",
@@ -320,6 +331,7 @@ dependencies = [
 name = "arbitraitor-model"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-workspace-hack",
  "serde",
  "serde_json",
  "uuid",
@@ -330,6 +342,7 @@ name = "arbitraitor-package-manager"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "thiserror 2.0.18",
 ]
 
@@ -339,6 +352,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-intel",
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -352,6 +366,7 @@ dependencies = [
  "arbitraitor-model",
  "arbitraitor-plugin-api",
  "arbitraitor-sandbox",
+ "arbitraitor-workspace-hack",
  "rustix",
  "serde",
  "serde_json",
@@ -371,6 +386,7 @@ name = "arbitraitor-policy"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "proptest",
  "serde",
  "serde_json",
@@ -384,6 +400,7 @@ name = "arbitraitor-powershell"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "thiserror 2.0.18",
 ]
 
@@ -392,6 +409,7 @@ name = "arbitraitor-provenance"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "minisign",
  "serde",
  "serde_json",
@@ -404,6 +422,7 @@ name = "arbitraitor-receipt"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "minisign",
  "proptest",
  "serde",
@@ -418,6 +437,7 @@ dependencies = [
 name = "arbitraitor-sandbox"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-workspace-hack",
  "libc",
  "rustix",
 ]
@@ -427,6 +447,7 @@ name = "arbitraitor-shell"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "base64",
  "flate2",
  "serde",
@@ -445,6 +466,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
+ "arbitraitor-workspace-hack",
  "async-trait",
  "cap-std",
  "cap-tempfile",
@@ -467,6 +489,7 @@ dependencies = [
  "arbitraitor-model",
  "arbitraitor-receipt",
  "arbitraitor-store",
+ "arbitraitor-workspace-hack",
  "serde",
  "serde_json",
  "tokio",
@@ -477,6 +500,7 @@ dependencies = [
 name = "arbitraitor-update"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-workspace-hack",
  "hex",
  "minisign-verify",
  "serde",
@@ -487,11 +511,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitraitor-workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "allocator-api2",
+ "anstyle",
+ "anyhow",
+ "bitflags",
+ "block-buffer 0.12.1",
+ "bstr",
+ "bumpalo",
+ "cc",
+ "cranelift-bitset",
+ "crc32fast",
+ "crossbeam-utils",
+ "crypto-common 0.1.7",
+ "digest 0.10.7",
+ "digest 0.11.3",
+ "flate2",
+ "futures-channel",
+ "futures-core",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+ "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
+ "id-arena",
+ "indexmap",
+ "log",
+ "memchr",
+ "num-traits",
+ "once_cell",
+ "proc-macro2",
+ "pulley-interpreter",
+ "quote",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
+ "rustc-hash 2.1.2",
+ "semver",
+ "serde",
+ "serde_core",
+ "serde_json",
+ "sha2 0.10.9",
+ "simd-adler32",
+ "slab",
+ "smallvec",
+ "stable_deref_trait",
+ "subtle",
+ "syn",
+ "tracing-core",
+ "typenum",
+ "wasmparser 0.245.1",
+ "wasmtime-internal-core",
+ "zeroize",
+ "zstd",
+ "zstd-safe",
+ "zstd-sys",
+]
+
+[[package]]
 name = "arbitraitor-wrapper"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-plugin-api",
+ "arbitraitor-workspace-hack",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -505,6 +591,7 @@ dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-model",
  "arbitraitor-receipt",
+ "arbitraitor-workspace-hack",
  "minisign",
  "sha2 0.11.0",
  "thiserror 2.0.18",
@@ -4238,6 +4325,7 @@ version = "43.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3820b174f477d2a7083209d1ad5353fcdb11eaea434b2137b8681029460dd3"
 dependencies = [
+ "anyhow",
  "hashbrown 0.16.1",
  "libm",
  "serde",
