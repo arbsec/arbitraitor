@@ -123,7 +123,21 @@ gh project item-edit --id <item-id> --field-id <field-id> --project-id PVT_kwDOE
 
 Agents have access to Model Context Protocol (MCP) servers that provide capabilities beyond plain file I/O and shell commands. **Prefer MCP tools over manual alternatives** when the task matches.
 
-### 3.1 Serena — LSP-powered code analysis
+### 3.1 Codegraph — cross-file code exploration
+
+Codegraph indexes the entire workspace and provides symbol-level search, caller/callee traversal, and verbatim source retrieval across files in a single call.
+
+**Use for:**
+- `codegraph_explore` — the primary tool. Pass a natural-language question or a bag of symbol/file names. Returns verbatim source code (line-numbered, Read-equivalent) plus the call path between symbols. Use this BEFORE Reading files or grepping.
+- `codegraph_search` — quick symbol name lookup. Returns locations only (no source). Good for "where is X defined?" when there might be multiple definitions.
+- `codegraph_node` — read one symbol's full body with its caller/callee trail. Pass `file` alone to read an entire file like Read.
+- `codegraph_callers` — find every call site of a function/method. Use before refactoring or deleting.
+
+**Prefer over:** `grep` for "how does X work?", `read` for multiple files at once, manual cross-file symbol tracing.
+
+**Key advantage over Serena:** Codegraph works across the entire workspace in one call, while Serena is scoped to a single file/session. For "how does the plugin system work end-to-end?", use Codegraph. For "what are the compiler errors in this file?", use Serena.
+
+### 3.2 Serena — LSP-powered code analysis
 
 Serena wraps a language server (rust-analyzer) to provide semantic code intelligence.
 
@@ -135,9 +149,9 @@ Serena wraps a language server (rust-analyzer) to provide semantic code intellig
 - `serena_rename_symbol` — workspace-wide rename with LSP precision (no regex misses).
 - `serena_replace_symbol_body` — replace a function/method body with semantic awareness.
 
-**Prefer over:** `grep` for symbol searches, manual find-and-replace for renames, full `cargo check` for single-file diagnostics.
+**Prefer over:** `grep` for symbol searches within a file, manual find-and-replace for renames, full `cargo check` for single-file diagnostics.
 
-### 3.2 Sequential thinking — structured problem decomposition
+### 3.3 Sequential thinking — structured problem decomposition
 
 Multi-step reasoning tool for complex analysis with revision and branching.
 
@@ -149,7 +163,7 @@ Multi-step reasoning tool for complex analysis with revision and branching.
 
 **How:** Start with an initial thought count estimate, revise as understanding deepens, branch into alternative approaches when needed.
 
-### 3.3 Tavily — web research and content extraction
+### 3.4 Tavily — web research and content extraction
 
 Web search, page extraction, site crawling, and multi-source research.
 
@@ -161,7 +175,7 @@ Web search, page extraction, site crawling, and multi-source research.
 
 **Prefer over:** Manual web browsing, guessing library APIs from memory.
 
-### 3.4 Context7 — library documentation
+### 3.5 Context7 — library documentation
 
 Resolve and query up-to-date documentation for any library or framework.
 
@@ -173,15 +187,16 @@ Resolve and query up-to-date documentation for any library or framework.
 
 **Prefer over:** Reading vendored docs, relying on potentially outdated training data.
 
-### 3.5 Priority order
+### 3.6 Priority order
 
 When multiple tools could serve a task:
 
-1. **Serena** for anything involving code symbols, references, or diagnostics in this repo.
-2. **Context7** for external library/framework documentation.
-3. **Tavily** for web research, CVE lookups, or non-documentation web content.
-4. **Sequential thinking** for complex multi-step reasoning before any implementation.
-5. **Plain tools** (`grep`, `read`, `bash`) only when no MCP tool covers the task or adds unnecessary overhead.
+1. **Codegraph** for "how does X work?", cross-file exploration, and understanding architecture before making changes.
+2. **Serena** for code symbols, references, diagnostics, and renames within a specific file.
+3. **Context7** for external library/framework documentation.
+4. **Tavily** for web research, CVE lookups, or non-documentation web content.
+5. **Sequential thinking** for complex multi-step reasoning before any implementation.
+6. **Plain tools** (`grep`, `read`, `bash`) only when no MCP tool covers the task or adds unnecessary overhead.
 
 ---
 
