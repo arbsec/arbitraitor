@@ -66,13 +66,13 @@ Block immediately if human approval would be required. Returns exit code 5.
 arbitraitor run https://example.com/install.sh --non-interactive
 ```
 
-### `--policy-capability <PATH>`
+### `--policy <PATH>`
 
 Path to a pre-issued approval capability JSON file. Used in CI and automation instead of interactive approval.
 
 ```sh
 arbitraitor run https://example.com/install.sh \
-  --policy-capability ./ci-capability.json
+  --policy ./ci-capability.json
 ```
 
 ### `--working-dir <PATH>`
@@ -165,7 +165,7 @@ arbitraitor approve receipt.json --output capability.json
 
 # Later, in CI
 arbitraitor run https://example.com/install.sh \
-  --policy-capability ./capability.json \
+  --policy ./capability.json \
   --receipt ./receipt.json
 ```
 

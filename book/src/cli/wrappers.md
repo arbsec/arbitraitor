@@ -10,14 +10,9 @@ arbitraitor wrappers <subcommand> [flags]
 
 ## How wrappers work
 
-Wrappers install shell scripts named `curl` and `wget` into `~/.local/bin`. When invoked, they:
+Wrappers install shell scripts (or symlinks) named `curl` and `wget` into a shim directory (default: `~/.arbitraitor/shims`). When invoked, they call `arbitraitor fetch` with the original arguments, routing the download through the inspection pipeline before any bytes reach the shell.
 
-1. Capture the original command arguments
-2. Spawn the real `curl` or `wget` via an `exec` syscall
-3. Pass the downloaded content to `arbitraitor run --output -` for inspection
-4. Pipe the approved bytes to the original destination
-
-The original binary is preserved and called through `exec`, so PATH ordering does not matter.
+The original binary is found via PATH lookup excluding the shim directory, so the real `curl` or `wget` is used for the actual HTTP request under Arbitraitor's control.
 
 ## Subcommands
 
@@ -77,21 +72,20 @@ A PATH shim is a shell script placed early in PATH that intercepts a command:
 
 ```sh
 #!/bin/sh
-# ~/.local/bin/curl
-exec /usr/bin/curl -fsSL "$@" | arbitraitor run --output - --non-interactive
+# ~/.arbitraitor/shims/curl
+exec /path/to/arbitraitor fetch "$@"
 ```
 
-The real binary is called with `exec`, replacing the shell process. Downloaded bytes flow through a pipe to Arbitraitor.
+Arbitraitor resolves the real binary via PATH (excluding the shim directory), performs the HTTP request under its own SSRF and TLS controls, stores the result in CAS, and runs the detection pipeline.
 
-For `wget`, the shim downloads to a temporary file and passes that path:
+For `wget`, the same pattern applies — the shim invokes `arbitraitor fetch` with the original arguments.
 
 ```sh
 #!/bin/sh
-# ~/.local/bin/wget
-TMPFILE=$(mktemp)
-trap "rm -f $TMPFILE" EXIT
-/usr/bin/wget -O "$TMPFILE" "$@"
-arbitraitor run "$TMPFILE" --output - --non-interactive
+# ~/.arbitraitor/shims/wget
+exec /path/to/arbitraitor fetch "$@"
+```
+
 ```
 
 ## Flags
