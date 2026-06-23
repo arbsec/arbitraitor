@@ -13,7 +13,8 @@ use std::time::Duration;
 use arbitraitor_exec::EnvDenyList;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_sandbox::{
-    ProcessResourceLimits, SandboxConfig, configure_command, configure_resource_limits,
+    ProcessResourceLimits, SandboxConfig, configure_command, configure_network_isolation,
+    configure_resource_limits,
 };
 
 use crate::error::ProtocolError;
@@ -80,6 +81,7 @@ pub struct SubprocessExecutor {
     timeout: Duration,
     env_allowlist: Vec<String>,
     working_directory: Option<PathBuf>,
+    network_isolated: bool,
 }
 
 impl SubprocessExecutor {
@@ -92,6 +94,7 @@ impl SubprocessExecutor {
             timeout: DEFAULT_TIMEOUT,
             env_allowlist: Vec::new(),
             working_directory: None,
+            network_isolated: true,
         }
     }
 
@@ -121,6 +124,22 @@ impl SubprocessExecutor {
     pub fn with_working_directory(mut self, dir: PathBuf) -> Self {
         self.working_directory = Some(dir);
         self
+    }
+
+    /// Enables or disables subprocess plugin network isolation.
+    ///
+    /// Network isolation is enabled by default and should only be disabled for
+    /// plugins that have an explicit policy grant to perform network I/O.
+    #[must_use]
+    pub fn with_network_isolated(mut self, isolated: bool) -> Self {
+        self.network_isolated = isolated;
+        self
+    }
+
+    /// Returns whether subprocess plugin network isolation is enabled.
+    #[must_use]
+    pub const fn network_isolated(&self) -> bool {
+        self.network_isolated
     }
 
     /// Spawns the plugin process with sandbox hardening and framed I/O pipes.
@@ -163,6 +182,9 @@ impl SubprocessExecutor {
             fd_count: policy_limits.fd_count.map(u64::from),
         };
         configure_resource_limits(&mut command, &child_limits);
+        if self.network_isolated {
+            configure_network_isolation(&mut command);
+        }
         configure_command(&mut command, SandboxConfig::default());
 
         let mut child = command.spawn()?;
