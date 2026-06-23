@@ -4,11 +4,12 @@
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use arbitraitor_exec::ResourceLimits;
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_sandbox::PathRule;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use sha2::{Digest, Sha256};
 
@@ -78,6 +79,34 @@ pub(super) fn plugin_resource_limits() -> ResourceLimits {
         fd_count: Some(FD_LIMIT),
         output_size_bytes: Some(OUTPUT_LIMIT_BYTES),
     }
+}
+
+pub(super) fn plugin_filesystem_rules(
+    binary_path: &Path,
+    working_directory: Option<&Path>,
+) -> Vec<PathRule> {
+    let mut rules = Vec::new();
+    if let Some(parent) = binary_path.parent() {
+        rules.push(PathRule::read_execute(parent.to_path_buf()));
+    }
+    for path in dynamic_linker_paths() {
+        rules.push(PathRule::read_execute(path));
+    }
+    if let Some(directory) = working_directory {
+        rules.push(PathRule::read_write_execute(directory.to_path_buf()));
+    }
+    rules
+}
+
+fn dynamic_linker_paths() -> [PathBuf; 6] {
+    [
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/lib"),
+        PathBuf::from("/lib64"),
+        PathBuf::from("/usr/lib"),
+        PathBuf::from("/usr/lib64"),
+    ]
 }
 
 #[cfg(unix)]
