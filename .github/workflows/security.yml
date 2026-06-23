@@ -10,6 +10,7 @@ on:
       - ".github/workflows/security.yml"
   pull_request:
     paths: *security_paths
+  workflow_dispatch:
 
 permissions:
   contents: read
