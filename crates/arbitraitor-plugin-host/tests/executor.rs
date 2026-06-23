@@ -13,6 +13,20 @@ use arbitraitor_plugin_host::protocol::MessageKind;
 use serde_json::json;
 
 #[test]
+fn network_isolation_enabled_by_default() {
+    let executor = SubprocessExecutor::new(mock_plugin());
+
+    assert!(executor.network_isolated());
+}
+
+#[test]
+fn network_isolation_can_be_disabled() {
+    let executor = SubprocessExecutor::new(mock_plugin()).with_network_isolated(false);
+
+    assert!(!executor.network_isolated());
+}
+
+#[test]
 fn spawn_rejects_missing_binary() {
     let path = env::temp_dir().join("arbitraitor-missing-plugin-binary");
 

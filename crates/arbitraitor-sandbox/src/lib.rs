@@ -6,8 +6,10 @@
 #![warn(missing_docs)]
 
 mod resource_limits;
+mod seccomp;
 
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
+pub use seccomp::configure_network_isolation;
 
 use std::io;
 use std::process::Command;
