@@ -8,6 +8,7 @@ src = "src"
 [output.html]
 git-repository-url = "https://github.com/arbsec/arbitraitor"
 edit-url-template = "https://github.com/arbsec/arbitraitor/edit/main/book/src/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.search]
 enable = true
