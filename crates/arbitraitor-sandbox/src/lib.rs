@@ -5,9 +5,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod landlock;
 mod resource_limits;
 mod seccomp;
 
+pub use landlock::{PathRule, access_fs, configure_filesystem_isolation};
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
 pub use seccomp::configure_network_isolation;
 
