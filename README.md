@@ -1,6 +1,6 @@
 # Arbitraitor
 
-**[Documentation](https://arbitraitor.arbsec.org)** | **[ADRs](docs/adr/README.md)** | **[Contributing](CONTRIBUTING.md)**
+**[Documentation](https://arbsec.github.io/arbitraitor/)** | **[ADRs](docs/adr/README.md)** | **[Contributing](CONTRIBUTING.md)**
 
 A policy-enforced download, inspection, provenance verification, and execution gate for untrusted content.
 
