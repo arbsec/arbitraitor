@@ -1,0 +1,22 @@
+[book]
+title = "Arbitraitor"
+authors = ["ArbSec"]
+description = "A policy-enforced download, inspection, provenance verification, and execution gate for untrusted content"
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/arbsec/arbitraitor"
+edit-url-template = "https://github.com/arbsec/arbitraitor/edit/main/book/src/{path}"
+cname = "arbitraitor.arbsec.org"
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
