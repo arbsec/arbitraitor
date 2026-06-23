@@ -113,6 +113,7 @@ as a terminal.
 ### Implementation notes
 
 Rust crates to evaluate for the renderer:
+
 - `vte` or `strip-ansi-escapes` for ANSI sequence stripping.
 - Custom UTS #39 confusable detection (the `unicode-security` crate if
   available, or a focused implementation).

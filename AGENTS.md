@@ -5,6 +5,7 @@ Guidelines for AI agents and automated contributors working in the Arbitraitor r
 Arbitraitor is a **security boundary** — a policy-enforced download, inspection, provenance verification, and execution gate for untrusted content. Every contribution is part of the attack surface.
 
 **Before writing any code**, read:
+
 - [Development conventions](docs/conventions.md) — architecture boundaries, security invariants, coding rules, testing requirements.
 - [Architecture Decision Records](docs/adr/README.md) — all accepted and proposed ADRs. Every architecturally significant or security-sensitive decision must be recorded as an ADR.
 - `.spec/` — full product specification, technology stack, and adversarial review (gitignored, local only).
@@ -57,6 +58,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo check --workspace --all-targets --all-features
 cargo nextest run
+rumdl check .
 ```
 
 If the change affects schemas or WIT bindings, also verify generated output is current (CI will diff-check these).
@@ -128,6 +130,7 @@ Agents have access to Model Context Protocol (MCP) servers that provide capabili
 Codegraph indexes the entire workspace and provides symbol-level search, caller/callee traversal, and verbatim source retrieval across files in a single call.
 
 **Use for:**
+
 - `codegraph_explore` — the primary tool. Pass a natural-language question or a bag of symbol/file names. Returns verbatim source code (line-numbered, Read-equivalent) plus the call path between symbols. Use this BEFORE Reading files or grepping.
 - `codegraph_search` — quick symbol name lookup. Returns locations only (no source). Good for "where is X defined?" when there might be multiple definitions.
 - `codegraph_node` — read one symbol's full body with its caller/callee trail. Pass `file` alone to read an entire file like Read.
@@ -142,6 +145,7 @@ Codegraph indexes the entire workspace and provides symbol-level search, caller/
 Serena wraps a language server (rust-analyzer) to provide semantic code intelligence.
 
 **Use for:**
+
 - `serena_find_symbol` / `serena_get_symbols_overview` — locate types, functions, traits without grepping.
 - `serena_find_referencing_symbols` — find all call sites before refactoring or deleting.
 - `serena_find_implementations` — check trait impls, locate concrete implementations.
@@ -156,6 +160,7 @@ Serena wraps a language server (rust-analyzer) to provide semantic code intellig
 Multi-step reasoning tool for complex analysis with revision and branching.
 
 **Use for:**
+
 - Breaking down ambiguous requirements into concrete steps.
 - Architecture decisions with multiple viable approaches.
 - Root-cause analysis when debugging fails after the first attempt.
@@ -168,6 +173,7 @@ Multi-step reasoning tool for complex analysis with revision and branching.
 Web search, page extraction, site crawling, and multi-source research.
 
 **Use for:**
+
 - `tavily_search` — quick lookups: library versions, API changes, CVE details.
 - `tavily_extract` — pull documentation or blog posts from specific URLs.
 - `tavily_research` — deep multi-source research for unfamiliar domains.
@@ -180,6 +186,7 @@ Web search, page extraction, site crawling, and multi-source research.
 Resolve and query up-to-date documentation for any library or framework.
 
 **Use for:**
+
 - `context7_resolve-library-id` — find the Context7 ID for a crate or library.
 - `context7_query-docs` — query specific API docs, configuration, or best practices.
 
@@ -212,6 +219,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo check --workspace --all-targets --all-features
 cargo nextest run
+rumdl check .
 
 # Branch and PR
 git checkout -b <type>/<short-slug>

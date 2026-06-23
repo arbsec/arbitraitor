@@ -11,6 +11,9 @@ on:
       - ".github/workflows/ci.yml"
       - "wit/**"
       - "**/*.wit"
+      - "**/*.md"
+      - "rumdl.toml"
+      - "lefthook.yml"
   pull_request:
     paths: *ci_paths
 
@@ -40,6 +43,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
+
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
+      - name: Lint markdown
+        run: rumdl check .
 
   test-changed:
     name: Test Changed

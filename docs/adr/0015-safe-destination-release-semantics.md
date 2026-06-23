@@ -51,6 +51,7 @@ this sequence:
 ### Symlink and reparse-point defense
 
 Before writing:
+
 - `fstatat` with `AT_SYMLINK_NOFOLLOW` on POSIX to verify the destination is
   not a symlink.
 - Check for reparse points / junctions on Windows.
@@ -64,6 +65,7 @@ relative to the capability handle.
 
 If the staging directory and destination are on different filesystems, atomic
 rename is impossible. Arbitraitor:
+
 1. Detects the cross-filesystem condition.
 2. Reports it as a finding.
 3. Requires explicit policy approval or `--allow-non-atomic`.
