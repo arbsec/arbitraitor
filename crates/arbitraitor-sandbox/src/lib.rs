@@ -5,6 +5,10 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod resource_limits;
+
+pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
+
 use std::io;
 use std::process::Command;
 
