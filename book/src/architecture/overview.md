@@ -2,6 +2,31 @@
 
 Arbitraitor is organized as a Rust monorepo with focused crates that own specific responsibilities.
 
+## High-level component interaction
+
+```mermaid
+graph TD
+    CLI[arbitraitor-cli]
+    Fetch[arbitraitor-fetch]
+    Store[arbitraitor-store]
+    Analysis[arbitraitor-analysis]
+    Policy[arbitraitor-policy]
+    Exec[arbitraitor-exec]
+    Sandbox[arbitraitor-sandbox]
+    MCP[arbitraitor-mcp]
+    PluginHost[arbitraitor-plugin-host]
+
+    CLI --> Fetch
+    CLI --> Analysis
+    CLI --> Policy
+    CLI --> Exec
+    Fetch --> Store
+    Analysis --> Store
+    Exec --> Sandbox
+    MCP --> Exec
+    PluginHost --> Sandbox
+```
+
 ## High-level pipeline
 
 ```

@@ -26,6 +26,8 @@ jobs:
       - uses: jdx/mise-action@v4
       - name: Install mdBook
         run: cargo install mdbook --locked
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid --locked
       - name: Copy ADRs to book
         run: cp -r docs/adr/* book/src/adr/
       - name: Build book

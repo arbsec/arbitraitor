@@ -29,6 +29,16 @@ resolve policy
 
 Commands like `curl -fsSL https://example.com/install.sh | sh` collapse retrieval, trust, inspection, and execution into one operation. Arbitraitor makes trust decisions explicit, prevents premature streaming execution, and provides explainable findings.
 
+## How it compares
+
+| | Arbitraitor | ShellCheck | cosign | Firejail |
+|---|---|---|---|---|
+| Download gate | Yes | No | No | No |
+| Script analysis | Yes | Yes | No | No |
+| Signature verification | Yes | No | Yes | No |
+| Execution sandbox | Yes | No | No | Yes |
+| Audit receipts | Yes | No | No | No |
+
 ## Quick start
 
 ### Install
