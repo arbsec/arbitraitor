@@ -29,47 +29,33 @@ graph TD
 
 ## High-level pipeline
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      arbitraitor-cli                                 │
-│                   (argument parsing, output)                         │
-└──────────┬──────────────────────────────────────┬───────────────────┘
-           │                                      │
-           ▼                                      ▼
-┌──────────────────────┐              ┌──────────────────────────────┐
-│   arbitraitor-fetch  │─────────────▶│     arbitraitor-store       │
-│   HTTP retrieval     │              │   Content-addressed store   │
-│   SSRF protection    │              │   SHA-256 identity          │
-└──────────────────────┘              └──────────────────────────────┘
-                                                  ▲
-                                                  │ artifact bytes
-                                                  │
-           ┌──────────────────────────────────────┴───────────────────┐
-           │                  arbitraitor-analysis                     │
-           │              Detection pipeline coordinator                │
-           │  ┌──────────┐  ┌──────────┐  ┌─────────┐  ┌───────────┐  │
-           │  │  shell   │  │ archive  │  │  yarax  │  │ powershell │  │
-           │  └──────────┘  └──────────┘  └─────────┘  └───────────┘  │
-           └───────────────────────────────────────────────────────────┘
-                                                  │
-                                                  ▼ findings
-           ┌───────────────────────────────────────────────────────────┐
-           │                  arbitraitor-policy                       │
-           │              TOML policy engine, verdicts                 │
-           └───────────────────────────────────────────────────────────┘
-                                                  │
-                                                  ▼
-           ┌───────────────────────────────────────────────────────────┐
-           │                  arbitraitor-core                         │
-           │              State machine, orchestration                  │
-           └───────────────────────────────────────────────────────────┘
-                                                  │
-                            ┌─────────────────────┴───────────────────┐
-                            ▼                                       ▼
-           ┌──────────────────────────┐              ┌──────────────────────┐
-           │   arbitraitor-exec      │              │ arbitraitor-receipt │
-           │   Mediated execution    │              │ RFC 8785 receipts   │
-           └──────────────────────────┘              └──────────────────────┘
+```mermaid
+graph TD
+    CLI["arbitraitor-cli<br/>(argument parsing, output)"]
+    Fetch["arbitraitor-fetch<br/>(HTTP retrieval, SSRF protection)"]
+    Store["arbitraitor-store<br/>(content-addressed store, SHA-256)"]
+    Analysis["arbitraitor-analysis<br/>(detection pipeline coordinator)"]
+    Policy["arbitraitor-policy<br/>(TOML policy engine, verdicts)"]
+    Core["arbitraitor-core<br/>(state machine, orchestration)"]
+    Exec["arbitraitor-exec<br/>(mediated execution)"]
+    Receipt["arbitraitor-receipt<br/>(RFC 8785 receipts)"]
+
+    CLI -->|fetch request| Fetch
+    Fetch -->|artifact bytes| Store
+    Store -->|artifact bytes| Analysis
+    Analysis -->|findings| Policy
+    Policy -->|verdict| Core
+    Core -->|execute| Exec
+    Core -->|audit| Receipt
+
+    subgraph detectors ["Detectors"]
+        Shell["shell analyzer"]
+        Archive["archive inspector"]
+        YaraX["YARA-X scanner"]
+        Pwsh["PowerShell analyzer"]
+    end
+
+    Analysis --- detectors
 ```
 
 ## Core subsystems
