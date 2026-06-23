@@ -5,7 +5,7 @@
   - [Installation](./getting-started.md#installation)
   - [First inspection](./getting-started.md#first-inspection)
   - [First run with approval](./getting-started.md#first-run-with-approval)
-  - [Using wrappers](./getting-started.md#using-wrappers)
+  - [Wrappers](./getting-started.md#wrappers)
 - [CLI Reference](./cli-reference.md)
   - [inspect](./cli/inspect.md)
   - [run](./cli/run.md)
