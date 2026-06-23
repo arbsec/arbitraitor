@@ -2,6 +2,27 @@
 
 The Arbitraitor pipeline transforms an untrusted URL into an inspected artifact with a signed verdict and optional mediated execution.
 
+## Pipeline flow
+
+```mermaid
+graph TD
+    A[Resolve Policy] --> B[Retrieve Once]
+    B --> C[Record Transport Metadata]
+    C --> D[Buffer Immutable Bytes]
+    D --> E[Identify Content]
+    E --> F[Hash & Verify Provenance]
+    F --> G[Inspect Reputation]
+    G --> H[Scan Content]
+    H --> I[Recursive Payload Discovery]
+    I --> J[Calculate Verdict]
+    J --> K{Verdict}
+    K -->|Pass/Warn| L[Release/Execute]
+    K -->|Prompt| M[Request Approval]
+    M -->|Approved| L
+    M -->|Denied| N[Exit: Denied]
+    L --> O[Emit Signed Receipt]
+```
+
 ## Pipeline stages
 
 ```
