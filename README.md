@@ -31,13 +31,17 @@ Commands like `curl -fsSL https://example.com/install.sh | sh` collapse retrieva
 
 ## How it compares
 
-| | Arbitraitor | ShellCheck | cosign | Firejail |
-|---|---|---|---|---|
-| Download gate | Yes | No | No | No |
-| Script analysis | Yes | Yes | No | No |
-| Signature verification | Yes | No | Yes | No |
-| Execution sandbox | Yes | No | No | Yes |
-| Audit receipts | Yes | No | No | No |
+| | Arbitraitor | Tirith | safesh | ShellCheck | cosign | Firejail |
+|---|---|---|---|---|---|---|
+| Download gate | Yes | No | Yes | No | No | No |
+| Script analysis | Yes | No | Yes | Yes | No | No |
+| Signature verification | Yes | No | No | No | Yes | No |
+| Execution sandbox | Yes | No | No | No | No | Yes |
+| Audit receipts | Yes | No | No | No | No | No |
+| Policy engine | Yes | No | No | No | No | No |
+| Plugin system | Yes | No | No | No | No | No |
+
+See the [full comparison](book/src/comparison.md) for details and complementary tools.
 
 ## Quick start
 
