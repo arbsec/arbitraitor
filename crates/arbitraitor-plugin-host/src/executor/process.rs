@@ -90,7 +90,18 @@ pub(super) fn configure_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 pub(super) const fn configure_process_group(_command: &mut Command) {}
 
+/// Applies resource limits from the parent via `prlimit` after spawn, fenced
+/// by a best-effort `SIGSTOP`.
+///
+/// **Deprecated for plugin execution.** The [`super::SubprocessExecutor`] now
+/// applies limits in the child via `setrlimit` in `pre_exec`
+/// ([`arbitraitor_sandbox::configure_resource_limits`]), which is inherited
+/// across `execve` and closes the TOCTOU race this parent-side approach has.
+///
+/// Retained for backward compatibility with callers that apply limits after
+/// spawn; new code should register limits via `pre_exec` before calling spawn.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub(super) fn apply_limits_fenced(
     child: &mut Child,
     limits: &ResourceLimits,
@@ -108,6 +119,7 @@ pub(super) fn apply_limits_fenced(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub(super) const fn apply_limits_fenced(
     _child: &mut Child,
     _limits: &ResourceLimits,

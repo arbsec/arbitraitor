@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use arbitraitor_exec::EnvDenyList;
 use arbitraitor_model::ids::Sha256Digest;
-use arbitraitor_sandbox::{SandboxConfig, configure_command};
+use arbitraitor_sandbox::{
+    ProcessResourceLimits, SandboxConfig, configure_command, configure_resource_limits,
+};
 
 use crate::error::ProtocolError;
 
@@ -21,9 +23,7 @@ mod plugin;
 mod process;
 
 pub use plugin::SubprocessPlugin;
-use process::{
-    BoundedReader, apply_limits_fenced, configure_process_group, hash_file, plugin_resource_limits,
-};
+use process::{BoundedReader, configure_process_group, hash_file, plugin_resource_limits};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -150,10 +150,23 @@ impl SubprocessExecutor {
             command.current_dir(directory);
         }
         configure_process_group(&mut command);
+        // Security: limits are applied in-child via `setrlimit` in `pre_exec`
+        // (inherited across `execve`), not parent-side `prlimit` after spawn.
+        // This closes the #210 TOCTOU race where a plugin could fork unbounded
+        // grandchildren before limits applied. Must be registered before
+        // `configure_command` so limits hold during sandbox hardening too.
+        let policy_limits = plugin_resource_limits();
+        let child_limits = ProcessResourceLimits {
+            cpu_time_secs: policy_limits.cpu_time_secs,
+            memory_bytes: policy_limits.memory_bytes,
+            process_count: policy_limits.process_count.map(u64::from),
+            fd_count: policy_limits.fd_count.map(u64::from),
+        };
+        configure_resource_limits(&mut command, &child_limits);
         configure_command(&mut command, SandboxConfig::default());
 
         let mut child = command.spawn()?;
-        apply_limits_fenced(&mut child, &plugin_resource_limits())?;
+        // Limits are already applied in-child before execve — no race window.
 
         let stdin = child.stdin.take().ok_or_else(|| {
             io::Error::new(io::ErrorKind::BrokenPipe, "plugin stdin pipe unavailable")
