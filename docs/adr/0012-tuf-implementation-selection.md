@@ -14,6 +14,7 @@ and consistent snapshots.
 
 AWS security bulletin 2026-019 disclosed multiple vulnerabilities in `tough`
 (the Rust TUF implementation) before version 0.22.0:
+
 - Delegated-role signature threshold bypass.
 - Missing delegated metadata validation.
 - Path traversal in metadata handling.
@@ -70,6 +71,7 @@ signed manifest (minisign)
 ```
 
 This provides:
+
 - Signed updates (minisign).
 - Version rollback protection.
 - Expiration checking.

@@ -108,12 +108,14 @@ endpoints. Use a policy-selectable backend rather than one universal default.
 ### Implementation approach
 
 **Phase 1 (MVP):** Use reqwest with explicit configuration:
+
 - Disable auto-decompression, ambient proxy, cookies, netrc.
 - Custom `resolve` callback that performs address filtering.
 - Redirect policy set to `none` — Arbitraitor handles redirects manually.
 - Connect callback (if available) to verify peer address.
 
 **Phase 2 (if reqwest is insufficient):** Custom Hyper connector that:
+
 - Resolves DNS through Arbitraitor's filtered resolver.
 - Binds policy to the actual connection.
 - Verifies connected peer address post-connect.
@@ -123,6 +125,7 @@ endpoints. Use a policy-selectable backend rather than one universal default.
 ### DNS rebinding defense
 
 The connector must:
+
 1. Resolve the hostname.
 2. Connect to a specific resolved address.
 3. Verify (via `getpeername`) that the connected address matches.

@@ -15,6 +15,7 @@ metadata, or analysis results.
 ADR 0008 also makes runtime network access denied by default because unrestricted
 egress defeats transitive payload coverage. Native subprocess plugins therefore
 need an operating-system boundary that applies before untrusted code runs.
+
 ## Decision
 
 Install a Linux seccomp-BPF filter in the subprocess plugin child via
@@ -37,6 +38,7 @@ disable it only when policy explicitly grants a plugin network capability. The
 current implementation enforces on Linux `x86_64` and `aarch64`; other platforms
 must report this control as unavailable rather than silently claiming isolation.
 Landlock filesystem isolation remains separate work (#209).
+
 ## Consequences
 
 - Community subprocess plugins can no longer create network sockets under the
@@ -56,6 +58,7 @@ Landlock filesystem isolation remains separate work (#209).
   lifecycle handling, and often privilege/user-namespace considerations.
 - **SECCOMP_RET_KILL:** Rejected. Killing plugins obscures policy failures and
   makes graceful capability-denied behavior harder to test and debug.
+
 ## References
 
 - [ADR 0006](0006-wasmtime-component-model-plugins.md) — Wasmtime Component

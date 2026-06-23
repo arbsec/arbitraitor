@@ -79,6 +79,7 @@ For AI agent and MCP integration, three **separate capabilities** are exposed:
 | `execute_approved` | Execute using a pre-issued approval token. | Agent or CI |
 
 Rules:
+
 - The agent that requests inspection or execution **cannot** also satisfy human approval through the same capability.
 - Approval is rendered by the **core-owned UI** or another authenticated channel — never through agent-provided text.
 - Agent-provided prose is **never** inserted into the approval prompt.

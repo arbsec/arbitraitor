@@ -11,7 +11,7 @@ Arbitraitor reads configuration from (in order of precedence, later wins):
 3. `./.arbitraitor/config.toml` (project-level, if present)
 4. Path specified by `--config <PATH>`
 
-Project-level configuration (`./.arbitraitor/config.toml`) may only **tighten** inherited policy. It cannot add trust roots, enable plugins, or weaken execution controls. See [ADR 0017](../adr/0017-monotonic-project-configuration.md) for details.
+Project-level configuration (`./.arbitraitor/config.toml`) may only **tighten** inherited policy. It cannot add trust roots, enable plugins, or weaken execution controls. See [ADR 0017](adr/0017-monotonic-project-configuration.md) for details.
 
 ## All configuration sections
 

@@ -9,6 +9,7 @@
 The adversarial review (C-03) identified that wrapper plugins are part of the extended trusted computing base. The core can validate a plan's shape, but it cannot prove that a plugin faithfully represented the original command.
 
 A malicious or buggy wrapper can:
+
 - Omit a URL or redirect-affecting option.
 - Mishandle authentication scope.
 - Falsely label a partial translation as exact.
@@ -60,6 +61,7 @@ Examples: shell executors, Homebrew adapter, Arch adapter.
 ### UI extensions
 
 **Prohibited initially.** Plugins return structured fields only; the core owns all user-facing rendering. This prevents:
+
 - Terminal control sequence injection by plugins.
 - Phishing through fake approval prompts.
 - Confusion of reviewer by plugin-generated UI elements.

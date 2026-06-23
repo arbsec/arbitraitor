@@ -7,6 +7,7 @@
 The MVP delivers the core value proposition: **replace `curl | sh` with a safe, inspected alternative**.
 
 ### Critical Pipeline
+
 ```
 resolve policy → retrieve once → buffer in CAS → identify content
 → scan (shell AST + detection rules) → evaluate policy → verdict
@@ -14,6 +15,7 @@ resolve policy → retrieve once → buffer in CAS → identify content
 ```
 
 ### MVP Scope (must-have)
+
 1. HTTPS retrieval with SSRF/redirect/TLS policy ✅ (arbitraitor-fetch)
 2. Content-addressed immutable storage ✅ (arbitraitor-store)
 3. Shell normalization (AST, constants, decode chains) ✅ (arbitraitor-shell)
@@ -26,6 +28,7 @@ resolve policy → retrieve once → buffer in CAS → identify content
 10. CLI MVP (fetch, scan, explain commands) ❌ (arbitraitor-cli)
 
 ### Post-MVP (deferred)
+
 - YARA-X integration
 - Antivirus integrations (ClamAV, Defender)
 - Archive inspection
@@ -42,6 +45,7 @@ resolve policy → retrieve once → buffer in CAS → identify content
 ## Phases
 
 ### Phase 1: Secure Fetch Core ✅ DONE
+
 - Workspace scaffold, CI, tooling
 - Domain model types
 - HTTP retrieval with SSRF/redirect policy
@@ -50,21 +54,25 @@ resolve policy → retrieve once → buffer in CAS → identify content
 - Update verifier trait
 
 ### Phase 2: Static Analysis ✅ DONE (normalization layer)
+
 - Shell normalization (AST, constants, decode chains)
 - Execution context builder
 
 ### Phase 3: Detection + Policy (CURRENT)
+
 - Shell detection rules (29 categories)
 - Policy engine MVP
 - Analysis coordinator
 - Receipt system
 
 ### Phase 4: Integration
+
 - CLI MVP (fetch, scan, explain)
 - Safe destination release
 - End-to-end pipeline wiring
 
 ### Phase 5: Hardening
+
 - Adversarial review
 - Fuzz targets
 - Property tests for invariants
@@ -82,6 +90,7 @@ resolve policy → retrieve once → buffer in CAS → identify content
 | Wave 4C | Analysis coordinator, CLI MVP | ⏳ Blocked on 4B |
 
 ## Test Inventory
+
 - Main: 181 tests passing
 - Foundation: model (31), fetch (11), testkit (12)
 - Wave 2: core (17), update (27)
