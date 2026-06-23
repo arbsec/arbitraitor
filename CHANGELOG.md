@@ -14,6 +14,7 @@ Initial alpha release. **Not ready for production use.**
 ### Added
 
 #### Core pipeline
+
 - Content-addressed storage (CAS) with SHA-256 quarantine, immutable identity, streaming sink
 - HTTP retrieval with SSRF protection (connected-peer verification, IP literal blocking)
 - Artifact identification (content-type detection, shell shebang, archive magic)
@@ -23,6 +24,7 @@ Initial alpha release. **Not ready for production use.**
 - Configuration system (layered TOML, secret references with redaction, policy/detector integration)
 
 #### Detection
+
 - Shell script analysis (28+ detection categories)
 - PowerShell analysis (AST parser, detection rules for encoded commands, execution policy bypass, hidden windows, registry modification, credential access, process injection)
 - YARA-X scanner integration with authenticated rule packs
@@ -31,12 +33,14 @@ Initial alpha release. **Not ready for production use.**
 - Intelligence feeds (URLhaus, community submission, review workflow, transparency log)
 
 #### Execution
+
 - Mediated script execution (sandboxed bash with network isolation, resource limits, output capping)
 - Native binary execution with NativeExecutionGate opt-in
 - PowerShell execution adapter
 - Plan-bound approval (ADR-0013: token binds artifact + interpreter + network + policy)
 
 #### Plugin system
+
 - Plugin trait hierarchy (Detector, Wrapper, Intelligence, Provenance)
 - Subprocess plugin protocol (framed JSON, versioned)
 - Sandboxed subprocess executor (digest verification, env denylist, seccomp, Landlock)
@@ -44,12 +48,15 @@ Initial alpha release. **Not ready for production use.**
 - Plugin registry (filesystem discovery, manifest validation, trust tiers)
 
 #### CLI
+
 - `arbitraitor inspect`, `run`, `wrappers`, `status`, `daemon`, `unpack`, `intel`
 
 #### MCP integration
+
 - Model Context Protocol server (inspect, scan, explain, query, approve, execute)
 
 #### Infrastructure
+
 - 21 ADRs, mdBook documentation site, threat model
 - CI (Linux + macOS), Security (cargo-deny, cargo-audit), Markdown lint (rumdl)
 - Lefthook pre-commit hooks (fmt, clippy, markdown lint, conventional commits)
