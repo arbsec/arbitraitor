@@ -28,6 +28,7 @@ Each frame is preceded by an 8-byte big-endian length header:
 Sent once after process spawn to configure the plugin.
 
 **Request:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -48,6 +49,7 @@ Sent once after process spawn to configure the plugin.
 ```
 
 **Response:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -65,6 +67,7 @@ Sent once after process spawn to configure the plugin.
 Analyze an artifact.
 
 **Request:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -85,6 +88,7 @@ Analyze an artifact.
 ```
 
 **Response:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -114,6 +118,7 @@ Analyze an artifact.
 Look up an indicator in intelligence feeds.
 
 **Request:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -129,6 +134,7 @@ Look up an indicator in intelligence feeds.
 ```
 
 **Response:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -153,6 +159,7 @@ Look up an indicator in intelligence feeds.
 Clean plugin shutdown.
 
 **Request:**
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -163,6 +170,7 @@ Clean plugin shutdown.
 ```
 
 **Response:**
+
 ```json
 {
   "jsonrpc": "2.0",

@@ -90,7 +90,7 @@ Plugins are isolated using Wasmtime Component Model or subprocess protocols:
 - Subprocess plugins run with closed descriptors, clean environment, and resource limits
 - Native dynamic libraries (`.so`, `.dylib`) are not supported
 
-See the [Plugins](../plugins/overview.md) documentation for details.
+See the [Plugins](plugins/overview.md) documentation for details.
 
 ## Disclosure policy
 

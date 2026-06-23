@@ -1,0 +1,20 @@
+# rumdl configuration
+# https://github.com/rumdl/rumdl
+
+[global]
+disable = [
+    "MD013",  # Line length — not enforced
+    "MD033",  # Inline HTML — used in docs
+    "MD041",  # First line heading — ADRs start with metadata
+    "MD024",  # Duplicate headings — common in ADRs
+    "MD040",  # Code block language — will fix incrementally
+]
+
+[MD003]
+style = "atx"
+
+[MD007]
+indent = 2
+
+[MD012]
+maximum = 1

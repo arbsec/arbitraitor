@@ -65,6 +65,7 @@ Behavior that requires user profiles is an explicit **lower-assurance exception*
 ### 4. Temporary home and working directory
 
 By default:
+
 - `HOME` → temporary directory created with `0700` permissions.
 - Working directory → separate temporary directory.
 - Policy may specify known-safe paths or grant access to specific directories.
@@ -72,6 +73,7 @@ By default:
 ### 5. Controlled PATH
 
 The execution `PATH` contains only:
+
 - The system's trusted binary directories (`/usr/bin`, `/usr/local/bin` — policy-defined).
 - Explicitly granted directories.
 

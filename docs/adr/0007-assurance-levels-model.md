@@ -27,6 +27,7 @@ independently.
 Retrieval, hashing, identification, scanning, and reporting. **No execution.**
 
 Guarantees:
+
 - Complete buffering before verdict.
 - Exact artifact identity (SHA-256).
 - Configured static and reputation checks.

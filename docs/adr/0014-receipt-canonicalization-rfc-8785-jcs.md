@@ -35,6 +35,7 @@ Before canonicalization, reject:
 - Oversized values (string limit: 1 MiB, total document limit: 16 MiB).
 
 RFC 8785 mandates:
+
 - **Lexicographic key ordering** at every object level (UTF-16 code unit
   comparison).
 - **Number serialization** in the shortest round-trippable form (no trailing
@@ -53,6 +54,7 @@ RFC 8785 mandates:
 | Custom implementation | Fallback | Last resort; high risk of subtle bugs |
 
 **Selection criteria:**
+
 1. Passes official RFC 8785 test vectors.
 2. Rejects duplicate keys, invalid Unicode, non-I-JSON numbers.
 3. Deterministic output across platforms and architectures.
@@ -79,6 +81,7 @@ are signed. The `signature` object is **not** part of the signed payload.
 ### Test vectors
 
 Arbitraitor publishes official canonicalization test vectors covering:
+
 - Key ordering (including UTF-16 ordering edge cases).
 - Number formatting (integers, floats, scientific notation).
 - String escaping (control chars, surrogates, non-ASCII).

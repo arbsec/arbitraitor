@@ -239,6 +239,7 @@ docs/adr/0002-reqwest-behind-fetcher-trait.md
 States: `Proposed`, `Accepted`, `Superseded`, `Rejected`.
 
 Write an ADR when:
+
 - Adding or changing a production dependency with security implications.
 - Changing the trust model, plugin capability model, or execution context.
 - Choosing between competing approaches where reversal is expensive.

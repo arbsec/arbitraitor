@@ -12,6 +12,10 @@ pre-commit:
       run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       glob: "*.rs"
       stage_fixed: false
+    markdown-lint:
+      run: rumdl check {staged_files}
+      glob: "*.{md,markdown}"
+      stage_fixed: false
 
 commit-msg:
   commands:

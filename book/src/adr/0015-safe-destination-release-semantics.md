@@ -40,6 +40,7 @@ Define mandatory release-to-path controls. Every release operation follows this 
 ### Symlink and reparse-point defense
 
 Before writing:
+
 - `fstatat` with `AT_SYMLINK_NOFOLLOW` on POSIX to verify the destination is not a symlink.
 - Check for reparse points / junctions on Windows.
 - Reject hard links (check link count).
@@ -49,6 +50,7 @@ The parent directory handle (from step 5) ensures the path cannot be replaced wi
 ### Cross-filesystem awareness
 
 If the staging directory and destination are on different filesystems, atomic rename is impossible. Arbitraitor:
+
 1. Detects the cross-filesystem condition.
 2. Reports it as a finding.
 3. Requires explicit policy approval or `--allow-non-atomic`.

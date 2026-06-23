@@ -126,6 +126,7 @@ Enriched indicators are added to findings:
 ### URL matching
 
 URLs match if:
+
 - Exact match: `https://evil.example.com/malware.exe`
 - Domain match: any path under `evil.example.com`
 - Pattern match: configurable wildcard patterns
@@ -133,6 +134,7 @@ URLs match if:
 ### Hash matching
 
 SHA-256 hashes match exactly:
+
 - Artifact digest matches a known malware hash
 - Referenced file digests match known malware
 

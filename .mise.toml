@@ -6,6 +6,9 @@ rust = "1.96.0"
 lefthook = "1.13.0"
 cocogitto = "7.0.0"
 
+# Markdown linter
+rumdl = "latest"
+
 [env]
 RUST_BACKTRACE = "1"
 
@@ -18,6 +21,14 @@ cargo install cargo-audit --locked || true
 cargo install sccache --locked || true
 cargo install cargo-test-changed --locked || true
 """
+
+[tasks.lint-md]
+description = "Lint markdown files"
+run = "rumdl check ."
+
+[tasks.fmt-md]
+description = "Fix markdown formatting"
+run = "rumdl fmt ."
 
 [tasks.fmt]
 description = "Check formatting"
