@@ -14,3 +14,4 @@ pub mod frame;
 pub mod protocol;
 pub mod registry;
 pub mod wasm_engine;
+pub mod wasm_plugin;
