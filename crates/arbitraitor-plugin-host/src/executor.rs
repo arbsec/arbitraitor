@@ -13,8 +13,8 @@ use std::time::Duration;
 use arbitraitor_exec::EnvDenyList;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_sandbox::{
-    ProcessResourceLimits, SandboxConfig, configure_command, configure_network_isolation,
-    configure_resource_limits,
+    ProcessResourceLimits, SandboxConfig, configure_command, configure_filesystem_isolation,
+    configure_network_isolation, configure_resource_limits,
 };
 
 use crate::error::ProtocolError;
@@ -24,6 +24,7 @@ mod plugin;
 mod process;
 
 pub use plugin::SubprocessPlugin;
+use process::plugin_filesystem_rules;
 use process::{BoundedReader, configure_process_group, hash_file, plugin_resource_limits};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -186,6 +187,9 @@ impl SubprocessExecutor {
             configure_network_isolation(&mut command);
         }
         configure_command(&mut command, SandboxConfig::default());
+        let filesystem_rules =
+            plugin_filesystem_rules(&self.binary_path, self.working_directory.as_deref());
+        configure_filesystem_isolation(&mut command, &filesystem_rules);
 
         let mut child = command.spawn()?;
         // Limits are already applied in-child before execve — no race window.

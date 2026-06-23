@@ -42,6 +42,7 @@ supersede it.
 | [0018](0018-ssrf-proxy-connected-peer-verification.md) | SSRF, proxy, and connected-peer verification | Accepted | #14 |
 | [0019](0019-catch-unwind-and-panic-abort.md) | catch_unwind and panic=abort interaction | Accepted | #80 |
 | [0020](0020-subprocess-plugin-network-isolation.md) | Seccomp-BPF network isolation for subprocess plugins | Accepted | #208 |
+| [0021](0021-subprocess-plugin-filesystem-isolation.md) | Landlock filesystem isolation for subprocess plugins | Accepted | #209 |
 
 ## Format
 
