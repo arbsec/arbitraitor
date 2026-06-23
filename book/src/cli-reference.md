@@ -86,7 +86,7 @@ arbitraitor run <URL or file path> [flags]
 | `--native` | Allow native binary execution (requires `--native` gate in policy) |
 | `--interactive` | Force interactive approval prompt |
 | `--non-interactive` | Block if approval required |
-| `--policy-capability <PATH>` | Path to pre-issued approval capability |
+| `--policy <PATH>` | Path to pre-issued approval capability |
 | `--working-dir <PATH>` | Set the working directory for execution |
 | `--env <KEY=VALUE>` | Set environment variables (repeatable) |
 | `--network` | Allow network access during execution |
@@ -103,7 +103,7 @@ arbitraitor run https://example.com/install.sh --non-interactive
 
 # With pre-approved capability
 arbitraitor run https://example.com/install.sh \
-  --policy-capability ./approved-capability.json
+  --policy ./approved-capability.json
 
 # Script with network and filesystem access
 arbitraitor run install.sh --network --fs-grant /tmp
