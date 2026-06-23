@@ -27,6 +27,9 @@ Cargo.lock.bak
 *.sublime-workspace
 .cache/
 
+# mdBook output
+book/book/
+
 # Private specs (not part of the repo)
 .spec/
 .serena/
