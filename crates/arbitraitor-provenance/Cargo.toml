@@ -18,3 +18,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }

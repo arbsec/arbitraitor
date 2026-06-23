@@ -17,3 +17,4 @@ arbitraitor-model = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }

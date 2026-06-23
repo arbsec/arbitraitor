@@ -46,6 +46,7 @@ wasmtime = { version = ">=29", default-features = false, features = [
     "parallel-compilation",
     "cache",
 ] }
+arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

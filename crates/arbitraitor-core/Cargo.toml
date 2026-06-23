@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
 proptest = { workspace = true }

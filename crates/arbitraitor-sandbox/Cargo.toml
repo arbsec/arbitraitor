@@ -30,3 +30,4 @@ multiple_crate_versions = "allow"
 [dependencies]
 libc = { workspace = true }
 rustix = { workspace = true }
+arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
