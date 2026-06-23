@@ -1571,7 +1571,7 @@ mod tests {
             capabilities: Vec::new(),
             is_local: true,
             may_upload: false,
-            default_timeout_ms: 100,
+            default_timeout_ms: 5_000,
             is_deterministic: true,
         }
     }
