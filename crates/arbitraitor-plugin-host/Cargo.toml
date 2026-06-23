@@ -31,9 +31,25 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+# ADR-0006: Wasmtime Component Model plugin runtime. `default-features = false`
+# disables WASI, ambient filesystem, networking, and all ambient capabilities —
+# plugins receive zero capabilities by default. Features enabled:
+#   cranelift          — optimizing compiler (required for component-model)
+#   runtime            — Engine, Store, and instance management
+#   component-model    — Component Model support (ADR-0006)
+#   parallel-compilation — speed up compilation of large components
+#   cache              — on-disk compilation cache to avoid recompilation
+wasmtime = { version = ">=29", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "component-model",
+    "parallel-compilation",
+    "cache",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wat = "1"
 wit-parser = "0.252"
 
 [build-dependencies]
