@@ -50,6 +50,7 @@ This installs the correct versions of Rust, lefthook, cocogitto, and all other t
    cargo clippy --workspace --all-targets --all-features -- -D warnings
    cargo check --workspace --all-targets --all-features
    cargo nextest run
+   rumdl check .
    ```
 
 5. **Open a PR** with a Conventional Commits title, security impact assessment, and linked issue.
