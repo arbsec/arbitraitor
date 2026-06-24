@@ -24,6 +24,7 @@
 - [Intelligence](./intelligence/overview.md)
   - [Feeds](./intelligence/feeds.md)
   - [Community Submissions](./intelligence/submissions.md)
+<!-- markdownlint-disable MD057 --><!-- ADR links resolve at build time after docs.yml copies docs/adr/ to book/src/adr/ -->
 - [Architecture Decision Records](./adr/README.md)
   - [ADR 0001: Rust 2024 and toolchain policy](./adr/0001-rust-2024-and-toolchain-policy.md)
   - [ADR 0002: Workspace structure and crate boundaries](./adr/0002-workspace-structure-and-crate-boundaries.md)
@@ -46,5 +47,6 @@
   - [ADR 0019: catch_unwind and panic=abort interaction](./adr/0019-catch-unwind-and-panic-abort.md)
   - [ADR 0020: Seccomp-BPF network isolation for subprocess plugins](./adr/0020-subprocess-plugin-network-isolation.md)
   - [ADR 0021: Landlock filesystem isolation for subprocess plugins](./adr/0021-subprocess-plugin-filesystem-isolation.md)
+<!-- markdownlint-enable MD057 -->
 - [Contributing](./contributing.md)
 - [Security Policy](./security.md)

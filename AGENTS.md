@@ -86,7 +86,7 @@ Every PR must update documentation to reflect the changes made:
 - **Public API changes** (new public types, functions, traits): add or update rustdoc comments. All crates use `#![warn(missing_docs)]` — no undocumented public items.
 - **New features** (new CLI commands, new config sections, new protocol messages): update the relevant section in the user guide (`docs/guide/` or `README.md`).
 - **Architecture changes** (new crates, new ADRs, changed boundaries): update [Architecture Decision Records](docs/adr/README.md) and [conventions](docs/conventions.md).
-- **Security changes** (sandboxing, policy, approval flow): update the threat model in `docs/threat-model/` and note the change in the PR description.
+- **Security changes** (sandboxing, policy, approval flow): note the security impact in the PR description.
 - **New dependencies**: document justification in the PR description per the [dependency admission checklist](docs/conventions.md#dependencies).
 
 **README.md** must accurately reflect the current state of the project. If a PR changes what the user sees (CLI output, config format, installation), the README must be updated in the same PR.

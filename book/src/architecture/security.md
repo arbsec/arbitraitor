@@ -82,6 +82,7 @@ Arbitraitor does not assume:
 
 ## Assurance levels
 
+<!-- markdownlint-disable-next-line MD057 -->
 Every operation reports which assurance level was in effect. These are documented in detail in [ADR 0007](../adr/0007-assurance-levels-model.md).
 
 | Level | Name | What it means |
@@ -117,6 +118,7 @@ Nonce:                op-12345
 
 Any change to these fields invalidates the approval. If the script is modified, the network policy changes, or the interpreter shifts, fresh approval is required.
 
+<!-- markdownlint-disable-next-line MD057 -->
 See [ADR 0013](../adr/0013-plan-bound-approval-capability.md) for the full approval model.
 
 ## No-root invariant
@@ -125,6 +127,7 @@ Arbitraitor analysis, parsing, rule evaluation, and plugin execution **never** r
 
 Elevation requests (`sudo`, `su`, `doas`, `pkexec`, UAC) within a script are detected by shell analysis and blocked during mediated execution.
 
+<!-- markdownlint-disable-next-line MD057 -->
 See [ADR 0009](../adr/0009-privilege-separation-no-root-invariant.md) for the full privilege separation model.
 
 ## Sandbox capabilities
