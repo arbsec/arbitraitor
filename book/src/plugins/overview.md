@@ -23,6 +23,7 @@ Plugins are classified by trust level:
 | **First-party** | Developed by ArbSec team | Always loaded, code reviewed |
 | **Community** | Submitted by users | Disabled by default in enforcement mode |
 
+<!-- markdownlint-disable-next-line MD057 -->
 See [ADR 0011](../adr/0011-plugin-trust-classification.md) for the full trust classification model.
 
 ## Plugin manifest
