@@ -1,5 +1,9 @@
 # Getting Started
 
+> **Pre-alpha software.** Commands, flags, and output formats may change
+> between versions. Examples in this guide reflect the current development
+> state, not a stable release.
+
 This guide walks you through installing Arbitraitor and running your first inspection and execution.
 
 ## Prerequisites
