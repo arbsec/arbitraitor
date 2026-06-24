@@ -1,6 +1,7 @@
 # Arbitraitor
 
-**Status:** Pre-alpha
+> **Pre-alpha software.** The CLI flags, configuration format, receipt schemas,
+> and policy syntax are subject to breaking changes. Do not use in production.
 
 Arbitraitor is a policy-enforced download, inspection, provenance verification, and execution gate for untrusted content. It replaces the `curl | sh` pattern with a controlled pipeline that makes trust decisions explicit and provides explainable findings.
 
