@@ -159,15 +159,10 @@ arbitraitor run https://example.com/install.sh \
 
 ### With pre-issued capability
 
-```sh
-# Issue capability first
-arbitraitor approve receipt.json --output capability.json
-
-# Later, in CI
-arbitraitor run https://example.com/install.sh \
-  --policy ./capability.json \
-  --receipt ./receipt.json
-```
+> **Note:** Pre-issued capability issuance (`approve` subcommand) is not yet
+> implemented. The `--policy` flag accepts a capability file when available,
+> but there is currently no CLI command to create one. This will be added in a
+> future release.
 
 ### Script with limited access
 

@@ -8,11 +8,11 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 |---------|-------------|
 | `arbitraitor inspect` | Retrieve and analyze an artifact without executing it |
 | `arbitraitor run` | Execute the full pipeline with approval flow |
-| `arbitraitor wrappers` | Manage curl/wget wrapper shims |
+| `arbitraitor daemon` | Unix socket daemon with background queue (start/stop/status) |
+| `arbitraitor unpack` | Unpack an archive to a directory for inspection |
+| `arbitraitor intel` | Manage local threat-intelligence feeds (update) |
 | `arbitraitor status` | Show system health and configured detectors |
-| `arbitraitor approve` | Issue an approval capability for a previously inspected artifact |
-| `arbitraitor execute` | Execute using a pre-issued approval capability |
-| `arbitraitor receipt` | Verify and inspect a receipt file |
+| `arbitraitor wrappers` | Manage curl/wget wrapper shims |
 
 ## Global flags
 
