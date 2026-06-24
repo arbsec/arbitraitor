@@ -4,7 +4,7 @@
 
 A policy-enforced download, inspection, provenance verification, and execution gate for untrusted content.
 
-[![CI](https://github.com/arbsec/arbitraitor/actions/workflows/ci.yml/badge.svg)](https://github.com/arbsec/arbitraitor/actions/workflows/ci.yml)
+[![Code](https://github.com/arbsec/arbitraitor/actions/workflows/code.yml/badge.svg)](https://github.com/arbsec/arbitraitor/actions/workflows/code.yml)
 [![Security](https://github.com/arbsec/arbitraitor/actions/workflows/security.yml/badge.svg)](https://github.com/arbsec/arbitraitor/actions/workflows/security.yml)
 
 Arbitraitor separates retrieval, trust, inspection, and execution into a controlled pipeline:
