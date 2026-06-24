@@ -1,27 +1,24 @@
-name: CI
+name: Code
 
 on:
   push:
     branches: [main]
-    paths: &ci_paths
+    paths: &code_paths
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
       - ".mise.toml"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/code.yml"
       - "wit/**"
       - "**/*.wit"
-      - "**/*.md"
-      - "rumdl.toml"
-      - "lefthook.yml"
   pull_request:
-    paths: *ci_paths
+    paths: *code_paths
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: code-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -43,16 +40,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
-
-  markdown-lint:
-    name: Markdown Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
-      - name: Lint markdown
-        run: rumdl check .
 
   test-changed:
     name: Test Changed
@@ -113,19 +100,3 @@ jobs:
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
       - name: Build docs
         run: cargo doc --workspace --all-features --no-deps
-
-  book-build:
-    name: Book Build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
-      - name: Install mdBook
-        run: cargo install mdbook --locked
-      - name: Install mdbook-mermaid
-        run: cargo install mdbook-mermaid --locked
-      - name: Copy ADRs to book
-        run: mkdir -p book/src/adr && cp -r docs/adr/* book/src/adr/
-      - name: Build book
-        run: mdbook build book
