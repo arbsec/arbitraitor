@@ -28,7 +28,7 @@ arbitraitor/                   # Workspace root (Cargo.toml)
 │   ├── arbitraitor-plugin-host/   # Plugin runtime
 │   └── arbitraitor-daemon/    # Unix socket daemon
 ├── book/                      # mdBook documentation
-├── docs/                      # ADRs, conventions, threat model
+├── docs/                      # ADRs, conventions
 ├── wit/                       # WIT interface definitions
 ├── rules/                     # YARA-X rule packs
 ├── schemas/                   # JSON schemas

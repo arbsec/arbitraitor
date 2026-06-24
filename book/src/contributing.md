@@ -31,8 +31,7 @@ arbitraitor/
 ├── crates/           # All workspace crates
 ├── book/             # mdBook documentation
 ├── docs/
-│   ├── adr/          # Architecture decision records
-│   └── threat-model/ # Security threat model
+│   └── adr/          # Architecture decision records
 ├── wit/              # WIT interface definitions
 ├── rules/            # YARA-X rule packs
 └── schemas/          # JSON schemas
