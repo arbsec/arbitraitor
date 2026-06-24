@@ -126,6 +126,6 @@ jobs:
       - name: Install mdbook-mermaid
         run: cargo install mdbook-mermaid --locked
       - name: Copy ADRs to book
-        run: cp -r docs/adr/* book/src/adr/
+        run: mkdir -p book/src/adr && cp -r docs/adr/* book/src/adr/
       - name: Build book
         run: mdbook build book
