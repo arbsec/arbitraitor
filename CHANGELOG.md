@@ -57,7 +57,7 @@ Initial alpha release. **Not ready for production use.**
 
 #### Infrastructure
 
-- 21 ADRs, mdBook documentation site, threat model
+- 21 ADRs, mdBook documentation site
 - CI (Linux + macOS), Security (cargo-deny, cargo-audit), Markdown lint (rumdl)
 - Lefthook pre-commit hooks (fmt, clippy, markdown lint, conventional commits)
 

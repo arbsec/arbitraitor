@@ -42,8 +42,6 @@ Arbitraitor assumes:
 - **Content publishers may be compromised.** A legitimate domain can serve malicious content.
 - **Human operators make mistakes.** Arbitraitor enforces policy even when users intend to bypass it.
 
-For the full threat model, see the threat model documentation in `docs/threat-model/`.
-
 ## Security boundaries
 
 ```

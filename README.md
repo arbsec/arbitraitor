@@ -156,7 +156,6 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 - [Architecture Decision Records](docs/adr/README.md) — 21 accepted ADRs
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - [MVP roadmap](docs/mvp-roadmap.md) — milestone breakdown
-- [Threat model](docs/threat-model/) — security analysis
 - Crate documentation: `cargo doc --workspace --open`
 
 ## Status
