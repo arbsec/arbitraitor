@@ -8,6 +8,7 @@ disable = [
     "MD041",  # First line heading — ADRs start with metadata
     "MD024",  # Duplicate headings — common in ADRs
     "MD040",  # Code block language — will fix incrementally
+    "MD057",  # Relative link existence — ADRs are copied at build time, not in source
 ]
 
 [MD003]

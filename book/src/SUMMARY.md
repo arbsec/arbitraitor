@@ -44,5 +44,7 @@
   - [ADR 0017: Monotonic project configuration](./adr/0017-monotonic-project-configuration.md)
   - [ADR 0018: SSRF, proxy, and connected-peer verification](./adr/0018-ssrf-proxy-connected-peer-verification.md)
   - [ADR 0019: catch_unwind and panic=abort interaction](./adr/0019-catch-unwind-and-panic-abort.md)
+  - [ADR 0020: Seccomp-BPF network isolation for subprocess plugins](./adr/0020-subprocess-plugin-network-isolation.md)
+  - [ADR 0021: Landlock filesystem isolation for subprocess plugins](./adr/0021-subprocess-plugin-filesystem-isolation.md)
 - [Contributing](./contributing.md)
 - [Security Policy](./security.md)

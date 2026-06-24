@@ -30,6 +30,9 @@ Cargo.lock.bak
 # mdBook output
 book/book/
 
+# mdBook ADR build artifacts (copied from docs/adr/ by docs.yml)
+book/src/adr/
+
 # Private specs (not part of the repo)
 .spec/
 .serena/
