@@ -27,14 +27,17 @@ Type the plan digest prefix to approve. The script then runs in a sandboxed bash
 
 ## Exit codes
 
-| Code | Meaning                                |
-|------|----------------------------------------|
-| 0    | Success (script executed and exited 0) |
-| 1    | Script execution failed (non-zero exit)|
-| 2    | Approval denied or required but skipped|
-| 3    | Fetch error                            |
-| 4    | Detection error (scanner failure)      |
-| 5    | Internal error                         |
+Arbitraitor uses its own exit codes to report the verdict — these are
+**not** the exit code of the executed script.
+
+| Code | Meaning                                                       |
+|------|---------------------------------------------------------------|
+| 0    | Pass — artifact passed all policy checks                      |
+| 1    | Warn — artifact has findings, human review recommended        |
+| 2    | Incomplete — analysis could not complete, blocking by default |
+| 3    | Block — artifact blocked by policy                            |
+| 4    | Error — fatal error (network, I/O, configuration)             |
+| 5    | Approval required in non-interactive mode                     |
 
 ## Non-interactive mode
 
@@ -44,7 +47,7 @@ In CI or automated contexts where no human can approve:
 arbitraitor run https://example.com/install.sh --non-interactive
 ```
 
-If the verdict is Prompt or Block, the command exits with code 2 immediately — it **never** silently approves.
+If the verdict is Prompt or Block, the command exits with code 5 immediately — it **never** silently approves.
 
 ## Native binary execution
 
