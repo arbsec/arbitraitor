@@ -48,5 +48,6 @@
   - [ADR 0020: Seccomp-BPF network isolation for subprocess plugins](./adr/0020-subprocess-plugin-network-isolation.md)
   - [ADR 0021: Landlock filesystem isolation for subprocess plugins](./adr/0021-subprocess-plugin-filesystem-isolation.md)
 <!-- markdownlint-enable MD057 -->
+- [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)
 - [Security Policy](./security.md)
