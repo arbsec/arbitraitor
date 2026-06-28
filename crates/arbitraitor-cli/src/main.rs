@@ -4,6 +4,7 @@
 
 mod run;
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -58,6 +59,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Inspect(Box<InspectCommand>),
+    #[command(hide = true)]
+    Fetch(FetchCommand),
     Run(Box<run::RunCommand>),
     Daemon(DaemonCommand),
     Unpack(UnpackCommand),
@@ -108,6 +111,12 @@ struct InspectCommand {
     /// Output format for the explainability report (implies --explain).
     #[arg(long, value_enum)]
     format: Option<ExplainFormat>,
+}
+
+#[derive(Args)]
+struct FetchCommand {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 /// Output format for the `--explain` report.
@@ -233,7 +242,7 @@ struct CosignInput {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli_from_invocation();
 
     let level = match cli.verbose {
         0 => "warn",
@@ -292,6 +301,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Command::Fetch(command) => {
+            wrapper_fetch(&command, &config).await?;
+        }
         Command::Run(command) => {
             let exit_code = run::run(*command, &config).await?;
             if exit_code != 0 {
@@ -316,6 +328,57 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_cli_from_invocation() -> Cli {
+    parse_cli_from_args(std::env::args_os())
+}
+
+fn parse_cli_from_args<I, T>(args: I) -> Cli
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let Some(program) = args.first() else {
+        return Cli::parse_from([OsString::from("arbitraitor")]);
+    };
+    let wrapper_target = Path::new(program)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(WrapperTarget::from_binary_name);
+    if wrapper_target.is_none() {
+        return Cli::parse_from(args);
+    }
+
+    let mut rewritten = Vec::with_capacity(args.len() + 1);
+    rewritten.push(OsString::from("arbitraitor"));
+    rewritten.push(OsString::from("fetch"));
+    rewritten.extend(args.into_iter().skip(1));
+    Cli::parse_from(rewritten)
+}
+
+async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
+    let url = wrapper_url_argument(&command.args).ok_or_else(|| {
+        miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
+    })?;
+    inspect(
+        url,
+        None,
+        None,
+        None,
+        None,
+        SignatureInputs::default(),
+        config,
+        None,
+    )
+    .await
+}
+
+fn wrapper_url_argument(args: &[String]) -> Option<&str> {
+    args.iter()
+        .map(String::as_str)
+        .find(|arg| arg.starts_with("http://") || arg.starts_with("https://"))
 }
 
 async fn daemon(command: DaemonCommand) -> Result<()> {
@@ -1018,7 +1081,8 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, write_status_text,
+        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, parse_cli_from_args,
+        wrapper_url_argument, write_status_text,
     };
     use clap::Parser;
     use std::fs;
@@ -1046,6 +1110,7 @@ mod tests {
                 );
             }
             Command::Daemon(_)
+            | Command::Fetch(_)
             | Command::Unpack(_)
             | Command::Intel(_)
             | Command::Run(_)
@@ -1102,6 +1167,7 @@ mod tests {
                 );
             }
             Command::Daemon(_)
+            | Command::Fetch(_)
             | Command::Unpack(_)
             | Command::Intel(_)
             | Command::Run(_)
@@ -1140,6 +1206,7 @@ mod tests {
                 assert_eq!(command.cosign_issuer, ["https://issuer.example.test"]);
             }
             Command::Daemon(_)
+            | Command::Fetch(_)
             | Command::Unpack(_)
             | Command::Intel(_)
             | Command::Run(_)
@@ -1221,6 +1288,7 @@ mod tests {
             }
             Command::Inspect(_)
             | Command::Daemon(_)
+            | Command::Fetch(_)
             | Command::Intel(_)
             | Command::Run(_)
             | Command::Status(_)
@@ -1503,6 +1571,37 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_invocation_parses_as_fetch_wrapper() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = parse_cli_from_args([
+            "/tmp/shims/curl",
+            "-fsSL",
+            "https://example.test/install.sh",
+        ]);
+
+        match cli.command {
+            Command::Fetch(fetch) => {
+                assert_eq!(fetch.args, ["-fsSL", "https://example.test/install.sh"]);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_url_argument_ignores_options() -> Result<(), Box<dyn std::error::Error>> {
+        let args = [
+            "-o".to_owned(),
+            "install.sh".to_owned(),
+            "https://example.test/install.sh".to_owned(),
+        ];
+
+        let url = wrapper_url_argument(&args).ok_or("missing wrapper URL")?;
+
+        assert_eq!(url, "https://example.test/install.sh");
         Ok(())
     }
 
