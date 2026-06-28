@@ -21,7 +21,7 @@ use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetche
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
 use arbitraitor_model::finding::{Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
-use arbitraitor_model::verdict::{Confidence, Severity};
+use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use arbitraitor_provenance::{
     SignatureSystem, SignatureVerification, parse_minisign_public_key, verify_cosign,
     verify_minisign,
@@ -35,6 +35,7 @@ use arbitraitor_wrapper::shim::{
     ShimConfig, ShimError, WrapperTarget, check_shims, generate_shell_init, install_shims,
     uninstall_shims,
 };
+use arbitraitor_wrapper::{parse_curl_args, wget::translate_wget_args};
 use arbitraitor_yarax::{RulePackManager, RuleSource, YaraDetector};
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -114,7 +115,10 @@ struct InspectCommand {
 }
 
 #[derive(Args)]
+#[command(disable_help_flag = true)]
 struct FetchCommand {
+    #[arg(long, value_name = "curl|wget")]
+    tool: Option<String>,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -351,18 +355,34 @@ where
         return Cli::parse_from(args);
     }
 
-    let mut rewritten = Vec::with_capacity(args.len() + 1);
+    let Some(wrapper_target) = wrapper_target else {
+        return Cli::parse_from(args);
+    };
+    let mut rewritten = Vec::with_capacity(args.len() + 4);
     rewritten.push(OsString::from("arbitraitor"));
     rewritten.push(OsString::from("fetch"));
+    rewritten.push(OsString::from("--tool"));
+    rewritten.push(OsString::from(wrapper_target.binary_name()));
+    rewritten.push(OsString::from("--"));
     rewritten.extend(args.into_iter().skip(1));
     Cli::parse_from(rewritten)
 }
 
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
-    let url = wrapper_url_argument(&command.args).ok_or_else(|| {
+    let target = wrapper_fetch_target(command.tool.as_deref())?;
+    let url = wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
         miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
     })?;
-    inspect(
+    if matches!(target, Some(WrapperTarget::Curl)) {
+        let parsed = parse_curl_args(&command.args).into_diagnostic()?;
+        if !parsed.unsupported_options.is_empty() {
+            miette::bail!(
+                "unsupported curl wrapper option: {}",
+                parsed.unsupported_options.join(", ")
+            );
+        }
+    }
+    let verdict = inspect(
         url,
         None,
         None,
@@ -372,13 +392,44 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         config,
         None,
     )
-    .await
+    .await?;
+    enforce_wrapper_verdict(verdict)
 }
 
-fn wrapper_url_argument(args: &[String]) -> Option<&str> {
+fn wrapper_fetch_target(tool: Option<&str>) -> Result<Option<WrapperTarget>> {
+    tool.map(|name| {
+        WrapperTarget::from_binary_name(name)
+            .ok_or_else(|| miette::miette!("unsupported wrapper target: {name}"))
+    })
+    .transpose()
+}
+
+fn enforce_wrapper_verdict(verdict: Verdict) -> Result<()> {
+    if verdict == Verdict::Pass {
+        return Ok(());
+    }
+    miette::bail!("wrapper rejected artifact with verdict {verdict:?}")
+}
+
+fn wrapper_url_argument<'a>(tool: Option<&str>, args: &'a [String]) -> Option<&'a str> {
+    match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl) => curl_url_argument(args),
+        Some(WrapperTarget::Wget) => wget_url_argument(args),
+        None => curl_url_argument(args).or_else(|| wget_url_argument(args)),
+    }
+}
+
+fn curl_url_argument(args: &[String]) -> Option<&str> {
+    let parsed = parse_curl_args(args).ok()?;
+    let url = parsed.url.as_deref()?;
+    args.iter().map(String::as_str).find(|arg| *arg == url)
+}
+
+fn wget_url_argument(args: &[String]) -> Option<&str> {
+    let parsed = translate_wget_args(args).ok()?;
     args.iter()
         .map(String::as_str)
-        .find(|arg| arg.starts_with("http://") || arg.starts_with("https://"))
+        .find(|arg| *arg == parsed.url.as_str())
 }
 
 async fn daemon(command: DaemonCommand) -> Result<()> {
@@ -704,7 +755,7 @@ async fn inspect(
     signatures: SignatureInputs,
     config: &Config,
     explain_format: Option<ExplainFormat>,
-) -> Result<()> {
+) -> Result<Verdict> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let fetch_policy = FetchPolicy {
         total_timeout: Duration::from_secs(config.fetch.total_timeout_secs),
@@ -788,7 +839,7 @@ async fn inspect(
         std::fs::write(path, json).into_diagnostic()?;
     }
 
-    Ok(())
+    Ok(result.verdict)
 }
 
 fn analysis_coordinator(
@@ -1081,9 +1132,10 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, parse_cli_from_args,
-        wrapper_url_argument, write_status_text,
+        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, enforce_wrapper_verdict,
+        parse_cli_from_args, wrapper_url_argument, write_status_text,
     };
+    use arbitraitor_model::verdict::Verdict;
     use clap::Parser;
     use std::fs;
     use std::io::{Cursor, Write};
@@ -1584,7 +1636,49 @@ mod tests {
 
         match cli.command {
             Command::Fetch(fetch) => {
+                assert_eq!(fetch.tool.as_deref(), Some("curl"));
                 assert_eq!(fetch.args, ["-fsSL", "https://example.test/install.sh"]);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_invocation_treats_help_as_curl_arg() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = parse_cli_from_args([
+            "/tmp/shims/curl",
+            "--help",
+            "https://example.test/install.sh",
+        ]);
+
+        match cli.command {
+            Command::Fetch(fetch) => {
+                assert_eq!(fetch.tool.as_deref(), Some("curl"));
+                assert_eq!(fetch.args, ["--help", "https://example.test/install.sh"]);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_invocation_treats_config_as_curl_arg() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = parse_cli_from_args([
+            "/tmp/shims/curl",
+            "--config",
+            "curlrc",
+            "https://example.test/install.sh",
+        ]);
+
+        assert!(cli.config.is_none());
+        match cli.command {
+            Command::Fetch(fetch) => {
+                assert_eq!(fetch.tool.as_deref(), Some("curl"));
+                assert_eq!(
+                    fetch.args,
+                    ["--config", "curlrc", "https://example.test/install.sh"]
+                );
             }
             _ => return Err("parsed wrong command".into()),
         }
@@ -1599,9 +1693,54 @@ mod tests {
             "https://example.test/install.sh".to_owned(),
         ];
 
-        let url = wrapper_url_argument(&args).ok_or("missing wrapper URL")?;
+        let url = wrapper_url_argument(Some("curl"), &args).ok_or("missing wrapper URL")?;
 
         assert_eq!(url, "https://example.test/install.sh");
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_url_argument_uses_curl_parser_for_url_valued_options()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let args = [
+            "--proxy".to_owned(),
+            "https://example.test/proxy".to_owned(),
+            "https://www.rust-lang.org/".to_owned(),
+        ];
+
+        let url = wrapper_url_argument(Some("curl"), &args).ok_or("missing wrapper URL")?;
+
+        assert_eq!(url, "https://www.rust-lang.org/");
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_url_argument_consumes_unsupported_curl_option_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let args = [
+            "--config".to_owned(),
+            "curlrc".to_owned(),
+            "https://example.test/install.sh".to_owned(),
+        ];
+
+        let url = wrapper_url_argument(Some("curl"), &args).ok_or("missing wrapper URL")?;
+
+        assert_eq!(url, "https://example.test/install.sh");
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_verdict_passes_only_on_pass() -> Result<(), Box<dyn std::error::Error>> {
+        enforce_wrapper_verdict(Verdict::Pass)?;
+        for verdict in [
+            Verdict::Warn,
+            Verdict::Prompt,
+            Verdict::Block,
+            Verdict::Error,
+            Verdict::Incomplete,
+        ] {
+            assert!(enforce_wrapper_verdict(verdict).is_err());
+        }
         Ok(())
     }
 
