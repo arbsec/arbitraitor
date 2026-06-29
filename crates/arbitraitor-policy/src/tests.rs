@@ -7,6 +7,7 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
 use crate::{EvalContext, PolicyEngine};
+use arbitraitor_model::origin::CallerOrigin;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -692,6 +693,58 @@ action = "block"
 all = [{ field = "finding.severity", equals = "high", one_of = ["high"] }]
 "#;
     assert!(PolicyEngine::load(policy).is_err());
+}
+
+#[test]
+fn caller_origin_field_blocks_agent_session() {
+    let policy = r#"
+version = 1
+[network]
+require_https = false
+
+[[rules]]
+id = "block-agent"
+action = "block"
+[rules.when]
+all = [{ field = "context.caller_origin", equals = "agent_session" }]
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+    let ctx = EvalContext::new(false)
+        .with_https(true)
+        .with_caller_origin(CallerOrigin::AgentSession);
+    let verdict = engine.evaluate(&[], &ctx);
+    assert_eq!(verdict, Verdict::Block);
+}
+
+#[test]
+fn caller_origin_passes_for_human_tty() {
+    let policy = r#"
+version = 1
+[network]
+require_https = false
+
+[[rules]]
+id = "block-agent"
+action = "block"
+[rules.when]
+all = [{ field = "context.caller_origin", equals = "agent_session" }]
+
+[defaults]
+action = "pass"
+non_interactive_prompt_action = "pass"
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+    let ctx = EvalContext::new(false)
+        .with_https(true)
+        .with_caller_origin(CallerOrigin::HumanTty);
+    let verdict = engine.evaluate(&[], &ctx);
+    assert_ne!(verdict, Verdict::Block);
+}
+
+#[test]
+fn caller_origin_defaults_to_unknown() {
+    let ctx = EvalContext::default();
+    assert_eq!(ctx.caller_origin, CallerOrigin::Unknown);
 }
 
 #[test]

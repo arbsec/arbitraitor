@@ -343,6 +343,10 @@ fn resolve_context_field(name: &str, context: &EvalContext) -> FieldValue {
         "is_https" => FieldValue::Bool(context.is_https),
         "is_private_network" => FieldValue::Bool(context.is_private_network),
         "is_interactive" => FieldValue::Bool(context.is_interactive),
+        "caller_origin" => FieldValue::Text {
+            canonical: normalize_str(context.caller_origin.as_str()),
+            rank: None,
+        },
         "source_url" => match &context.source_url {
             Some(url) => FieldValue::Text {
                 canonical: normalize_str(url),
@@ -580,6 +584,7 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         "is_https",
         "is_private_network",
         "is_interactive",
+        "caller_origin",
         "source_url",
         "artifact_type",
     ];
