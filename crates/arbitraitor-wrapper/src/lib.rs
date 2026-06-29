@@ -217,7 +217,14 @@ fn release_path(args: &CurlArgs, url: &str) -> Result<Option<String>, WrapperErr
     Ok(None)
 }
 
-fn remote_name_from_url(url: &str) -> Result<String, WrapperError> {
+/// Derives a filename from the last path segment of a URL, stripping
+/// query and fragment components.
+///
+/// # Errors
+///
+/// Returns [`WrapperError::InvalidArguments`] if the URL has no
+/// filename component (e.g. `https://example.com/`).
+pub fn remote_name_from_url(url: &str) -> Result<String, WrapperError> {
     let path_without_query = url.split(['?', '#']).next().unwrap_or(url);
     let name = path_without_query
         .rsplit('/')

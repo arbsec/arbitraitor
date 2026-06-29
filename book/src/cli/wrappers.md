@@ -125,3 +125,21 @@ arbitraitor wrappers install --mode run
 - Wrappers do not grant automatic approval. Any script requiring approval still pauses for human input.
 - Network access during wrapper execution is controlled by the active policy.
 - Wrappers log every intercepted download to the Arbitraitor audit trail.
+
+## Output behavior on Pass verdict
+
+When the inspection verdict is **Pass**, the wrapper emits the fetched artifact bytes transparently — matching real `curl`/`wget` semantics:
+
+| Flags | Destination |
+|-------|-------------|
+| (none) | Raw bytes to **stdout** (pipe semantics: `arbitraitor wrap curl -- URL \| bash` works) |
+| `-o <file>` / `--output <file>` | Bytes written to the specified file |
+| `-O` / `--remote-name` | Bytes written to a file named after the URL's last path segment |
+| wget `-O <file>` | Same as curl `-o <file>` |
+
+When the verdict is anything other than Pass (Warn, Prompt, Block, Error, Incomplete):
+
+- **Nothing is written to stdout** — downstream consumers receive no bytes.
+- The wrapper exits non-zero.
+
+This means `arbitraitor wrap curl -- URL | bash` is safe by construction: `bash` receives input only when the artifact passed all configured checks.
