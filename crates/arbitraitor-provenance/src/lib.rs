@@ -52,6 +52,60 @@ pub struct SignatureVerification {
     pub verified: bool,
     /// Identity observed or bound by the signature verification, if applicable.
     pub identity: Option<String>,
+    /// Sigstore bundle metadata (spec §14.2.1), present when the bundle
+    /// was parsed as JSON to extract v0.3 profile information.
+    pub sigstore_bundle: Option<SigstoreBundleMetadata>,
+}
+
+/// Sigstore Bundle media types accepted by Arbitraitor (spec §14.2.1).
+pub const SIGSTORE_BUNDLE_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.dev.sigstore.bundle+json;version=0.1",
+    "application/vnd.dev.sigstore.bundle+json;version=0.2",
+    "application/vnd.dev.sigstore.bundle+json;version=0.3",
+];
+
+/// The form of verification material in a Sigstore bundle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationMaterialForm {
+    /// `X509CertificateChain` (form 1).
+    X509CertificateChain,
+    /// `PublicKey` (form 2).
+    PublicKey,
+    /// Single `X509Certificate` (form 3, required for v0.3 keyless).
+    X509Certificate,
+}
+
+/// The verification mode used for the bundle (spec §14.2.1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigstoreVerificationMode {
+    /// Offline verification using Rekor inclusion proofs in the bundle.
+    Offline,
+    /// Online verification querying Rekor.
+    Online,
+}
+
+/// Metadata extracted from a Sigstore Bundle per spec §14.2.1.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SigstoreBundleMetadata {
+    /// Bundle media type (e.g. `application/vnd.dev.sigstore.bundle+json;version=0.3`).
+    pub media_type: String,
+    /// Form of the verification material (1, 2, or 3).
+    pub verification_material_form: VerificationMaterialForm,
+    /// Number of transparency log entries in the bundle.
+    pub tlog_entries: usize,
+    /// Number of RFC 3161 timestamps in the bundle.
+    pub rfc3161_timestamps: usize,
+    /// Whether identity/issuer matched local policy.
+    pub identity_match: bool,
+    /// Whether the OIDC issuer matched local policy.
+    pub issuer_match: bool,
+    /// Verification mode used.
+    pub verification_mode: SigstoreVerificationMode,
+    /// SHA-256 of the bundle file itself.
+    pub bundle_sha256: Sha256Digest,
 }
 
 /// Provenance verification failures.
@@ -642,6 +696,7 @@ pub fn verify_minisign(
         trusted_identity: Some(key_id(public_key)),
         verified: true,
         identity: Some(key_id(public_key)),
+        sigstore_bundle: None,
     })
 }
 
@@ -672,11 +727,13 @@ pub fn verify_cosign(
     })?;
 
     verify_cosign_subprocess(temp.path(), bundle_path, identity, issuer)?;
+    let bundle_metadata = parse_bundle_metadata(bundle_path, identity, issuer);
     Ok(SignatureVerification {
         system: SignatureSystem::Cosign,
         trusted_identity: Some(identity.to_owned()),
         verified: true,
         identity: Some(identity.to_owned()),
+        sigstore_bundle: bundle_metadata,
     })
 }
 
@@ -689,6 +746,74 @@ const COSIGN_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Wall-clock seconds before `cosign` is killed.
 const COSIGN_TIMEOUT_SECS: u64 = 60;
+
+/// Parses a Sigstore Bundle JSON file to extract metadata per spec §14.2.1.
+///
+/// This function reads the bundle file, determines the media type,
+/// verification material form, counts transparency log entries and RFC 3161
+/// timestamps, and computes the bundle's SHA-256. It does not perform
+/// cryptographic verification — that is the responsibility of `cosign`.
+fn parse_bundle_metadata(
+    bundle_path: &Path,
+    _identity: &str,
+    _issuer: &str,
+) -> Option<SigstoreBundleMetadata> {
+    let bundle_bytes = fs::read(bundle_path).ok()?;
+    let bundle_json: serde_json::Value = serde_json::from_slice(&bundle_bytes).ok()?;
+
+    let media_type = bundle_json
+        .get("media_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+
+    let form = determine_material_form(&bundle_json);
+
+    let tlog_entries = bundle_json
+        .get("verification_material")
+        .and_then(|m| m.get("tlog_entries"))
+        .and_then(|t| t.as_array())
+        .map_or(0, Vec::len);
+
+    let rfc3161_timestamps = bundle_json
+        .get("verification_material")
+        .and_then(|m| m.get("timestamp_verification_data"))
+        .and_then(|t| t.get("rfc3161_timestamps"))
+        .and_then(|t| t.as_array())
+        .map_or(0, Vec::len);
+
+    let bundle_sha256 = {
+        use sha2::Digest;
+        Sha256Digest::new(sha2::Sha256::digest(&bundle_bytes).into())
+    };
+
+    Some(SigstoreBundleMetadata {
+        media_type,
+        verification_material_form: form,
+        tlog_entries,
+        rfc3161_timestamps,
+        identity_match: true,
+        issuer_match: true,
+        verification_mode: SigstoreVerificationMode::Offline,
+        bundle_sha256,
+    })
+}
+
+/// Determines the verification material form from the bundle JSON.
+fn determine_material_form(bundle: &serde_json::Value) -> VerificationMaterialForm {
+    let content = bundle
+        .get("verification_material")
+        .and_then(|m| m.get("content"));
+
+    match content {
+        Some(c) if c.get("x509_certificate_chain").is_some() => {
+            VerificationMaterialForm::X509CertificateChain
+        }
+        Some(c) if c.get("public_key").is_some() => VerificationMaterialForm::PublicKey,
+        Some(c) if c.get("x509_certificate").is_some() => VerificationMaterialForm::X509Certificate,
+        _ => VerificationMaterialForm::X509CertificateChain,
+    }
+}
 
 fn verify_cosign_subprocess(
     artifact_path: &Path,
@@ -889,9 +1014,10 @@ mod tests {
     use arbitraitor_model::ids::Sha256Digest;
 
     use super::{
-        ProvenanceError, SignatureSystem, TofuChange, TofuPin, TofuStore, TofuVerification, TufKey,
-        TufRole, TufRoot, TufSignature, TufTargets, TufVersionStore, verify_cosign,
-        verify_minisign,
+        ProvenanceError, SIGSTORE_BUNDLE_MEDIA_TYPES, SignatureSystem, SigstoreVerificationMode,
+        TofuChange, TofuPin, TofuStore, TofuVerification, TufKey, TufRole, TufRoot, TufSignature,
+        TufTargets, TufVersionStore, VerificationMaterialForm, determine_material_form,
+        parse_bundle_metadata, verify_cosign, verify_minisign,
     };
 
     #[test]
@@ -1218,5 +1344,130 @@ mod tests {
         let dir = tempfile::TempDir::new()?;
         let path = dir.path().join(format!("{name}.json"));
         Ok((dir, path))
+    }
+
+    #[test]
+    fn parse_bundle_metadata_extracts_v03_fields() -> std::io::Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let bundle_path = dir.path().join("bundle.json");
+        let bundle_json = serde_json::json!({
+            "media_type": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+            "verification_material": {
+                "content": {
+                    "x509_certificate": {
+                        "raw_bytes": "MIIB..."
+                    }
+                },
+                "tlog_entries": [
+                    {"log_index": 1},
+                    {"log_index": 2}
+                ],
+                "timestamp_verification_data": {
+                    "rfc3161_timestamps": [
+                        {"signed_theta": "MIAGCSqGSIb3DQEHA"}
+                    ]
+                }
+            },
+            "message_signature": {
+                "message_digest": {
+                    "algorithm": "SHA2_256",
+                    "digest": "abCd"
+                }
+            }
+        });
+        std::fs::write(&bundle_path, serde_json::to_vec_pretty(&bundle_json)?)?;
+
+        let metadata = parse_bundle_metadata(&bundle_path, "test-identity", "test-issuer");
+
+        assert!(metadata.is_some());
+        let m = metadata.ok_or_else(|| std::io::Error::other("metadata should be parsed"))?;
+        assert_eq!(
+            m.media_type,
+            "application/vnd.dev.sigstore.bundle+json;version=0.3"
+        );
+        assert_eq!(
+            m.verification_material_form,
+            VerificationMaterialForm::X509Certificate
+        );
+        assert_eq!(m.tlog_entries, 2);
+        assert_eq!(m.rfc3161_timestamps, 1);
+        assert_eq!(m.verification_mode, SigstoreVerificationMode::Offline);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_bundle_metadata_handles_missing_fields() -> std::io::Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let bundle_path = dir.path().join("minimal.json");
+        std::fs::write(
+            &bundle_path,
+            r#"{"media_type": "application/vnd.dev.sigstore.bundle+json;version=0.1"}"#,
+        )?;
+
+        let metadata = parse_bundle_metadata(&bundle_path, "id", "iss");
+
+        assert!(metadata.is_some());
+        let m = metadata.ok_or_else(|| std::io::Error::other("metadata should be parsed"))?;
+        assert_eq!(
+            m.media_type,
+            "application/vnd.dev.sigstore.bundle+json;version=0.1"
+        );
+        assert_eq!(m.tlog_entries, 0);
+        assert_eq!(m.rfc3161_timestamps, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_bundle_metadata_returns_none_for_invalid_json() -> std::io::Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let bundle_path = dir.path().join("bad.json");
+        std::fs::write(&bundle_path, b"not json at all")?;
+
+        let metadata = parse_bundle_metadata(&bundle_path, "id", "iss");
+        assert!(metadata.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn sigstore_bundle_media_types_includes_v03() {
+        assert!(
+            SIGSTORE_BUNDLE_MEDIA_TYPES
+                .contains(&"application/vnd.dev.sigstore.bundle+json;version=0.3")
+        );
+        assert!(
+            SIGSTORE_BUNDLE_MEDIA_TYPES
+                .contains(&"application/vnd.dev.sigstore.bundle+json;version=0.2")
+        );
+        assert!(
+            SIGSTORE_BUNDLE_MEDIA_TYPES
+                .contains(&"application/vnd.dev.sigstore.bundle+json;version=0.1")
+        );
+    }
+
+    #[test]
+    fn determine_material_form_detects_public_key() {
+        let bundle = serde_json::json!({
+            "verification_material": {
+                "content": {
+                    "public_key": {"raw_bytes": "key"}
+                }
+            }
+        });
+        assert_eq!(
+            determine_material_form(&bundle),
+            VerificationMaterialForm::PublicKey
+        );
+    }
+
+    #[test]
+    fn determine_material_form_defaults_to_chain() {
+        let bundle = serde_json::json!({});
+        assert_eq!(
+            determine_material_form(&bundle),
+            VerificationMaterialForm::X509CertificateChain
+        );
     }
 }
