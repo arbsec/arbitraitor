@@ -226,6 +226,7 @@ mod tests {
             remediation: None,
             references: Vec::new(),
             tags: vec!["test".to_owned()],
+            taxonomies: Vec::new(),
         }
     }
 

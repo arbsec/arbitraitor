@@ -9,4 +9,5 @@ pub mod finding;
 pub mod ids;
 pub mod operation;
 pub mod origin;
+pub mod taxonomy;
 pub mod verdict;

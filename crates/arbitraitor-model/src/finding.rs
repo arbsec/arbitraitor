@@ -3,6 +3,8 @@
 use core::fmt;
 use core::num::NonZeroU32;
 
+use crate::taxonomy::TaxonomyRef;
+
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::ArtifactKind;
@@ -81,6 +83,18 @@ pub struct Finding {
     pub references: Vec<String>,
     /// Machine-readable tags for grouping or policy matching.
     pub tags: Vec<String>,
+    /// Multi-taxonomy references (CWE, CAPEC, OWASP, etc.) per spec §15.2.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taxonomies: Vec<TaxonomyRef>,
+}
+
+impl Finding {
+    /// Attaches a taxonomy reference to this finding.
+    #[must_use]
+    pub fn with_taxonomy(mut self, taxonomy: TaxonomyRef) -> Self {
+        self.taxonomies.push(taxonomy);
+        self
+    }
 }
 
 /// Supporting evidence attached to a finding.
@@ -439,6 +453,7 @@ mod tests {
             remediation: None,
             references: Vec::new(),
             tags: vec!["classifier".to_owned()],
+            taxonomies: Vec::new(),
         };
         assert_eq!(
             serde_json::from_str::<Finding>(&serde_json::to_string(&value)?)?,

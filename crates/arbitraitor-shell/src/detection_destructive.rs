@@ -615,6 +615,7 @@ fn command_finding(input: CommandFinding<'_>) -> Finding {
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-destructive".to_owned(), input.tag.to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 
@@ -649,5 +650,6 @@ fn source_finding(input: SourceFinding<'_>) -> Finding {
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-destructive".to_owned(), input.tag.to_owned()],
+        taxonomies: Vec::new(),
     }
 }

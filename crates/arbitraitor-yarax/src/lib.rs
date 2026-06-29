@@ -719,6 +719,7 @@ pub fn yara_match_to_finding(matched: &YaraMatch, artifact_sha256: &Sha256Digest
         remediation: Some("Treat this artifact as malicious unless the matching rule is explicitly reviewed and allowlisted by policy.".to_owned()),
         references: Vec::new(),
         tags,
+        taxonomies: Vec::new(),
     }
 }
 
@@ -983,6 +984,7 @@ fn scanner_error_finding(error: &YaraError, artifact_sha256: &Sha256Digest) -> F
         remediation: Some("Fail closed or rescan with sufficient resources before release.".to_owned()),
         references: Vec::new(),
         tags: vec!["yara-x".to_owned(), "incomplete-analysis".to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 

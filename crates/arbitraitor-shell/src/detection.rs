@@ -414,6 +414,7 @@ impl DetectionState<'_> {
             remediation: None,
             references: Vec::new(),
             tags: vec!["shell-detection".to_owned(), input.tag.to_owned()],
+            taxonomies: Vec::new(),
         });
     }
 }

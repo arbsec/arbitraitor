@@ -348,6 +348,7 @@ fn issue_to_finding(issue: PayloadIssue) -> Finding {
         ),
         references: vec!["Arbitraitor spec section 20.1".to_owned()],
         tags: vec!["recursive-payload".to_owned(), tag.to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 
@@ -702,6 +703,7 @@ fn unknown_artifact_finding(ctx: &AnalysisContext<'_>) -> Finding {
         remediation: Some("Inspect the artifact manually or add a detector for this content type before release.".to_owned()),
         references: Vec::new(),
         tags: vec!["artifact-classifier".to_owned(), "unknown-artifact".to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 
@@ -753,6 +755,7 @@ fn shell_error_finding(
             "shell-analysis".to_owned(),
             "incomplete-analysis".to_owned(),
         ],
+        taxonomies: Vec::new(),
     }
 }
 
@@ -788,6 +791,7 @@ fn archive_error_finding(ctx: &AnalysisContext<'_>, error: &ArchiveError) -> Fin
         remediation: Some("Fail closed until archive contents can be listed and checked for hazards.".to_owned()),
         references: Vec::new(),
         tags,
+        taxonomies: Vec::new(),
     }
 }
 
@@ -853,6 +857,7 @@ fn reputation_finding(
             "reputation".to_owned(),
             format!("disposition:{disposition}"),
         ],
+        taxonomies: Vec::new(),
     }
 }
 
@@ -1539,6 +1544,7 @@ mod tests {
                 remediation: None,
                 references: Vec::new(),
                 tags: Vec::new(),
+                taxonomies: Vec::new(),
             }]
         }
     }
@@ -1591,6 +1597,7 @@ mod tests {
             remediation: None,
             references: Vec::new(),
             tags: Vec::new(),
+            taxonomies: Vec::new(),
         }
     }
 

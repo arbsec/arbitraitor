@@ -1100,6 +1100,7 @@ yara_rule_packs = ["rules/core", "rules/local"]
             remediation: None,
             references: Vec::new(),
             tags: Vec::new(),
+            taxonomies: Vec::new(),
         }
     }
 }
