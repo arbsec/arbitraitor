@@ -35,7 +35,7 @@ use arbitraitor_wrapper::shim::{
     ShimConfig, ShimError, WrapperTarget, check_shims, generate_shell_init, install_shims,
     uninstall_shims,
 };
-use arbitraitor_wrapper::{parse_curl_args, wget::translate_wget_args};
+use arbitraitor_wrapper::{parse_curl_args, remote_name_from_url, wget::translate_wget_args};
 use arbitraitor_yarax::{RulePackManager, RuleSource, YaraDetector};
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -413,24 +413,37 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         );
     }
 
-    match output_path {
-        Some(path) => {
-            std::fs::write(&path, &outcome.bytes).into_diagnostic()?;
-        }
-        None if remote_name => {
-            let filename = url
-                .rsplit('/')
-                .find(|s| !s.is_empty())
-                .unwrap_or("download");
-            std::fs::write(filename, &outcome.bytes).into_diagnostic()?;
-        }
-        None => {
-            std::io::stdout()
-                .write_all(&outcome.bytes)
-                .into_diagnostic()?;
-        }
+    let recomputed = Sha256Digest::new(Sha256::digest(&outcome.bytes).into());
+    if recomputed != outcome.sha256 {
+        miette::bail!(
+            "pre-release digest mismatch: stored={}, recomputed={}",
+            outcome.sha256,
+            recomputed
+        );
     }
 
+    emit_wrapper_output(&outcome.bytes, output_path.as_deref(), remote_name, url)?;
+    Ok(())
+}
+
+fn emit_wrapper_output(
+    bytes: &[u8],
+    output_path: Option<&str>,
+    remote_name: bool,
+    url: &str,
+) -> Result<()> {
+    match output_path {
+        Some(path) => {
+            std::fs::write(path, bytes).into_diagnostic()?;
+        }
+        None if remote_name => {
+            let filename = remote_name_from_url(url).into_diagnostic()?;
+            std::fs::write(&filename, bytes).into_diagnostic()?;
+        }
+        None => {
+            std::io::stdout().write_all(bytes).into_diagnostic()?;
+        }
+    }
     Ok(())
 }
 
@@ -1191,8 +1204,8 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, parse_cli_from_args,
-        wrapper_output_destination, wrapper_url_argument, write_status_text,
+        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, emit_wrapper_output,
+        parse_cli_from_args, wrapper_output_destination, wrapper_url_argument, write_status_text,
     };
     use clap::Parser;
     use std::fs;
@@ -1839,6 +1852,76 @@ mod tests {
         assert_eq!(output.as_deref(), Some("/tmp/file.tar.gz"));
         assert!(!remote_name);
     }
+
+    #[test]
+    fn emit_output_writes_bytes_to_file() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join("arb_test_emit_file");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("output.bin");
+        let path_str = path.to_string_lossy().into_owned();
+        let bytes = b"hello world";
+        emit_wrapper_output(
+            bytes,
+            Some(path_str.as_str()),
+            false,
+            "https://example.com/file.bin",
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let read_back = std::fs::read(&path)?;
+        assert_eq!(read_back, bytes);
+        std::fs::remove_file(path)?;
+        std::fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn emit_output_remote_name_derives_filename() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join("arb_test_emit_remote");
+        std::fs::create_dir_all(&dir)?;
+        let prev = std::env::current_dir()?;
+        std::env::set_current_dir(&dir)?;
+        let bytes = b"remote content";
+        emit_wrapper_output(bytes, None, true, "https://example.com/path/to/tool.tar.gz")
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let read_back = std::fs::read("tool.tar.gz")?;
+        assert_eq!(read_back, bytes);
+        std::fs::remove_file("tool.tar.gz")?;
+        std::env::set_current_dir(prev)?;
+        std::fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn emit_output_remote_name_strips_query_and_fragment() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join("arb_test_emit_query");
+        std::fs::create_dir_all(&dir)?;
+        let prev = std::env::current_dir()?;
+        std::env::set_current_dir(&dir)?;
+        let bytes = b"data";
+        emit_wrapper_output(
+            bytes,
+            None,
+            true,
+            "https://example.com/file.bin?token=secret#frag",
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let read_back = std::fs::read("file.bin")?;
+        assert_eq!(read_back, bytes);
+        std::fs::remove_file("file.bin")?;
+        std::env::set_current_dir(prev)?;
+        std::fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn emit_output_remote_name_rejects_url_without_filename() {
+        let result = emit_wrapper_output(b"x", None, true, "https://example.com/");
+        assert!(
+            result.is_err(),
+            "URL with no filename component should fail"
+        );
+    }
+
     #[test]
     fn wrappers_rejects_unknown_target_name() {
         let result = Cli::try_parse_from(["arbitraitor", "wrappers", "install", "unknown-tool"]);
