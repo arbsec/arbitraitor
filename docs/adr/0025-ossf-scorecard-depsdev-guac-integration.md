@@ -18,13 +18,13 @@ OpenVEX into a queryable graph. It is a separate service, not a library.
 
 ## Decision
 
-These are **optional enterprise integrations**, not core Arbitraitor
-capabilities:
+These are **proposed optional enterprise integrations**, not implemented or
+required core Arbitraitor capabilities:
 
-1. **OpenSSF Scorecard** — Arbitraitor can consume Scorecard results as a
-   detector input (advisory, never authoritative). Requires the artifact's
-   source repository to be resolvable. When unresolvable, the signal is
-   `unavailable` — never `passing`.
+1. **OpenSSF Scorecard** — Arbitraitor would consume Scorecard results as a
+   detector input (advisory, never authoritative). This requires the
+   artifact's source repository to be resolvable. When unresolvable, the
+   signal would be `unavailable` — never `passing`.
 
 2. **deps.dev** — provides license info, package deprecation, and
    dependency resolution depth. Consumed as a supplementary signal alongside

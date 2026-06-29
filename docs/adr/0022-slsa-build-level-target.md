@@ -12,9 +12,9 @@ build levels (L1–L3 plus Source and Dependencies tracks). L3 requires a
 hardened build platform with provenance that is non-forgeable.
 
 Currently Arbitraitor uses GitHub Actions hosted runners, pinned actions by
-SHA, OIDC trusted publishing, and GitHub artifact attestations. This meets
-SLSA Build L2 (provenance available, build service hosted) but not L3 (no
-provenanced hermetic boundary with隔离 guarantees).
+SHA, and GitHub artifact attestations for build provenance. This meets SLSA
+Build L1 (provenance available). The path to L2 (hosted build service) and L3
+(non-forgeable hermetic boundary) requires additional work documented below.
 
 ## Decision
 
@@ -51,7 +51,7 @@ is L3, contingent on:
 
 ## References
 
-- SLSA v1.2 spec: <https://slsa.dev/spec/v1.2-rc2/build-provenance>
-- SLSA Build Levels: <https://slsa.dev/spec/v1.2-rc2/levels>
+- SLSA v1.2 spec: <https://slsa.dev/spec/v1.2/build-provenance>
+- SLSA Build Levels: <https://slsa.dev/spec/v1.2/levels>
 - GitHub artifact attestations: <https://docs.github.com/actions/how-tos/secure-your-work/use-artifact-attestations>
 - Spec §14.6, §44

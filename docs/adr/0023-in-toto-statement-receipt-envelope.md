@@ -17,9 +17,9 @@ canonically or as an optional derived export.
 
 ## Decision
 
-The canonical Arbitraitor receipt format remains RFC 8785 JCS JSON
-(ADR-0014). Arbitraitor additionally supports exporting a receipt as an
-in-toto Statement via an optional derived transform:
+The canonical Arbitraitor receipt format is RFC 8785 JCS JSON
+(ADR-0014). This ADR proposes adding an optional derived export as an
+in-toto Statement:
 
 ```json
 {

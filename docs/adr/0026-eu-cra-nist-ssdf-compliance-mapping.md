@@ -27,26 +27,26 @@ controls to CRA and SSDF language. The matrix documents what Arbitraitor
 
 ### EU CRA mapping (informational)
 
-| CRA Requirement | Arbitraitor Control |
+| CRA Requirement | Arbitraitor Control (planned) |
 |---|---|
-| Annex I Part II: SBOM in machine-readable format | CycloneDX 1.6 SBOM generated via `cargo-cyclonedx` for Arbitraitor releases (§44) |
+| Annex I Part II: SBOM in machine-readable format | Target: CycloneDX SBOM via `cargo-cyclonedx` for Arbitraitor releases (§44) |
 | Article 14: 24h/72h/14d vulnerability reporting | `SECURITY.md` directs reports to GitHub private vulnerability reporting; reporting cadence is an operational responsibility, not a code feature |
-| Recital 77: SBOM need not be public | SBOM is attached to releases but not published to a public registry |
+| Recital 77: SBOM need not be public | SBOM would be attached to releases but not published to a public registry |
 
 ### NIST SSDF mapping (informational)
 
-| SSDF Practice | Arbitraitor Control |
+| SSDF Practice | Arbitraitor Control (current or planned) |
 |---|---|
 | PO.5.1 (define security requirements) | Spec §9 security invariants; ADRs for every security-relevant decision |
 | PS.1.1 (protect components from tampering) | SHA-256 CAS with invariant 2 (immutable identity) |
-| PS.2.1 (automated build) | GitHub Actions with pinned actions by SHA; OIDC trusted publishing |
-| PS.3.2 (provenance) | GitHub artifact attestations; SLSA Build L2 target (ADR-0022) |
+| PS.2.1 (automated build) | GitHub Actions; target: pin actions by SHA for all workflows |
+| PS.3.2 (provenance) | Target: GitHub artifact attestations; SLSA Build L2 target (ADR-0022) |
 | PW.4.4 (review human-readable code) | CODEOWNERS with security-owner review for sensitive paths |
 | PW.5.1 (code-based configuration) | TOML configuration with `deny_unknown_fields` (ADR-0004) |
 | PW.6.2 (test cases) | 900+ tests across unit, property, integration, invariant, and fuzz layers |
-| PW.7.1 (build from separate environment) | `--locked` release builds from protected tags |
+| PW.7.1 (build from separate environment) | Target: `--locked` release builds from protected tags |
 | PW.8.2 (static analysis) | Clippy with `-D warnings`; CodeQL; YARA-X for artifact content |
-| RV.1.1 (identify vulnerabilities) | `cargo-audit`, `cargo-deny`, GitHub dependency review |
+| RV.1.1 (identify vulnerabilities) | `cargo-audit`, `cargo-deny` (planned); GitHub dependency review |
 | RV.3.2 (root-cause analysis) | Receipts provide full audit trail; ADRs document decisions |
 
 This mapping is **informational**, not a procurement self-attestation. The

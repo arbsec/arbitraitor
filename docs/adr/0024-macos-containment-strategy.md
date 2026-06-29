@@ -12,10 +12,13 @@ no documented replacement for non-App-Store server-side process sandboxing
 ([Apple containerization issue 737](https://github.com/apple/containerization/issues/737)).
 
 The Endpoint Security framework (introduced macOS Catalina, `es_subscribe`,
-~60 MAC hooks) provides **observation only** — it does not enforce
-filesystem/network/process restrictions. It is distributed as a Developer
-ID-signed System Extension (not Mac App Store), requires notarization, and
-its audit subsystem is deprecated in favor of unified logging.
+~60 MAC hooks) provides **observation** and **authorization** events
+(`es_respond_auth_result` can allow/deny some operations), but it is not a
+complete containment primitive — it lacks network sandbox coverage and is
+not a declarative filesystem/network/process boundary like Linux namespaces
+or seccomp. It is distributed as a Developer ID-signed System Extension (not
+Mac App Store), requires notarization, and its audit subsystem is deprecated
+in favor of unified logging.
 
 App Sandbox requires `com.apple.security.app-sandbox` entitlement and is
 designed for GUI/Mac-App-Store apps, not headless CLI tools.
@@ -46,9 +49,9 @@ Until the ADR is Accepted:
 
 For observation mode (`sandbox: observe`), the Endpoint Security framework
 via System Extension is the supported path. This provides process-tree,
-file-access, and network-connection observation events (§27.6) but enforces
-no restrictions. The observer receives `es_subscribe` callbacks; it cannot
-prevent the observed action.
+file-access, and network-connection observation events (§27.6). The ES AUTH
+events may allow/deny some operations, but coverage is incomplete and not
+equivalent to a full containment profile.
 
 ## Consequences
 
