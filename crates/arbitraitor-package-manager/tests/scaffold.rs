@@ -1,10 +1,12 @@
 //! Scaffold smoke tests for the package-manager adapter trait and types.
 
+use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_package_manager::{
-    AdapterManagerError, AdapterRecipe, InspectionPattern, LifecycleScriptPolicy,
+    AdapterManagerError, AdapterRecipe, CapabilityGrant, InspectionPattern, LifecycleScriptPolicy,
     LifecycleScriptStatus, LockfileFormat, PackageManagerReceipt, ProxyMode, RegistryAdapter,
     RegistryTool,
 };
+use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
 struct CargoAdapter;
@@ -14,19 +16,19 @@ impl RegistryAdapter for CargoAdapter {
         RegistryTool::Cargo
     }
     fn recipe(&self) -> AdapterRecipe {
-        AdapterRecipe {
-            primary: InspectionPattern::LockfilePrescan,
-            secondary: vec![
+        AdapterRecipe::new(
+            InspectionPattern::LockfilePrescan,
+            vec![
                 InspectionPattern::PostInstallScan,
                 InspectionPattern::BuildScriptSandbox,
             ],
-        }
+        )
     }
     fn lockfile_format(&self) -> LockfileFormat {
         LockfileFormat::CargoLock
     }
     fn lifecycle_script_policy(&self) -> LifecycleScriptPolicy {
-        LifecycleScriptPolicy::SandboxRequired
+        LifecycleScriptPolicy::PolicyApprovedOrIncomplete
     }
 }
 
@@ -38,18 +40,29 @@ fn cargo_adapter_metadata_matches_spec_recipe() {
     assert_eq!(adapter.lockfile_format(), LockfileFormat::CargoLock);
 
     let recipe = adapter.recipe();
-    assert_eq!(recipe.primary, InspectionPattern::LockfilePrescan);
-    assert_eq!(recipe.secondary.len(), 2);
+    assert_eq!(recipe.primary(), InspectionPattern::LockfilePrescan);
+    assert!(
+        !recipe.secondary().is_empty(),
+        "spec §39.14.1 requires non-empty secondary"
+    );
     assert!(
         recipe
-            .secondary
+            .secondary()
             .contains(&InspectionPattern::BuildScriptSandbox)
     );
 
     assert!(matches!(
         adapter.lifecycle_script_policy(),
-        LifecycleScriptPolicy::SandboxRequired
+        LifecycleScriptPolicy::PolicyApprovedOrIncomplete
     ));
+}
+
+#[test]
+fn recipe_panics_on_empty_secondary() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = AdapterRecipe::new(InspectionPattern::RegistryProxy, vec![]);
+    });
+    assert!(result.is_err(), "empty secondary should panic");
 }
 
 #[test]
@@ -71,21 +84,28 @@ fn all_tools_have_distinct_names() {
 
 #[test]
 fn receipt_fields_roundtrip() {
+    let digest = Sha256Digest::new(Sha256::digest(b"lockfile").into());
     let receipt = PackageManagerReceipt {
         tool: "cargo".to_owned(),
         tool_version: "1.96.0".to_owned(),
-        lockfile_digest: "sha256:abc".to_owned(),
+        lockfile_digest: digest.clone(),
         packages_inspected: 42,
         packages_blocked: 1,
         packages_incomplete: 0,
         lifecycle_scripts: LifecycleScriptStatus::Denied,
         build_sandbox: Some("gvisor".to_owned()),
         proxy_mode: ProxyMode::LockfilePrescan,
+        capabilities: vec![CapabilityGrant {
+            name: "parse_argv".to_owned(),
+            granted: true,
+        }],
     };
     assert_eq!(receipt.tool, "cargo");
     assert_eq!(receipt.packages_inspected, 42);
     assert_eq!(receipt.lifecycle_scripts, LifecycleScriptStatus::Denied);
     assert_eq!(receipt.proxy_mode, ProxyMode::LockfilePrescan);
+    assert_eq!(receipt.capabilities.len(), 1);
+    assert!(receipt.capabilities[0].granted);
 }
 
 #[test]

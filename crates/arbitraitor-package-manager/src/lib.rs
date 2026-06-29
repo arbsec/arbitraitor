@@ -15,7 +15,7 @@ pub mod receipt;
 pub mod recipe;
 
 pub use error::AdapterManagerError;
-pub use receipt::{LifecycleScriptStatus, PackageManagerReceipt, ProxyMode};
+pub use receipt::{CapabilityGrant, LifecycleScriptStatus, PackageManagerReceipt, ProxyMode};
 pub use recipe::{
     AdapterRecipe, InspectionPattern, LifecycleScriptPolicy, LockfileFormat, RegistryAdapter,
     RegistryTool,

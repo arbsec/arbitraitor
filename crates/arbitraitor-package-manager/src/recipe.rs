@@ -58,54 +58,71 @@ pub enum LockfileFormat {
 }
 
 /// The hybrid integration patterns from spec §39.14.1.
-///
-/// Each adapter combines multiple patterns because no single pattern
-/// covers every tool's threat surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InspectionPattern {
-    /// Arbitraitor acts as the configured registry URL, intercepting
-    /// all tarball downloads.
+    /// Arbitraitor acts as the configured registry URL.
     RegistryProxy,
     /// Arbitraitor inspects the committed lockfile before the tool runs.
     LockfilePrescan,
-    /// Arbitraitor scans the populated cache or install directory after
-    /// the tool completes.
+    /// Arbitraitor scans the populated cache after the tool completes.
     PostInstallScan,
-    /// Arbitraitor isolates `build.rs`, PEP 517 builds, or postinstall
-    /// scripts in a sandbox.
+    /// Arbitraitor isolates build scripts in a sandbox.
     BuildScriptSandbox,
 }
 
 /// The per-tool recipe mapping a tool to its primary and secondary
-/// inspection patterns (spec §39.14.1 recipe table).
+/// inspection patterns (spec §39.14.1). Every adapter MUST combine
+/// multiple patterns — no single pattern covers all threat surfaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterRecipe {
-    /// The primary inspection pattern (highest-coverage, binding).
-    pub primary: InspectionPattern,
-    /// Secondary patterns applied as defense-in-depth.
-    pub secondary: Vec<InspectionPattern>,
+    primary: InspectionPattern,
+    secondary: Vec<InspectionPattern>,
+}
+
+impl AdapterRecipe {
+    /// Creates a new recipe. The secondary list must be non-empty
+    /// per spec §39.14.1 (\"each adapter MUST combine multiple patterns\").
+    ///
+    /// # Panics
+    ///
+    /// Panics if `secondary` is empty.
+    #[must_use]
+    pub fn new(primary: InspectionPattern, secondary: Vec<InspectionPattern>) -> Self {
+        assert!(
+            !secondary.is_empty(),
+            "AdapterRecipe secondary must be non-empty per spec §39.14.1"
+        );
+        Self { primary, secondary }
+    }
+
+    /// Returns the primary inspection pattern.
+    #[must_use]
+    pub const fn primary(&self) -> InspectionPattern {
+        self.primary
+    }
+
+    /// Returns the secondary inspection patterns.
+    #[must_use]
+    pub fn secondary(&self) -> &[InspectionPattern] {
+        &self.secondary
+    }
 }
 
 /// Lifecycle-script enforcement policy per spec §39.14.3.
-///
-/// All adapters enforce `--ignore-scripts` by default. Selective
-/// re-enabling requires explicit policy approval.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleScriptPolicy {
-    /// Lifecycle scripts are denied entirely (`--ignore-scripts`).
+    /// Scripts denied entirely (`--ignore-scripts`).
     DeniedByDefault,
-    /// Scripts run only for packages on the trust list; all others denied.
+    /// Scripts run only for policy-approved packages.
     AllowedWithTrustlist(Vec<String>),
-    /// Scripts may run but only inside an isolated sandbox (e.g. gVisor
-    /// for cargo `build.rs`, `arbitraitor-exec` for postinstall).
+    /// Scripts may run inside a sandbox (gVisor, arbitraitor-exec).
     SandboxRequired,
+    /// Scripts approved per-package by explicit policy; uninspected
+    /// packages produce incomplete coverage (cargo `build.rs` model).
+    PolicyApprovedOrIncomplete,
 }
 
 /// Trait implemented by each per-tool registry adapter.
-///
-/// Implementations live in first-party plugins (spec §39.14.2). This
-/// trait defines the metadata contract — actual fetching, parsing, and
-/// scanning happen in the adapter's plugin runtime.
 pub trait RegistryAdapter: Send + Sync + Debug {
     /// Returns the tool this adapter wraps.
     fn tool(&self) -> RegistryTool;
