@@ -47,6 +47,11 @@
   - [ADR 0019: catch_unwind and panic=abort interaction](./adr/0019-catch-unwind-and-panic-abort.md)
   - [ADR 0020: Seccomp-BPF network isolation for subprocess plugins](./adr/0020-subprocess-plugin-network-isolation.md)
   - [ADR 0021: Landlock filesystem isolation for subprocess plugins](./adr/0021-subprocess-plugin-filesystem-isolation.md)
+  - [ADR 0022: SLSA Build Level target for Arbitraitor releases](./adr/0022-slsa-build-level-target.md)
+  - [ADR 0023: in-toto Statement receipt envelope](./adr/0023-in-toto-statement-receipt-envelope.md)
+  - [ADR 0024: macOS containment strategy](./adr/0024-macos-containment-strategy.md)
+  - [ADR 0025: OpenSSF Scorecard, deps.dev, and GUAC as optional integrations](./adr/0025-ossf-scorecard-depsdev-guac-integration.md)
+  - [ADR 0026: EU CRA / NIST SSDF informational compliance mapping](./adr/0026-eu-cra-nist-ssdf-compliance-mapping.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)
