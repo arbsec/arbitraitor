@@ -68,7 +68,7 @@ zip = "8.6"
 tar = "0.4"
 flate2 = "1.1"
 xz2 = "0.1"
-bzip2 = "0.5"
+bzip2 = "0.6"
 zstd = "0.13"
 
 # Error handling and diagnostics
