@@ -59,6 +59,12 @@ impl CallerOrigin {
 
     /// Returns `true` if this origin is spoofable by a malicious local process
     /// without transport-level authentication.
+    ///
+    /// `HumanTty` and `HumanIpc` are **not** self-reported because they are
+    /// authenticated by the OS (TTY process group or Unix peer credentials).
+    /// All other origins are self-reported: their identity fields are
+    /// asserted by the caller and may be forged unless the transport
+    /// independently verifies them.
     #[must_use]
     pub fn is_self_reported(&self) -> bool {
         !matches!(self, Self::HumanTty | Self::HumanIpc)
