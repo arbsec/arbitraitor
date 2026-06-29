@@ -28,6 +28,7 @@ members = [
     "crates/arbitraitor-package-manager",
     "crates/arbitraitor-testkit",
     "crates/arbitraitor-mcp",
+    "crates/xtask",
 ]
 
 [workspace.package]

@@ -44,3 +44,13 @@ jobs:
         run: mkdir -p book/src/adr && cp -r docs/adr/* book/src/adr/
       - name: Build book
         run: mdbook build book
+
+  docs-check:
+    name: Docs Consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
+      - name: Check ADR consistency
+        run: cargo run -p xtask -- docs-check
