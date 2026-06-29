@@ -402,6 +402,7 @@ fn source_finding(
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-system".to_owned(), tag.to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 
@@ -437,5 +438,6 @@ fn finding(input: CommandFinding<'_>) -> Finding {
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-system".to_owned(), input.tag.to_owned()],
+        taxonomies: Vec::new(),
     }
 }

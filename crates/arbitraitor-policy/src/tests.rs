@@ -85,6 +85,7 @@ fn make_finding(category: FindingCategory, severity: Severity, confidence: Confi
         remediation: None,
         references: Vec::new(),
         tags: Vec::new(),
+        taxonomies: Vec::new(),
     }
 }
 

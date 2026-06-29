@@ -384,6 +384,7 @@ fn mismatch_finding(
         remediation: Some("Inspect the exact downloaded bytes and update policy expectations only if the content is trusted.".to_owned()),
         references: Vec::new(),
         tags: vec!["artifact-classifier".to_owned(), "content-mismatch".to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 

@@ -746,6 +746,7 @@ fn make_finding(config: &ParserConfig, input: FindingInput) -> Finding {
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-parser".to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 

@@ -319,6 +319,7 @@ impl AvDetector {
             ),
             references: vec!["Arbitraitor spec sections 18.2-18.4".to_owned()],
             tags: vec!["antivirus".to_owned(), "fail-closed".to_owned()],
+            taxonomies: Vec::new(),
         }
     }
 
@@ -342,6 +343,7 @@ impl AvDetector {
                 remediation: Some("Block release and investigate the artifact source.".to_owned()),
                 references: vec!["Arbitraitor spec sections 18.2-18.3".to_owned()],
                 tags: vec!["antivirus".to_owned(), "malware-signature".to_owned()],
+                taxonomies: Vec::new(),
             }),
             ScanResult::Suspicious => Some(Finding {
                 id: "av.suspicious".to_owned(),
@@ -363,6 +365,7 @@ impl AvDetector {
                 ),
                 references: vec!["Arbitraitor spec sections 18.2-18.3".to_owned()],
                 tags: vec!["antivirus".to_owned(), "suspicious".to_owned()],
+                taxonomies: Vec::new(),
             }),
             ScanResult::Error { reason } => Some(self.scan_error_finding(ctx, &reason)),
         }
@@ -390,6 +393,7 @@ impl AvDetector {
             remediation: Some("Fail closed when AV scanning is required by policy.".to_owned()),
             references: vec!["Arbitraitor spec sections 18.2-18.4".to_owned()],
             tags: vec!["antivirus".to_owned(), "incomplete-analysis".to_owned()],
+            taxonomies: Vec::new(),
         }
     }
 

@@ -991,6 +991,7 @@ fn hazard_finding(
         remediation: Some("Do not extract or release this archive until the hazardous entries are removed or policy explicitly handles them under containment.".to_owned()),
         references: vec![ARCHIVE_HAZARD_REFERENCE.to_owned()],
         tags: vec!["archive-hazard".to_owned(), tag.to_owned()],
+        taxonomies: Vec::new(),
     }
 }
 
