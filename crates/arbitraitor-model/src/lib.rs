@@ -8,4 +8,5 @@ pub mod artifact;
 pub mod finding;
 pub mod ids;
 pub mod operation;
+pub mod origin;
 pub mod verdict;

@@ -1,5 +1,7 @@
 //! Evaluation context provided to the policy engine at decision time.
 
+use arbitraitor_model::origin::CallerOrigin;
+
 /// Runtime context describing the operation being evaluated.
 ///
 /// The context carries information that is not part of any single finding —
@@ -14,6 +16,7 @@
 /// - `is_interactive = false` — prompts are upgraded to blocks.
 /// - `is_https = false` — HTTPS-requiring policies will block.
 /// - `is_private_network = false` — no SSRF assumption.
+/// - `caller_origin = Unknown` — lowest trust class.
 ///
 /// Callers **must** populate the fields accurately before evaluating.
 #[derive(Debug, Clone, Default)]
@@ -33,6 +36,10 @@ pub struct EvalContext {
     /// Whether the resolved endpoint is on a private / loopback / link-local
     /// network.
     pub is_private_network: bool,
+
+    /// Origin class of the operation request (spec §23.1.1). Defaults to
+    /// [`CallerOrigin::Unknown`] — the lowest trust class.
+    pub caller_origin: CallerOrigin,
 }
 
 impl EvalContext {
@@ -71,6 +78,13 @@ impl EvalContext {
     #[must_use]
     pub fn with_private_network(mut self, is_private_network: bool) -> Self {
         self.is_private_network = is_private_network;
+        self
+    }
+
+    /// Sets the caller-origin class (spec §23.1.1).
+    #[must_use]
+    pub fn with_caller_origin(mut self, origin: CallerOrigin) -> Self {
+        self.caller_origin = origin;
         self
     }
 }
