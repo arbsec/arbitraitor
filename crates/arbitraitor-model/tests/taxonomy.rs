@@ -98,3 +98,39 @@ fn finding_with_taxonomy_roundtrips_serde() -> TestResult {
     assert_eq!(back.taxonomies[0].id, "CWE-22");
     Ok(())
 }
+
+#[test]
+fn old_json_without_taxonomies_deserializes_as_empty() -> TestResult {
+    let old_json = r#"{
+        "id":"test-001","detector":"test",
+        "category":"malware-signature","severity":"critical","confidence":"confirmed",
+        "title":"test","description":"test",
+        "evidence":[{"kind":"other","description":"test"}],
+        "artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000",
+        "location":null,"remediation":null,"references":[],"tags":[]
+    }"#;
+    let finding: Finding = serde_json::from_str(old_json)?;
+    assert!(finding.taxonomies.is_empty());
+    Ok(())
+}
+
+#[test]
+fn empty_taxonomy_finding_omits_field_in_json() -> TestResult {
+    let finding = sample_finding();
+    let json = serde_json::to_string(&finding)?;
+    assert!(
+        !json.contains("taxonomies"),
+        "empty taxonomy vec must be omitted from JSON output"
+    );
+    Ok(())
+}
+
+#[test]
+fn taxonomy_ref_rejects_unknown_fields() {
+    let json = r#"{"name":"cwe","id":"CWE-78","confidence":"high","evil":"injected"}"#;
+    let result: Result<TaxonomyRef, _> = serde_json::from_str(json);
+    assert!(
+        result.is_err(),
+        "TaxonomyRef must reject unknown fields (conventions: deny_unknown_fields)"
+    );
+}

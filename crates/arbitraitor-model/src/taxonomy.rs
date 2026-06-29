@@ -25,6 +25,7 @@ pub enum TaxonomyName {
 
 /// A single taxonomy reference attached to a finding.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaxonomyRef {
     /// Taxonomy name (e.g. `Cwe`, `Capec`, `Owasp`).
     pub name: TaxonomyName,
