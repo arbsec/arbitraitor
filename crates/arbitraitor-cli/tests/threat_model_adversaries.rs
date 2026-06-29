@@ -22,7 +22,9 @@ fn temp_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let dir = std::env::temp_dir().join(format!("arb-adversary-test-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    // Canonicalize to resolve symlinks (e.g. macOS /var -> /private/var)
+    // so that release_artifact's O_NOFOLLOW path traversal succeeds.
+    Ok(std::fs::canonicalize(dir)?)
 }
 
 async fn stored_digest(
