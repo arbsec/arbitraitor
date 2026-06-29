@@ -303,7 +303,14 @@ async fn main() -> Result<()> {
                 &config,
                 explain_format,
             )
-            .await?;
+            .await
+            .map(|outcome| {
+                tracing::info!(
+                    sha256 = %outcome.sha256,
+                    verdict = ?outcome.verdict,
+                    "inspection complete"
+                );
+            })?;
         }
         Command::Fetch(command) => {
             wrapper_fetch(&command, &config).await?;
@@ -373,6 +380,10 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
     let url = wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
         miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
     })?;
+
+    let (output_path, remote_name) =
+        wrapper_output_destination(command.tool.as_deref(), &command.args);
+
     if matches!(target, Some(WrapperTarget::Curl)) {
         let parsed = parse_curl_args(&command.args).into_diagnostic()?;
         if !parsed.unsupported_options.is_empty() {
@@ -382,7 +393,8 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
             );
         }
     }
-    let verdict = inspect(
+
+    let outcome = inspect(
         url,
         None,
         None,
@@ -393,7 +405,33 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         None,
     )
     .await?;
-    enforce_wrapper_verdict(verdict)
+
+    if outcome.verdict != Verdict::Pass {
+        miette::bail!(
+            "wrapper rejected artifact with verdict {:?}",
+            outcome.verdict
+        );
+    }
+
+    match output_path {
+        Some(path) => {
+            std::fs::write(&path, &outcome.bytes).into_diagnostic()?;
+        }
+        None if remote_name => {
+            let filename = url
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or("download");
+            std::fs::write(filename, &outcome.bytes).into_diagnostic()?;
+        }
+        None => {
+            std::io::stdout()
+                .write_all(&outcome.bytes)
+                .into_diagnostic()?;
+        }
+    }
+
+    Ok(())
 }
 
 fn wrapper_fetch_target(tool: Option<&str>) -> Result<Option<WrapperTarget>> {
@@ -404,11 +442,21 @@ fn wrapper_fetch_target(tool: Option<&str>) -> Result<Option<WrapperTarget>> {
     .transpose()
 }
 
-fn enforce_wrapper_verdict(verdict: Verdict) -> Result<()> {
-    if verdict == Verdict::Pass {
-        return Ok(());
+fn wrapper_output_destination(tool: Option<&str>, args: &[String]) -> (Option<String>, bool) {
+    match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl) => match parse_curl_args(args) {
+            Ok(parsed) => (parsed.output, parsed.remote_name),
+            Err(_) => (None, false),
+        },
+        Some(WrapperTarget::Wget) => match translate_wget_args(args) {
+            Ok(parsed) => (
+                parsed.output_path.map(|p| p.to_string_lossy().into_owned()),
+                false,
+            ),
+            Err(_) => (None, false),
+        },
+        None => (None, false),
     }
-    miette::bail!("wrapper rejected artifact with verdict {verdict:?}")
 }
 
 fn wrapper_url_argument<'a>(tool: Option<&str>, args: &'a [String]) -> Option<&'a str> {
@@ -746,6 +794,13 @@ fn write_unpack_hazards(
 }
 
 #[allow(clippy::too_many_arguments)]
+struct InspectOutcome {
+    verdict: Verdict,
+    bytes: Vec<u8>,
+    sha256: Sha256Digest,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn inspect(
     url: &str,
     receipt_path: Option<&Path>,
@@ -755,7 +810,7 @@ async fn inspect(
     signatures: SignatureInputs,
     config: &Config,
     explain_format: Option<ExplainFormat>,
-) -> Result<Verdict> {
+) -> Result<InspectOutcome> {
     let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let fetch_policy = FetchPolicy {
         total_timeout: Duration::from_secs(config.fetch.total_timeout_secs),
@@ -839,7 +894,11 @@ async fn inspect(
         std::fs::write(path, json).into_diagnostic()?;
     }
 
-    Ok(result.verdict)
+    Ok(InspectOutcome {
+        verdict: result.verdict,
+        bytes,
+        sha256: artifact_sha256,
+    })
 }
 
 fn analysis_coordinator(
@@ -1132,10 +1191,9 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, enforce_wrapper_verdict,
-        parse_cli_from_args, wrapper_url_argument, write_status_text,
+        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, parse_cli_from_args,
+        wrapper_output_destination, wrapper_url_argument, write_status_text,
     };
-    use arbitraitor_model::verdict::Verdict;
     use clap::Parser;
     use std::fs;
     use std::io::{Cursor, Write};
@@ -1728,22 +1786,59 @@ mod tests {
         assert_eq!(url, "https://example.test/install.sh");
         Ok(())
     }
-
     #[test]
-    fn wrapper_verdict_passes_only_on_pass() -> Result<(), Box<dyn std::error::Error>> {
-        enforce_wrapper_verdict(Verdict::Pass)?;
-        for verdict in [
-            Verdict::Warn,
-            Verdict::Prompt,
-            Verdict::Block,
-            Verdict::Error,
-            Verdict::Incomplete,
-        ] {
-            assert!(enforce_wrapper_verdict(verdict).is_err());
-        }
-        Ok(())
+    fn wrapper_output_destination_curl_stdout() {
+        let args: Vec<String> = ["curl", "-fsSL", "https://example.test/install.sh"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let (output, remote_name) = wrapper_output_destination(Some("curl"), &args);
+        assert!(output.is_none(), "no -o flag should yield None");
+        assert!(!remote_name, "no -O flag should yield false");
     }
 
+    #[test]
+    fn wrapper_output_destination_curl_dash_o() {
+        let args: Vec<String> = [
+            "curl",
+            "-o",
+            "/tmp/file.tar.gz",
+            "https://example.test/file.tar.gz",
+        ]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+        let (output, remote_name) = wrapper_output_destination(Some("curl"), &args);
+        assert_eq!(output.as_deref(), Some("/tmp/file.tar.gz"));
+        assert!(!remote_name);
+    }
+
+    #[test]
+    fn wrapper_output_destination_curl_remote_name() {
+        let args: Vec<String> = ["curl", "-O", "https://example.test/file.tar.gz"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let (output, remote_name) = wrapper_output_destination(Some("curl"), &args);
+        assert!(output.is_none());
+        assert!(remote_name, "-O should set remote_name");
+    }
+
+    #[test]
+    fn wrapper_output_destination_wget_output_document() {
+        let args: Vec<String> = [
+            "wget",
+            "-O",
+            "/tmp/file.tar.gz",
+            "https://example.test/file.tar.gz",
+        ]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+        let (output, remote_name) = wrapper_output_destination(Some("wget"), &args);
+        assert_eq!(output.as_deref(), Some("/tmp/file.tar.gz"));
+        assert!(!remote_name);
+    }
     #[test]
     fn wrappers_rejects_unknown_target_name() {
         let result = Cli::try_parse_from(["arbitraitor", "wrappers", "install", "unknown-tool"]);
