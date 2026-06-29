@@ -1,12 +1,15 @@
-//! Tests for the six new §8.2 threat-model adversaries added in spec v0.5.
+//! Regression tests for spec §8.2 threat-model adversaries added in v0.5.
 //!
-//! Adversary 17: untrusted project config (.arbitraitor.toml)
-//! Adversary 20: release-destination attacks (symlink/hardlink/reparse)
-//! Adversary 21: privacy leakage via secret file path traversal
+//! This file covers testable aspects of adversaries 17, 18, 20, and 21.
+//! Adversaries 19 (mandatory scanning coverage) and 22 (privilege-helper
+//! scope creep) lack the API surface to test and are tracked in #271.
+//!
+//! **Does NOT resolve #271** — this is partial coverage.
 
 use arbitraitor_core::config::Config;
 use arbitraitor_core::secret::SecretResolver;
 use arbitraitor_exec::release::{ReleaseError, ReleasePolicy, release_artifact};
+use arbitraitor_fetch::redact_url;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_store::ContentStore;
 use tempfile::TempDir;
@@ -24,11 +27,11 @@ async fn stored_digest(
     Ok(sink.finish().await?)
 }
 
-mod adversary_17_untrusted_project_config {
+mod adversary_17_project_config {
     use super::*;
 
     #[test]
-    fn system_and_project_config_layer_correctly() -> TestResult {
+    fn system_then_project_config_layers_correctly() -> TestResult {
         let tmp = TempDir::new()?;
         let system = tmp.path().join("system.toml");
         std::fs::write(&system, "[fetch]\nmax_bytes = 1048576\n")?;
@@ -41,10 +44,7 @@ mod adversary_17_untrusted_project_config {
         )?;
 
         let config = Config::load_from_layers(Some(&system), None, &project)?;
-        assert_eq!(
-            config.fetch.max_bytes, 524_288,
-            "project config overrides system"
-        );
+        assert_eq!(config.fetch.max_bytes, 524_288);
         Ok(())
     }
 
@@ -56,6 +56,45 @@ mod adversary_17_untrusted_project_config {
         let config = Config::load_from_layers(Some(&system), None, tmp.path())?;
         assert_eq!(config.fetch.max_bytes, 5_242_880);
         Ok(())
+    }
+
+    #[test]
+    fn missing_project_config_uses_defaults() -> TestResult {
+        let tmp = TempDir::new()?;
+        let config = Config::load_from_layers(None, None, tmp.path())?;
+        assert_eq!(config, Config::default());
+        Ok(())
+    }
+}
+
+mod adversary_18_confused_deputy {
+    use super::*;
+
+    #[test]
+    fn redact_url_strips_credentials() {
+        let redacted = redact_url("https://user:secret@api.example.com/path");
+        assert!(
+            !redacted.contains("secret"),
+            "URL credentials must not appear in redacted form (invariant 9)"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_query_params() {
+        let redacted = redact_url("https://api.example.com/path?token=hidden&sig=abc");
+        assert!(
+            !redacted.contains("hidden") && !redacted.contains("abc"),
+            "query parameters must not appear in redacted form (invariant 9)"
+        );
+    }
+
+    #[test]
+    fn redact_url_preserves_host_and_path() {
+        let redacted = redact_url("https://api.example.com/releases/tool.tar.gz");
+        assert!(
+            redacted.contains("api.example.com") && redacted.contains("tool.tar.gz"),
+            "host and path must be preserved after redaction"
+        );
     }
 }
 
@@ -116,13 +155,28 @@ mod adversary_20_release_destination {
         assert_eq!(
             std::fs::read(&dest)?,
             bytes,
-            "released bytes must match (invariant 2)"
+            "released bytes must match scanned bytes (invariant 2)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_to_nonexistent_directory_fails() -> TestResult {
+        let tmp = TempDir::new()?;
+        let store = ContentStore::open(&tmp.path().join("store"))?;
+        let digest = stored_digest(&store, b"content").await?;
+
+        let dest = tmp.path().join("nonexistent/dir/output.txt");
+        let result = release_artifact(&store, &digest, &dest, &ReleasePolicy::default());
+        assert!(
+            result.is_err(),
+            "release to nonexistent parent dir must fail"
         );
         Ok(())
     }
 }
 
-mod adversary_21_privacy_leakage {
+mod adversary_21_secret_leakage {
     use super::*;
 
     #[test]
