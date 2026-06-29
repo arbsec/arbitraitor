@@ -43,6 +43,11 @@ supersede it.
 | [0019](0019-catch-unwind-and-panic-abort.md) | catch_unwind and panic=abort interaction | Accepted | #80 |
 | [0020](0020-subprocess-plugin-network-isolation.md) | Seccomp-BPF network isolation for subprocess plugins | Accepted | #208 |
 | [0021](0021-subprocess-plugin-filesystem-isolation.md) | Landlock filesystem isolation for subprocess plugins | Accepted | #209 |
+| [0022](0022-slsa-build-level-target.md) | SLSA Build Level target for Arbitraitor releases | Proposed | #272 |
+| [0023](0023-in-toto-statement-receipt-envelope.md) | in-toto Statement receipt envelope | Proposed | #273 |
+| [0024](0024-macos-containment-strategy.md) | macOS containment strategy | Proposed | #279 |
+| [0025](0025-ossf-scorecard-depsdev-guac-integration.md) | OpenSSF Scorecard, deps.dev, and GUAC as optional integrations | Proposed | #275 |
+| [0026](0026-eu-cra-nist-ssdf-compliance-mapping.md) | EU CRA / NIST SSDF informational compliance mapping | Proposed | #276 |
 
 ## Format
 
