@@ -762,7 +762,7 @@ fn parse_bundle_metadata(
     let bundle_json: serde_json::Value = serde_json::from_slice(&bundle_bytes).ok()?;
 
     let media_type = bundle_json
-        .get("media_type")
+        .get("mediaType")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_owned();
@@ -770,15 +770,15 @@ fn parse_bundle_metadata(
     let form = determine_material_form(&bundle_json);
 
     let tlog_entries = bundle_json
-        .get("verification_material")
-        .and_then(|m| m.get("tlog_entries"))
+        .get("verificationMaterial")
+        .and_then(|m| m.get("tlogEntries"))
         .and_then(|t| t.as_array())
         .map_or(0, Vec::len);
 
     let rfc3161_timestamps = bundle_json
-        .get("verification_material")
-        .and_then(|m| m.get("timestamp_verification_data"))
-        .and_then(|t| t.get("rfc3161_timestamps"))
+        .get("verificationMaterial")
+        .and_then(|m| m.get("timestampVerificationData"))
+        .and_then(|t| t.get("rfc3161Timestamps"))
         .and_then(|t| t.as_array())
         .map_or(0, Vec::len);
 
@@ -802,15 +802,15 @@ fn parse_bundle_metadata(
 /// Determines the verification material form from the bundle JSON.
 fn determine_material_form(bundle: &serde_json::Value) -> VerificationMaterialForm {
     let content = bundle
-        .get("verification_material")
+        .get("verificationMaterial")
         .and_then(|m| m.get("content"));
 
     match content {
-        Some(c) if c.get("x509_certificate_chain").is_some() => {
+        Some(c) if c.get("x509CertificateChain").is_some() => {
             VerificationMaterialForm::X509CertificateChain
         }
-        Some(c) if c.get("public_key").is_some() => VerificationMaterialForm::PublicKey,
-        Some(c) if c.get("x509_certificate").is_some() => VerificationMaterialForm::X509Certificate,
+        Some(c) if c.get("publicKey").is_some() => VerificationMaterialForm::PublicKey,
+        Some(c) if c.get("x509Certificate").is_some() => VerificationMaterialForm::X509Certificate,
         _ => VerificationMaterialForm::X509CertificateChain,
     }
 }
@@ -1351,19 +1351,19 @@ mod tests {
         let dir = tempfile::TempDir::new()?;
         let bundle_path = dir.path().join("bundle.json");
         let bundle_json = serde_json::json!({
-            "media_type": "application/vnd.dev.sigstore.bundle+json;version=0.3",
-            "verification_material": {
+            "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+            "verificationMaterial": {
                 "content": {
-                    "x509_certificate": {
-                        "raw_bytes": "MIIB..."
+                    "x509Certificate": {
+                        "rawBytes": "MIIB..."
                     }
                 },
-                "tlog_entries": [
+                "tlogEntries": [
                     {"log_index": 1},
                     {"log_index": 2}
                 ],
-                "timestamp_verification_data": {
-                    "rfc3161_timestamps": [
+                "timestampVerificationData": {
+                    "rfc3161Timestamps": [
                         {"signed_theta": "MIAGCSqGSIb3DQEHA"}
                     ]
                 }
@@ -1402,7 +1402,7 @@ mod tests {
         let bundle_path = dir.path().join("minimal.json");
         std::fs::write(
             &bundle_path,
-            r#"{"media_type": "application/vnd.dev.sigstore.bundle+json;version=0.1"}"#,
+            r#"{"mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.1"}"#,
         )?;
 
         let metadata = parse_bundle_metadata(&bundle_path, "id", "iss");
@@ -1450,9 +1450,9 @@ mod tests {
     #[test]
     fn determine_material_form_detects_public_key() {
         let bundle = serde_json::json!({
-            "verification_material": {
+            "verificationMaterial": {
                 "content": {
-                    "public_key": {"raw_bytes": "key"}
+                    "publicKey": {"rawBytes": "key"}
                 }
             }
         });
