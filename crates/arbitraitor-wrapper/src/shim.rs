@@ -262,7 +262,7 @@ fn install_script(
     let content = format!(
         "#!/bin/sh\n\
          # {marker}{name} — routes through inspection pipeline\n\
-         exec {quoted} {sub} \"$@\"\n",
+         exec {quoted} {sub} --tool {name} -- \"$@\"\n",
         marker = SHIM_MARKER,
         name = target.binary_name(),
         sub = target.arbitraitor_subcommand(),

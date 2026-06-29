@@ -33,6 +33,7 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
         crate::Command::Run(command) => command,
         crate::Command::Inspect(_)
         | crate::Command::Daemon(_)
+        | crate::Command::Fetch(_)
         | crate::Command::Unpack(_)
         | crate::Command::Intel(_)
         | crate::Command::Status(_)

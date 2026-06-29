@@ -177,6 +177,7 @@ fn is_critical_unsupported_option(option: &str) -> bool {
             | "--resolve"
             | "--interface"
             | "--unix-socket"
+            | "--config"
     )
 }
 fn request_headers(args: &CurlArgs) -> Vec<(String, String)> {
@@ -319,7 +320,7 @@ impl<'a> CurlParser<'a> {
             "--request" => self.args.request_method = Some(self.option_value(name, inline_value)?),
             "--url" => self.args.url = Some(self.option_value(name, inline_value)?),
             "--form" | "--upload-file" | "--user" | "--proxy" | "--connect-to" | "--resolve"
-            | "--interface" | "--unix-socket" => {
+            | "--interface" | "--unix-socket" | "--config" => {
                 self.args.unsupported_options.push(name.to_owned());
                 if inline_value.is_none() {
                     let _ = self.next_token();
