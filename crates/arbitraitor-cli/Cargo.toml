@@ -52,4 +52,3 @@ arbitraitor-model = { workspace = true }
 arbitraitor-testkit = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true }

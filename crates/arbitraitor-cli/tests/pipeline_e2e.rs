@@ -1,8 +1,10 @@
-//! Pipeline end-to-end tests — Tier 3 per spec §43.8.
+//! Analyzer pipeline integration tests.
 //!
-//! Full pipeline tests using wiremock HTTP backends and the in-process
-//! analysis coordinator. Verifies the complete flow: fetch → analyze →
-//! evaluate → receipt, without requiring Docker.
+//! Exercises the analysis coordinator against real HTTP-served content
+//! using wiremock backends. These are not full CLI e2e tests (the CLI's
+//! `FetchPolicy` blocks HTTP/loopback by default) — they verify the
+//! analysis pipeline's ability to classify and detect threats in
+//! content fetched from HTTP origins.
 //!
 //! Uses `arbitraitor-testkit::mock_server` for disposable HTTP origins
 //! that serve synthetic shell script fixtures from the corpus.
