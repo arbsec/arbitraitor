@@ -55,8 +55,10 @@ jobs:
           fetch-depth: 0
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
-      - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6  # v2.82.6
+        with:
+          tool: cargo-nextest
+          fallback: none
       - name: Install cargo-test-changed
         run: cargo install cargo-test-changed --locked
       - name: Test changed crates
@@ -81,8 +83,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
-      - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6  # v2.82.6
+        with:
+          tool: cargo-nextest
+          fallback: none
       - name: Run tests
         run: cargo nextest run --workspace --all-features
 
