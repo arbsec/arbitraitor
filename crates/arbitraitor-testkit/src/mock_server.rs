@@ -65,7 +65,7 @@ impl MockHttpServer {
     /// NOTE: `WireMock` serves HTTP only. This tests redirect handling logic, NOT TLS downgrade
     /// detection. TLS downgrade tests require a real HTTPS server.
     ///
-    /// TODO: real HTTPS downgrade testing requires a custom HTTPS server -- see #33.
+    /// TODO(#324): real HTTPS downgrade testing requires a custom HTTPS server.
     pub async fn http_redirect_chain(&self) -> String {
         let route_path = self.unique_path("http-redirect-chain");
         let target = self.absolute_url("/downgraded-target");
@@ -97,7 +97,7 @@ impl MockHttpServer {
     /// still accepts the TCP connection on the mock server address; it does not bind to a private
     /// IP and does not exercise real SSRF network controls.
     ///
-    /// TODO: real SSRF network tests require a custom TCP server -- see #33.
+    /// TODO(#324): real SSRF network tests require a custom TCP server.
     pub async fn private_ip_metadata_headers(&self) -> String {
         let route_path = self.unique_path("private-ip-metadata-headers");
         Mock::given(method("GET"))
@@ -132,7 +132,7 @@ impl MockHttpServer {
     /// `WireMock` and Hyper reject mismatched `Content-Length` responses, so this tests small-body
     /// handling rather than TCP-level truncation.
     ///
-    /// TODO: raw TCP-level truncation tests require a custom TCP server -- see #33.
+    /// TODO(#324): raw TCP-level truncation tests require a custom TCP server.
     pub async fn short_content_response(&self) -> String {
         let route_path = self.unique_path("short-content-response");
         Mock::given(method("GET"))
@@ -179,7 +179,7 @@ impl MockHttpServer {
     /// the TCP connection on the mock server address; it does not bind to a metadata IP and does
     /// not exercise real SSRF network controls.
     ///
-    /// TODO: real SSRF network tests require a custom TCP server -- see #33.
+    /// TODO(#324): real SSRF network tests require a custom TCP server.
     pub async fn ssrf_metadata_headers(&self) -> String {
         let route_path = self.unique_path("ssrf-metadata-headers");
         Mock::given(method("GET"))
