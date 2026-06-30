@@ -190,3 +190,59 @@ async fn streaming_timeout() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn truncated_response_returns_partial_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let server = network::MockHttpServer::truncated_response(1024, 16)?;
+    let url = server.url();
+    let mut sink = VecSink::new();
+
+    let result = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_loopback_policy()),
+            &mut sink,
+        )
+        .await;
+
+    match result {
+        Ok(receipt) => {
+            assert!(
+                receipt.bytes_written < 1024,
+                "fetcher should return fewer bytes than Content-Length declared (1024), got {}",
+                receipt.bytes_written
+            );
+        }
+        Err(error) => {
+            assert!(
+                error.to_string().to_lowercase().contains("eof")
+                    || error.to_string().to_lowercase().contains("unexpected")
+                    || error.to_string().to_lowercase().contains("incomplete")
+                    || error.to_string().to_lowercase().contains("truncat")
+                    || error.to_string().to_lowercase().contains("body"),
+                "expected truncation/body error, got: {error}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_http_response_handled() -> Result<(), Box<dyn std::error::Error>> {
+    let raw = b"NOT-HTTP/1.1 GARBAGE\r\n\r\n".to_vec();
+    let server = network::MockHttpServer::raw_bytes(raw)?;
+    let url = server.url();
+    let mut sink = VecSink::new();
+
+    let result = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_loopback_policy()),
+            &mut sink,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "malformed HTTP response must produce an error, got: {result:?}"
+    );
+    Ok(())
+}
