@@ -113,6 +113,45 @@ impl MockHttpServer {
         })
     }
 
+    /// Creates a server that claims `content_length` bytes but only sends
+    /// `actual_bytes`, then closes the connection.
+    ///
+    /// This exercises the fetcher's handling of truncated responses where the
+    /// `Content-Length` header promises more data than the server delivers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::Error`] if binding the TCP listener fails.
+    pub fn truncated_response(content_length: usize, actual_bytes: usize) -> std::io::Result<Self> {
+        Self::spawn(move |stream| {
+            consume_request(stream);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.flush();
+            let body = vec![b'x'; actual_bytes];
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        })
+    }
+
+    /// Creates a server that sends a raw byte sequence as its entire response,
+    /// without constructing a valid HTTP response.
+    ///
+    /// Useful for testing how the fetcher handles malformed protocol data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::Error`] if binding the TCP listener fails.
+    pub fn raw_bytes(raw_response: Vec<u8>) -> std::io::Result<Self> {
+        Self::spawn(move |stream| {
+            consume_request(stream);
+            let _ = stream.write_all(&raw_response);
+            let _ = stream.flush();
+        })
+    }
+
     fn spawn<F>(handler: F) -> std::io::Result<Self>
     where
         F: Fn(&mut TcpStream) + Send + 'static,
