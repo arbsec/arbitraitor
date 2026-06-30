@@ -221,7 +221,7 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Status
 
-**Pre-alpha.** Not ready for production use. The API, CLI, receipts, and policy schemas will change. 867+ tests passing.
+**Pre-alpha.** Not ready for production use. The API, CLI, receipts, and policy schemas will change. 1066+ tests passing.
 
 ## License
 
