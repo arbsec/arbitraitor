@@ -1,15 +1,14 @@
 //! CLI subcommand handlers added in v0.6 to close the spec §28.1 surface gap.
-//!
-//! Each function corresponds to a top-level subcommand. Functions are
-//! intentionally stateless: they receive parsed clap args, perform I/O
-//! against the appropriate crate APIs, and write to stdout/stderr.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
+use arbitraitor_mcp::sanitize_for_agent;
+use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::PolicyEngine;
+use arbitraitor_receipt::Receipt;
 use arbitraitor_store::ContentStore;
 use clap::{Args, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -70,15 +69,40 @@ pub struct DoctorCommand {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
+    let max_bytes = config.store.max_bytes;
     let bytes = if command.stdin {
         let mut buf = Vec::new();
-        std::io::stdin().read_to_end(&mut buf).into_diagnostic()?;
+        let mut stdin = std::io::stdin().lock();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let n = stdin.read(&mut chunk).into_diagnostic()?;
+            if n == 0 {
+                break;
+            }
+            if buf.len() + n > usize::try_from(max_bytes).unwrap_or(usize::MAX) {
+                miette::bail!(
+                    "input exceeds configured store limit: bytes={}, limit={}",
+                    buf.len() + n,
+                    max_bytes
+                );
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
         buf
     } else {
         let path = command
             .path
             .as_deref()
             .ok_or_else(|| miette::miette!("no file path provided and --stdin not set"))?;
+        let metadata = std::fs::metadata(path).into_diagnostic()?;
+        let file_size = metadata.len();
+        if file_size > max_bytes {
+            miette::bail!(
+                "file exceeds configured store limit: bytes={}, limit={}",
+                file_size,
+                max_bytes
+            );
+        }
         std::fs::read(path).into_diagnostic()?
     };
 
@@ -97,70 +121,65 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
         &[],
     )?;
 
-    if let Some(format) = command.format {
-        write_explainability(&result.findings, "scan", format)?;
+    let format = match (command.explain, command.format) {
+        (_, Some(f)) => Some(f),
+        (true, None) => Some(ExplainFormat::Text),
+        (false, None) => None,
+    };
+    if let Some(fmt) = format {
+        write_explainability(&result.findings, "scan", fmt)?;
     }
 
-    if result.verdict == arbitraitor_model::verdict::Verdict::Block {
-        std::process::exit(30);
+    let exit_code = match result.verdict {
+        Verdict::Pass => 0,
+        Verdict::Warn => 10,
+        Verdict::Block => 30,
+        Verdict::Prompt => 21,
+        Verdict::Error => 33,
+        Verdict::Incomplete => 34,
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
     Ok(())
 }
 
 pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
     let receipt_bytes = std::fs::read(&command.receipt_path).into_diagnostic()?;
-    let receipt: serde_json::Value = serde_json::from_slice(&receipt_bytes).into_diagnostic()?;
-
-    let verdict = receipt
-        .get("verdict")
-        .and_then(|v| v.get("verdict"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-
-    let findings = receipt
-        .get("findings")
-        .cloned()
-        .unwrap_or(serde_json::Value::Array(vec![]));
-
-    let artifact_sha = receipt
-        .get("artifact_sha256")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<unknown>");
+    let receipt: Receipt = serde_json::from_slice(&receipt_bytes)
+        .map_err(|e| miette::miette!("invalid receipt file: {e}"))?;
 
     let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "Artifact: {artifact_sha}").into_diagnostic()?;
-    writeln!(stdout, "Verdict: {verdict}").into_diagnostic()?;
+    writeln!(
+        stdout,
+        "Artifact: {}",
+        sanitize_for_agent(&receipt.artifact_sha256)
+    )
+    .into_diagnostic()?;
+    writeln!(stdout, "Verdict: {:?}", receipt.verdict.verdict).into_diagnostic()?;
     writeln!(stdout).into_diagnostic()?;
 
-    if let Some(findings_arr) = findings.as_array() {
-        writeln!(stdout, "Findings ({})", findings_arr.len()).into_diagnostic()?;
-        for (i, finding) in findings_arr.iter().enumerate() {
-            let title = finding
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("<no title>");
-            let severity = finding
-                .get("severity")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?");
-            writeln!(stdout, "  {}. [{severity}] {title}", i + 1).into_diagnostic()?;
-        }
+    writeln!(stdout, "Findings ({})", receipt.findings.len()).into_diagnostic()?;
+    for (i, finding) in receipt.findings.iter().enumerate() {
+        writeln!(
+            stdout,
+            "  {}. [{:?}] {}",
+            i + 1,
+            finding.severity,
+            sanitize_for_agent(&finding.title)
+        )
+        .into_diagnostic()?;
     }
 
-    if let Some(retrieval) = receipt.get("retrieval") {
+    if let Some(retrieval) = &receipt.retrieval {
         writeln!(stdout).into_diagnostic()?;
         writeln!(stdout, "Retrieval:").into_diagnostic()?;
-        if let Some(url) = retrieval
-            .get("requested_url")
-            .and_then(serde_json::Value::as_str)
-        {
-            writeln!(stdout, "  URL: {url}").into_diagnostic()?;
+        let url = retrieval.requested_url();
+        if !url.is_empty() {
+            writeln!(stdout, "  URL: {}", sanitize_for_agent(url)).into_diagnostic()?;
         }
-        if let Some(size) = retrieval
-            .get("byte_count")
-            .and_then(serde_json::Value::as_u64)
-        {
-            writeln!(stdout, "  Size: {size} bytes").into_diagnostic()?;
+        if let Some(final_url) = retrieval.final_url() {
+            writeln!(stdout, "  Final URL: {}", sanitize_for_agent(final_url)).into_diagnostic()?;
         }
     }
 
@@ -183,10 +202,11 @@ pub(crate) fn store(command: &StoreCommand, config: &Config) -> Result<()> {
             let mut stdout = std::io::stdout().lock();
             writeln!(stdout, "Stored artifacts: {}", entries.len()).into_diagnostic()?;
             for entry in &entries {
+                let prefix: String = entry.sha256.chars().take(12).collect();
                 writeln!(
                     stdout,
                     "  {} ({} bytes, {})",
-                    &entry.sha256[..12],
+                    prefix,
                     entry.size_bytes,
                     if entry.locked { "locked" } else { "unlocked" }
                 )
@@ -203,8 +223,11 @@ pub(crate) fn store(command: &StoreCommand, config: &Config) -> Result<()> {
         }
         StoreSubcommand::Gc { max_age_days } => {
             let mut gc = arbitraitor_store::GarbageCollector::new();
-            if let Some(days) = *max_age_days {
-                gc = gc.with_max_age(std::time::Duration::from_secs(days * 86_400));
+            if let Some(days) = max_age_days {
+                let secs = days
+                    .checked_mul(86_400)
+                    .ok_or_else(|| miette::miette!("max-age-days overflow: {days} is too large"))?;
+                gc = gc.with_max_age(std::time::Duration::from_secs(secs));
             }
             let stats = gc.run(&store, index).into_diagnostic()?;
             let mut stdout = std::io::stdout().lock();
