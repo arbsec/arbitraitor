@@ -7,14 +7,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
-
 use arbitraitor_model::artifact::ArtifactKind;
 use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::Duration;
 
 use crate::{AnalysisContext, Detector, DetectorMetadata};
 
@@ -22,7 +21,6 @@ const DETECTOR_ID: &str = "tirith";
 const DETECTOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const TEMP_PREFIX: &str = "arb-tirith-scan-";
 
 /// Tirith subprocess detector. Resolves the `tirith` binary at construction
 /// time; if not found, the detector is inert and returns no findings.
@@ -94,15 +92,21 @@ impl Detector for TirithDetector {
             return Vec::new();
         };
 
-        let temp_path = match write_temp_artifact(ctx.artifact_bytes) {
-            Ok(path) => path,
+        let temp_file = match tempfile::NamedTempFile::new() {
+            Ok(f) => f,
             Err(error) => {
-                tracing::warn!("tirith: failed to write temp file: {error}");
+                tracing::warn!("tirith: failed to create temp file: {error}");
                 return Vec::new();
             }
         };
+        if let Err(error) = std::io::Write::write_all(&mut temp_file.as_file(), ctx.artifact_bytes)
+        {
+            tracing::warn!("tirith: failed to write temp file: {error}");
+            return Vec::new();
+        }
+        let temp_path = temp_file.path().to_path_buf();
 
-        let output = Command::new(binary)
+        let mut child = match Command::new(binary)
             .args([
                 "scan",
                 "--json",
@@ -114,45 +118,81 @@ impl Detector for TirithDetector {
             .arg(&temp_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output();
-
-        let _ = std::fs::remove_file(&temp_path);
-
-        let output = match output {
-            Ok(o) => o,
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
             Err(error) => {
-                tracing::warn!("tirith: subprocess failed: {error}");
+                tracing::warn!("tirith: subprocess spawn failed: {error}");
                 return Vec::new();
             }
         };
 
-        if !output.status.success() {
-            tracing::debug!(
-                "tirith: non-zero exit code {}",
-                output.status.code().unwrap_or(-1)
-            );
+        let mut stdout = Vec::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            let mut buf = [0_u8; 8192];
+            loop {
+                match std::io::Read::read(&mut pipe, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stdout.len() + n > MAX_OUTPUT_BYTES {
+                            tracing::warn!(
+                                "tirith: output exceeded {MAX_OUTPUT_BYTES} bytes, killing subprocess"
+                            );
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            drop(temp_file);
+                            return Vec::new();
+                        }
+                        stdout.extend_from_slice(&buf[..n]);
+                    }
+                    Err(error) => {
+                        tracing::debug!("tirith: stdout read error: {error}");
+                        break;
+                    }
+                }
+            }
         }
 
-        if output.stdout.len() > MAX_OUTPUT_BYTES {
-            tracing::warn!(
-                "tirith: output exceeded {} bytes, truncating",
-                MAX_OUTPUT_BYTES
-            );
-            return Vec::new();
+        let deadline = std::time::Instant::now() + self.timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        tracing::debug!(
+                            "tirith: non-zero exit code {}",
+                            status.code().unwrap_or(-1)
+                        );
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            "tirith: subprocess timed out after {:?}, killing",
+                            self.timeout
+                        );
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        drop(temp_file);
+                        return Vec::new();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => {
+                    tracing::warn!("tirith: subprocess wait failed: {error}");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    drop(temp_file);
+                    return Vec::new();
+                }
+            }
         }
 
-        parse_tirith_findings(&output.stdout, &ctx.artifact_sha256)
+        drop(temp_file);
+
+        parse_tirith_findings(&stdout, &ctx.artifact_sha256)
     }
-}
-
-fn write_temp_artifact(bytes: &[u8]) -> std::io::Result<PathBuf> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!("{TEMP_PREFIX}{nanos}-{}", std::process::id()));
-    std::fs::write(&path, bytes)?;
-    Ok(path)
 }
 
 fn parse_tirith_findings(stdout: &[u8], artifact_sha256: &Sha256Digest) -> Vec<Finding> {
