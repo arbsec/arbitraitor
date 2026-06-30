@@ -62,7 +62,7 @@ subtle = { version = "2" }
 tracing-core = { version = "0.1" }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 wasmparser = { version = "0.245" }
-wasmtime-internal-core = { version = "43", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core = { version = "46", default-features = false, features = ["anyhow", "serde", "std"] }
 zeroize = { version = "1" }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
@@ -94,6 +94,6 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 wasmparser = { version = "0.245" }
-wasmtime-internal-core = { version = "43", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core = { version = "46", default-features = false, features = ["anyhow", "serde", "std"] }
 
 ### END HAKARI SECTION
