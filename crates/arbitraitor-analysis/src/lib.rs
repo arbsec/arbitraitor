@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod dep_vuln;
+pub mod tirith;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
