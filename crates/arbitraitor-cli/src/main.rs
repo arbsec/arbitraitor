@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod commands;
 mod run;
 
 use std::ffi::OsString;
@@ -68,8 +69,13 @@ enum Command {
     Intel(IntelCommand),
     Status(StatusCommand),
     Wrappers(WrappersCommand),
-    /// Start MCP server over stdio (JSON-RPC 2.0)
     Mcp,
+    Scan(commands::ScanCommand),
+    Explain(commands::ExplainCommand),
+    Store(commands::StoreCommand),
+    Policy(commands::PolicyCommand),
+    Doctor(commands::DoctorCommand),
+    Version,
 }
 
 #[derive(Args)]
@@ -246,6 +252,7 @@ struct CosignInput {
     issuer: String,
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = parse_cli_from_invocation();
@@ -340,6 +347,24 @@ async fn main() -> Result<()> {
         }
         Command::Mcp => {
             arbitraitor_mcp::run_stdio_server().into_diagnostic()?;
+        }
+        Command::Scan(command) => {
+            commands::scan(&command, &config)?;
+        }
+        Command::Explain(command) => {
+            commands::explain(&command)?;
+        }
+        Command::Store(command) => {
+            commands::store(&command, &config)?;
+        }
+        Command::Policy(command) => {
+            commands::policy(&command)?;
+        }
+        Command::Doctor(command) => {
+            commands::doctor(&command, &config)?;
+        }
+        Command::Version => {
+            commands::version()?;
         }
     }
 
@@ -1244,7 +1269,13 @@ mod tests {
             | Command::Run(_)
             | Command::Status(_)
             | Command::Wrappers(_)
-            | Command::Mcp => {
+            | Command::Mcp
+            | Command::Scan(_)
+            | Command::Explain(_)
+            | Command::Store(_)
+            | Command::Policy(_)
+            | Command::Doctor(_)
+            | Command::Version => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1302,7 +1333,13 @@ mod tests {
             | Command::Run(_)
             | Command::Status(_)
             | Command::Wrappers(_)
-            | Command::Mcp => {
+            | Command::Mcp
+            | Command::Scan(_)
+            | Command::Explain(_)
+            | Command::Store(_)
+            | Command::Policy(_)
+            | Command::Doctor(_)
+            | Command::Version => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1342,7 +1379,13 @@ mod tests {
             | Command::Run(_)
             | Command::Status(_)
             | Command::Wrappers(_)
-            | Command::Mcp => {
+            | Command::Mcp
+            | Command::Scan(_)
+            | Command::Explain(_)
+            | Command::Store(_)
+            | Command::Policy(_)
+            | Command::Doctor(_)
+            | Command::Version => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1424,7 +1467,13 @@ mod tests {
             | Command::Run(_)
             | Command::Status(_)
             | Command::Wrappers(_)
-            | Command::Mcp => {
+            | Command::Mcp
+            | Command::Scan(_)
+            | Command::Explain(_)
+            | Command::Store(_)
+            | Command::Policy(_)
+            | Command::Doctor(_)
+            | Command::Version => {
                 return Err("parsed wrong command".into());
             }
         }
