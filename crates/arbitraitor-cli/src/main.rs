@@ -76,6 +76,7 @@ enum Command {
     Store(commands::StoreCommand),
     Policy(commands::PolicyCommand),
     Doctor(commands::DoctorCommand),
+    Rules(commands::RulesCommand),
     Version,
 }
 
@@ -381,6 +382,9 @@ async fn main() -> Result<()> {
         }
         Command::Doctor(command) => {
             commands::doctor(&command, &config)?;
+        }
+        Command::Rules(command) => {
+            commands::rules(&command)?;
         }
         Command::Version => {
             commands::version()?;
@@ -1342,8 +1346,9 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, emit_wrapper_output,
-        parse_cli_from_args, wrapper_output_destination, wrapper_url_argument, write_status_text,
+        Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
+        emit_wrapper_output, parse_cli_from_args, wrapper_output_destination, wrapper_url_argument,
+        write_status_text,
     };
     use clap::Parser;
     use std::fs;
@@ -1383,6 +1388,7 @@ mod tests {
             | Command::Store(_)
             | Command::Policy(_)
             | Command::Doctor(_)
+            | Command::Rules(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1447,6 +1453,7 @@ mod tests {
             | Command::Store(_)
             | Command::Policy(_)
             | Command::Doctor(_)
+            | Command::Rules(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1493,6 +1500,7 @@ mod tests {
             | Command::Store(_)
             | Command::Policy(_)
             | Command::Doctor(_)
+            | Command::Rules(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1581,6 +1589,7 @@ mod tests {
             | Command::Store(_)
             | Command::Policy(_)
             | Command::Doctor(_)
+            | Command::Rules(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1913,6 +1922,56 @@ mod tests {
                 subcommand: WrappersSubcommand::Init(cmd),
                 ..
             }) => assert!(cmd.detect_shell),
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rules_list_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "rules", "list"])?;
+        match cli.command {
+            Command::Rules(cmd) => {
+                assert!(cmd.rules_dir.is_none());
+                assert!(matches!(cmd.subcommand, commands::RulesSubcommand::List));
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rules_list_with_dir_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "rules",
+            "--rules-dir",
+            "/path/to/rules",
+            "list",
+        ])?;
+        match cli.command {
+            Command::Rules(cmd) => {
+                assert_eq!(
+                    cmd.rules_dir.as_deref(),
+                    Some(std::path::Path::new("/path/to/rules"))
+                );
+                assert!(matches!(cmd.subcommand, commands::RulesSubcommand::List));
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rules_validate_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "rules", "validate", "/path/to/rules.yar"])?;
+        match cli.command {
+            Command::Rules(cmd) => match cmd.subcommand {
+                commands::RulesSubcommand::Validate { file } => {
+                    assert_eq!(file, PathBuf::from("/path/to/rules.yar"));
+                }
+                commands::RulesSubcommand::List => return Err("wrong subcommand".into()),
+            },
             _ => return Err("parsed wrong command".into()),
         }
         Ok(())

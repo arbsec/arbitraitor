@@ -67,6 +67,20 @@ pub struct DoctorCommand {
     pub rules: Option<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct RulesCommand {
+    #[arg(long, value_name = "DIR")]
+    pub rules_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    pub subcommand: RulesSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum RulesSubcommand {
+    List,
+    Validate { file: PathBuf },
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     let max_bytes = config.store.max_bytes;
@@ -283,5 +297,60 @@ pub(crate) fn version() -> Result<()> {
     writeln!(stdout, "arbitraitor {}", env!("CARGO_PKG_VERSION")).into_diagnostic()?;
     writeln!(stdout, "license: {}", env!("CARGO_PKG_LICENSE")).into_diagnostic()?;
     writeln!(stdout, "repository: {}", env!("CARGO_PKG_REPOSITORY")).into_diagnostic()?;
+    Ok(())
+}
+
+pub(crate) fn rules(command: &RulesCommand) -> Result<()> {
+    let mut manager = arbitraitor_yarax::RulePackManager::with_built_in().into_diagnostic()?;
+    if let Some(dir) = command.rules_dir.as_deref() {
+        manager
+            .load_directory(
+                dir,
+                arbitraitor_yarax::RuleSource::FileSystem(dir.to_path_buf()),
+            )
+            .into_diagnostic()?;
+    }
+
+    match &command.subcommand {
+        RulesSubcommand::List => {
+            let mut stdout = std::io::stdout().lock();
+            let packs = manager.packs();
+            writeln!(stdout, "Rule packs: {}", packs.len()).into_diagnostic()?;
+            for pack in packs {
+                let source = match pack.source {
+                    arbitraitor_yarax::RuleSource::BuiltIn => "built-in",
+                    arbitraitor_yarax::RuleSource::FileSystem(_) => "filesystem",
+                    arbitraitor_yarax::RuleSource::Enterprise => "enterprise",
+                    arbitraitor_yarax::RuleSource::Community => "community",
+                    arbitraitor_yarax::RuleSource::UserLocal => "user-local",
+                };
+                let auth = match &pack.auth {
+                    arbitraitor_yarax::RulePackAuth::Signed { key_id } => {
+                        format!("signed ({key_id})")
+                    }
+                    arbitraitor_yarax::RulePackAuth::Unsigned { reason: _ } => {
+                        "unsigned".to_owned()
+                    }
+                };
+                let digest_short: String = pack.digest.to_string().chars().take(12).collect();
+                writeln!(
+                    stdout,
+                    "  {source:10} {ns:20} {ver:20} {auth:20} sha256:{digest_short}",
+                    ns = pack.namespace,
+                    ver = pack.version,
+                )
+                .into_diagnostic()?;
+            }
+        }
+        RulesSubcommand::Validate { file } => {
+            let rules_text = std::fs::read_to_string(file).into_diagnostic()?;
+            let scanner = arbitraitor_yarax::YaraScanner::empty().into_diagnostic()?;
+            let mut scanner = scanner;
+            scanner.add_rules(&rules_text).into_diagnostic()?;
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "valid: {}", file.display()).into_diagnostic()?;
+            writeln!(stdout, "  rules compiled successfully").into_diagnostic()?;
+        }
+    }
     Ok(())
 }
