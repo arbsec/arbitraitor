@@ -11,3 +11,4 @@ pub mod operation;
 pub mod origin;
 pub mod taxonomy;
 pub mod verdict;
+pub mod vex;

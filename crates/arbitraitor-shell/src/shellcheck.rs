@@ -150,6 +150,7 @@ fn code_for_category(finding: &Finding) -> u32 {
         C::PolicyViolation => 910,
         C::ParserError => 920,
         C::ResourceLimitEvent => 930,
+        C::SupplyChain => 940,
     };
     CODE_BASE + offset
 }

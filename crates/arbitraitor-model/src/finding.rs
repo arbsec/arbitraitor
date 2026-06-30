@@ -51,6 +51,8 @@ pub enum FindingCategory {
     ParserError,
     /// Resource limit event.
     ResourceLimitEvent,
+    /// Supply-chain companion artifact (SBOM, VEX, attestation).
+    SupplyChain,
 }
 
 /// A detector finding emitted for an artifact.
