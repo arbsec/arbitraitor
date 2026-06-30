@@ -51,10 +51,15 @@ If the verdict is Prompt or Block, the command exits with code 5 immediately —
 
 ## Native binary execution
 
-To execute a native binary (ELF/Mach-O) instead of a script, use the `--native` gate:
+Arbitraitor auto-detects whether an artifact is a native binary (ELF, Mach-O, PE) or a script from the downloaded bytes. When a native binary is detected:
+
+- **Interactive mode**: you'll be prompted to confirm native execution before proceeding.
+- **Non-interactive mode**: native execution is blocked unless you pass `--native` to pre-approve it.
 
 ```sh
+# Auto-detected: native binary → prompts for confirmation
+arbitraitor run https://example.com/binary
+
+# Pre-approve native execution (skips the prompt)
 arbitraitor run https://example.com/binary --native
 ```
-
-This constructs a `NativeExecutionGate` that opts into native execution. Without `--native`, native artifacts are always rejected.

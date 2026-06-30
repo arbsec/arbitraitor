@@ -35,7 +35,7 @@ pub struct RunCommand {
     /// URL to fetch and execute.
     pub url: String,
 
-    /// Execute as a native binary instead of a mediated script.
+    /// Pre-approve native binary execution without interactive prompt.
     #[arg(long)]
     pub native: bool,
 
@@ -150,25 +150,40 @@ async fn run_with_services(
     write_fetch_summary(writer, &artifact)?;
     write_detection_summary(writer, &artifact)?;
 
-    if artifact.is_native && !command.native {
-        return write_failure(
-            writer,
-            RunFailure::Approval("native artifact requires explicit --native gate".to_owned()),
-        );
-    }
-
-    let network_isolated = !command.network;
-    let mode = if command.native {
+    let mode = if artifact.is_native {
         ExecutionMode::Native
     } else {
         ExecutionMode::Script
     };
+    let network_isolated = !command.network;
     let plan = execution_plan(mode, network_isolated);
     let mut ctx = PlanContext::for_bash(network_isolated, artifact.policy_digest.clone());
     if mode == ExecutionMode::Native {
         ctx.interpreter = format!("native:{}", artifact.sha256);
     }
     writeln!(writer, "Plan: {plan}").into_diagnostic()?;
+
+    if mode == ExecutionMode::Native && !command.native {
+        if command.non_interactive {
+            return write_failure(
+                writer,
+                RunFailure::Approval(
+                    "native binary detected; pass --native to confirm native execution".to_owned(),
+                ),
+            );
+        }
+        let approved = match services.request_approval(&artifact, &plan, &ctx) {
+            Ok(approved) => approved,
+            Err(error) => return write_failure(writer, error),
+        };
+        if !approved {
+            return write_failure(
+                writer,
+                RunFailure::Approval("native execution not approved".to_owned()),
+            );
+        }
+        writeln!(writer, "Native execution approved.").into_diagnostic()?;
+    }
 
     match artifact.verdict {
         Verdict::Pass | Verdict::Warn => {}
