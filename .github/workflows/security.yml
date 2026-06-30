@@ -28,6 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6  # v2.82.6
+        with:
+          tool: cargo-deny
       - name: Run cargo-deny
         run: cargo deny check
 
@@ -38,5 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d  # v4.2.0
+      - uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6  # v2.82.6
+        with:
+          tool: cargo-audit
       - name: Run cargo-audit
         run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0186

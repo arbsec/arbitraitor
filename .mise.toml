@@ -9,12 +9,8 @@ cocogitto = "7.0.0"
 # Markdown linter
 rumdl = "latest"
 
-# CI tools (installed via cargo-binstall — prebuilt binaries)
-"cargo:cargo-nextest" = "latest"
-"cargo:cargo-deny" = "latest"
-"cargo:cargo-audit" = "latest"
-"cargo:mdbook" = "latest"
-"cargo:mdbook-mermaid" = "latest"
+# CI tools — installed in CI via taiki-e/install-action (prebuilt binaries).
+# For local dev, install with: cargo install cargo-nextest cargo-deny cargo-audit mdbook mdbook-mermaid --locked
 
 [env]
 RUST_BACKTRACE = "1"
