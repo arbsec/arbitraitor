@@ -74,14 +74,42 @@ pub struct CargoLock {
 #[derive(Debug, thiserror::Error)]
 pub enum CargoLockError {
     /// The file could not be read.
-    #[error("failed to read Cargo.lock: {0}")]
+    #[error("failed to read file: {0}")]
     Io(#[from] std::io::Error),
     /// The TOML could not be parsed.
-    #[error("failed to parse Cargo.lock TOML: {0}")]
+    #[error("failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
-    /// The `version` field is missing or invalid.
-    #[error("Cargo.lock missing or invalid version field")]
-    MissingVersion,
+    /// Unsupported lockfile version.
+    #[error("unsupported lockfile version: {0}")]
+    InvalidVersion(u32),
+    /// Too many packages in lockfile (possible `DoS`).
+    #[error("too many packages in lockfile: {0}")]
+    TooManyPackages(usize),
+    /// A field exceeds the maximum length.
+    #[error("field '{field}' too long: {len} bytes")]
+    FieldTooLong {
+        /// Field name.
+        field: &'static str,
+        /// Actual length.
+        len: usize,
+    },
+    /// Checksum is not 64 lowercase hex chars.
+    #[error("invalid checksum format")]
+    InvalidChecksum,
+    /// File is a symlink (rejected for security).
+    #[error("symlink rejected")]
+    SymlinkRejected,
+    /// Path is not a regular file.
+    #[error("not a regular file")]
+    NotRegularFile,
+    /// File exceeds maximum size.
+    #[error("file too large: {size} bytes (max {max})")]
+    FileTooLarge {
+        /// Actual file size.
+        size: u64,
+        /// Maximum allowed size.
+        max: u64,
+    },
 }
 
 #[derive(Deserialize)]
@@ -91,6 +119,11 @@ struct LockFile {
     #[serde(default)]
     package: Vec<LockPackage>,
 }
+
+const MAX_LOCKFILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_PACKAGES: usize = 100_000;
+const MAX_FIELD_LEN: usize = 512;
 
 fn default_lockfile_version() -> u32 {
     1
@@ -107,52 +140,118 @@ struct LockPackage {
 /// Parses a `Cargo.lock` file from its raw bytes.
 ///
 /// Supports all format versions (V1–V4). V1 lacks the `version` field and
-/// is treated as version 1.
+/// is treated as version 1. Validates version range, package count, and
+/// field lengths.
 ///
 /// # Errors
 ///
-/// Returns [`CargoLockError`] if the file cannot be read or parsed.
+/// Returns [`CargoLockError`] if the file cannot be parsed or fails validation.
 pub fn parse_cargo_lock(data: &str) -> Result<CargoLock, CargoLockError> {
     let lock: LockFile = toml::from_str(data)?;
+    if !(1..=4).contains(&lock.version) {
+        return Err(CargoLockError::InvalidVersion(lock.version));
+    }
+    if lock.package.len() > MAX_PACKAGES {
+        return Err(CargoLockError::TooManyPackages(lock.package.len()));
+    }
     let packages = lock
         .package
         .into_iter()
-        .map(|p| CargoPackage {
-            name: p.name,
-            version: p.version,
-            source: p.source,
-            checksum: p.checksum,
+        .map(|p| {
+            validate_field_len("name", &p.name)?;
+            validate_field_len("version", &p.version)?;
+            if let Some(ref s) = p.source {
+                validate_field_len("source", s)?;
+            }
+            if let Some(ref c) = p.checksum {
+                validate_checksum(c)?;
+            }
+            Ok::<_, CargoLockError>(CargoPackage {
+                name: p.name,
+                version: p.version,
+                source: p.source,
+                checksum: p.checksum,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(CargoLock {
         version: lock.version,
         packages,
     })
 }
 
+fn validate_field_len(field: &'static str, value: &str) -> Result<(), CargoLockError> {
+    if value.len() > MAX_FIELD_LEN {
+        return Err(CargoLockError::FieldTooLong {
+            field,
+            len: value.len(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_checksum(checksum: &str) -> Result<(), CargoLockError> {
+    if checksum.len() != 64 || !checksum.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CargoLockError::InvalidChecksum);
+    }
+    Ok(())
+}
+
+fn check_regular_file(path: &Path, max_bytes: u64) -> Result<std::fs::File, CargoLockError> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(CargoLockError::SymlinkRejected);
+    }
+    if !meta.is_file() {
+        return Err(CargoLockError::NotRegularFile);
+    }
+    if meta.len() > max_bytes {
+        return Err(CargoLockError::FileTooLarge {
+            size: meta.len(),
+            max: max_bytes,
+        });
+    }
+    Ok(std::fs::File::open(path)?)
+}
+
 /// Reads and parses a `Cargo.lock` file from disk.
+///
+/// Rejects symlinks, non-regular files, and files exceeding 16 MiB.
 ///
 /// # Errors
 ///
 /// Returns [`CargoLockError`] if the file cannot be read or parsed.
 pub fn read_cargo_lock(path: &Path) -> Result<CargoLock, CargoLockError> {
-    let data = std::fs::read_to_string(path)?;
+    let mut file = check_regular_file(path, MAX_LOCKFILE_BYTES)?;
+    let mut data = String::new();
+    std::io::Read::read_to_string(&mut file, &mut data)?;
     parse_cargo_lock(&data)
+}
+
+/// Categories of dangerous patterns detected in build scripts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum DangerCategory {
+    /// Patterns that execute external commands.
+    ProcessInvocation,
+    /// Patterns that access the filesystem.
+    FilesystemAccess,
+    /// Patterns that perform network operations.
+    NetworkAccess,
 }
 
 /// Result of static-analysing a `build.rs` file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildScriptAnalysis {
-    /// Patterns that execute external commands.
-    pub invokes_process: bool,
-    /// Patterns that access the filesystem beyond the crate directory.
-    pub accesses_filesystem: bool,
-    /// Patterns that perform network operations.
-    pub accesses_network: bool,
-    /// Patterns that read environment variables beyond standard cargo vars.
+    /// Detected danger categories.
+    pub categories: HashSet<DangerCategory>,
+    /// Environment variables read beyond standard cargo vars.
     pub reads_env_vars: HashSet<String>,
     /// Raw text matches for dangerous patterns.
     pub dangerous_patterns: Vec<String>,
+    /// Pattern scanning is inherently incomplete. This is always `true` —
+    /// a `false` value here would be a soundness bug. Downstream code MUST
+    /// treat any non-empty build.rs as requiring policy approval.
+    pub incomplete_coverage: bool,
 }
 
 /// Statically analyses a `build.rs` source file for dangerous patterns.
@@ -161,27 +260,25 @@ pub struct BuildScriptAnalysis {
 /// API patterns in Rust source. It does NOT execute or compile the script.
 #[must_use]
 pub fn analyse_build_script(source: &str) -> BuildScriptAnalysis {
-    let mut invokes_process = false;
-    let mut accesses_filesystem = false;
-    let mut accesses_network = false;
+    let mut categories = HashSet::new();
     let mut reads_env_vars = HashSet::new();
     let mut dangerous_patterns = Vec::new();
 
     for pattern in DANGEROUS_PROCESS_PATTERNS {
         if source.contains(*pattern) {
-            invokes_process = true;
+            categories.insert(DangerCategory::ProcessInvocation);
             dangerous_patterns.push((*pattern).to_owned());
         }
     }
     for pattern in DANGEROUS_FS_PATTERNS {
         if source.contains(*pattern) {
-            accesses_filesystem = true;
+            categories.insert(DangerCategory::FilesystemAccess);
             dangerous_patterns.push((*pattern).to_owned());
         }
     }
     for pattern in DANGEROUS_NETWORK_PATTERNS {
         if source.contains(*pattern) {
-            accesses_network = true;
+            categories.insert(DangerCategory::NetworkAccess);
             dangerous_patterns.push((*pattern).to_owned());
         }
     }
@@ -193,11 +290,10 @@ pub fn analyse_build_script(source: &str) -> BuildScriptAnalysis {
     }
 
     BuildScriptAnalysis {
-        invokes_process,
-        accesses_filesystem,
-        accesses_network,
+        categories,
         reads_env_vars,
         dangerous_patterns,
+        incomplete_coverage: true,
     }
 }
 
@@ -270,7 +366,9 @@ fn extract_env_vars(source: &str) -> Vec<(String, String)> {
 ///
 /// Returns an error if the file cannot be read or parsed.
 pub fn is_workspace_root(cargo_toml_path: &Path) -> Result<bool, CargoLockError> {
-    let data = std::fs::read_to_string(cargo_toml_path)?;
+    let mut file = check_regular_file(cargo_toml_path, MAX_MANIFEST_BYTES)?;
+    let mut data = String::new();
+    std::io::Read::read_to_string(&mut file, &mut data)?;
     let value: toml::Value = toml::from_str(&data)?;
     Ok(value.get("workspace").is_some())
 }
@@ -286,7 +384,7 @@ version = 4
 name = "serde"
 version = "1.0.210"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8d728e5b7d3"
+checksum = "c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d7"
 
 [[package]]
 name = "local-crate"
@@ -298,7 +396,7 @@ version = "0.1.0"
 name = "serde"
 version = "1.0.210"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8d728e5b7d3"
+checksum = "c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d7"
 "#;
 
     #[test]
@@ -370,16 +468,15 @@ checksum = "c8d728e5b7d3"
             }
         "#;
         let analysis = analyse_build_script(src);
-        assert!(analysis.invokes_process);
         assert!(
             analysis
-                .dangerous_patterns
-                .contains(&"Command::new".to_owned())
+                .categories
+                .contains(&DangerCategory::ProcessInvocation)
         );
         assert!(
             analysis
                 .dangerous_patterns
-                .contains(&"std::process::Command".to_owned())
+                .contains(&"Command::new".to_owned())
         );
     }
 
@@ -393,7 +490,11 @@ checksum = "c8d728e5b7d3"
             }
         "#;
         let analysis = analyse_build_script(src);
-        assert!(analysis.accesses_filesystem);
+        assert!(
+            analysis
+                .categories
+                .contains(&DangerCategory::FilesystemAccess)
+        );
     }
 
     #[test]
@@ -404,7 +505,7 @@ checksum = "c8d728e5b7d3"
             }
         "#;
         let analysis = analyse_build_script(src);
-        assert!(analysis.accesses_network);
+        assert!(analysis.categories.contains(&DangerCategory::NetworkAccess));
     }
 
     #[test]
@@ -423,17 +524,36 @@ checksum = "c8d728e5b7d3"
     }
 
     #[test]
-    fn build_script_benign_passes_clean() {
+    fn build_script_benign_still_incomplete() {
         let src = r#"
             fn main() {
                 println!("cargo:rerun-if-changed=build.rs");
             }
         "#;
         let analysis = analyse_build_script(src);
-        assert!(!analysis.invokes_process);
-        assert!(!analysis.accesses_filesystem);
-        assert!(!analysis.accesses_network);
+        assert!(analysis.categories.is_empty());
         assert!(analysis.dangerous_patterns.is_empty());
+        assert!(analysis.incomplete_coverage);
+    }
+
+    #[test]
+    fn parse_rejects_invalid_version() {
+        let result = parse_cargo_lock("version = 99\n[[package]]\nname = \"x\"\nversion = \"1\"\n");
+        assert!(matches!(result, Err(CargoLockError::InvalidVersion(99))));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_checksum() {
+        let lock = r#"version = 4
+[[package]]
+name = "bad"
+version = "1.0"
+checksum = "not-hex"
+"#;
+        assert!(matches!(
+            parse_cargo_lock(lock),
+            Err(CargoLockError::InvalidChecksum)
+        ));
     }
 
     #[test]
