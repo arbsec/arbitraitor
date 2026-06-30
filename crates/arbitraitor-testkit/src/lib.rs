@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 pub mod assert;
+pub mod corpus;
 pub mod fixtures;
 pub mod mock_server;
 pub mod network;

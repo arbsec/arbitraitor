@@ -17,9 +17,11 @@ arbitraitor-receipt = { workspace = true }
 arbitraitor-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 wiremock = "0.6"
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
 arbitraitor-fetch = { workspace = true }
+hex = { workspace = true }

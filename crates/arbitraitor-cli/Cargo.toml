@@ -45,3 +45,6 @@ arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace
 [dev-dependencies]
 tempfile = { workspace = true }
 zip = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+arbitraitor-testkit = { workspace = true }
