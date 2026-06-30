@@ -1,5 +1,10 @@
 {
   "mcpServers": {
+    "arbitraitor": {
+      "command": "cargo",
+      "args": ["run", "-p", "arbitraitor-cli", "--", "mcp"],
+      "env": {}
+    },
     "serena": {
       "command": "uvx",
       "args": [
