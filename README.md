@@ -91,6 +91,56 @@ arbitraitor wrappers install
 arbitraitor wrappers status
 ```
 
+### Scan a local file or stdin
+
+```sh
+# Scan a local script
+arbitraitor scan ./suspicious.sh
+
+# Scan piped input
+curl -s https://example.com/script.sh | arbitraitor scan --stdin
+```
+
+### Explain a verdict
+
+```sh
+# Inspect with receipt output, then explain the verdict
+arbitraitor inspect https://example.com/install.sh --receipt receipt.json
+arbitraitor explain receipt.json
+```
+
+### Manage stored artifacts
+
+```sh
+# List stored artifacts
+arbitraitor store list
+
+# Inspect a specific artifact by digest
+arbitraitor store inspect <sha256>
+
+# Run garbage collection
+arbitraitor store gc
+arbitraitor store gc --max-age-days 30
+```
+
+### Validate a policy
+
+```sh
+arbitraitor policy my-policy.toml
+```
+
+### Check system health
+
+```sh
+arbitraitor doctor
+```
+
+### Show version
+
+```sh
+arbitraitor version
+```
+
 ## Features
 
 - **Mediated execution** — Scripts run in a sandboxed bash with network isolation, resource limits, and output capping
@@ -102,6 +152,7 @@ arbitraitor wrappers status
 - **Plugin system** — Subprocess protocol, Wasmtime Component Model, plugin registry with trust tiers
 - **Community intelligence** — Feed submission, review workflow, transparency log, URLhaus adapter
 - **Receipts** — RFC 8785 JCS canonicalized receipts with full audit trail
+- **MCP server** — `arbitraitor mcp` starts a JSON-RPC 2.0 server over stdio for AI agent integration
 
 ## Architecture
 
@@ -126,6 +177,7 @@ arbitraitor-cli         Command-line interface
 ├── arbitraitor-plugin-host   Plugin runtime (subprocess + Wasmtime)
 ├── arbitraitor-wrapper  curl/wget wrapper translators
 ├── arbitraitor-daemon   Unix socket daemon with background queue
+├── arbitraitor-package-manager  Registry adapter trait (cargo, npm, uv, etc.)
 └── arbitraitor-core     Config, metrics, health checks
 ```
 
