@@ -160,8 +160,15 @@ fn detect_from_env_shell() -> Option<Shell> {
 }
 
 fn detect_from_parent() -> Option<Shell> {
-    let ppid = std::process::id().checked_sub(1)?;
-    parent_name(ppid).as_deref().and_then(Shell::from_name)
+    #[cfg(unix)]
+    {
+        let ppid = std::os::unix::process::parent_id();
+        parent_name(ppid).as_deref().and_then(Shell::from_name)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -266,14 +273,71 @@ fn target_rcfile_for_home(shell: Shell, home: &Path) -> Option<PathBuf> {
 // Snippet generation
 // ---------------------------------------------------------------------------
 
+/// Errors when the `shim_dir` is unsafe to embed in shell snippets.
+#[derive(Debug, Error)]
+pub enum ShimDirError {
+    /// Path is not absolute.
+    #[error("shim directory must be absolute: {0}")]
+    Relative(PathBuf),
+    /// Path contains characters unsafe for shell embedding.
+    #[error("shim directory contains shell-unsafe characters: {0}")]
+    UnsafeChars(PathBuf),
+}
+
+fn validate_shim_dir(path: &Path) -> Result<&Path, ShimDirError> {
+    if !path.is_absolute() {
+        return Err(ShimDirError::Relative(path.to_path_buf()));
+    }
+    let s = path.to_string_lossy();
+    if s.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
+        return Err(ShimDirError::UnsafeChars(path.to_path_buf()));
+    }
+    // Shell metacharacters that could escape quoting in any target shell.
+    if s.chars().any(|c| {
+        matches!(
+            c,
+            '"' | '\''
+                | '`'
+                | '$'
+                | ';'
+                | '|'
+                | '&'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '#'
+                | '!'
+                | '\\'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '~'
+                | '='
+                | ' '
+        )
+    }) {
+        return Err(ShimDirError::UnsafeChars(path.to_path_buf()));
+    }
+    Ok(path)
+}
+
 /// Renders the shell-specific PATH-export snippet for `shim_dir`.
 ///
 /// Each snippet prepends `shim_dir` to `PATH` with deduplication so the
 /// snippet is safe to evaluate multiple times.
-#[must_use]
-pub fn render_snippet(shell: Shell, shim_dir: &Path) -> String {
+///
+/// # Errors
+///
+/// Returns [`ShimDirError`] if `shim_dir` is not absolute or contains
+/// shell-unsafe characters.
+pub fn render_snippet(shell: Shell, shim_dir: &Path) -> Result<String, ShimDirError> {
+    validate_shim_dir(shim_dir)?;
     let dir = &shim_dir.to_string_lossy();
-    match shell {
+    Ok(match shell {
         Shell::Bash | Shell::Sh | Shell::Posix => posix_snippet(dir),
         Shell::Zsh => zsh_snippet(dir),
         Shell::Fish => fish_snippet(dir),
@@ -282,7 +346,7 @@ pub fn render_snippet(shell: Shell, shim_dir: &Path) -> String {
         Shell::Powershell => powershell_snippet(dir),
         Shell::Elvish => elvish_snippet(dir),
         Shell::Tcsh => tcsh_snippet(dir),
-    }
+    })
 }
 
 fn posix_snippet(dir: &str) -> String {
@@ -311,9 +375,9 @@ fn fish_snippet(dir: &str) -> String {
 
 fn nu_snippet(dir: &str) -> String {
     format!(
-        "# {MARKER_BEGIN}\n\
+        "{MARKER_BEGIN}\n\
          $env.PATH = ($env.PATH | prepend \"{dir}\" | uniq)\n\
-         # {MARKER_END}\n",
+         {MARKER_END}\n",
     )
 }
 
@@ -370,6 +434,9 @@ pub enum InitError {
     /// The rcfile path could not be determined for this shell.
     #[error("no rcfile path known for shell '{0}'; use print mode instead")]
     NoRcfile(&'static str),
+    /// Snippet rendering failed (invalid shim directory).
+    #[error("{0}")]
+    Render(String),
     /// The rcfile (or its parent directory) could not be read.
     #[error("failed to read {path}: {source}")]
     ReadRcfile {
@@ -395,7 +462,8 @@ pub enum InitError {
 ///
 /// # Errors
 ///
-/// Returns [`InitError::NoRcfile`] if no target path is known for `shell`.
+/// Returns [`InitError::NoRcfile`] if no target path is known for `shell`,
+/// or [`InitError::ReadRcfile`] / [`InitError::WriteRcfile`] on I/O failure.
 pub fn install_to_rcfile(shell: Shell, shim_dir: &Path) -> Result<PathBuf, InitError> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -406,13 +474,34 @@ pub fn install_to_rcfile(shell: Shell, shim_dir: &Path) -> Result<PathBuf, InitE
 fn install_to_rcfile_in(shell: Shell, shim_dir: &Path, home: &Path) -> Result<PathBuf, InitError> {
     let target =
         target_rcfile_for_home(shell, home).ok_or_else(|| InitError::NoRcfile(shell.as_str()))?;
-    let snippet = render_snippet(shell, shim_dir);
+    let snippet = render_snippet(shell, shim_dir).map_err(|e| InitError::Render(e.to_string()))?;
 
     if let Some(parent) = target.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|source| InitError::WriteRcfile {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
 
-    let existing = std::fs::read_to_string(&target).unwrap_or_default();
+    // Fish uses a dedicated file — just overwrite it (always idempotent).
+    if matches!(shell, Shell::Fish) {
+        std::fs::write(&target, &snippet).map_err(|source| InitError::WriteRcfile {
+            path: target.clone(),
+            source,
+        })?;
+        return Ok(target);
+    }
+
+    let existing = match std::fs::read_to_string(&target) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(InitError::ReadRcfile {
+                path: target.clone(),
+                source,
+            });
+        }
+    };
     let updated = replace_or_append_block(&existing, &snippet);
     std::fs::write(&target, updated).map_err(|source| InitError::WriteRcfile {
         path: target.clone(),
@@ -439,6 +528,20 @@ fn uninstall_from_rcfile_in(shell: Shell, home: &Path) -> Result<PathBuf, InitEr
     let target =
         target_rcfile_for_home(shell, home).ok_or_else(|| InitError::NoRcfile(shell.as_str()))?;
 
+    // Fish uses a dedicated file — just delete it.
+    if matches!(shell, Shell::Fish) {
+        match std::fs::remove_file(&target) {
+            Ok(()) => return Ok(target),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+            Err(source) => {
+                return Err(InitError::WriteRcfile {
+                    path: target,
+                    source,
+                });
+            }
+        }
+    }
+
     let existing = match std::fs::read_to_string(&target) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(target),
@@ -450,7 +553,7 @@ fn uninstall_from_rcfile_in(shell: Shell, home: &Path) -> Result<PathBuf, InitEr
         }
     };
 
-    if !existing.contains(MARKER_BEGIN) {
+    if !contains_complete_block(&existing) {
         return Ok(target);
     }
 
@@ -469,8 +572,28 @@ fn uninstall_from_rcfile_in(shell: Shell, home: &Path) -> Result<PathBuf, InitEr
 /// Replaces an existing marker block with `new_snippet`, or appends if none
 /// exists. Handles both marker-using snippets (bash, zsh, etc.) and
 /// marker-less snippets (fish).
+fn is_marker_begin(line: &str) -> bool {
+    line.trim() == MARKER_BEGIN
+}
+
+fn is_marker_end(line: &str) -> bool {
+    line.trim() == MARKER_END
+}
+
+fn contains_complete_block(content: &str) -> bool {
+    let mut in_block = false;
+    for line in content.lines() {
+        if is_marker_begin(line) {
+            in_block = true;
+        } else if in_block && is_marker_end(line) {
+            return true;
+        }
+    }
+    false
+}
+
 fn replace_or_append_block(existing: &str, new_snippet: &str) -> String {
-    if existing.contains(MARKER_BEGIN) {
+    if contains_complete_block(existing) {
         let base = remove_block(existing);
         let trimmed_base = base.trim_end_matches('\n');
         let trimmed_snippet = new_snippet.trim_end_matches('\n');
@@ -487,18 +610,15 @@ fn replace_or_append_block(existing: &str, new_snippet: &str) -> String {
     }
 }
 
-/// Removes the marker block (including markers) from `content`.
-/// Also handles nushell-style markers (`# MARKER`).
 fn remove_block(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut in_block = false;
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with(MARKER_BEGIN) {
+        if is_marker_begin(line) {
             in_block = true;
             continue;
         }
-        if in_block && trimmed.starts_with(MARKER_END) {
+        if in_block && is_marker_end(line) {
             in_block = false;
             continue;
         }
@@ -507,7 +627,9 @@ fn remove_block(content: &str) -> String {
             result.push('\n');
         }
     }
-    // Collapse triple+ blank lines left by block removal.
+    // If markers were unbalanced (begin without end), we never entered the
+    // post-block state, so lines after the stray begin were dropped. This is
+    // safe: we return only lines before the unmatched begin.
     while result.contains("\n\n\n") {
         result = result.replace("\n\n\n", "\n\n");
     }
@@ -542,84 +664,118 @@ mod tests {
     // --- render_snippet ---
 
     #[test]
-    fn posix_snippet_has_case_based_dedup() {
+    fn posix_snippet_has_case_based_dedup() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Bash, dir);
+        let snippet = render_snippet(Shell::Bash, dir)?;
         assert!(snippet.contains("case \":${PATH}:\""));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
         assert!(snippet.contains("export PATH"));
         assert!(snippet.contains(MARKER_BEGIN));
         assert!(snippet.contains(MARKER_END));
+        Ok(())
     }
 
     #[test]
-    fn zsh_snippet_uses_typeset_a_u() {
+    fn zsh_snippet_uses_typeset_a_u() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Zsh, dir);
+        let snippet = render_snippet(Shell::Zsh, dir)?;
         assert!(snippet.contains("typeset -aU path"));
         assert!(snippet.contains("path=("));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn fish_snippet_uses_fish_add_path() {
+    fn fish_snippet_uses_fish_add_path() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Fish, dir);
+        let snippet = render_snippet(Shell::Fish, dir)?;
         assert!(snippet.contains("fish_add_path --move --path"));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn nu_snippet_prepends_and_uniqs() {
+    fn nu_snippet_prepends_and_uniqs() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Nu, dir);
+        let snippet = render_snippet(Shell::Nu, dir)?;
         assert!(snippet.contains("prepend"));
         assert!(snippet.contains("uniq"));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn xonsh_snippet_checks_membership() {
+    fn xonsh_snippet_checks_membership() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Xonsh, dir);
+        let snippet = render_snippet(Shell::Xonsh, dir)?;
         assert!(snippet.contains("not in $PATH"));
         assert!(snippet.contains("$PATH.insert(0"));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn powershell_snippet_splits_and_checks() {
+    fn powershell_snippet_splits_and_checks() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Powershell, dir);
+        let snippet = render_snippet(Shell::Powershell, dir)?;
         assert!(snippet.contains("-split \";\""));
         assert!(snippet.contains("-notcontains"));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn elvish_snippet_checks_value() {
+    fn elvish_snippet_checks_value() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Elvish, dir);
+        let snippet = render_snippet(Shell::Elvish, dir)?;
         assert!(snippet.contains("has-value"));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn tcsh_snippet_uses_path_check() {
+    fn tcsh_snippet_uses_path_check() -> TestResult {
         let dir = Path::new("/home/user/.arbitraitor/shims");
-        let snippet = render_snippet(Shell::Tcsh, dir);
+        let snippet = render_snippet(Shell::Tcsh, dir)?;
         assert!(snippet.contains("set path ="));
         assert!(snippet.contains("/home/user/.arbitraitor/shims"));
+        Ok(())
     }
 
     #[test]
-    fn sh_and_posix_produce_same_output_as_bash() {
+    fn sh_and_posix_produce_same_output_as_bash() -> TestResult {
         let dir = Path::new("/tmp/shims");
-        let bash = render_snippet(Shell::Bash, dir);
-        let sh = render_snippet(Shell::Sh, dir);
-        let posix = render_snippet(Shell::Posix, dir);
+        let bash = render_snippet(Shell::Bash, dir)?;
+        let sh = render_snippet(Shell::Sh, dir)?;
+        let posix = render_snippet(Shell::Posix, dir)?;
         assert_eq!(bash, sh);
         assert_eq!(bash, posix);
+        Ok(())
+    }
+
+    #[test]
+    fn render_snippet_rejects_relative_path() {
+        let result = render_snippet(Shell::Bash, Path::new("relative/shims"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_snippet_rejects_shell_metachars() {
+        let payloads = [
+            "/tmp/x;touch /tmp/pwn",
+            "/tmp/x$(whoami)",
+            "/tmp/x`whoami`",
+            "/tmp/x'whoami'",
+            "/tmp/x\"whoami\"",
+            "/tmp/x\nwhoami",
+            "/tmp/x #comment",
+        ];
+        for payload in payloads {
+            assert!(
+                render_snippet(Shell::Bash, Path::new(payload)).is_err(),
+                "should reject: {payload}"
+            );
+        }
     }
 
     // --- rcfile install/uninstall ---
@@ -786,21 +942,49 @@ mod tests {
     }
 
     #[test]
-    fn replace_or_append_on_empty_returns_snippet() {
-        let snippet = render_snippet(Shell::Bash, Path::new("/shims"));
+    fn replace_or_append_on_empty_returns_snippet() -> TestResult {
+        let snippet = render_snippet(Shell::Bash, Path::new("/shims"))?;
         let result = replace_or_append_block("", &snippet);
         assert_eq!(result, snippet);
+        Ok(())
     }
 
     #[test]
-    fn replace_or_append_replaces_existing_block() {
-        let snippet1 = render_snippet(Shell::Bash, Path::new("/old-shims"));
+    fn replace_or_append_replaces_existing_block() -> TestResult {
+        let snippet1 = render_snippet(Shell::Bash, Path::new("/old-shims"))?;
         let content = format!("# header\n\n{snippet1}");
-        let snippet2 = render_snippet(Shell::Bash, Path::new("/new-shims"));
+        let snippet2 = render_snippet(Shell::Bash, Path::new("/new-shims"))?;
         let result = replace_or_append_block(&content, &snippet2);
         assert!(result.contains("# header"));
         assert!(result.contains("/new-shims"));
         assert!(!result.contains("/old-shims"));
         assert_eq!(result.matches(MARKER_BEGIN).count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn contains_complete_block_detects_pair() {
+        let content = format!("line1\n{MARKER_BEGIN}\nx\n{MARKER_END}\nline2");
+        assert!(contains_complete_block(&content));
+    }
+
+    #[test]
+    fn contains_complete_block_rejects_unmatched_begin() {
+        let content = format!("line1\n{MARKER_BEGIN}\nx\nline2");
+        assert!(!contains_complete_block(&content));
+    }
+
+    #[test]
+    fn contains_complete_block_rejects_no_markers() {
+        assert!(!contains_complete_block("just text"));
+    }
+
+    #[test]
+    fn remove_block_preserves_content_outside_unmatched_begin() {
+        let content = format!("line1\n{MARKER_BEGIN}\nx\nline2");
+        let result = remove_block(&content);
+        assert!(result.contains("line1"));
+        assert!(!result.contains("line2"));
+        assert!(!result.contains(MARKER_BEGIN));
     }
 }

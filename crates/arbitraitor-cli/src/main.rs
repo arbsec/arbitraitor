@@ -807,7 +807,8 @@ fn handle_init(cmd: &InitCommand, shim_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let snippet = shell_init::render_snippet(shell, shim_dir);
+    let snippet =
+        shell_init::render_snippet(shell, shim_dir).map_err(|e| miette::miette!("{e}"))?;
     stdout.write_all(snippet.as_bytes()).into_diagnostic()?;
     Ok(())
 }
