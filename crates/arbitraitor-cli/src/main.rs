@@ -77,6 +77,7 @@ enum Command {
     Policy(commands::PolicyCommand),
     Doctor(commands::DoctorCommand),
     Rules(commands::RulesCommand),
+    Update(commands::UpdateCommand),
     Version,
 }
 
@@ -385,6 +386,9 @@ async fn main() -> Result<()> {
         }
         Command::Rules(command) => {
             commands::rules(&command)?;
+        }
+        Command::Update(command) => {
+            commands::update(&command)?;
         }
         Command::Version => {
             commands::version()?;
@@ -1389,6 +1393,7 @@ mod tests {
             | Command::Policy(_)
             | Command::Doctor(_)
             | Command::Rules(_)
+            | Command::Update(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1454,6 +1459,7 @@ mod tests {
             | Command::Policy(_)
             | Command::Doctor(_)
             | Command::Rules(_)
+            | Command::Update(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1501,6 +1507,7 @@ mod tests {
             | Command::Policy(_)
             | Command::Doctor(_)
             | Command::Rules(_)
+            | Command::Update(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1590,6 +1597,7 @@ mod tests {
             | Command::Policy(_)
             | Command::Doctor(_)
             | Command::Rules(_)
+            | Command::Update(_)
             | Command::Version => {
                 return Err("parsed wrong command".into());
             }
@@ -1971,6 +1979,59 @@ mod tests {
                     assert_eq!(file, PathBuf::from("/path/to/rules.yar"));
                 }
                 commands::RulesSubcommand::List => return Err("wrong subcommand".into()),
+            },
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn update_verify_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "update",
+            "verify",
+            "manifest.json",
+            "--key",
+            "pubkey.pub",
+        ])?;
+        match cli.command {
+            Command::Update(cmd) => match cmd.subcommand {
+                commands::UpdateSubcommand::Verify {
+                    manifest_file,
+                    key,
+                    signature,
+                } => {
+                    assert_eq!(manifest_file, PathBuf::from("manifest.json"));
+                    assert_eq!(key, PathBuf::from("pubkey.pub"));
+                    assert!(signature.is_none());
+                }
+            },
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn update_verify_with_explicit_sig_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "arbitraitor",
+            "update",
+            "verify",
+            "manifest.json",
+            "--key",
+            "pubkey.pub",
+            "--signature",
+            "custom.sig",
+        ])?;
+        match cli.command {
+            Command::Update(cmd) => match cmd.subcommand {
+                commands::UpdateSubcommand::Verify { signature, .. } => {
+                    assert_eq!(
+                        signature.as_deref(),
+                        Some(std::path::Path::new("custom.sig"))
+                    );
+                }
             },
             _ => return Err("parsed wrong command".into()),
         }

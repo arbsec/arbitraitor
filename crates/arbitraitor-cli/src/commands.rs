@@ -10,6 +10,7 @@ use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::PolicyEngine;
 use arbitraitor_receipt::Receipt;
 use arbitraitor_store::ContentStore;
+use arbitraitor_update::verifier::UpdateVerifier;
 use clap::{Args, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
@@ -79,6 +80,23 @@ pub struct RulesCommand {
 pub enum RulesSubcommand {
     List,
     Validate { file: PathBuf },
+}
+
+#[derive(Args)]
+pub struct UpdateCommand {
+    #[command(subcommand)]
+    pub subcommand: UpdateSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum UpdateSubcommand {
+    Verify {
+        manifest_file: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        signature: Option<PathBuf>,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -350,6 +368,64 @@ pub(crate) fn rules(command: &RulesCommand) -> Result<()> {
             let mut stdout = std::io::stdout().lock();
             writeln!(stdout, "valid: {}", file.display()).into_diagnostic()?;
             writeln!(stdout, "  rules compiled successfully").into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn update(command: &UpdateCommand) -> Result<()> {
+    match &command.subcommand {
+        UpdateSubcommand::Verify {
+            manifest_file,
+            key,
+            signature,
+        } => {
+            let key_bytes = std::fs::read(key).into_diagnostic()?;
+            let verifier = arbitraitor_update::verifier::MinisignVerifier::new(&key_bytes)
+                .map_err(|e| miette::miette!("invalid public key: {e}"))?;
+
+            let manifest_bytes = std::fs::read(manifest_file).into_diagnostic()?;
+            let sig_path = signature.clone().unwrap_or_else(|| {
+                let mut p = manifest_file.clone();
+                p.set_extension("minisig");
+                p
+            });
+            let sig_bytes = std::fs::read(&sig_path).into_diagnostic()?;
+
+            let manifest = verifier
+                .verify_manifest(&manifest_bytes, &sig_bytes)
+                .map_err(|e| miette::miette!("manifest verification failed: {e}"))?;
+            manifest
+                .validate_manifest()
+                .map_err(|e| miette::miette!("manifest validation failed: {e}"))?;
+
+            let channel = match manifest.channel {
+                arbitraitor_update::manifest::UpdateChannel::RulePacks => "rule_packs",
+                arbitraitor_update::manifest::UpdateChannel::IntelFeeds => "intel_feeds",
+                arbitraitor_update::manifest::UpdateChannel::TrustRoot => "trust_root",
+                arbitraitor_update::manifest::UpdateChannel::PluginRegistry => "plugin_registry",
+            };
+
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "verified: {}", manifest_file.display()).into_diagnostic()?;
+            writeln!(stdout, "  channel:          {channel}").into_diagnostic()?;
+            writeln!(stdout, "  manifest version: {}", manifest.manifest_version)
+                .into_diagnostic()?;
+            writeln!(stdout, "  schema version:   {}", manifest.schema_version)
+                .into_diagnostic()?;
+            writeln!(stdout, "  publisher:        {}", manifest.publisher).into_diagnostic()?;
+            writeln!(stdout, "  published at:     {}", manifest.published_at).into_diagnostic()?;
+            writeln!(stdout, "  expires at:       {}", manifest.expires_at).into_diagnostic()?;
+            writeln!(stdout, "  targets:          {}", manifest.targets.len()).into_diagnostic()?;
+            for target in &manifest.targets {
+                let sha_prefix: String = target.sha256.to_string().chars().take(12).collect();
+                writeln!(
+                    stdout,
+                    "    {} v{} ({} bytes, sha256:{sha_prefix})",
+                    target.path, target.target_version, target.size
+                )
+                .into_diagnostic()?;
+            }
         }
     }
     Ok(())

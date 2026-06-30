@@ -31,6 +31,7 @@ arbitraitor-provenance = { workspace = true }
 arbitraitor-receipt = { workspace = true }
 arbitraitor-shell = { workspace = true }
 arbitraitor-store = { workspace = true }
+arbitraitor-update = { workspace = true }
 arbitraitor-wrapper = { workspace = true }
 arbitraitor-yarax = { workspace = true }
 clap = { workspace = true }

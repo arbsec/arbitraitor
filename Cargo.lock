@@ -213,6 +213,7 @@ dependencies = [
  "arbitraitor-shell",
  "arbitraitor-store",
  "arbitraitor-testkit",
+ "arbitraitor-update",
  "arbitraitor-workspace-hack",
  "arbitraitor-wrapper",
  "arbitraitor-yarax",
