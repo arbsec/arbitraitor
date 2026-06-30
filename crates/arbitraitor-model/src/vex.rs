@@ -122,13 +122,12 @@ pub fn discover_companion_artifacts(entry_names: &[String]) -> Vec<CompanionArti
 /// Parses an `OpenVEX` v0.2+ JSON document into a [`VexStatement`].
 ///
 /// `OpenVEX` products use `@id` fields and a `statements` array. This parser
-/// extracts the first statement whose subject matches `expected_subject`,
-/// or the first statement if no match is found.
+/// extracts the first statement whose subject matches `expected_subject`.
 ///
 /// # Errors
 ///
-/// Returns `Err` if the JSON is not a valid `OpenVEX` document or required
-/// fields are missing.
+/// Returns `Err` if the JSON is not a valid `OpenVEX` document, required
+/// fields are missing, or no statement matches `expected_subject`.
 pub fn parse_openvex(json: &[u8], expected_subject: &str) -> Result<VexStatement, String> {
     let value: serde_json::Value =
         serde_json::from_slice(json).map_err(|e| format!("invalid JSON: {e}"))?;
@@ -152,8 +151,7 @@ pub fn parse_openvex(json: &[u8], expected_subject: &str) -> Result<VexStatement
                 .and_then(|p| p.as_str())
                 .is_some_and(|p| p == expected_subject)
         })
-        .or_else(|| statements.first())
-        .ok_or("empty 'statements' array")?;
+        .ok_or_else(|| format!("no statement found matching subject '{expected_subject}'"))?;
 
     let status_str = stmt
         .get("status")
@@ -190,10 +188,12 @@ pub fn parse_openvex(json: &[u8], expected_subject: &str) -> Result<VexStatement
         .and_then(|s| s.as_str())
         .map(str::to_owned);
 
-    let timestamp = value
+    let timestamp_str = value
         .get("timestamp")
         .and_then(|t| t.as_str())
-        .and_then(parse_iso8601);
+        .ok_or("missing 'timestamp'")?;
+    let timestamp = parse_iso8601(timestamp_str)
+        .ok_or_else(|| format!("invalid timestamp format: {timestamp_str}"))?;
 
     Ok(VexStatement {
         issuer,
@@ -201,7 +201,7 @@ pub fn parse_openvex(json: &[u8], expected_subject: &str) -> Result<VexStatement
         status,
         justification,
         statement,
-        timestamp,
+        timestamp: Some(timestamp),
     })
 }
 
@@ -297,6 +297,7 @@ mod tests {
     fn parse_openvex_fixed_status() -> Result<(), String> {
         let json = br#"{
             "author": "vendor@example.com",
+            "timestamp": "2026-01-15T10:30:00Z",
             "statements": [
                 {"product": "pkg:foo@1.0", "status": "fixed"}
             ]
@@ -311,6 +312,7 @@ mod tests {
     fn parse_openvex_unknown_status() -> Result<(), String> {
         let json = br#"{
             "author": "vendor@example.com",
+            "timestamp": "2026-01-15T10:30:00Z",
             "statements": [
                 {"product": "pkg:bar@2.0", "status": "some_new_status"}
             ]
@@ -322,7 +324,7 @@ mod tests {
 
     #[test]
     fn parse_openvex_missing_statements_returns_error() {
-        let json = br#"{"author": "x"}"#;
+        let json = br#"{"author": "x", "timestamp": "2026-01-15T10:30:00Z"}"#;
         assert!(parse_openvex(json, "pkg:x@1").is_err());
     }
 
@@ -330,6 +332,7 @@ mod tests {
     fn parse_openvex_picks_matching_subject() -> Result<(), String> {
         let json = br#"{
             "author": "issuer",
+            "timestamp": "2026-01-15T10:30:00Z",
             "statements": [
                 {"product": "pkg:other@1.0", "status": "affected"},
                 {"product": "pkg:target@1.0", "status": "not_affected"}
@@ -338,5 +341,40 @@ mod tests {
         let stmt = parse_openvex(json, "pkg:target@1.0")?;
         assert_eq!(stmt.status, VexStatus::NotAffected);
         Ok(())
+    }
+
+    #[test]
+    fn parse_openvex_no_matching_subject_returns_error() {
+        let json = br#"{
+            "author": "issuer",
+            "timestamp": "2026-01-15T10:30:00Z",
+            "statements": [
+                {"product": "pkg:other@1.0", "status": "affected"}
+            ]
+        }"#;
+        assert!(parse_openvex(json, "pkg:nonexistent@1.0").is_err());
+    }
+
+    #[test]
+    fn parse_openvex_missing_timestamp_returns_error() {
+        let json = br#"{
+            "author": "issuer",
+            "statements": [
+                {"product": "pkg:foo@1.0", "status": "not_affected"}
+            ]
+        }"#;
+        assert!(parse_openvex(json, "pkg:foo@1.0").is_err());
+    }
+
+    #[test]
+    fn parse_openvex_invalid_timestamp_returns_error() {
+        let json = br#"{
+            "author": "issuer",
+            "timestamp": "not-a-date",
+            "statements": [
+                {"product": "pkg:foo@1.0", "status": "not_affected"}
+            ]
+        }"#;
+        assert!(parse_openvex(json, "pkg:foo@1.0").is_err());
     }
 }

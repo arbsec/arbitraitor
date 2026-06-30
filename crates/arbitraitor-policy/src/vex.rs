@@ -1,8 +1,9 @@
 //! VEX anti-suppression rules (spec §19.5, invariant 21).
 //!
 //! A VEX statement may downgrade the severity of a vulnerability finding,
-//! but only when all five binding conditions are met. Certain finding
-//! categories can never be suppressed (invariant 21).
+//! but only when all five binding conditions are met. Only `PackageRisk`
+//! findings are eligible for downgrade — all other categories are
+//! non-suppressible by default.
 
 use std::collections::HashSet;
 
@@ -12,12 +13,7 @@ use arbitraitor_model::vex::{VexStatement, VexStatus};
 
 const FRESHNESS_WINDOW_SECS: i64 = 90 * 24 * 3_600;
 
-const NON_SUPPRESSIBLE_CATEGORIES: &[FindingCategory] = &[
-    FindingCategory::MalwareSignature,
-    FindingCategory::ContentMismatch,
-    FindingCategory::PolicyViolation,
-    FindingCategory::ResourceLimitEvent,
-];
+const SUPPRESSIBLE_CATEGORIES: &[FindingCategory] = &[FindingCategory::PackageRisk];
 
 /// Configuration for VEX-based severity downgrade.
 #[derive(Clone, Debug)]
@@ -80,9 +76,11 @@ pub enum VexDenyReason {
     SubjectMismatch,
     /// VEX status is not `not_affected` or `fixed`.
     InvalidStatus,
+    /// VEX timestamp is missing.
+    MissingTimestamp,
     /// VEX timestamp is outside the freshness window.
     Stale,
-    /// Finding category is non-suppressible (invariant 21).
+    /// Finding category is not eligible for VEX downgrade.
     NonSuppressibleCategory,
 }
 
@@ -92,10 +90,11 @@ pub enum VexDenyReason {
 /// 1. VEX issuer is in the trust root
 /// 2. VEX subject matches the artifact's digest or coordinate
 /// 3. VEX status is `not_affected` or `fixed`
-/// 4. VEX timestamp is within the freshness window
+/// 4. VEX timestamp is present and within the freshness window
 /// 5. Policy explicitly enables VEX-based downgrade for this issuer
 ///
-/// Additionally, invariant 21 categories can never be suppressed.
+/// Only `PackageRisk` findings are eligible for downgrade. All other
+/// categories are non-suppressible (invariant 21).
 #[must_use]
 pub fn validate_vex_downgrade(
     policy: &VexPolicy,
@@ -108,7 +107,7 @@ pub fn validate_vex_downgrade(
         return VexDowngradeResult::Deny(VexDenyReason::PolicyDisabled);
     }
 
-    if NON_SUPPRESSIBLE_CATEGORIES.contains(&finding_category) {
+    if !SUPPRESSIBLE_CATEGORIES.contains(&finding_category) {
         return VexDowngradeResult::Deny(VexDenyReason::NonSuppressibleCategory);
     }
 
@@ -124,11 +123,13 @@ pub fn validate_vex_downgrade(
         return VexDowngradeResult::Deny(VexDenyReason::InvalidStatus);
     }
 
-    if let Some(ts) = vex.timestamp {
-        let age = now_epoch - ts;
-        if age < 0 || age > policy.freshness_window_secs {
-            return VexDowngradeResult::Deny(VexDenyReason::Stale);
-        }
+    let Some(timestamp) = vex.timestamp else {
+        return VexDowngradeResult::Deny(VexDenyReason::MissingTimestamp);
+    };
+
+    let age = now_epoch - timestamp;
+    if age < 0 || age > policy.freshness_window_secs {
+        return VexDowngradeResult::Deny(VexDenyReason::Stale);
     }
 
     VexDowngradeResult::Allow(Severity::Informational)
@@ -297,7 +298,26 @@ mod tests {
 
     #[test]
     fn all_non_suppressible_categories_denied() {
-        for cat in NON_SUPPRESSIBLE_CATEGORIES {
+        let non_eligible = [
+            FindingCategory::MalwareSignature,
+            FindingCategory::ContentMismatch,
+            FindingCategory::PolicyViolation,
+            FindingCategory::ResourceLimitEvent,
+            FindingCategory::SuspiciousScriptBehavior,
+            FindingCategory::Obfuscation,
+            FindingCategory::CredentialAccess,
+            FindingCategory::Persistence,
+            FindingCategory::PrivilegeEscalation,
+            FindingCategory::DestructiveBehavior,
+            FindingCategory::NetworkBehavior,
+            FindingCategory::DynamicCodeExecution,
+            FindingCategory::ArchiveHazard,
+            FindingCategory::Provenance,
+            FindingCategory::Reputation,
+            FindingCategory::Transport,
+            FindingCategory::ParserError,
+        ];
+        for cat in &non_eligible {
             let result =
                 validate_vex_downgrade(&policy(), &trusted_vex(), *cat, "pkg:foo@1.0", 1_000_000);
             assert_eq!(
@@ -322,5 +342,24 @@ mod tests {
             1_000_000,
         );
         assert_eq!(result, VexDowngradeResult::Deny(VexDenyReason::Stale));
+    }
+
+    #[test]
+    fn deny_missing_timestamp() {
+        let vex = VexStatement {
+            timestamp: None,
+            ..trusted_vex()
+        };
+        let result = validate_vex_downgrade(
+            &policy(),
+            &vex,
+            FindingCategory::PackageRisk,
+            "pkg:foo@1.0",
+            1_000_000,
+        );
+        assert_eq!(
+            result,
+            VexDowngradeResult::Deny(VexDenyReason::MissingTimestamp)
+        );
     }
 }
