@@ -36,3 +36,4 @@ book/src/adr/
 # Private specs (not part of the repo)
 .spec/
 .serena/
+.arbitraitor/
