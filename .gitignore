@@ -36,4 +36,7 @@ book/src/adr/
 # Private specs (not part of the repo)
 .spec/
 .serena/
-.arbitraitor/
+# Arbitraitor runtime artifacts (config.toml can be project-local)
+.arbitraitor/cas/
+.arbitraitor/receipts/
+.arbitraitor/intel.json

@@ -512,8 +512,10 @@ dependencies = [
  "arbitraitor-receipt",
  "arbitraitor-store",
  "arbitraitor-workspace-hack",
+ "hex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "wiremock",
 ]
