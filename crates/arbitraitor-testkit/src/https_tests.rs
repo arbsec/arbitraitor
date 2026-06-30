@@ -192,37 +192,25 @@ async fn streaming_timeout() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn truncated_response_returns_partial_bytes() -> Result<(), Box<dyn std::error::Error>> {
+async fn truncated_response_detected() -> Result<(), Box<dyn std::error::Error>> {
     let server = network::MockHttpServer::truncated_response(1024, 16)?;
     let url = server.url();
     let mut sink = VecSink::new();
 
-    let result = HttpFetcher::new()
+    let error = HttpFetcher::new()
         .fetch(
             FetchRequest::url(FetchUrl::parse(&url)?, http_loopback_policy()),
             &mut sink,
         )
-        .await;
+        .await
+        .err()
+        .ok_or("truncated response must produce an error")?;
 
-    match result {
-        Ok(receipt) => {
-            assert!(
-                receipt.bytes_written < 1024,
-                "fetcher should return fewer bytes than Content-Length declared (1024), got {}",
-                receipt.bytes_written
-            );
-        }
-        Err(error) => {
-            assert!(
-                error.to_string().to_lowercase().contains("eof")
-                    || error.to_string().to_lowercase().contains("unexpected")
-                    || error.to_string().to_lowercase().contains("incomplete")
-                    || error.to_string().to_lowercase().contains("truncat")
-                    || error.to_string().to_lowercase().contains("body"),
-                "expected truncation/body error, got: {error}"
-            );
-        }
-    }
+    assert!(
+        matches!(error, FetchError::TruncatedBody { .. })
+            || error.to_string().contains("decoding response body"),
+        "expected truncation error, got: {error}"
+    );
     Ok(())
 }
 
