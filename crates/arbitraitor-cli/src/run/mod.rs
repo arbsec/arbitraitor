@@ -172,8 +172,7 @@ async fn run_with_services(
                 ),
             );
         }
-        let native_plan = "execute as native binary";
-        let approved = match services.request_approval(&artifact, native_plan, &ctx) {
+        let approved = match services.request_approval(&artifact, &plan, &ctx) {
             Ok(approved) => approved,
             Err(error) => return write_failure(writer, error),
         };
