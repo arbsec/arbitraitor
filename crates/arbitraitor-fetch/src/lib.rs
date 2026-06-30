@@ -394,6 +394,14 @@ pub enum FetchError {
         /// Safe diagnostic message.
         message: String,
     },
+    /// Server sent fewer bytes than declared in `Content-Length`.
+    #[error("truncated response body: Content-Length declared {declared} bytes, received {actual}")]
+    TruncatedBody {
+        /// Declared byte count from `Content-Length`.
+        declared: u64,
+        /// Actual byte count received.
+        actual: u64,
+    },
 }
 
 /// Size limit category.
@@ -717,6 +725,16 @@ async fn stream_response(
     {
         write_checked_chunk(&mut state, policy, sink, &chunk).await?;
     }
+
+    if let Some(declared) = content_length
+        && state.bytes_written != declared
+    {
+        return Err(FetchError::TruncatedBody {
+            declared,
+            actual: state.bytes_written,
+        });
+    }
+
     state.finish(metadata, expected_sha256)
 }
 
