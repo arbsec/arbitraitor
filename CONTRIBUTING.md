@@ -21,10 +21,9 @@ This installs the correct versions of Rust, lefthook, cocogitto, and all other t
 ### Setup
 
 1. Fork and clone the repository.
-2. Run `mise install` to install pinned tool versions.
-3. Run `mise run setup-tools` to install cargo-based tools (nextest, deny, audit).
-4. Run `lefthook install` to set up git hooks.
-5. Run `cargo build` to verify the workspace compiles.
+2. Run `mise install` to install pinned tool versions (Rust, lefthook, cocogitto, rumdl, nextest, deny, audit, mdbook).
+3. Run `lefthook install` to set up git hooks.
+4. Run `cargo build` to verify the workspace compiles.
 
 ### Workflow
 
