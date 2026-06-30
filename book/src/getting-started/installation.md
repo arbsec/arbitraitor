@@ -107,11 +107,18 @@ You should see the version string and the list of subcommands:
 Commands:
   inspect   Retrieve and analyze an artifact without executing it
   run       Execute the full pipeline with approval flow
+  scan      Scan a local file or stdin for threats
+  explain   Explain a verdict from a receipt file
+  store     Manage content-addressed storage
+  policy    Validate a policy file
+  doctor    Check scanner and integration health
+  version   Show version and build provenance
   daemon    Unix socket daemon with background queue
   unpack    Unpack an archive to a directory for inspection
   intel     Manage local threat-intelligence feeds
   status    Show system health and configured detectors
   wrappers  Manage curl/wget wrapper shims
+  mcp       Start MCP server over stdio (JSON-RPC 2.0)
 ```
 
 ## Troubleshooting
