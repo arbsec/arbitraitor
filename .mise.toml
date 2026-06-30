@@ -9,51 +9,12 @@ cocogitto = "7.0.0"
 # Markdown linter
 rumdl = "latest"
 
+# CI tools (installed via cargo-binstall — prebuilt binaries)
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-deny" = "latest"
+"cargo:cargo-audit" = "latest"
+"cargo:mdbook" = "latest"
+"cargo:mdbook-mermaid" = "latest"
+
 [env]
 RUST_BACKTRACE = "1"
-
-[tasks.setup-tools]
-description = "Install cargo-based development tools (nextest, deny, audit, sccache, test-changed)"
-run = """
-cargo install cargo-nextest --locked || true
-cargo install cargo-deny --locked || true
-cargo install cargo-audit --locked || true
-cargo install sccache --locked || true
-cargo install cargo-test-changed --locked || true
-"""
-
-[tasks.lint-md]
-description = "Lint markdown files"
-run = "rumdl check ."
-
-[tasks.fmt-md]
-description = "Fix markdown formatting"
-run = "rumdl fmt ."
-
-[tasks.fmt]
-description = "Check formatting"
-run = "cargo fmt --check"
-
-[tasks.clippy]
-description = "Run clippy with all features"
-run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
-
-[tasks.check]
-description = "Run cargo check"
-run = "cargo check --workspace --all-targets --all-features"
-
-[tasks.test]
-description = "Run tests with nextest"
-run = "cargo nextest run --workspace --all-features"
-
-[tasks.deny]
-description = "Run cargo-deny checks"
-run = "cargo deny check --all-features"
-
-[tasks.audit]
-description = "Run cargo-audit"
-run = "cargo audit"
-
-[tasks.test-changed]
-description = "Run tests only for changed crates and their dependents"
-run = "cargo test-changed -r nextest --with-dependents"

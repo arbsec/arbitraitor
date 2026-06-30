@@ -47,6 +47,16 @@ See the [full comparison](book/src/comparison.md) for details and complementary 
 
 ### Install
 
+Download the latest nightly binary from the
+[releases page](https://github.com/arbsec/arbitraitor/releases/tag/nightly):
+
+```sh
+curl -fsSL https://github.com/arbsec/arbitraitor/releases/download/nightly/arbitraitor-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv arbitraitor /usr/local/bin/
+```
+
+Or build from source:
+
 ```sh
 git clone https://github.com/arbsec/arbitraitor.git
 cd arbitraitor

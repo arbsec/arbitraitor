@@ -1,12 +1,52 @@
 # Installation
 
-Arbitraitor is built from source. There are no pre-built binaries yet —
-it is pre-alpha software and the CLI, config format, and schemas change
-between commits.
+Arbitraitor offers two installation methods. Nightly binaries are the
+fastest option; building from source is available for development.
 
-## Prerequisites
+## Nightly binaries (recommended)
 
-### Rust toolchain
+Pre-built binaries are published every night from the latest `main`
+commit. They are available for Linux and macOS on both x86_64 and
+aarch64.
+
+### Download
+
+Fetch the latest binary for your platform from the
+[nightly release page](https://github.com/arbsec/arbitraitor/releases/tag/nightly):
+
+| Platform | File |
+|----------|------|
+| Linux x86_64 | `arbitraitor-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `arbitraitor-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 (Intel) | `arbitraitor-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 (Apple Silicon) | `arbitraitor-aarch64-apple-darwin.tar.gz` |
+
+### Install
+
+```sh
+# Download and extract
+curl -fsSL https://github.com/arbsec/arbitraitor/releases/download/nightly/arbitraitor-x86_64-unknown-linux-gnu.tar.gz | tar xz
+
+# Move to a directory on your PATH
+sudo mv arbitraitor /usr/local/bin/
+
+# Verify
+arbitraitor --version
+```
+
+On macOS, substitute the file name with `arbitraitor-x86_64-apple-darwin.tar.gz`
+or `arbitraitor-aarch64-apple-darwin.tar.gz` depending on your architecture.
+
+> **Warning: Pre-alpha.** Nightly binaries are built from unreleased
+> code. The CLI, config format, and schemas change between commits. Do
+> not use in production.
+
+## Build from source
+
+Building from source is required for development or if you need a
+platform without pre-built binaries (e.g. Windows).
+
+### Prerequisites
 
 **Rust 1.96+** (Rust 2024 edition). Install via [rustup](https://rustup.rs):
 
@@ -14,10 +54,7 @@ between commits.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### System dependencies
-
-You need **pkg-config** and **OpenSSL development headers** for the HTTP
-stack.
+You also need **pkg-config** and **OpenSSL development headers**.
 
 **Ubuntu/Debian:**
 
@@ -44,7 +81,7 @@ This installs the Rust version pinned in `.mise.toml`, plus lefthook
 (git hooks), cocogitto (conventional commits), and rumdl (markdown
 linter).
 
-## Build and install
+### Build and install
 
 ```sh
 git clone https://github.com/arbsec/arbitraitor.git
@@ -88,7 +125,7 @@ export OPENSSL_DIR=$(brew --prefix openssl@3)
 ```
 
 **`arbitraitor` command not found:**
-Ensure `~/.cargo/bin` is on your `PATH`:
+Ensure the binary is on your `PATH`:
 
 ```sh
 echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
