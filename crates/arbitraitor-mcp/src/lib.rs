@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{ErrorKind as IoErrorKind, Read, Write};
+use std::io::{BufRead, ErrorKind as IoErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -1929,6 +1929,193 @@ enum ApprovalTokenError {
     Json(#[from] serde_json::Error),
     #[error("token encoding failed: {0}")]
     Hex(#[from] hex::FromHexError),
+}
+
+/// Errors returned by [`run_stdio_server`].
+#[derive(Debug, Error)]
+pub enum StdioError {
+    /// Standard I/O failure.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// JSON serialization or deserialization failure.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+const JSONRPC_VERSION: &str = "2.0";
+const MAX_LINE_LEN: usize = 1024 * 1024;
+
+fn build_default_server() -> McpServer {
+    let receipts = Arc::new(InMemoryReceiptStore::new()) as Arc<dyn ReceiptLookup>;
+
+    let mut server = McpServer::new();
+    server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
+    server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
+    server.register(Box::new(QueryReceiptTool::new(receipts)));
+    server.register(Box::new(ExplainVerdictTool));
+    server
+}
+
+fn default_agent() -> AgentIdentity {
+    AgentIdentity {
+        integration: "stdio".to_owned(),
+        agent_name: std::env::var("MCP_AGENT_NAME").unwrap_or_else(|_| "unknown".to_owned()),
+        session_id: Uuid::new_v4().to_string(),
+        workspace: std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned()),
+    }
+}
+
+fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) -> Option<Value> {
+    let id = request.get("id").cloned()?;
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let result = match method {
+        "initialize" | "notifications/initialized" => json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": {
+                "name": "arbitraitor",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }),
+        "tools/list" => {
+            let tools: Vec<Value> = server
+                .list_tools()
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema
+                    })
+                })
+                .collect();
+            json!({ "tools": tools })
+        }
+        "tools/call" => {
+            let name = request
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str);
+            let params = request
+                .get("params")
+                .and_then(|p| p.get("arguments"))
+                .cloned()
+                .unwrap_or(json!({}));
+
+            match name {
+                Some(tool_name) => match server.call_tool(tool_name, params, agent.clone()) {
+                    Ok(response) => {
+                        let content: Vec<Value> = response
+                            .content
+                            .iter()
+                            .map(|c| match c {
+                                McpContent::Text { text } => {
+                                    json!({ "type": "text", "text": text })
+                                }
+                                McpContent::Json { json: val } => {
+                                    json!({ "type": "text", "text": val.to_string() })
+                                }
+                            })
+                            .collect();
+                        json!({
+                            "content": content,
+                            "isError": response.is_error
+                        })
+                    }
+                    Err(error) => {
+                        return Some(json!({
+                            "jsonrpc": JSONRPC_VERSION,
+                            "id": id,
+                            "error": { "code": -32602, "message": error.to_string() }
+                        }));
+                    }
+                },
+                None => {
+                    return Some(json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "id": id,
+                        "error": { "code": -32602, "message": "missing 'name' in tools/call params" }
+                    }));
+                }
+            }
+        }
+        _ => {
+            return Some(json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": id,
+                "error": { "code": -32601, "message": format!("unknown method: {method}") }
+            }));
+        }
+    };
+
+    Some(json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id,
+        "result": result
+    }))
+}
+
+/// Runs the MCP server over stdio using JSON-RPC 2.0.
+///
+/// Reads line-delimited JSON requests from stdin and writes JSON-RPC
+/// responses to stdout. Registers all built-in tools with default
+/// configuration. Exits when stdin reaches EOF.
+///
+/// # Errors
+///
+/// Returns [`StdioError`] on I/O or JSON serialization failure.
+pub fn run_stdio_server() -> Result<(), StdioError> {
+    let server = build_default_server();
+    let agent = default_agent();
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout().lock();
+
+    let mut reader = stdin.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.len() > MAX_LINE_LEN {
+            let response = json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": Value::Null,
+                "error": { "code": -32600, "message": "request exceeds maximum line length" }
+            });
+            writeln!(stdout, "{response}")?;
+            stdout.flush()?;
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let request: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(error) => {
+                let response = json!({
+                    "jsonrpc": JSONRPC_VERSION,
+                    "id": Value::Null,
+                    "error": { "code": -32700, "message": format!("parse error: {error}") }
+                });
+                writeln!(stdout, "{response}")?;
+                stdout.flush()?;
+                continue;
+            }
+        };
+        if let Some(response) = handle_request(&server, &request, &agent) {
+            writeln!(stdout, "{response}")?;
+            stdout.flush()?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

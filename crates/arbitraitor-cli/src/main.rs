@@ -68,6 +68,8 @@ enum Command {
     Intel(IntelCommand),
     Status(StatusCommand),
     Wrappers(WrappersCommand),
+    /// Start MCP server over stdio (JSON-RPC 2.0)
+    Mcp,
 }
 
 #[derive(Args)]
@@ -335,6 +337,9 @@ async fn main() -> Result<()> {
         }
         Command::Wrappers(command) => {
             wrappers(command)?;
+        }
+        Command::Mcp => {
+            arbitraitor_mcp::run_stdio_server().into_diagnostic()?;
         }
     }
 
@@ -1238,7 +1243,8 @@ mod tests {
             | Command::Intel(_)
             | Command::Run(_)
             | Command::Status(_)
-            | Command::Wrappers(_) => {
+            | Command::Wrappers(_)
+            | Command::Mcp => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1295,7 +1301,8 @@ mod tests {
             | Command::Intel(_)
             | Command::Run(_)
             | Command::Status(_)
-            | Command::Wrappers(_) => {
+            | Command::Wrappers(_)
+            | Command::Mcp => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1334,7 +1341,8 @@ mod tests {
             | Command::Intel(_)
             | Command::Run(_)
             | Command::Status(_)
-            | Command::Wrappers(_) => {
+            | Command::Wrappers(_)
+            | Command::Mcp => {
                 return Err("parsed wrong command".into());
             }
         }
@@ -1415,7 +1423,8 @@ mod tests {
             | Command::Intel(_)
             | Command::Run(_)
             | Command::Status(_)
-            | Command::Wrappers(_) => {
+            | Command::Wrappers(_)
+            | Command::Mcp => {
                 return Err("parsed wrong command".into());
             }
         }
