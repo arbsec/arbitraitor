@@ -220,6 +220,7 @@ dependencies = [
  "clap",
  "miette",
  "predicates",
+ "reqwest",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
