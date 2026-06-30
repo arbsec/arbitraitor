@@ -18,6 +18,12 @@ use arbitraitor_model::taxonomy::{TaxonomyName, TaxonomyRef};
 use arbitraitor_model::verdict::{Confidence, Severity};
 use serde::{Deserialize, Serialize};
 
+/// Maximum lockfile artifact size accepted (10 MiB).
+const MAX_LOCKFILE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Maximum number of packages to extract before stopping.
+const MAX_PACKAGES: usize = 10_000;
+
 /// A single vulnerability advisory in the local OSV/KEV snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +97,9 @@ impl DepVulnDetector {
     /// Detects the lockfile format from artifact bytes.
     #[must_use]
     pub fn detect_format(bytes: &[u8]) -> Option<LockfileFormat> {
+        if bytes.len() > MAX_LOCKFILE_SIZE {
+            return None;
+        }
         let Ok(text) = std::str::from_utf8(bytes) else {
             return None;
         };
@@ -137,10 +146,25 @@ impl DepVulnDetector {
             return Vec::new();
         };
         let mut packages = Vec::new();
+        let mut in_package_table = false;
         let mut current_name: Option<String> = None;
 
         for line in text.lines() {
             let trimmed = line.trim();
+            if trimmed == "[[package]]" {
+                in_package_table = true;
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                in_package_table = false;
+                continue;
+            }
+            if !in_package_table {
+                continue;
+            }
+            if packages.len() >= MAX_PACKAGES {
+                break;
+            }
             if let Some(name) = trimmed
                 .strip_prefix("name = \"")
                 .and_then(|n| n.strip_suffix('"'))
@@ -167,9 +191,15 @@ impl DepVulnDetector {
             return Vec::new();
         };
         let mut packages = Vec::new();
+        if packages.len() >= MAX_PACKAGES {
+            return packages;
+        }
 
         if let Some(packages_obj) = json.get("packages").and_then(|p| p.as_object()) {
             for (path, info) in packages_obj {
+                if packages.len() >= MAX_PACKAGES {
+                    break;
+                }
                 if path.is_empty() {
                     continue;
                 }
@@ -246,17 +276,19 @@ impl DepVulnDetector {
         matches
     }
 
-    /// Simple version range check (supports `*`, `==X`, `>=X`, and substring match).
+    /// Simple version range check (supports `*`, `==X`, `>=X`).
+    ///
+    /// Does NOT use lexicographic substring matching. For `>=`, uses
+    /// lexicographic comparison (not semver-awware) — sufficient for
+    /// the simplified advisory model but not for complex ranges.
     #[must_use]
     pub fn version_matches(version: &str, range: &str) -> bool {
         if range == "*" {
             return true;
         }
-        if range.contains(version) {
-            return true;
-        }
         if let Some(exact) = range.strip_prefix("==") {
-            return version == exact.trim();
+            let exact = exact.trim();
+            return version == exact;
         }
         if let Some(prefix) = range.strip_prefix(">=") {
             let rest = prefix.split(',').next().unwrap_or(prefix).trim();
@@ -283,7 +315,7 @@ impl DepVulnDetector {
                 coordinate.ecosystem, coordinate.name, advisory.id
             ),
             detector: "dep-vuln".to_owned(),
-            category: FindingCategory::MalwareSignature,
+            category: FindingCategory::PackageRisk,
             severity,
             confidence: if advisory.is_kev {
                 Confidence::Confirmed
