@@ -58,18 +58,50 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
 }
 
 #[tokio::test]
-async fn run_deny_native_without_flag() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Given: a native artifact and no explicit --native flag.
+async fn run_native_auto_detects_and_prompts() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
     let command = command(false, false);
     let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Pass, true));
     let mut output = Vec::new();
 
-    // When: the run pipeline reaches the execution gate.
     let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
 
-    // Then: execution is denied before the executor is called.
+    assert_eq!(code, EXIT_SUCCESS);
+    assert!(services.approval_requested);
+    assert!(services.executed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_native_non_interactive_blocked_without_flag()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let command = command(false, true);
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Pass, true));
+    let mut output = Vec::new();
+
+    let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
     assert_eq!(code, EXIT_APPROVAL_DENIED);
+    assert!(!services.approval_requested);
     assert!(!services.executed);
+    let rendered = String::from_utf8(output)?;
+    assert!(rendered.contains("native binary detected"));
+    assert!(rendered.contains("--native"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_native_with_flag_skips_prompt() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let command = command(true, true);
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Pass, true));
+    let mut output = Vec::new();
+
+    let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
+    assert_eq!(code, EXIT_SUCCESS);
+    assert!(!services.approval_requested);
+    assert!(services.executed);
     Ok(())
 }
 

@@ -78,7 +78,7 @@ Output shows the artifact's SHA-256, content type, detection findings, and a ver
 # Fetch, inspect, and execute after human approval
 arbitraitor run https://example.com/install.sh
 
-# Execute as a native binary (requires --native gate)
+# Pre-approve native binary execution (auto-detected from artifact type)
 arbitraitor run https://example.com/binary --native
 ```
 
