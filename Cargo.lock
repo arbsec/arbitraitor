@@ -512,12 +512,15 @@ dependencies = [
  "arbitraitor-receipt",
  "arbitraitor-store",
  "arbitraitor-workspace-hack",
+ "flate2",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "tokio",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

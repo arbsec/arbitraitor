@@ -15,11 +15,14 @@ workspace = true
 arbitraitor-model = { workspace = true }
 arbitraitor-receipt = { workspace = true }
 arbitraitor-store = { workspace = true }
+flate2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true }
 wiremock = "0.6"
+zip = { workspace = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
