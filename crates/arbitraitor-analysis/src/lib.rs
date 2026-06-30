@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod dep_vuln;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;

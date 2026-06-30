@@ -19,6 +19,8 @@ arbitraitor-intel = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-shell = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -27,3 +29,4 @@ arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace
 
 [dev-dependencies]
 zip = { workspace = true }
+sha2 = { workspace = true }
