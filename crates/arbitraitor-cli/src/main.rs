@@ -32,6 +32,7 @@ use arbitraitor_receipt::{
     RetrievalInfo as ReceiptRetrievalInfo, VerdictInfo,
 };
 use arbitraitor_store::ContentStore;
+use arbitraitor_wrapper::init as shell_init;
 use arbitraitor_wrapper::shim::{
     ShimConfig, ShimError, WrapperTarget, check_shims, generate_shell_init, install_shims,
     uninstall_shims,
@@ -208,7 +209,10 @@ enum WrappersSubcommand {
     Uninstall(UninstallWrappersCommand),
     /// Show which shims are currently installed.
     Status(WrappersStatusCommand),
-    /// Print a shell init snippet for ~/.bashrc or ~/.zshrc.
+    /// Print or install a shell init snippet for PATH configuration.
+    Init(InitCommand),
+    #[command(hide = true)]
+    /// Legacy alias for `init` (prints a generic POSIX snippet).
     InitScript(InitScriptCommand),
 }
 
@@ -228,6 +232,21 @@ struct UninstallWrappersCommand {
 struct WrappersStatusCommand {
     /// Specific wrappers to check. Defaults to all.
     targets: Vec<String>,
+}
+
+#[derive(Args)]
+struct InitCommand {
+    /// Target shell (auto-detected from $SHELL if omitted).
+    shell: Option<String>,
+    /// Write to shell rcfile (instead of printing to stdout).
+    #[arg(long)]
+    install: bool,
+    /// Remove previously installed lines from rcfile.
+    #[arg(long)]
+    uninstall: bool,
+    /// Print detected shell and target rcfile, then exit.
+    #[arg(long)]
+    detect_shell: bool,
 }
 
 #[derive(Args)]
@@ -674,6 +693,19 @@ fn wrappers(command: WrappersCommand) -> Result<()> {
                 shim_dir.display()
             )
             .into_diagnostic()?;
+            writeln!(stdout).into_diagnostic()?;
+            writeln!(stdout, "To activate, add the shim directory to your PATH:")
+                .into_diagnostic()?;
+            writeln!(
+                stdout,
+                "  eval \"$(arbitraitor wrappers init)\"    # print mode"
+            )
+            .into_diagnostic()?;
+            writeln!(
+                stdout,
+                "  arbitraitor wrappers init --install      # auto-install to rcfile"
+            )
+            .into_diagnostic()?;
         }
         WrappersSubcommand::Uninstall(uninstall) => {
             let targets = resolve_targets(&uninstall.targets)?;
@@ -703,6 +735,9 @@ fn wrappers(command: WrappersCommand) -> Result<()> {
                 writeln!(stdout, "{}: {label}", st.target.binary_name()).into_diagnostic()?;
             }
         }
+        WrappersSubcommand::Init(init_cmd) => {
+            handle_init(&init_cmd, &shim_dir)?;
+        }
         WrappersSubcommand::InitScript(_) => {
             let arb = current_arbitraitor_binary()?;
             let snippet = generate_shell_init(&arb, WrapperTarget::ALL);
@@ -711,6 +746,79 @@ fn wrappers(command: WrappersCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_init(cmd: &InitCommand, shim_dir: &Path) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    if cmd.detect_shell {
+        match shell_init::detect_shell() {
+            Some(detected) => {
+                let rc_str = shell_init::target_rcfile(detected.shell)
+                    .map_or_else(|| "<none>".to_owned(), |p| p.display().to_string());
+                writeln!(
+                    stdout,
+                    "{} (detected via {})",
+                    detected.shell.as_str(),
+                    match detected.source {
+                        shell_init::DetectionSource::EnvShell => "$SHELL",
+                        shell_init::DetectionSource::ParentProcess => "parent process",
+                    }
+                )
+                .into_diagnostic()?;
+                writeln!(stdout, "rcfile: {rc_str}").into_diagnostic()?;
+                return Ok(());
+            }
+            None => {
+                miette::bail!(
+                    "could not detect shell; specify one explicitly: {}",
+                    supported_shells_list()
+                );
+            }
+        }
+    }
+
+    let shell = match &cmd.shell {
+        Some(name) => shell_init::Shell::from_name(name).ok_or_else(|| {
+            miette::miette!(
+                "unknown shell '{name}'; supported: {}",
+                supported_shells_list()
+            )
+        })?,
+        None => match shell_init::detect_shell() {
+            Some(detected) => detected.shell,
+            None => miette::bail!(
+                "could not detect shell; specify one explicitly: {}",
+                supported_shells_list()
+            ),
+        },
+    };
+
+    if cmd.uninstall {
+        let rcfile =
+            shell_init::uninstall_from_rcfile(shell).map_err(|e| miette::miette!("{e}"))?;
+        writeln!(stdout, "removed init block from {}", rcfile.display()).into_diagnostic()?;
+        return Ok(());
+    }
+
+    if cmd.install {
+        let rcfile =
+            shell_init::install_to_rcfile(shell, shim_dir).map_err(|e| miette::miette!("{e}"))?;
+        writeln!(stdout, "installed init snippet to {}", rcfile.display()).into_diagnostic()?;
+        return Ok(());
+    }
+
+    let snippet =
+        shell_init::render_snippet(shell, shim_dir).map_err(|e| miette::miette!("{e}"))?;
+    stdout.write_all(snippet.as_bytes()).into_diagnostic()?;
+    Ok(())
+}
+
+fn supported_shells_list() -> String {
+    shell_init::Shell::ALL
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn resolve_targets(names: &[String]) -> Result<Vec<WrapperTarget>> {
@@ -1752,6 +1860,61 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn wrappers_init_parses_shell_arg() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "init", "zsh"])?;
+        match cli.command {
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Init(cmd),
+                ..
+            }) => {
+                assert_eq!(cmd.shell.as_deref(), Some("zsh"));
+                assert!(!cmd.install);
+                assert!(!cmd.uninstall);
+                assert!(!cmd.detect_shell);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrappers_init_parses_flags() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "init", "bash", "--install"])?;
+        match cli.command {
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Init(cmd),
+                ..
+            }) => {
+                assert_eq!(cmd.shell.as_deref(), Some("bash"));
+                assert!(cmd.install);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "init", "--uninstall"])?;
+        match cli.command {
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Init(cmd),
+                ..
+            }) => {
+                assert!(cmd.shell.is_none());
+                assert!(cmd.uninstall);
+            }
+            _ => return Err("parsed wrong command".into()),
+        }
+
+        let cli = Cli::try_parse_from(["arbitraitor", "wrappers", "init", "--detect-shell"])?;
+        match cli.command {
+            Command::Wrappers(WrappersCommand {
+                subcommand: WrappersSubcommand::Init(cmd),
+                ..
+            }) => assert!(cmd.detect_shell),
+            _ => return Err("parsed wrong command".into()),
+        }
         Ok(())
     }
 

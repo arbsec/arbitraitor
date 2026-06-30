@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod init;
 pub mod shim;
 pub mod wget;
 

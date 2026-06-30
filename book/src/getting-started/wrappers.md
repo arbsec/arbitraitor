@@ -8,12 +8,36 @@ arbitraitor wrappers install
 
 # Check which shims are installed
 arbitraitor wrappers status
-
-# Print a shell init snippet for your dotfiles
-arbitraitor wrappers init-script >> ~/.bashrc
 ```
 
 After installation, any `curl https://example.com/file | sh` is transparently intercepted and inspected before the bytes reach the shell.
+
+## Shell integration
+
+After installing shims, add the shim directory to your `PATH`:
+
+```sh
+# Print mode — add to rcfile manually or eval inline
+eval "$(arbitraitor wrappers init)"
+
+# Auto-install mode — write to the correct rcfile with idempotency markers
+arbitraitor wrappers init --install
+
+# Detect which shell you're running and which rcfile is targeted
+arbitraitor wrappers init --detect-shell
+
+# Specify a shell explicitly
+arbitraitor wrappers init zsh
+arbitraitor wrappers init fish --install
+```
+
+Supported shells: bash, zsh, sh, fish, nu, xonsh, powershell, elvish, posix, tcsh.
+
+To remove the init block from your rcfile:
+
+```sh
+arbitraitor wrappers init --uninstall
+```
 
 ## Health checks
 
