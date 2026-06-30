@@ -9,6 +9,7 @@
   - [Scanning local files](./getting-started/scan.md)
   - [Explaining verdicts](./getting-started/explain.md)
   - [Managing storage](./getting-started/store.md)
+  - [Managing rule packs](./getting-started/rules.md)
 - [Comparison with Other Tools](./comparison.md)
 - [CLI Reference](./cli-reference.md)
   - [inspect](./cli/inspect.md)
