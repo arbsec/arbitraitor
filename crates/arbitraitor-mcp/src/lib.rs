@@ -1943,18 +1943,15 @@ pub enum StdioError {
 }
 
 const JSONRPC_VERSION: &str = "2.0";
+const MAX_LINE_LEN: usize = 1024 * 1024;
 
 fn build_default_server() -> McpServer {
-    let artifacts = Arc::new(InMemoryArtifactStore::new()) as Arc<dyn ArtifactLookup>;
     let receipts = Arc::new(InMemoryReceiptStore::new()) as Arc<dyn ReceiptLookup>;
-    let issuer = ApprovalTokenIssuer::new();
 
     let mut server = McpServer::new();
     server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
     server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
     server.register(Box::new(QueryReceiptTool::new(receipts)));
-    server.register(Box::new(RequestApprovalTool::new()));
-    server.register(Box::new(RunApprovedArtifactTool::new(artifacts, issuer)));
     server.register(Box::new(ExplainVerdictTool));
     server
 }
@@ -1970,26 +1967,20 @@ fn default_agent() -> AgentIdentity {
     }
 }
 
-fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) -> Value {
-    let id = request.get("id").cloned().unwrap_or(Value::Null);
+fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) -> Option<Value> {
+    let id = request.get("id").cloned()?;
     let method = request
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
 
-    match method {
-        "initialize" => json!({
-            "jsonrpc": JSONRPC_VERSION,
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "arbitraitor",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
+    let result = match method {
+        "initialize" | "notifications/initialized" => json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": {
+                "name": "arbitraitor",
+                "version": env!("CARGO_PKG_VERSION")
             }
         }),
         "tools/list" => {
@@ -2004,11 +1995,7 @@ fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) ->
                     })
                 })
                 .collect();
-            json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "id": id,
-                "result": { "tools": tools }
-            })
+            json!({ "tools": tools })
         }
         "tools/call" => {
             let name = request
@@ -2037,33 +2024,41 @@ fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) ->
                             })
                             .collect();
                         json!({
-                            "jsonrpc": JSONRPC_VERSION,
-                            "id": id,
-                            "result": {
-                                "content": content,
-                                "isError": response.is_error
-                            }
+                            "content": content,
+                            "isError": response.is_error
                         })
                     }
-                    Err(error) => json!({
+                    Err(error) => {
+                        return Some(json!({
+                            "jsonrpc": JSONRPC_VERSION,
+                            "id": id,
+                            "error": { "code": -32602, "message": error.to_string() }
+                        }));
+                    }
+                },
+                None => {
+                    return Some(json!({
                         "jsonrpc": JSONRPC_VERSION,
                         "id": id,
-                        "error": { "code": -32602, "message": error.to_string() }
-                    }),
-                },
-                None => json!({
-                    "jsonrpc": JSONRPC_VERSION,
-                    "id": id,
-                    "error": { "code": -32602, "message": "missing 'name' in tools/call params" }
-                }),
+                        "error": { "code": -32602, "message": "missing 'name' in tools/call params" }
+                    }));
+                }
             }
         }
-        _ => json!({
-            "jsonrpc": JSONRPC_VERSION,
-            "id": id,
-            "error": { "code": -32601, "message": format!("unknown method: {method}") }
-        }),
-    }
+        _ => {
+            return Some(json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": id,
+                "error": { "code": -32601, "message": format!("unknown method: {method}") }
+            }));
+        }
+    };
+
+    Some(json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id,
+        "result": result
+    }))
 }
 
 /// Runs the MCP server over stdio using JSON-RPC 2.0.
@@ -2088,6 +2083,16 @@ pub fn run_stdio_server() -> Result<(), StdioError> {
         if reader.read_line(&mut line)? == 0 {
             break;
         }
+        if line.len() > MAX_LINE_LEN {
+            let response = json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": Value::Null,
+                "error": { "code": -32600, "message": "request exceeds maximum line length" }
+            });
+            writeln!(stdout, "{response}")?;
+            stdout.flush()?;
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -2105,9 +2110,10 @@ pub fn run_stdio_server() -> Result<(), StdioError> {
                 continue;
             }
         };
-        let response = handle_request(&server, &request, &agent);
-        writeln!(stdout, "{response}")?;
-        stdout.flush()?;
+        if let Some(response) = handle_request(&server, &request, &agent) {
+            writeln!(stdout, "{response}")?;
+            stdout.flush()?;
+        }
     }
     Ok(())
 }
