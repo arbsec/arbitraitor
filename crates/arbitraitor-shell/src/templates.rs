@@ -104,6 +104,11 @@ pub fn category_risk(category: FindingCategory) -> &'static str {
              maximum size, nesting depth, or node count. Resource limits prevent \
              denial-of-service via pathologically structured input."
         }
+        FindingCategory::SupplyChain => {
+            "A companion supply-chain artifact (SBOM, VEX, or attestation) was discovered. \
+             Its contents may provide additional context for vulnerability assessment \
+             and provenance verification."
+        }
     }
 }
 
@@ -171,6 +176,10 @@ pub fn recommendation_for(category: FindingCategory) -> String {
         FindingCategory::ResourceLimitEvent => {
             "Increase the limit if the input is expected to be large, or reject if \
              the size is anomalous."
+        }
+        FindingCategory::SupplyChain => {
+            "Review the companion artifact contents and verify VEX issuers against \
+             the trust root before accepting severity downgrades."
         }
     }
     .to_owned()

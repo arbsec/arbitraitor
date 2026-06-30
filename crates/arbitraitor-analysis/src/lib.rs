@@ -532,6 +532,7 @@ impl Detector for ArchiveHazardDetector {
             capabilities: vec![
                 "archive-list".to_owned(),
                 "archive-hazard-detection".to_owned(),
+                "companion-artifact-discovery".to_owned(),
             ],
             is_local: true,
             may_upload: false,
@@ -551,10 +552,11 @@ impl Detector for ArchiveHazardDetector {
             Err(error) => return vec![archive_error_finding(ctx, &error)],
         };
         match reader.entries() {
-            Ok(entries) => rewrite_artifact_digest(
-                detect_archive_hazards(&entries, &limits),
-                &ctx.artifact_sha256,
-            ),
+            Ok(entries) => {
+                let mut findings = detect_archive_hazards(&entries, &limits);
+                findings.extend(discover_companion_findings(&entries, ctx));
+                rewrite_artifact_digest(findings, &ctx.artifact_sha256)
+            }
             Err(error) => vec![archive_error_finding(ctx, &error)],
         }
     }
@@ -684,6 +686,61 @@ fn rewrite_artifact_digest(
             finding
         })
         .collect()
+}
+
+const COMPANION_REFERENCE: &str = "https://github.com/arbsec/arbitraitor/blob/main/.spec/arbitraitor-comprehensive-spec.md#195-companion-artifact-consumption-sbom-vex";
+
+fn discover_companion_findings(
+    entries: &[arbitraitor_archive::ArchiveEntry],
+    ctx: &AnalysisContext<'_>,
+) -> Vec<Finding> {
+    let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+    let companions = arbitraitor_model::vex::discover_companion_artifacts(&names);
+    companions
+        .iter()
+        .map(|artifact| companion_finding(artifact, ctx))
+        .collect()
+}
+
+fn companion_finding(
+    artifact: &arbitraitor_model::vex::CompanionArtifact,
+    ctx: &AnalysisContext<'_>,
+) -> Finding {
+    let format_name = match artifact.format {
+        arbitraitor_model::vex::CompanionFormat::CycloneDx => "CycloneDX SBOM",
+        arbitraitor_model::vex::CompanionFormat::Spdx => "SPDX SBOM",
+        arbitraitor_model::vex::CompanionFormat::OpenVex => "OpenVEX statement",
+        arbitraitor_model::vex::CompanionFormat::Csaf => "CSAF VEX document",
+    };
+    Finding {
+        id: format!("archive.companion.{}", artifact.name.replace('.', "-")),
+        detector: ARCHIVE_DETECTOR_ID.to_owned(),
+        category: FindingCategory::SupplyChain,
+        severity: Severity::Informational,
+        confidence: Confidence::Confirmed,
+        title: format!("Discovered {format_name} companion artifact"),
+        description: format!(
+            "Archive entry '{}' is a {format_name}. Per spec §19.5, its contents are recorded as evidence — SBOM components become references, VEX statements may downgrade vulnerability severity under anti-suppression rules.",
+            artifact.name
+        ),
+        evidence: vec![Evidence {
+            kind: EvidenceKind::Other,
+            description: format!("companion artifact: {format_name}"),
+            content: Some(format!(
+                "entry={}; format={:?}",
+                artifact.name, artifact.format
+            )),
+        }],
+        artifact_sha256: ctx.artifact_sha256.clone(),
+        location: None,
+        remediation: None,
+        references: vec![COMPANION_REFERENCE.to_owned()],
+        tags: vec![
+            "companion-artifact".to_owned(),
+            format!("{:?}", artifact.format).to_ascii_lowercase(),
+        ],
+        taxonomies: Vec::new(),
+    }
 }
 
 fn unknown_artifact_finding(ctx: &AnalysisContext<'_>) -> Finding {

@@ -481,6 +481,7 @@ fn category_info(cat: FindingCategory) -> (String, u8) {
         FindingCategory::PolicyViolation => ("policy-violation", 15),
         FindingCategory::ParserError => ("parser-error", 16),
         FindingCategory::ResourceLimitEvent => ("resource-limit-event", 17),
+        FindingCategory::SupplyChain => ("supply-chain", 18),
     };
     (name.to_owned(), rank)
 }
