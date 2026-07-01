@@ -144,6 +144,12 @@ pub enum ShimSubcommand {
     Uninstall { tool: String },
 }
 
+#[derive(Args)]
+pub struct GraphCommand {
+    /// Local file to analyze.
+    pub file: PathBuf,
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     let max_bytes = config.store.max_bytes;
@@ -620,6 +626,50 @@ pub(crate) fn shim(command: &ShimCommand) -> Result<()> {
                 writeln!(std::io::stdout().lock(), "not installed: {tool}").into_diagnostic()?;
             }
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn graph(command: &GraphCommand) -> Result<()> {
+    let bytes = std::fs::read(&command.file).into_diagnostic()?;
+    let coordinator = arbitraitor_analysis::AnalysisCoordinator::new();
+    let (node, findings) = arbitraitor_analysis::analyze_recursive(&coordinator, &bytes, 10);
+    let mut stdout = std::io::stdout().lock();
+    let sha: String = node.sha256.to_string().chars().take(12).collect();
+    writeln!(stdout, "{:?} {sha}", node.kind).into_diagnostic()?;
+    render_node(&mut stdout, &node, 1)?;
+    if !findings.is_empty() {
+        writeln!(stdout).into_diagnostic()?;
+        writeln!(stdout, "Findings: {}", findings.len()).into_diagnostic()?;
+        for f in &findings {
+            writeln!(stdout, "  - {}", f.title).into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+fn render_node(
+    writer: &mut impl std::io::Write,
+    node: &arbitraitor_archive::ArtifactNode,
+    depth: usize,
+) -> Result<()> {
+    for child in &node.contained {
+        let prefix = "  ".repeat(depth);
+        let sha: String = child.sha256.to_string().chars().take(12).collect();
+        let name = match &child.origin {
+            arbitraitor_archive::ArtifactOrigin::ArchiveEntry { entry_name, .. } => {
+                entry_name.as_str()
+            }
+            arbitraitor_archive::ArtifactOrigin::Root => "(root)",
+        };
+        writeln!(
+            writer,
+            "{prefix}├─ {sha} {kind:?} [{name}]",
+            kind = child.kind,
+            name = name
+        )
+        .into_diagnostic()?;
+        render_node(writer, child, depth + 1)?;
     }
     Ok(())
 }

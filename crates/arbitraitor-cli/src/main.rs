@@ -81,6 +81,7 @@ enum Command {
     Plugin(commands::PluginCommand),
     Hook(commands::HookCommand),
     Shim(commands::ShimCommand),
+    Graph(commands::GraphCommand),
     Version,
 }
 
@@ -401,6 +402,9 @@ async fn main() -> Result<()> {
         }
         Command::Shim(command) => {
             commands::shim(&command)?;
+        }
+        Command::Graph(command) => {
+            commands::graph(&command)?;
         }
         Command::Version => {
             commands::version()?;
