@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
@@ -148,6 +149,21 @@ pub enum ShimSubcommand {
 pub struct GraphCommand {
     /// Local file to analyze.
     pub file: PathBuf,
+}
+
+#[derive(Args)]
+pub struct ApproveCommand {
+    /// Receipt file from a prior inspection.
+    pub receipt: PathBuf,
+}
+
+#[derive(Args)]
+pub struct ExecuteCommand {
+    /// Approval file from 'arbitraitor approve'.
+    pub approval: PathBuf,
+    /// Allow network access during execution.
+    #[arg(long)]
+    pub network: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -671,5 +687,103 @@ fn render_node(
         .into_diagnostic()?;
         render_node(writer, child, depth + 1)?;
     }
+    Ok(())
+}
+
+pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> {
+    let receipt_bytes = std::fs::read(&command.receipt).into_diagnostic()?;
+    let receipt: Receipt = serde_json::from_slice(&receipt_bytes)
+        .map_err(|e| miette::miette!("invalid receipt file: {e}"))?;
+    let sha = &receipt.artifact_sha256;
+    let verdict = receipt.verdict.verdict;
+
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "Artifact: {sha}").into_diagnostic()?;
+    writeln!(stderr, "Verdict:  {verdict:?}").into_diagnostic()?;
+    writeln!(stderr, "Findings: {}", receipt.findings.len()).into_diagnostic()?;
+    for f in &receipt.findings {
+        writeln!(stderr, "  - {}", f.title).into_diagnostic()?;
+    }
+    writeln!(stderr).into_diagnostic()?;
+    writeln!(stderr, "Approve execution? [y/N] ").into_diagnostic()?;
+    drop(stderr);
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).into_diagnostic()?;
+    if !input.trim().eq_ignore_ascii_case("y") {
+        miette::bail!("approval denied");
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let expiry = now + 300;
+
+    let approval = serde_json::json!({
+        "artifact_sha256": sha.to_owned(),
+        "approved_at": now,
+        "expires_at": expiry,
+        "verdict": format!("{verdict:?}"),
+    });
+
+    let approval_path = command.receipt.with_extension("approval.json");
+    let json = serde_json::to_vec_pretty(&approval).into_diagnostic()?;
+    std::fs::write(&approval_path, json).into_diagnostic()?;
+    writeln!(
+        std::io::stdout().lock(),
+        "approval written to: {}",
+        approval_path.display()
+    )
+    .into_diagnostic()?;
+    Ok(())
+}
+
+pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
+    let approval_bytes = std::fs::read(&command.approval).into_diagnostic()?;
+    let approval: serde_json::Value = serde_json::from_slice(&approval_bytes)
+        .map_err(|e| miette::miette!("invalid approval file: {e}"))?;
+
+    let sha_str = approval
+        .get("artifact_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| miette::miette!("approval missing artifact_sha256"))?;
+    let sha = arbitraitor_model::ids::Sha256Digest::from_str(sha_str)
+        .map_err(|e| miette::miette!("invalid SHA-256 in approval: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let expires = approval
+        .get("expires_at")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if now > expires {
+        miette::bail!("approval has expired");
+    }
+
+    let cas_dir = config.store.cas_dir.clone().unwrap_or_else(default_cas_dir);
+    let store = ContentStore::open(&cas_dir).into_diagnostic()?;
+    let handle = store.get(&sha).into_diagnostic()?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut handle.read(), &mut bytes).into_diagnostic()?;
+
+    let execution = arbitraitor_exec::script::ScriptExecution::bash()
+        .map_err(|e| miette::miette!("exec setup failed: {e}"))?
+        .with_network_isolated(!command.network);
+    let result = execution
+        .execute(&bytes)
+        .map_err(|e| miette::miette!("execution failed: {e}"))?;
+
+    let mut stdout = std::io::stdout().lock();
+    if !result.stdout.is_empty() {
+        stdout.write_all(&result.stdout).into_diagnostic()?;
+    }
+    if !result.stderr.is_empty() {
+        std::io::stderr()
+            .lock()
+            .write_all(&result.stderr)
+            .into_diagnostic()?;
+    }
+    writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(1)).into_diagnostic()?;
     Ok(())
 }
