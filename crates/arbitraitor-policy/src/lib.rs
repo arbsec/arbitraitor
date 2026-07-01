@@ -2,7 +2,7 @@
 //!
 //! The policy engine is the decision layer: it consumes detector findings and
 //! runtime context, evaluates them against a compiled TOML policy, and
-//! produces a [`Verdict`].
+//! produces a `Verdict`.
 //!
 //! # Quick start
 //!

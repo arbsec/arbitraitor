@@ -15,7 +15,7 @@ use crate::submission::{
 /// Construct with [`SubmissionWorkflow::new`] for the default policy, or
 /// [`SubmissionWorkflow::with_policy`] to tune auto-accept and evidence
 /// thresholds. The workflow assumes the submission has already passed
-/// [`crate::validate_submission`]; it does not re-run structural validation.
+/// [`validate_submission`](crate::submission::validate_submission); it does not re-run structural validation.
 #[derive(Clone, Debug)]
 pub struct SubmissionWorkflow {
     /// Minimum trust tier required for auto-acceptance.
@@ -31,7 +31,7 @@ impl SubmissionWorkflow {
     ///
     /// - Auto-accept only from [`TrustTier::Verified`] and above.
     /// - Do not require evidence for high-confidence submissions (confirmed
-    ///   always requires evidence per [`crate::validate_submission`]).
+    ///   always requires evidence per [`validate_submission`](crate::submission::validate_submission)).
     #[must_use]
     pub fn new() -> Self {
         Self {
