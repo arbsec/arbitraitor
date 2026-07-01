@@ -153,7 +153,16 @@ pub fn parse_uv_lock(data: &str) -> Result<UvLock, UvLockError> {
             validate_field_len("name", &p.name)?;
             validate_field_len("version", &p.version)?;
             let source = p.source.as_ref().and_then(extract_source_string);
+            if let Some(ref s) = source {
+                validate_field_len("source", s)?;
+            }
+            let is_remote = source
+                .as_ref()
+                .is_some_and(|s| s.starts_with("registry:") || s.starts_with("git:"));
             let sdist_hash = p.sdist.as_ref().and_then(extract_hash);
+            if is_remote && p.sdist.is_some() && sdist_hash.is_none() {
+                return Err(UvLockError::InvalidHash);
+            }
             let mut wheel_hashes = Vec::new();
             for wheel in &p.wheels {
                 if let Some(h) = extract_hash(wheel) {
@@ -226,20 +235,9 @@ fn extract_hash(value: &toml::Value) -> Option<String> {
 ///
 /// Returns [`UvLockError`] if the file cannot be read or parsed.
 pub fn read_uv_lock(path: &Path) -> Result<UvLock, UvLockError> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        return Err(UvLockError::SymlinkRejected);
-    }
-    if !meta.is_file() {
-        return Err(UvLockError::NotRegularFile);
-    }
-    if meta.len() > MAX_LOCKFILE_BYTES {
-        return Err(UvLockError::FileTooLarge {
-            size: meta.len(),
-            max: MAX_LOCKFILE_BYTES,
-        });
-    }
-    let data = std::fs::read_to_string(path)?;
+    let mut file = open_bounded(path, MAX_LOCKFILE_BYTES)?;
+    let mut data = String::new();
+    std::io::Read::read_to_string(&mut file, &mut data)?;
     parse_uv_lock(&data)
 }
 
@@ -251,26 +249,40 @@ pub fn read_uv_lock(path: &Path) -> Result<UvLock, UvLockError> {
 ///
 /// Returns [`UvLockError`] if the file cannot be read or parsed.
 pub fn is_uv_workspace(pyproject_path: &Path) -> Result<bool, UvLockError> {
-    let meta = std::fs::symlink_metadata(pyproject_path)?;
-    if meta.file_type().is_symlink() {
-        return Err(UvLockError::SymlinkRejected);
-    }
-    if !meta.is_file() {
-        return Err(UvLockError::NotRegularFile);
-    }
-    if meta.len() > 1024 * 1024 {
-        return Err(UvLockError::FileTooLarge {
-            size: meta.len(),
-            max: 1024 * 1024,
-        });
-    }
-    let data = std::fs::read_to_string(pyproject_path)?;
+    let mut file = open_bounded(pyproject_path, 1024 * 1024)?;
+    let mut data = String::new();
+    std::io::Read::read_to_string(&mut file, &mut data)?;
     let value: toml::Value = toml::from_str(&data)?;
     Ok(value
         .get("tool")
         .and_then(|t| t.get("uv"))
         .and_then(|u| u.get("workspace"))
         .is_some())
+}
+
+fn open_bounded(path: &Path, max_bytes: u64) -> Result<std::fs::File, UvLockError> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(UvLockError::SymlinkRejected);
+    }
+    if !meta.is_file() {
+        return Err(UvLockError::NotRegularFile);
+    }
+    if meta.len() > max_bytes {
+        return Err(UvLockError::FileTooLarge {
+            size: meta.len(),
+            max: max_bytes,
+        });
+    }
+    let file = std::fs::File::open(path)?;
+    let file_meta = file.metadata()?;
+    if file_meta.len() > max_bytes {
+        return Err(UvLockError::FileTooLarge {
+            size: file_meta.len(),
+            max: max_bytes,
+        });
+    }
+    Ok(file)
 }
 
 /// Environment variables that Arbitraitor should set for uv interop.
