@@ -82,6 +82,8 @@ enum Command {
     Hook(commands::HookCommand),
     Shim(commands::ShimCommand),
     Graph(commands::GraphCommand),
+    Approve(commands::ApproveCommand),
+    Execute(commands::ExecuteCommand),
     Version,
 }
 
@@ -405,6 +407,12 @@ async fn main() -> Result<()> {
         }
         Command::Graph(command) => {
             commands::graph(&command)?;
+        }
+        Command::Approve(command) => {
+            commands::approve(&command, &config)?;
+        }
+        Command::Execute(command) => {
+            commands::execute(&command, &config)?;
         }
         Command::Version => {
             commands::version()?;
