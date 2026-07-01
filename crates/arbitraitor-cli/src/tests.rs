@@ -43,6 +43,7 @@ fn inspect_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Doctor(_)
         | Command::Rules(_)
         | Command::Update(_)
+        | Command::Plugin(_)
         | Command::Version => {
             return Err("parsed wrong command".into());
         }
@@ -109,6 +110,7 @@ fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Erro
         | Command::Doctor(_)
         | Command::Rules(_)
         | Command::Update(_)
+        | Command::Plugin(_)
         | Command::Version => {
             return Err("parsed wrong command".into());
         }
@@ -157,6 +159,7 @@ fn inspect_accepts_signature_flags() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Doctor(_)
         | Command::Rules(_)
         | Command::Update(_)
+        | Command::Plugin(_)
         | Command::Version => {
             return Err("parsed wrong command".into());
         }
@@ -247,6 +250,7 @@ fn unpack_accepts_archive_and_output_flags() -> Result<(), Box<dyn std::error::E
         | Command::Doctor(_)
         | Command::Rules(_)
         | Command::Update(_)
+        | Command::Plugin(_)
         | Command::Version => {
             return Err("parsed wrong command".into());
         }
