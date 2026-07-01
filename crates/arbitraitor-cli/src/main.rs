@@ -78,6 +78,7 @@ enum Command {
     Doctor(commands::DoctorCommand),
     Rules(commands::RulesCommand),
     Update(commands::UpdateCommand),
+    Plugin(commands::PluginCommand),
     Version,
 }
 
@@ -389,6 +390,9 @@ async fn main() -> Result<()> {
         }
         Command::Update(command) => {
             commands::update(&command)?;
+        }
+        Command::Plugin(command) => {
+            commands::plugin(&command)?;
         }
         Command::Version => {
             commands::version()?;

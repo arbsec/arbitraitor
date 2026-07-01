@@ -99,6 +99,20 @@ pub enum UpdateSubcommand {
     },
 }
 
+#[derive(Args)]
+pub struct PluginCommand {
+    #[command(subcommand)]
+    pub subcommand: PluginSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum PluginSubcommand {
+    List,
+    Info { id: String },
+    Discover,
+    Remove { id: String },
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     let max_bytes = config.store.max_bytes;
@@ -426,6 +440,54 @@ pub(crate) fn update(command: &UpdateCommand) -> Result<()> {
                 )
                 .into_diagnostic()?;
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn plugin(command: &PluginCommand) -> Result<()> {
+    let mut registry = arbitraitor_plugin_host::registry::PluginRegistry::new(
+        arbitraitor_plugin_host::registry::PluginRegistry::default_dirs(),
+    );
+    registry
+        .discover()
+        .map_err(|e| miette::miette!("plugin discovery failed: {e}"))?;
+
+    match &command.subcommand {
+        PluginSubcommand::List => {
+            let mut stdout = std::io::stdout().lock();
+            let plugins = registry.list();
+            writeln!(stdout, "Registered plugins: {}", plugins.len()).into_diagnostic()?;
+            for p in plugins {
+                writeln!(
+                    stdout,
+                    "  {} v{} [{:?}] {:?}",
+                    p.manifest.identity.id,
+                    p.manifest.identity.version,
+                    p.manifest.plugin_type,
+                    p.manifest.identity.trust_class,
+                )
+                .into_diagnostic()?;
+            }
+        }
+        PluginSubcommand::Info { id } => {
+            let plugin = registry
+                .get(id)
+                .ok_or_else(|| miette::miette!("plugin '{id}' not found"))?;
+            let json = serde_json::to_string_pretty(&plugin.manifest).into_diagnostic()?;
+            writeln!(std::io::stdout().lock(), "{json}").into_diagnostic()?;
+        }
+        PluginSubcommand::Discover => {
+            let count = registry
+                .discover()
+                .map_err(|e| miette::miette!("discovery failed: {e}"))?;
+            writeln!(std::io::stdout().lock(), "Discovered {count} plugins").into_diagnostic()?;
+        }
+        PluginSubcommand::Remove { id } => {
+            registry
+                .unregister(id)
+                .ok_or_else(|| miette::miette!("plugin '{id}' not found"))?;
+            writeln!(std::io::stdout().lock(), "Removed plugin {id}").into_diagnostic()?;
         }
     }
     Ok(())
