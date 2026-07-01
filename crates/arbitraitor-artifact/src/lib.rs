@@ -519,6 +519,85 @@ mod tests {
         assert!(finding.is_none());
     }
 
+    #[test]
+    fn identifies_gzip_compressed() {
+        assert_eq!(
+            classify(b"\x1f\x8b\x08\x00\x00\x00\x00\x00").artifact_type,
+            ArtifactType::GzipCompressed
+        );
+    }
+
+    #[test]
+    fn identifies_xz_compressed() {
+        assert_eq!(
+            classify(b"\xfd7zXZ\x00\x00\x00\x00").artifact_type,
+            ArtifactType::XzCompressed
+        );
+    }
+
+    #[test]
+    fn identifies_bzip2_compressed() {
+        assert_eq!(
+            classify(b"BZh91AY&SY").artifact_type,
+            ArtifactType::Bzip2Compressed
+        );
+    }
+
+    #[test]
+    fn identifies_zstd_compressed() {
+        assert_eq!(
+            classify(&[0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00]).artifact_type,
+            ArtifactType::ZstdCompressed
+        );
+    }
+
+    #[test]
+    fn identifies_zip_archive() {
+        assert_eq!(
+            classify(b"PK\x03\x04\x14\x00").artifact_type,
+            ArtifactType::ZipArchive
+        );
+    }
+
+    #[test]
+    fn identifies_macho_executable() {
+        let magic_64 = [0xfe, 0xed, 0xfa, 0xcf];
+        assert_eq!(
+            classify(&magic_64).artifact_type,
+            ArtifactType::MachOExecutable
+        );
+    }
+
+    #[test]
+    fn classifies_empty_input_as_unknown() {
+        let result = classify(b"");
+        assert_eq!(result.artifact_type, ArtifactType::Unknown);
+    }
+
+    #[test]
+    fn classifies_json_content() {
+        let result = classify(b"{\"key\": \"value\"}");
+        assert_eq!(result.artifact_type, ArtifactType::JsonDocument);
+    }
+
+    #[test]
+    fn classifies_html_content() {
+        let result = classify(b"<!DOCTYPE html>\n<html>");
+        assert_eq!(result.artifact_type, ArtifactType::HtmlDocument);
+    }
+
+    #[test]
+    fn classifies_binary_data_as_generic_binary() {
+        let result = classify(&[0x00, 0x01, 0x02, 0x03, 0xff, 0xfe]);
+        assert_eq!(result.artifact_type, ArtifactType::GenericBinary);
+    }
+
+    #[test]
+    fn detects_python_shebang() {
+        let result = classify(b"#!/usr/bin/env python3\nprint('hello')\n");
+        assert_eq!(result.artifact_type, ArtifactType::PythonScript);
+    }
+
     fn tar_bytes() -> Vec<u8> {
         let mut data = vec![0_u8; 512];
         data[257..262].copy_from_slice(b"ustar");
