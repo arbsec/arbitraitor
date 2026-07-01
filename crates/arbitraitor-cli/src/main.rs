@@ -79,6 +79,7 @@ enum Command {
     Rules(commands::RulesCommand),
     Update(commands::UpdateCommand),
     Plugin(commands::PluginCommand),
+    Hook(commands::HookCommand),
     Version,
 }
 
@@ -393,6 +394,9 @@ async fn main() -> Result<()> {
         }
         Command::Plugin(command) => {
             commands::plugin(&command)?;
+        }
+        Command::Hook(command) => {
+            commands::hook(&command)?;
         }
         Command::Version => {
             commands::version()?;
