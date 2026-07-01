@@ -12,6 +12,7 @@
 
 pub mod cargo;
 pub mod error;
+pub mod npm;
 pub mod receipt;
 pub mod recipe;
 pub mod uv;
