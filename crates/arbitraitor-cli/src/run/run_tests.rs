@@ -49,6 +49,7 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
         | crate::Command::Plugin(_)
         | crate::Command::Hook(_)
         | crate::Command::Shim(_)
+        | crate::Command::Graph(_)
         | crate::Command::Version => return Err("parsed wrong command".into()),
     };
 
