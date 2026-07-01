@@ -128,6 +128,22 @@ pub enum HookSubcommand {
     },
 }
 
+#[derive(Args)]
+pub struct ShimCommand {
+    #[command(subcommand)]
+    pub subcommand: ShimSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum ShimSubcommand {
+    /// List installed compatibility shims.
+    List,
+    /// Install a compatibility shim for a package manager tool.
+    Install { tool: String },
+    /// Remove a compatibility shim.
+    Uninstall { tool: String },
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     let max_bytes = config.store.max_bytes;
@@ -533,6 +549,76 @@ pub(crate) fn hook(command: &HookCommand) -> Result<()> {
             );
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(snippet.as_bytes()).into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+const SUPPORTED_SHIMS: &[&str] = &["npm", "yarn", "pnpm", "pip", "uv", "bun"];
+
+pub(crate) fn shim(command: &ShimCommand) -> Result<()> {
+    match &command.subcommand {
+        ShimSubcommand::List => {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "Supported shims: {}", SUPPORTED_SHIMS.join(", "))
+                .into_diagnostic()?;
+            writeln!(stdout).into_diagnostic()?;
+            let shim_dir = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".arbitraitor").join("shims"))
+                .ok_or_else(|| miette::miette!("HOME not set"))?;
+            if !shim_dir.exists() {
+                writeln!(stdout, "No shims installed.").into_diagnostic()?;
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(&shim_dir).into_diagnostic()? {
+                let entry = entry.into_diagnostic()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                writeln!(stdout, "  {name}").into_diagnostic()?;
+            }
+        }
+        ShimSubcommand::Install { tool } => {
+            if !SUPPORTED_SHIMS.contains(&tool.as_str()) {
+                miette::bail!(
+                    "unsupported shim '{tool}'; supported: {}",
+                    SUPPORTED_SHIMS.join(", ")
+                );
+            }
+            let arb = std::env::current_exe()
+                .map_or_else(|_| "arbitraitor".to_owned(), |p| p.display().to_string());
+            let shim_dir = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".arbitraitor").join("shims"))
+                .ok_or_else(|| miette::miette!("HOME not set"))?;
+            std::fs::create_dir_all(&shim_dir).into_diagnostic()?;
+            let shim_path = shim_dir.join(tool);
+            let content = format!(
+                "#!/bin/sh\n# Arbitraitor shim for {tool}\nexec {arb} pm run --tool {tool} -- \"$@\"\n"
+            );
+            std::fs::write(&shim_path, content).into_diagnostic()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755))
+                    .into_diagnostic()?;
+            }
+            writeln!(
+                std::io::stdout().lock(),
+                "installed: {}",
+                shim_path.display()
+            )
+            .into_diagnostic()?;
+        }
+        ShimSubcommand::Uninstall { tool } => {
+            let shim_dir = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".arbitraitor").join("shims"))
+                .ok_or_else(|| miette::miette!("HOME not set"))?;
+            let shim_path = shim_dir.join(tool);
+            if shim_path.exists() {
+                std::fs::remove_file(&shim_path).into_diagnostic()?;
+                writeln!(std::io::stdout().lock(), "removed: {}", shim_path.display())
+                    .into_diagnostic()?;
+            } else {
+                writeln!(std::io::stdout().lock(), "not installed: {tool}").into_diagnostic()?;
+            }
         }
     }
     Ok(())

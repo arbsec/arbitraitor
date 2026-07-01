@@ -80,6 +80,7 @@ enum Command {
     Update(commands::UpdateCommand),
     Plugin(commands::PluginCommand),
     Hook(commands::HookCommand),
+    Shim(commands::ShimCommand),
     Version,
 }
 
@@ -397,6 +398,9 @@ async fn main() -> Result<()> {
         }
         Command::Hook(command) => {
             commands::hook(&command)?;
+        }
+        Command::Shim(command) => {
+            commands::shim(&command)?;
         }
         Command::Version => {
             commands::version()?;
