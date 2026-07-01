@@ -113,6 +113,21 @@ pub enum PluginSubcommand {
     Remove { id: String },
 }
 
+#[derive(Args)]
+pub struct HookCommand {
+    #[command(subcommand)]
+    pub subcommand: HookSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum HookSubcommand {
+    /// Print a shell hook that intercepts curl|sh patterns.
+    Init {
+        #[arg(long, value_name = "PATH")]
+        binary: Option<PathBuf>,
+    },
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     let max_bytes = config.store.max_bytes;
@@ -488,6 +503,36 @@ pub(crate) fn plugin(command: &PluginCommand) -> Result<()> {
                 .unregister(id)
                 .ok_or_else(|| miette::miette!("plugin '{id}' not found"))?;
             writeln!(std::io::stdout().lock(), "Removed plugin {id}").into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn hook(command: &HookCommand) -> Result<()> {
+    match &command.subcommand {
+        HookSubcommand::Init { binary } => {
+            let arb = match binary.as_ref() {
+                Some(p) => p.display().to_string(),
+                None => std::env::current_exe()
+                    .map_or_else(|_| "arbitraitor".to_owned(), |p| p.display().to_string()),
+            };
+            let snippet = format!(
+                "# >>> arbitraitor hook >>>\n\
+                 _arbitraitor_guard() {{\n\
+                 \x20   local cmd=\"$BASH_COMMAND\"\n\
+                 \x20   case \"$cmd\" in\n\
+                 \x20       *'curl'*'|'*'sh'*|*'curl'*'|'*'bash'*|*'wget'*'|'*'sh'*)\n\
+                 \x20           echo \"[arbitraitor] intercepted: $cmd\" >&2\n\
+                 \x20           echo \"[arbitraitor] use '{arb} run <url>' for safe execution\" >&2\n\
+                 \x20           return 1\n\
+                 \x20           ;;\n\
+                 \x20   esac\n\
+                 }}\n\
+                 trap '_arbitraitor_guard' DEBUG\n\
+                 # <<< arbitraitor hook <<<\n"
+            );
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(snippet.as_bytes()).into_diagnostic()?;
         }
     }
     Ok(())
