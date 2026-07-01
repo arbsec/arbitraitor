@@ -141,6 +141,34 @@ arbitraitor doctor
 arbitraitor version
 ```
 
+### Manage rule packs
+
+```sh
+arbitraitor rules list
+arbitraitor rules validate /path/to/rules.yar
+```
+
+### Verify update manifests
+
+```sh
+arbitraitor update verify manifest.json --key pubkey.pub
+```
+
+### Manage plugins
+
+```sh
+arbitraitor plugin list
+arbitraitor plugin discover
+arbitraitor plugin info <id>
+```
+
+### Shell integration hooks
+
+```sh
+# Print a bash hook that intercepts curl|sh patterns
+arbitraitor hook init
+```
+
 ## Features
 
 - **Mediated execution** — Scripts run in a sandboxed bash with network isolation, resource limits, and output capping
