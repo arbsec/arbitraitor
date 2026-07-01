@@ -14,6 +14,7 @@ pub mod cargo;
 pub mod error;
 pub mod receipt;
 pub mod recipe;
+pub mod uv;
 
 pub use error::AdapterManagerError;
 pub use receipt::{CapabilityGrant, LifecycleScriptStatus, PackageManagerReceipt, ProxyMode};
