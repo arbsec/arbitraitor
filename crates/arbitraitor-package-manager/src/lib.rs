@@ -10,12 +10,16 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod bun;
 pub mod cargo;
 pub mod error;
 pub mod npm;
+pub mod pnpm;
 pub mod receipt;
 pub mod recipe;
 pub mod uv;
+pub mod yarn_berry;
+pub mod yarn_classic;
 
 pub use error::AdapterManagerError;
 pub use receipt::{CapabilityGrant, LifecycleScriptStatus, PackageManagerReceipt, ProxyMode};
