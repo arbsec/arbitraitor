@@ -312,7 +312,7 @@ impl IntelStore {
     /// when its identifier already existed and "added" otherwise. Existing
     /// entries are replaced in place; new entries are appended in input order.
     ///
-    /// This performs a single [`IntelStore::persist`] regardless of entry count
+    /// This performs a single `persist` regardless of entry count
     /// so that bulk feed ingestion does not rewrite the store file once per
     /// row. The identifier lookup is linear per row to match [`IntelStore::add_entry`];
     /// a future index may speed up large feeds.

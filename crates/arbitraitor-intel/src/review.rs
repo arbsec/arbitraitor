@@ -114,7 +114,7 @@ pub struct ReviewWorkflow {
     /// Number of accepting reviews required to accept a submission.
     required_reviews: usize,
     /// Minimum trust tier for a reviewer's [`ReviewDecision::Accept`] to be
-    /// valid and to count toward [`Self::required_reviews`].
+    /// valid and to count toward `required_reviews`.
     auto_accept_tier: TrustTier,
 }
 
@@ -176,7 +176,7 @@ impl ReviewWorkflow {
     /// Processes a review decision and returns the resulting submission status.
     ///
     /// `review_count` is the number of accepting reviews already recorded for
-    /// the submission from reviewers at or above [`Self::auto_accept_tier`].
+    /// the submission from reviewers at or above `auto_accept_tier`.
     /// This method is infallible and does not re-validate the review; call
     /// [`Self::validate_review`] first.
     ///
@@ -188,7 +188,7 @@ impl ReviewWorkflow {
     ///   a reject is terminal unless later escalated.
     /// - [`ReviewDecision::RequestChanges`] → [`UnderReview`](SubmissionStatus::UnderReview).
     /// - [`ReviewDecision::Accept`] → [`Accepted`](SubmissionStatus::Accepted)
-    ///   once `review_count + 1` reaches [`Self::required_reviews`], otherwise
+    ///   once `review_count + 1` reaches `required_reviews`, otherwise
     ///   [`UnderReview`](SubmissionStatus::UnderReview). An accept does not
     ///   revive a submission that is already
     ///   [`Rejected`](SubmissionStatus::Rejected) or
@@ -224,7 +224,7 @@ impl ReviewWorkflow {
     /// accepted.
     ///
     /// Only reviews whose decision is [`ReviewDecision::Accept`] **and** whose
-    /// reviewer trust tier is at least [`Self::auto_accept_tier`] are counted.
+    /// reviewer trust tier is at least `auto_accept_tier` are counted.
     #[must_use]
     pub fn is_accepted(&self, reviews: &[Review]) -> bool {
         let accepting = reviews
