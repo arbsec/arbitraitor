@@ -5,35 +5,42 @@ The Arbitraitor workspace is organized into focused crates. Each crate has a cle
 ## Workspace layout
 
 ```
-arbitraitor/                   # Workspace root (Cargo.toml)
+arbitraitor/                           # Workspace root (Cargo.toml)
 ├── crates/
-│   ├── arbitraitor-cli/      # CLI entry point
-│   ├── arbitraitor-core/     # State machine, config, health
-│   ├── arbitraitor-model/    # Domain types, receipts, findings
-│   ├── arbitraitor-fetch/    # HTTP retrieval
-│   ├── arbitraitor-store/     # Content-addressed storage
-│   ├── arbitraitor-analysis/  # Detection coordinator
-│   ├── arbitraitor-shell/     # Shell script analyzer
-│   ├── arbitraitor-powershell/ # PowerShell AST analyzer
-│   ├── arbitraitor-yarax/     # YARA-X scanner
-│   ├── arbitraitor-archive/   # Archive inspector
-│   ├── arbitraitor-provenance/# Signature verification
-│   ├── arbitraitor-intel/    # Intelligence feeds
-│   ├── arbitraitor-policy/    # Policy engine
-│   ├── arbitraitor-receipt/   # Receipt generation
-│   ├── arbitraitor-exec/      # Execution broker
-│   ├── arbitraitor-sandbox/   # Process hardening
-│   ├── arbitraitor-mcp/       # MCP server
-│   ├── arbitraitor-plugin-api/    # Plugin trait hierarchy
-│   ├── arbitraitor-plugin-host/   # Plugin runtime
-│   └── arbitraitor-daemon/    # Unix socket daemon
-├── book/                      # mdBook documentation
-├── docs/                      # ADRs, conventions
-├── wit/                       # WIT interface definitions
-├── rules/                     # YARA-X rule packs
-├── schemas/                   # JSON schemas
-├── plugins/                   # Built-in plugins
-└── fixtures/                  # Test fixtures
+│   ├── arbitraitor-cli/               # CLI entry point (22 subcommands)
+│   ├── arbitraitor-core/              # State machine, config, health checks
+│   ├── arbitraitor-model/             # Domain types, receipts, findings (newtypes)
+│   ├── arbitraitor-fetch/             # HTTP retrieval with SSRF protection
+│   ├── arbitraitor-store/             # Content-addressed storage (CAS)
+│   ├── arbitraitor-artifact/           # Content classification (ELF, PE, Mach-O, shebang)
+│   ├── arbitraitor-analysis/           # Detection pipeline coordinator
+│   ├── arbitraitor-shell/              # Shell script analyzer (bash/dash)
+│   ├── arbitraitor-powershell/         # PowerShell AST analyzer
+│   ├── arbitraitor-yarax/              # YARA-X scanner
+│   ├── arbitraitor-archive/            # Archive inspector (6 formats, 15 hazards)
+│   ├── arbitraitor-av/                 # Antivirus adapters (ClamAV, Defender)
+│   ├── arbitraitor-provenance/         # Signature verification
+│   ├── arbitraitor-intel/             # Intelligence feeds
+│   ├── arbitraitor-policy/             # TOML policy engine
+│   ├── arbitraitor-receipt/            # RFC 8785 canonicalized receipts
+│   ├── arbitraitor-exec/              # Mediated execution (script + native + PowerShell)
+│   ├── arbitraitor-sandbox/            # Process hardening (prctl, close_range, setrlimit)
+│   ├── arbitraitor-mcp/               # MCP server (inspect, scan, explain, approve, execute)
+│   ├── arbitraitor-plugin-api/         # Plugin trait hierarchy
+│   ├── arbitraitor-plugin-host/        # Plugin runtime (subprocess + Wasmtime)
+│   ├── arbitraitor-wrapper/            # curl/wget wrapper translators + per-shell init
+│   ├── arbitraitor-daemon/             # Unix socket daemon with background queue
+│   ├── arbitraitor-package-manager/    # Registry adapters (cargo, npm, uv, pnpm, yarn, bun)
+│   ├── arbitraitor-update/             # Signed update manifest verification
+│   ├── arbitraitor-testkit/            # Test infrastructure (SSRF, TLS, raw TCP helpers)
+│   └── arbitraitor-workspace-hack/      # hakari-managed dependency deduplication
+├── book/                               # mdBook documentation
+├── docs/                               # ADRs, conventions, research
+├── wit/                                # WIT interface definitions
+├── rules/                              # YARA-X rule packs
+├── schemas/                            # JSON schemas
+├── plugins/                            # Built-in plugins
+└── fixtures/                           # Test fixtures
 ```
 
 ## Crate responsibilities
@@ -101,27 +108,75 @@ Command-line interface.
 **Owns:** Argument parsing, output formatting, user interaction
 **Must not:** Business logic (delegates to core)
 
+### `arbitraitor-artifact`
+
+Content classification and magic byte detection.
+
+**Owns:** Artifact type detection (ELF, PE, Mach-O, ZIP, tar, gzip, xz, bzip2, zstd), shell shebang parsing, content-type heuristics
+**Must not:** Policy evaluation, execution decisions
+
+### `arbitraitor-av`
+
+Antivirus adapter trait and implementations.
+
+**Owns:** ClamAV (`clamd` streaming), Microsoft Defender CLI adapter
+**Must not:** Policy decisions, trust verdicts
+
+### `arbitraitor-package-manager`
+
+Registry adapter trait and per-tool implementations.
+
+**Owns:** `RegistryAdapter` trait, cargo/uv/npm/pnpm/yarn/bun adapters, lockfile parsing, build script analysis, lifecycle policy enforcement
+**Must not:** Direct execution, policy override
+
+### `arbitraitor-wrapper`
+
+curl/wget wrapper translators and per-shell initialization.
+
+**Owns:** Wrapper argument translation, shell init script generation (bash, zsh, fish, dash, ksh, tcsh, sh, csh, nu, pwsh), rcfile installation
+**Must not:** Policy evaluation, execution
+
+### `arbitraitor-update`
+
+Signed update manifest verification.
+
+**Owns:** Minisign verification, update manifest parsing, manifest validation, target verification
+**Must not:** Network retrieval, policy decisions
+
+### `arbitraitor-testkit`
+
+Test infrastructure for integration testing.
+
+**Owns:** Mock HTTP server, SSRF test helpers, TLS test helpers, raw TCP server (truncation/malformed response), HTTPS test fixtures
+**Must not:** Production code paths
+
 ## Dependency graph (simplified)
 
 ```
 arbitraitor-cli
-└── arbitraitor-core
-    ├── arbitraitor-model
-    ├── arbitraitor-fetch
-    ├── arbitraitor-store
-    ├── arbitraitor-analysis
-    │   ├── arbitraitor-shell
-    │   ├── arbitraitor-archive
-    │   ├── arbitraitor-yarax
-    │   ├── arbitraitor-powershell
-    │   └── arbitraitor-plugin-host
-    ├── arbitraitor-policy
-    ├── arbitraitor-provenance
-    ├── arbitraitor-intel
-    ├── arbitraitor-exec
-    ├── arbitraitor-sandbox
-    ├── arbitraitor-receipt
-    └── arbitraitor-daemon
+├── arbitraitor-core
+│   ├── arbitraitor-model
+│   ├── arbitraitor-fetch
+│   ├── arbitraitor-store
+│   ├── arbitraitor-analysis
+│   │   ├── arbitraitor-shell
+│   │   ├── arbitraitor-archive
+│   │   ├── arbitraitor-yarax
+│   │   ├── arbitraitor-powershell
+│   │   └── arbitraitor-plugin-host
+│   ├── arbitraitor-policy
+│   ├── arbitraitor-provenance
+│   ├── arbitraitor-intel
+│   ├── arbitraitor-exec
+│   ├── arbitraitor-sandbox
+│   ├── arbitraitor-receipt
+│   └── arbitraitor-daemon
+├── arbitraitor-artifact
+├── arbitraitor-mcp
+├── arbitraitor-wrapper
+├── arbitraitor-package-manager
+├── arbitraitor-update
+└── arbitraitor-testkit (dev-dep)
 ```
 
 ## Public API vs internal

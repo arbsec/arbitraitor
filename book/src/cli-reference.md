@@ -188,3 +188,335 @@ arbitraitor status [flags]
 - **Detectors**: Loaded plugins and their current status
 - **Feeds**: Last sync time and freshness for each configured feed
 - **Config**: Validity of configuration files
+
+## Scan command
+
+```sh
+arbitraitor scan [FILE] [flags]
+arbitraitor scan --stdin [flags]
+```
+
+Scans a local file or stdin without network retrieval. Runs detectors and reports findings.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--stdin` | Read input from stdin instead of a file path |
+| `--rules <DIR>` | Path to a directory of YARA-X rule packs |
+| `--explain` | Print an explainability summary after findings |
+| `--format <FORMAT>` | Output format for explainability: `text`, `json` (implies `--explain`) |
+
+### Examples
+
+```sh
+# Scan a local script
+arbitraitor scan ./suspicious.sh
+
+# Scan piped input
+curl -s https://example.com/script.sh | arbitraitor scan --stdin
+
+# Scan with explainability output
+arbitraitor scan ./script.sh --explain
+```
+
+## Explain command
+
+```sh
+arbitraitor explain <RECEIPT_PATH>
+```
+
+Reads a receipt file from a prior `inspect` or `run` and prints a human-readable summary of the verdict, findings, and retrieval metadata.
+
+### Examples
+
+```sh
+arbitraitor inspect https://example.com/install.sh --receipt receipt.json
+arbitraitor explain receipt.json
+```
+
+## Store command
+
+```sh
+arbitraitor store <subcommand> [flags]
+```
+
+Manages artifacts in the content-addressed store (CAS).
+
+### Subcommands
+
+#### `list`
+
+List all stored artifacts:
+
+```sh
+arbitraitor store list
+```
+
+#### `inspect <SHA256>`
+
+Show metadata for a specific artifact:
+
+```sh
+arbitraitor store inspect <sha256>
+```
+
+#### `gc`
+
+Run garbage collection on the store:
+
+```sh
+arbitraitor store gc
+arbitraitor store gc --max-age-days 30
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--cas-dir <DIR>` | Override the CAS directory |
+
+## Policy command
+
+```sh
+arbitraitor policy <POLICY_PATH>
+```
+
+Validates a TOML policy file and prints version, rule count, and digest.
+
+### Examples
+
+```sh
+arbitraitor policy my-policy.toml
+```
+
+## Doctor command
+
+```sh
+arbitraitor doctor [flags]
+```
+
+Runs system health diagnostics and outputs a JSON report covering store health, detector status, and rule pack versions.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--cas-dir <DIR>` | Override the CAS directory to check |
+| `--rules <DIR>` | Path to rule packs directory |
+
+## Rules command
+
+```sh
+arbitraitor rules <subcommand> [flags]
+```
+
+Manages YARA-X rule packs.
+
+### Subcommands
+
+#### `list`
+
+List all loaded rule packs with source, namespace, version, auth status, and digest:
+
+```sh
+arbitraitor rules list
+```
+
+#### `validate <FILE>`
+
+Validate that a YARA-X rule file compiles:
+
+```sh
+arbitraitor rules validate /path/to/rules.yar
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--rules-dir <DIR>` | Directory containing rule packs |
+
+## Update command
+
+```sh
+arbitraitor update <subcommand>
+```
+
+Verifies signed update manifests for rule packs, intel feeds, trust roots, and plugin registries.
+
+### Subcommands
+
+#### `verify <MANIFEST> --key <KEY> [--signature <SIG>]`
+
+Verify a signed minisign update manifest:
+
+```sh
+arbitraitor update verify manifest.json --key pubkey.pub
+# Signature defaults to manifest.json.minisig
+arbitraitor update verify manifest.json --key pubkey.pub --signature custom.minisig
+```
+
+## Plugin command
+
+```sh
+arbitraitor plugin <subcommand>
+```
+
+Manages the plugin registry — discovery, listing, inspection, and removal.
+
+### Subcommands
+
+#### `list`
+
+List all registered plugins:
+
+```sh
+arbitraitor plugin list
+```
+
+#### `info <ID>`
+
+Show manifest details for a specific plugin:
+
+```sh
+arbitraitor plugin info <id>
+```
+
+#### `discover`
+
+Run plugin discovery from default directories:
+
+```sh
+arbitraitor plugin discover
+```
+
+#### `remove <ID>`
+
+Unregister a plugin:
+
+```sh
+arbitraitor plugin remove <id>
+```
+
+## Hook command
+
+```sh
+arbitraitor hook <subcommand>
+```
+
+Shell integration hooks.
+
+### Subcommands
+
+#### `init [--binary <PATH>]`
+
+Print a bash hook that intercepts `curl|sh` patterns and suggests `arbitraitor run`:
+
+```sh
+arbitraitor hook init
+# Custom binary path:
+arbitraitor hook init --binary /usr/local/bin/arbitraitor
+```
+
+## Shim command
+
+```sh
+arbitraitor shim <subcommand>
+```
+
+Manages package manager compatibility shims that route tool invocations through Arbitraitor.
+
+### Subcommands
+
+#### `list`
+
+List installed shims and supported tools (npm, yarn, pnpm, pip, uv, bun):
+
+```sh
+arbitraitor shim list
+```
+
+#### `install <TOOL>`
+
+Install a compatibility shim for a package manager tool:
+
+```sh
+arbitraitor shim install npm
+```
+
+#### `uninstall <TOOL>`
+
+Remove a compatibility shim:
+
+```sh
+arbitraitor shim uninstall npm
+```
+
+## Graph command
+
+```sh
+arbitraitor graph <FILE>
+```
+
+Renders a payload containment tree for archives, showing nested artifact types and SHA-256 digests.
+
+### Examples
+
+```sh
+arbitraitor graph ./archive.tar.gz
+```
+
+## Approve command
+
+```sh
+arbitraitor approve <RECEIPT>
+```
+
+Decoupled approval flow: reads a receipt from a prior inspection, displays findings, prompts for approval, and writes a time-limited approval file (5-minute expiry).
+
+### Examples
+
+```sh
+arbitraitor inspect https://example.com/install.sh --receipt receipt.json
+arbitraitor approve receipt.json
+# Writes receipt.approval.json
+```
+
+## Execute command
+
+```sh
+arbitraitor execute <APPROVAL> [flags]
+```
+
+Executes an artifact from CAS using a previously generated approval file.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--network` | Allow network access during execution |
+
+### Examples
+
+```sh
+arbitraitor execute receipt.approval.json
+# With network access:
+arbitraitor execute receipt.approval.json --network
+```
+
+## MCP command
+
+```sh
+arbitraitor mcp
+```
+
+Starts a Model Context Protocol JSON-RPC 2.0 server over stdio for AI agent integration. Provides tools for inspecting, scanning, explaining, and approving artifact execution.
+
+## Version command
+
+```sh
+arbitraitor version
+```
+
+Prints version, license, and repository information.

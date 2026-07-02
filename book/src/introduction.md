@@ -73,28 +73,37 @@ The verdict always states which level was in effect. A clean static scan with ne
 Arbitraitor is a Rust monorepo organized into focused crates:
 
 ```
-arbitraitor-cli              CLI entry point
-arbitraitor-fetch            HTTP retrieval with SSRF protection
-arbitraitor-store            Content-addressed storage (CAS)
-arbitraitor-analysis         Detection pipeline coordinator
-arbitraitor-shell            Shell script analyzer
-arbitraitor-powershell       PowerShell AST analyzer
-arbitraitor-yarax            YARA-X scanner
-arbitraitor-archive          Archive inspection
-arbitraitor-provenance       Signature and attestation verification
-arbitraitor-intel            Threat intelligence feeds
-arbitraitor-policy           TOML policy engine
-arbitraitor-receipt          RFC 8785 canonicalized receipts
-arbitraitor-exec             Mediated execution
-arbitraitor-sandbox          Process hardening
-arbitraitor-mcp              MCP server
-arbitraitor-plugin-host      Plugin runtime (Wasmtime + subprocess)
-arbitraitor-core             Config, metrics, health
+arbitraitor-cli               CLI entry point (22 subcommands)
+arbitraitor-core              Config, metrics, health checks, state machine
+arbitraitor-model             Domain types, receipts, findings (newtypes)
+arbitraitor-fetch             HTTP retrieval with SSRF protection + truncation detection
+arbitraitor-store             Content-addressed storage (CAS)
+arbitraitor-artifact           Content classification (ELF, PE, Mach-O, shebang)
+arbitraitor-analysis          Detection pipeline coordinator
+arbitraitor-shell             Shell script analyzer (bash/dash)
+arbitraitor-powershell        PowerShell AST analyzer
+arbitraitor-yarax             YARA-X scanner
+arbitraitor-archive           Archive inspection (6 formats, 15 hazards)
+arbitraitor-av                Antivirus adapters (ClamAV, Defender)
+arbitraitor-provenance        Signature and attestation verification
+arbitraitor-intel             Threat intelligence feeds
+arbitraitor-policy            TOML policy engine
+arbitraitor-receipt           RFC 8785 canonicalized receipts
+arbitraitor-exec              Mediated execution (script + native + PowerShell)
+arbitraitor-sandbox           Process hardening
+arbitraitor-mcp               MCP server
+arbitraitor-plugin-api        Plugin trait hierarchy
+arbitraitor-plugin-host       Plugin runtime (Wasmtime + subprocess)
+arbitraitor-wrapper           curl/wget wrapper translators + per-shell init
+arbitraitor-daemon            Unix socket daemon with background queue
+arbitraitor-package-manager   Registry adapters (cargo, npm, uv, pnpm, yarn, bun)
+arbitraitor-update            Signed update manifest verification
+arbitraitor-testkit           Test infrastructure
 ```
 
 ## Current status
 
-**Pre-alpha.** The API, CLI, receipts, and policy schemas will change. 867+ tests pass in the current suite. Do not use in production.
+**Pre-alpha.** The API, CLI, receipts, and policy schemas will change. 1103+ tests pass in the current suite. Do not use in production.
 
 ## Next steps
 
