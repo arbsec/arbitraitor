@@ -7,6 +7,7 @@ use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategor
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
 
+use crate::detection::cwe_for_category;
 use crate::{ExtractedCommand, NormalizeResult};
 
 const DETECTOR_ID: &str = "arbitraitor-shell.destructive";
@@ -615,7 +616,7 @@ fn command_finding(input: CommandFinding<'_>) -> Finding {
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-destructive".to_owned(), input.tag.to_owned()],
-        taxonomies: Vec::new(),
+        taxonomies: cwe_for_category(input.category).into_iter().collect(),
     }
 }
 
@@ -650,6 +651,6 @@ fn source_finding(input: SourceFinding<'_>) -> Finding {
         remediation: None,
         references: Vec::new(),
         tags: vec!["shell-destructive".to_owned(), input.tag.to_owned()],
-        taxonomies: Vec::new(),
+        taxonomies: cwe_for_category(input.category).into_iter().collect(),
     }
 }

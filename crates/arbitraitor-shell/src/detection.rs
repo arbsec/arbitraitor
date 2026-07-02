@@ -4,11 +4,36 @@ use std::collections::BTreeSet;
 
 use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::taxonomy::{TaxonomyName, TaxonomyRef};
 use arbitraitor_model::verdict::{Confidence, Severity};
 
 use crate::{DecodeKind, ExtractedCommand, NormalizationResult, SourceSpan};
 
 const DETECTOR_ID: &str = "arbitraitor-shell.detection";
+
+pub(crate) fn cwe_for_category(category: FindingCategory) -> Option<TaxonomyRef> {
+    let cwe_id = match category {
+        FindingCategory::DestructiveBehavior => "CWE-1045",
+        FindingCategory::Obfuscation => "CWE-454",
+        FindingCategory::DynamicCodeExecution => "CWE-94",
+        FindingCategory::CredentialAccess => "CWE-798",
+        FindingCategory::Persistence => "CWE-506",
+        FindingCategory::PrivilegeEscalation => "CWE-269",
+        FindingCategory::NetworkBehavior => "CWE-200",
+        FindingCategory::SuspiciousScriptBehavior => "CWE-78",
+        FindingCategory::Transport => "CWE-918",
+        _ => return None,
+    };
+    Some(TaxonomyRef {
+        name: TaxonomyName::Cwe,
+        id: cwe_id.to_owned(),
+        confidence: Confidence::Medium,
+        url: Some(format!(
+            "https://cwe.mitre.org/data/definitions/{}.html",
+            &cwe_id[4..]
+        )),
+    })
+}
 
 /// Detects dynamic execution and decode-to-execute shell patterns.
 #[must_use]
@@ -414,7 +439,7 @@ impl DetectionState<'_> {
             remediation: None,
             references: Vec::new(),
             tags: vec!["shell-detection".to_owned(), input.tag.to_owned()],
-            taxonomies: Vec::new(),
+            taxonomies: cwe_for_category(input.category).into_iter().collect(),
         });
     }
 }
