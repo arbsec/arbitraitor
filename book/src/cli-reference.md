@@ -10,7 +10,6 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor run` | Execute the full pipeline with approval flow |
 | `arbitraitor scan` | Scan a local file or stdin without retrieval |
 | `arbitraitor explain` | Explain a verdict from a receipt file |
-| `arbitraitor fetch` | Retrieve an artifact to CAS (hidden, used by wrappers) |
 | `arbitraitor daemon` | Unix socket daemon with background queue (start/stop/status) |
 | `arbitraitor unpack` | Unpack an archive to a directory for inspection |
 | `arbitraitor intel` | Manage local threat-intelligence feeds (update) |
@@ -29,6 +28,8 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor execute` | Execute an artifact from CAS using an approval file |
 | `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
 | `arbitraitor version` | Print version, license, and repository |
+
+> **Note:** `arbitraitor fetch` is a hidden command used internally by wrappers. It retrieves an artifact to CAS without analysis.
 
 ## Global flags
 
@@ -65,11 +66,16 @@ arbitraitor inspect <URL or file path> [flags]
 | Flag | Description |
 |------|-------------|
 | `--receipt <PATH>` | Write a JSON receipt to this path |
-| `--detectors <NAMES>` | Comma-separated list of detectors to run |
-| `--no-detectors` | Skip all detectors, only retrieve and identify |
-| `--content-type <TYPE>` | Override content type detection |
-| `--timeout <SECONDS>` | Maximum time for retrieval and analysis |
-| `--native` | Treat as a native binary, not a script |
+| `--cas-dir <DIR>` | Override the CAS directory |
+| `--sha256 <HEX>` | Expected SHA-256 digest for provenance verification |
+| `--rules <DIR>` | Path to a directory of YARA-X rule packs |
+| `--minisign-sig <PATH>` | minisign signature file (repeatable) |
+| `--minisign-key <KEY>` | minisign public key (repeatable) |
+| `--cosign-bundle <PATH>` | cosign bundle file (repeatable) |
+| `--cosign-identity <IDENTITY>` | cosign identity (repeatable) |
+| `--cosign-issuer <ISSUER>` | cosign certificate issuer (repeatable) |
+| `--explain` | Show an explainability report for detected findings |
+| `--format <FORMAT>` | Output format for explainability: `text`, `shellcheck` (implies `--explain`) |
 
 ```sh
 # Basic inspection
@@ -78,8 +84,8 @@ arbitraitor inspect https://example.com/install.sh
 # With receipt
 arbitraitor inspect https://example.com/install.sh --receipt receipt.json
 
-# Specific detectors only
-arbitraitor inspect script.sh --detectors shell,archive
+# With provenance verification
+arbitraitor inspect https://example.com/install.sh --sha256 abc123... --minisign-key pubkey
 
 # Inspect a local file
 arbitraitor inspect ./downloads/script.sh
@@ -95,16 +101,10 @@ arbitraitor run <URL or file path> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--receipt <PATH>` | Write receipt to path |
-| `--output <PATH>` | Write script stdout/stderr to path |
-| `--native` | Allow native binary execution (requires `--native` gate in policy) |
-| `--interactive` | Force interactive approval prompt |
-| `--non-interactive` | Block if approval required |
-| `--policy <PATH>` | Path to pre-issued approval capability |
-| `--working-dir <PATH>` | Set the working directory for execution |
-| `--env <KEY=VALUE>` | Set environment variables (repeatable) |
-| `--network` | Allow network access during execution |
-| `--fs-grant <PATH>` | Grant read access to a path (repeatable) |
+| `--native` | Pre-approve native binary execution without interactive prompt |
+| `--non-interactive` | Skip interactive approval prompts (block if approval needed) |
+| `--network` | Allow network access during execution (default: isolated) |
+| `--policy <PATH>` | Policy file path |
 
 ### Examples
 
@@ -115,12 +115,11 @@ arbitraitor run https://example.com/install.sh
 # Non-interactive (block if approval needed)
 arbitraitor run https://example.com/install.sh --non-interactive
 
-# With pre-approved capability
-arbitraitor run https://example.com/install.sh \
-  --policy ./approved-capability.json
+# With native binary and network access
+arbitraitor run https://example.com/binary --native --network
 
-# Script with network and filesystem access
-arbitraitor run install.sh --network --fs-grant /tmp
+# With policy file
+arbitraitor run https://example.com/install.sh --policy ./my-policy.toml
 ```
 
 ## Wrappers command
@@ -205,7 +204,7 @@ Scans a local file or stdin without network retrieval. Runs detectors and report
 | `--stdin` | Read input from stdin instead of a file path |
 | `--rules <DIR>` | Path to a directory of YARA-X rule packs |
 | `--explain` | Print an explainability summary after findings |
-| `--format <FORMAT>` | Output format for explainability: `text`, `json` (implies `--explain`) |
+| `--format <FORMAT>` | Output format for explainability: `text`, `shellcheck` (implies `--explain`) |
 
 ### Examples
 
@@ -353,7 +352,7 @@ Verify a signed minisign update manifest:
 
 ```sh
 arbitraitor update verify manifest.json --key pubkey.pub
-# Signature defaults to manifest.json.minisig
+# Signature defaults to manifest.minisig (extension replaced)
 arbitraitor update verify manifest.json --key pubkey.pub --signature custom.minisig
 ```
 

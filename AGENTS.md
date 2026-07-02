@@ -68,7 +68,7 @@ If the PR changes anything the user sees — CLI commands, flags, config format,
 - [ ] `README.md` — update if the change affects install, quick start, features, or architecture tree.
 - [ ] `book/src/cli-reference.md` — update if CLI commands, flags, or exit codes change.
 - [ ] `book/src/architecture/crates.md` — update if crates are added, removed, or restructured.
-- [ ] `book/src/SUMMARY.md` — add new book pages.
+- [ ] `book/src/SUMMARY.md` — add new book pages. Update relevant book content pages as well.
 - [ ] `docs/adr/` — add an ADR if the change introduces a significant architectural decision.
 - [ ] Rust doc comments (`///`) on new or changed public items.
 

@@ -212,7 +212,8 @@ arbitraitor-cli             Command-line interface (22 subcommands)
 ├── arbitraitor-daemon       Unix socket daemon with background queue
 ├── arbitraitor-package-manager  Registry adapters (cargo, npm, uv, pnpm, yarn, bun)
 ├── arbitraitor-update       Signed update manifest verification
-└── arbitraitor-testkit      Test infrastructure (SSRF, TLS, raw TCP helpers)
+├── arbitraitor-testkit      Test infrastructure (SSRF, TLS, raw TCP helpers)
+└── arbitraitor-workspace-hack  hakari-managed dependency deduplication
 ```
 
 See the [Architecture Decision Records](docs/adr/README.md) for design rationale.
