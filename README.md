@@ -173,40 +173,46 @@ arbitraitor hook init
 
 - **Mediated execution** — Scripts run in a sandboxed bash with network isolation, resource limits, and output capping
 - **Content-addressed storage** — All artifacts stored by SHA-256 with quarantine, retention policies, and garbage collection
-- **Threat detection** — Shell analysis (28+ categories), YARA-X rules, PowerShell AST parsing, archive inspection
+- **Threat detection** — Shell analysis (28+ categories), YARA-X rules, PowerShell AST parsing, archive inspection, Tirith subprocess detector
 - **Provenance verification** — Digest pinning, minisign/cosign signatures, TUF metadata, TOFU mode
 - **Plan-bound approval** — ADR-0013 approval tokens bind artifact + interpreter + network + policy snapshot
-- **MCP integration** — Model Context Protocol tools for AI agent inspection, scanning, and approved execution
+- **Decoupled workflow** — `approve` + `execute` commands enable inspection and execution as separate steps with time-limited approval files
+- **MCP integration** — `arbitraitor mcp` starts a JSON-RPC 2.0 server over stdio for AI agent inspection, scanning, and approved execution
 - **Plugin system** — Subprocess protocol, Wasmtime Component Model, plugin registry with trust tiers
+- **Package manager adapters** — cargo, npm, uv, pnpm, yarn, bun lifecycle policies and lockfile analysis
 - **Community intelligence** — Feed submission, review workflow, transparency log, URLhaus adapter
 - **Receipts** — RFC 8785 JCS canonicalized receipts with full audit trail
-- **MCP server** — `arbitraitor mcp` starts a JSON-RPC 2.0 server over stdio for AI agent integration
+- **HTTP safety** — SSRF protection, truncation detection, redirect policy enforcement
 
 ## Architecture
 
 ```text
-arbitraitor-cli         Command-line interface
-├── arbitraitor-fetch    HTTP retrieval with SSRF protection
-├── arbitraitor-store    Content-addressed storage (CAS) with retention/GC
-├── arbitraitor-analysis Detection pipeline coordinator
+arbitraitor-cli             Command-line interface (22 subcommands)
+├── arbitraitor-core         Config, metrics, health checks, state machine
+│   ├── arbitraitor-model    Domain types, receipts, findings (newtypes)
+│   └── arbitraitor-policy   TOML policy engine with rule evaluation
+├── arbitraitor-fetch        HTTP retrieval with SSRF protection + truncation detection
+├── arbitraitor-store        Content-addressed storage (CAS) with retention/GC
+├── arbitraitor-artifact     Content classification (ELF, PE, Mach-O, shebang, archives)
+├── arbitraitor-analysis     Detection pipeline coordinator
 │   ├── arbitraitor-shell       Shell script analyzer (bash/dash)
 │   ├── arbitraitor-powershell  PowerShell AST analyzer
 │   ├── arbitraitor-yarax       YARA-X scanner integration
 │   ├── arbitraitor-archive     Archive inspection (6 formats, 15 hazard types)
 │   └── arbitraitor-av          Antivirus adapters (ClamAV, Microsoft Defender)
-├── arbitraitor-provenance Signature/attestation verification
-├── arbitraitor-intel    Threat intelligence feeds
-├── arbitraitor-policy   TOML policy engine with rule evaluation
-├── arbitraitor-receipt  RFC 8785 canonicalized receipts
-├── arbitraitor-exec     Mediated execution (script + native + PowerShell)
-├── arbitraitor-sandbox  Process hardening (prctl, close_range, setrlimit)
-├── arbitraitor-mcp      MCP server (inspect, scan, approve, execute)
-├── arbitraitor-plugin-api    Plugin trait hierarchy
-├── arbitraitor-plugin-host   Plugin runtime (subprocess + Wasmtime)
-├── arbitraitor-wrapper  curl/wget wrapper translators
-├── arbitraitor-daemon   Unix socket daemon with background queue
-├── arbitraitor-package-manager  Registry adapter trait (cargo, npm, uv, etc.)
-└── arbitraitor-core     Config, metrics, health checks
+├── arbitraitor-provenance   Signature/attestation verification
+├── arbitraitor-intel        Threat intelligence feeds
+├── arbitraitor-receipt      RFC 8785 canonicalized receipts
+├── arbitraitor-exec         Mediated execution (script + native + PowerShell)
+├── arbitraitor-sandbox      Process hardening (prctl, close_range, setrlimit)
+├── arbitraitor-mcp          MCP server (inspect, scan, explain, approve, execute)
+├── arbitraitor-plugin-api   Plugin trait hierarchy
+├── arbitraitor-plugin-host  Plugin runtime (subprocess + Wasmtime)
+├── arbitraitor-wrapper      curl/wget wrapper translators + per-shell init
+├── arbitraitor-daemon       Unix socket daemon with background queue
+├── arbitraitor-package-manager  Registry adapters (cargo, npm, uv, pnpm, yarn, bun)
+├── arbitraitor-update       Signed update manifest verification
+└── arbitraitor-testkit      Test infrastructure (SSRF, TLS, raw TCP helpers)
 ```
 
 See the [Architecture Decision Records](docs/adr/README.md) for design rationale.
@@ -243,13 +249,13 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/README.md) — 21 accepted ADRs
+- [Architecture Decision Records](docs/adr/README.md) — 26 accepted ADRs
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - Crate documentation: `cargo doc --workspace --open`
 
 ## Status
 
-**Pre-alpha.** Not ready for production use. The API, CLI, receipts, and policy schemas will change. 1066+ tests passing.
+**Pre-alpha.** Not ready for production use. The API, CLI, receipts, and policy schemas will change. 1103+ tests passing.
 
 ## License
 

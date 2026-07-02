@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### CLI
+
+- `arbitraitor scan` — scan local files or stdin without retrieval
+- `arbitraitor explain` — explain a verdict from a receipt file
+- `arbitraitor store` — manage CAS artifacts (list, inspect, gc)
+- `arbitraitor policy` — validate policy TOML files
+- `arbitraitor doctor` — system health diagnostics (JSON output)
+- `arbitraitor rules` — manage YARA-X rule packs (list, validate)
+- `arbitraitor update verify` — verify signed update manifests (minisign)
+- `arbitraitor plugin` — manage plugin registry (list, info, discover, remove)
+- `arbitraitor hook init` — print shell hook intercepting `curl|sh` patterns
+- `arbitraitor shim` — manage package manager compatibility shims (list, install, uninstall)
+- `arbitraitor graph` — render payload containment tree for archives
+- `arbitraitor approve` — decoupled approval flow from receipt file
+- `arbitraitor execute` — execute artifact from CAS using approval file
+- `arbitraitor mcp` — start MCP JSON-RPC 2.0 server over stdio
+- `arbitraitor version` — print version, license, repository
+- Native binary auto-detection from artifact classifier (no manual `--native` needed)
+
+#### Package manager adapters
+
+- `cargo` adapter — Cargo.lock parsing, build.rs analysis, lifecycle policy
+- `uv`/`uvx` adapter — uv.lock parsing, source validation, sandbox-required lifecycle
+- `npm` adapter — package-lock.json parsing, denied-by-default lifecycle
+- `pnpm` adapter — RegistryAdapter trait conformance
+- `yarn` (berry + classic) adapters — trait conformance
+- `bun` adapter — trait conformance
+
+#### Detection
+
+- Tirith subprocess detector (external script analysis via bounded subprocess)
+- Dependency vulnerability detector framework
+
+#### Wrapper system
+
+- Per-shell initialization (bash, zsh, fish, dash, ksh, tcsh, sh, csh, nu, pwsh)
+- Rcfile installation with idempotent markers per shell
+
+#### Fetch
+
+- HTTP response truncation detection (Content-Length mismatch → `FetchError::TruncatedBody`)
+
+#### Documentation
+
+- 26 ADRs (was 21): ADRs 0022–0026 covering SLSA, in-toto receipts, macOS containment, OpenSSF/Scorecard, EU CRA/NIST SSDF compliance
+- 1103 tests passing (was 867+)
+
+### Changed
+
+- MCP `explain` and `sanitize_for_agent` extracted to dedicated `explain.rs` module
+- Test suites extracted to `tests.rs` files across 10 crates (mcp, cli, analysis, core, yarax, shell, provenance, archive, exec, intel, store)
+- `--native` flag repurposed as confirmation override (execution mode auto-detected from artifact type)
+
+### Fixed
+
+- CLI auto-detects native vs script execution mode from artifact classifier instead of requiring `--native` flag
+
 ## [0.1.0-alpha] — 2026-06-23
 
 Initial alpha release. **Not ready for production use.**
