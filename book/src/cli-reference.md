@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `arbitraitor` CLI provides commands for inspection, execution, wrapper management, and status checking.
+The `arbitraitor` CLI provides commands for inspection, execution, wrapper management, storage, policy validation, and system health.
 
 ## Commands
 
@@ -8,11 +8,27 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 |---------|-------------|
 | `arbitraitor inspect` | Retrieve and analyze an artifact without executing it |
 | `arbitraitor run` | Execute the full pipeline with approval flow |
+| `arbitraitor scan` | Scan a local file or stdin without retrieval |
+| `arbitraitor explain` | Explain a verdict from a receipt file |
+| `arbitraitor fetch` | Retrieve an artifact to CAS (hidden, used by wrappers) |
 | `arbitraitor daemon` | Unix socket daemon with background queue (start/stop/status) |
 | `arbitraitor unpack` | Unpack an archive to a directory for inspection |
 | `arbitraitor intel` | Manage local threat-intelligence feeds (update) |
 | `arbitraitor status` | Show system health and configured detectors |
 | `arbitraitor wrappers` | Manage curl/wget wrapper shims |
+| `arbitraitor store` | Manage CAS artifacts (list, inspect, gc) |
+| `arbitraitor policy` | Validate a policy TOML file |
+| `arbitraitor doctor` | Run system health diagnostics |
+| `arbitraitor rules` | Manage YARA-X rule packs (list, validate) |
+| `arbitraitor update` | Verify signed update manifests |
+| `arbitraitor plugin` | Manage plugin registry (list, info, discover, remove) |
+| `arbitraitor hook` | Print shell integration hooks |
+| `arbitraitor shim` | Manage package manager compatibility shims |
+| `arbitraitor graph` | Render payload containment tree for archives |
+| `arbitraitor approve` | Approve execution from a receipt file |
+| `arbitraitor execute` | Execute an artifact from CAS using an approval file |
+| `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
+| `arbitraitor version` | Print version, license, and repository |
 
 ## Global flags
 
@@ -54,8 +70,6 @@ arbitraitor inspect <URL or file path> [flags]
 | `--content-type <TYPE>` | Override content type detection |
 | `--timeout <SECONDS>` | Maximum time for retrieval and analysis |
 | `--native` | Treat as a native binary, not a script |
-
-### Examples
 
 ```sh
 # Basic inspection
