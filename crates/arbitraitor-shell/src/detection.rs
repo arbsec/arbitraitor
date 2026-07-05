@@ -4,11 +4,54 @@ use std::collections::BTreeSet;
 
 use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::taxonomy::{TaxonomyName, TaxonomyRef};
 use arbitraitor_model::verdict::{Confidence, Severity};
 
 use crate::{DecodeKind, ExtractedCommand, NormalizationResult, SourceSpan};
 
 const DETECTOR_ID: &str = "arbitraitor-shell.detection";
+
+pub(crate) fn cwe_for_category(category: FindingCategory) -> Option<TaxonomyRef> {
+    // Only `DynamicCodeExecution` has a defensible CWE mapping today
+    // (CWE-94: Code Injection). The other behavioral categories describe
+    // *what the artifact does* (destructive commands, credential access,
+    // persistence, network reach, obfuscation, etc.) rather than a
+    // code-level weakness, so forcing a CWE produces misleading security
+    // metadata. ATT&CK / CAPEC are better fits for those behaviors and
+    // can be added as separate taxonomies later. Adding a new
+    // `FindingCategory` variant forces a compile error here until an
+    // explicit mapping or unmapped listing decision is made.
+    let cwe_id = match category {
+        FindingCategory::DynamicCodeExecution => "CWE-94",
+        FindingCategory::DestructiveBehavior
+        | FindingCategory::Obfuscation
+        | FindingCategory::CredentialAccess
+        | FindingCategory::Persistence
+        | FindingCategory::PrivilegeEscalation
+        | FindingCategory::NetworkBehavior
+        | FindingCategory::SuspiciousScriptBehavior
+        | FindingCategory::Transport
+        | FindingCategory::Provenance
+        | FindingCategory::Reputation
+        | FindingCategory::ContentMismatch
+        | FindingCategory::MalwareSignature
+        | FindingCategory::ArchiveHazard
+        | FindingCategory::PackageRisk
+        | FindingCategory::PolicyViolation
+        | FindingCategory::ParserError
+        | FindingCategory::ResourceLimitEvent
+        | FindingCategory::SupplyChain => return None,
+    };
+    let id_suffix = cwe_id
+        .strip_prefix("CWE-")
+        .map(|suffix| format!("https://cwe.mitre.org/data/definitions/{suffix}.html"));
+    Some(TaxonomyRef {
+        name: TaxonomyName::Cwe,
+        id: cwe_id.to_owned(),
+        confidence: Confidence::Medium,
+        url: id_suffix,
+    })
+}
 
 /// Detects dynamic execution and decode-to-execute shell patterns.
 #[must_use]
@@ -414,7 +457,7 @@ impl DetectionState<'_> {
             remediation: None,
             references: Vec::new(),
             tags: vec!["shell-detection".to_owned(), input.tag.to_owned()],
-            taxonomies: Vec::new(),
+            taxonomies: cwe_for_category(input.category).into_iter().collect(),
         });
     }
 }
