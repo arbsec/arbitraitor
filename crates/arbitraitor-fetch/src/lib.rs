@@ -202,6 +202,13 @@ pub struct FetchPolicy {
     /// This is fail-closed by default. It does not allow private, link-local,
     /// metadata, multicast, benchmarking, or other IANA special-purpose ranges.
     pub allow_loopback_addresses: bool,
+    /// Allows a redirect to downgrade from HTTPS to HTTP.
+    ///
+    /// Fail-closed by default (ADR-0018 §Redirect handling). Even when both
+    /// schemes are permitted by [`FetchPolicy::allowed_schemes`], a downgrade
+    /// from HTTPS to HTTP strips transport encryption and is blocked unless a
+    /// caller explicitly opts in here.
+    pub allow_https_to_http_redirect: bool,
     /// Requires callers to provide an expected SHA-256 digest before fetching.
     pub require_digest: bool,
 }
@@ -217,6 +224,7 @@ impl Default for FetchPolicy {
             max_redirects: 0,
             allowed_schemes: vec![FetchScheme::Https, FetchScheme::File, FetchScheme::Stdin],
             allow_loopback_addresses: false,
+            allow_https_to_http_redirect: false,
             require_digest: false,
         }
     }
@@ -358,6 +366,17 @@ pub enum FetchError {
     /// Redirect response was malformed.
     #[error("malformed redirect response")]
     MalformedRedirect,
+    /// Connected peer address differs from approved resolved addresses.
+    ///
+    /// A DNS rebinding attack resolved to an approved IP during the policy
+    /// check but connected to a different IP. The error message is
+    /// deliberately redacted — it never includes the connected or resolved
+    /// addresses, which could leak internal topology.
+    #[error("connected peer address does not match a resolved address (possible DNS rebinding)")]
+    PeerAddressMismatch,
+    /// Redirect downgraded from HTTPS to HTTP without explicit opt-in.
+    #[error("redirect downgrades from HTTPS to HTTP, which is blocked by policy")]
+    InsecureRedirectDowngrade,
     /// DNS resolution reached a prohibited address range.
     #[error("resolved address is prohibited by fetch policy: {address}")]
     ProhibitedAddress {
@@ -526,6 +545,7 @@ impl HttpFetcher {
                 }
                 let next = redirect_target(&current, response.headers())?;
                 ensure_scheme_allowed(FetchScheme::from_str(next.scheme()), next.scheme(), policy)?;
+                ensure_no_insecure_downgrade(current.scheme(), next.scheme(), policy)?;
                 trace!(from = %redact_parsed_url(&current), to = %redact_parsed_url(&next), "following policy-approved redirect");
                 redirect_chain.push(FetchUrl(current));
                 current = next;
@@ -700,6 +720,7 @@ async fn stream_response(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let connected_ip = response.remote_addr().map(|addr| addr.ip());
+    verify_connected_peer(connected_ip, &resolved_ips)?;
     let peer_certificate_fingerprint = response
         .extensions()
         .get::<reqwest::tls::TlsInfo>()
@@ -987,6 +1008,58 @@ fn ensure_scheme_allowed(
     ensure_policy_allows(scheme, policy)
 }
 
+/// Verifies the post-connect peer address matches an approved resolved address.
+///
+/// ADR-0018 §DNS rebinding defense: after the transport connects, the actual
+/// peer address (reported via `getpeername` by reqwest) must be one of the
+/// addresses that passed policy validation during resolution. A mismatch
+/// indicates DNS rebinding between resolution and connection.
+///
+/// The error is redacted — it never includes addresses, preventing internal
+/// topology leakage through diagnostics. When `connected` is `None` the peer
+/// address could not be observed, so verification is skipped (the transport
+/// backend did not expose it). When `resolved` is empty, verification fails
+/// closed because there is no approved address to match against.
+///
+/// # Errors
+///
+/// Returns [`FetchError::PeerAddressMismatch`] when `connected` is present but
+/// not contained in `resolved`, or when `resolved` is empty.
+pub(crate) fn verify_connected_peer(
+    connected: Option<IpAddr>,
+    resolved: &[IpAddr],
+) -> Result<(), FetchError> {
+    let Some(connected) = connected else {
+        return Ok(());
+    };
+    if resolved.is_empty() || !resolved.contains(&connected) {
+        return Err(FetchError::PeerAddressMismatch);
+    }
+    Ok(())
+}
+
+/// Enforces HTTPS→HTTP redirect downgrade policy (ADR-0018 §Redirect handling).
+///
+/// A redirect from HTTPS to HTTP removes transport encryption. This is blocked
+/// by default even when both schemes are allowed by policy. Callers must
+/// explicitly opt in via [`FetchPolicy::allow_https_to_http_redirect`].
+/// HTTP→HTTPS is always permitted (it is an upgrade, not a downgrade).
+///
+/// # Errors
+///
+/// Returns [`FetchError::InsecureRedirectDowngrade`] when the redirect
+/// downgrades from `https` to `http` and the policy does not allow it.
+pub(crate) fn ensure_no_insecure_downgrade(
+    from_scheme: &str,
+    to_scheme: &str,
+    policy: &FetchPolicy,
+) -> Result<(), FetchError> {
+    if from_scheme == "https" && to_scheme == "http" && !policy.allow_https_to_http_redirect {
+        return Err(FetchError::InsecureRedirectDowngrade);
+    }
+    Ok(())
+}
+
 fn classify_reqwest_error(stage: &'static str, error: reqwest::Error) -> FetchError {
     if error.is_timeout() {
         return FetchError::Timeout { stage };
@@ -1073,10 +1146,15 @@ fn is_sensitive_path_segment(segment: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{FetchPolicy, build_http_client, execute_request};
+    use super::{
+        FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_no_insecure_downgrade,
+        execute_request, verify_connected_peer,
+    };
 
     #[tokio::test]
     async fn client_pins_validated_address_for_request() -> Result<(), Box<dyn std::error::Error>> {
@@ -1116,5 +1194,117 @@ mod tests {
         let request = server.await??;
         assert!(request.contains(&format!("host: rebind.invalid:{}", addr.port())));
         Ok(())
+    }
+
+    // --- ADR-0018: post-connect peer verification (Issue #383) ---
+
+    #[test]
+    fn verify_connected_peer_accepts_matching_address() {
+        let resolved = vec![
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+        ];
+        let result =
+            verify_connected_peer(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))), &resolved);
+        assert!(
+            result.is_ok(),
+            "connected IP in resolved set must pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_connected_peer_rejects_mismatch() {
+        let resolved = vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))];
+        let connected = IpAddr::V4(Ipv4Addr::LOCALHOST); // DNS rebinding to loopback
+        let result = verify_connected_peer(Some(connected), &resolved);
+        assert!(
+            matches!(result, Err(FetchError::PeerAddressMismatch)),
+            "rebinding to non-resolved IP must be blocked, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_connected_peer_rejects_when_resolved_empty() {
+        // No approved addresses to compare against — fail closed.
+        let result = verify_connected_peer(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))), &[]);
+        assert!(
+            matches!(result, Err(FetchError::PeerAddressMismatch)),
+            "connected IP with no resolved set must fail closed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_connected_peer_message_is_redacted() -> Result<(), Box<dyn std::error::Error>> {
+        // The error must NOT leak the connected or resolved addresses.
+        let resolved = vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))];
+        let connected = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let error = verify_connected_peer(Some(connected), &resolved)
+            .err()
+            .ok_or("expected PeerAddressMismatch for non-resolved connected IP")?;
+        let message = format!("{error}");
+        assert!(
+            !message.contains("10.0.0.1"),
+            "error must not leak connected IP: {message}"
+        );
+        assert!(
+            !message.contains("203.0.113.10"),
+            "error must not leak resolved IP: {message}"
+        );
+        Ok(())
+    }
+
+    // --- ADR-0018: HTTPS→HTTP redirect downgrade (Issue #383) ---
+
+    #[test]
+    fn insecure_downgrade_blocked_by_default() {
+        let policy = FetchPolicy {
+            allowed_schemes: vec![FetchScheme::Http, FetchScheme::Https],
+            ..FetchPolicy::default()
+        };
+        let result = ensure_no_insecure_downgrade("https", "http", &policy);
+        assert!(
+            matches!(result, Err(FetchError::InsecureRedirectDowngrade)),
+            "HTTPS→HTTP downgrade must be blocked by default, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn insecure_downgrade_allowed_when_opted_in() {
+        let policy = FetchPolicy {
+            allowed_schemes: vec![FetchScheme::Http, FetchScheme::Https],
+            allow_https_to_http_redirect: true,
+            ..FetchPolicy::default()
+        };
+        let result = ensure_no_insecure_downgrade("https", "http", &policy);
+        assert!(
+            result.is_ok(),
+            "explicit opt-in must allow downgrade: {result:?}"
+        );
+    }
+
+    #[test]
+    fn same_scheme_redirect_not_a_downgrade() {
+        let policy = FetchPolicy::default();
+        assert!(ensure_no_insecure_downgrade("https", "https", &policy).is_ok());
+        assert!(ensure_no_insecure_downgrade("http", "http", &policy).is_ok());
+    }
+
+    #[test]
+    fn http_to_https_is_an_upgrade_not_blocked() {
+        let policy = FetchPolicy::default();
+        let result = ensure_no_insecure_downgrade("http", "https", &policy);
+        assert!(
+            result.is_ok(),
+            "HTTP→HTTPS upgrade must never be blocked: {result:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_policy_defaults_block_https_to_http_downgrade() {
+        let policy = FetchPolicy::default();
+        assert!(
+            !policy.allow_https_to_http_redirect,
+            "default policy must block HTTPS→HTTP downgrade (fail-closed)"
+        );
     }
 }
