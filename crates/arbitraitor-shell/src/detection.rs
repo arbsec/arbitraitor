@@ -12,23 +12,26 @@ use crate::{DecodeKind, ExtractedCommand, NormalizationResult, SourceSpan};
 const DETECTOR_ID: &str = "arbitraitor-shell.detection";
 
 pub(crate) fn cwe_for_category(category: FindingCategory) -> Option<TaxonomyRef> {
+    // Only `DynamicCodeExecution` has a defensible CWE mapping today
+    // (CWE-94: Code Injection). The other behavioral categories describe
+    // *what the artifact does* (destructive commands, credential access,
+    // persistence, network reach, obfuscation, etc.) rather than a
+    // code-level weakness, so forcing a CWE produces misleading security
+    // metadata. ATT&CK / CAPEC are better fits for those behaviors and
+    // can be added as separate taxonomies later. Adding a new
+    // `FindingCategory` variant forces a compile error here until an
+    // explicit mapping or unmapped listing decision is made.
     let cwe_id = match category {
-        FindingCategory::DestructiveBehavior => "CWE-1045",
-        FindingCategory::Obfuscation => "CWE-454",
         FindingCategory::DynamicCodeExecution => "CWE-94",
-        FindingCategory::CredentialAccess => "CWE-798",
-        FindingCategory::Persistence => "CWE-506",
-        FindingCategory::PrivilegeEscalation => "CWE-269",
-        FindingCategory::NetworkBehavior => "CWE-200",
-        FindingCategory::SuspiciousScriptBehavior => "CWE-78",
-        FindingCategory::Transport => "CWE-918",
-        // Intentionally unmapped: these categories describe findings about
-        // the artifact itself (provenance, reputation, archive/policy hazards,
-        // parser/runtime resource limits, supply-chain metadata) rather than
-        // code-level weaknesses, so no CWE applies. Adding a new
-        // `FindingCategory` variant forces a compile error here until an
-        // explicit mapping or unmapped listing decision is made.
-        FindingCategory::Provenance
+        FindingCategory::DestructiveBehavior
+        | FindingCategory::Obfuscation
+        | FindingCategory::CredentialAccess
+        | FindingCategory::Persistence
+        | FindingCategory::PrivilegeEscalation
+        | FindingCategory::NetworkBehavior
+        | FindingCategory::SuspiciousScriptBehavior
+        | FindingCategory::Transport
+        | FindingCategory::Provenance
         | FindingCategory::Reputation
         | FindingCategory::ContentMismatch
         | FindingCategory::MalwareSignature

