@@ -6,8 +6,8 @@ fastest option; building from source is available for development.
 ## Nightly binaries (recommended)
 
 Pre-built binaries are published every night from the latest `main`
-commit. They are available for Linux and macOS on both x86_64 and
-aarch64.
+commit. They are available for Linux on x86_64 and aarch64, and for
+macOS on aarch64 (Apple Silicon).
 
 ### Download
 
@@ -18,7 +18,6 @@ Fetch the latest binary for your platform from the
 |----------|------|
 | Linux x86_64 | `arbitraitor-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux aarch64 | `arbitraitor-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 (Intel) | `arbitraitor-x86_64-apple-darwin.tar.gz` |
 | macOS aarch64 (Apple Silicon) | `arbitraitor-aarch64-apple-darwin.tar.gz` |
 
 ### Install
@@ -34,8 +33,7 @@ sudo mv arbitraitor /usr/local/bin/
 arbitraitor --version
 ```
 
-On macOS, substitute the file name with `arbitraitor-x86_64-apple-darwin.tar.gz`
-or `arbitraitor-aarch64-apple-darwin.tar.gz` depending on your architecture.
+On macOS, substitute the file name with `arbitraitor-aarch64-apple-darwin.tar.gz`.
 
 > **Warning: Pre-alpha.** Nightly binaries are built from unreleased
 > code. The CLI, config format, and schemas change between commits. Do
