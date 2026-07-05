@@ -66,6 +66,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CLI auto-detects native vs script execution mode from artifact classifier instead of requiring `--native` flag
 
+### Security
+
+- **SSRF post-connect peer verification (ADR-0018, #383):** the HTTP fetcher now
+  compares the connected peer address against the addresses that passed policy
+  validation during DNS resolution. A DNS rebinding attack that resolves to an
+  approved IP but connects to a different IP is now detected and aborted with a
+  redacted error that does not leak internal addresses.
+- **HTTPS→HTTP redirect downgrade protection (ADR-0018, #383):** a redirect from
+  HTTPS to HTTP is now blocked by default even when both schemes are allowed by
+  policy. Opt in with the new `FetchPolicy::allow_https_to_http_redirect` field.
+- **No-root invariant at entry points (ADR-0009, #385):** the CLI, daemon, MCP
+  server, and plugin host now refuse to run as root before any untrusted content
+  is touched. A new `--allow-root` global CLI flag provides a diagnostic bypass
+  for the `doctor` command and integration tests.
+
 ## [0.1.0-alpha] — 2026-06-23
 
 Initial alpha release. **Not ready for production use.**
