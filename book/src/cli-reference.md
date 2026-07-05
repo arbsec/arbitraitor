@@ -15,6 +15,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor intel` | Manage local threat-intelligence feeds (update) |
 | `arbitraitor status` | Show system health and configured detectors |
 | `arbitraitor wrappers` | Manage curl/wget wrapper shims |
+| `arbitraitor env` | Hidden alias of `wrappers init` (shell env setup) |
 | `arbitraitor store` | Manage CAS artifacts (list, inspect, gc) |
 | `arbitraitor policy` | Validate a policy TOML file |
 | `arbitraitor doctor` | Run system health diagnostics |

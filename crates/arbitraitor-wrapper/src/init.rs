@@ -51,6 +51,8 @@ pub enum Shell {
     Posix,
     /// TENEX C Shell.
     Tcsh,
+    /// Oil shell (OSH/YSH — bash-compatible).
+    Oil,
 }
 
 impl Shell {
@@ -66,6 +68,7 @@ impl Shell {
         Shell::Elvish,
         Shell::Posix,
         Shell::Tcsh,
+        Shell::Oil,
     ];
 
     /// Returns the string used in CLI values and diagnostics.
@@ -82,6 +85,7 @@ impl Shell {
             Self::Elvish => "elvish",
             Self::Posix => "posix",
             Self::Tcsh => "tcsh",
+            Self::Oil => "oil",
         }
     }
 
@@ -99,6 +103,7 @@ impl Shell {
             "elvish" => Some(Self::Elvish),
             "posix" => Some(Self::Posix),
             "tcsh" => Some(Self::Tcsh),
+            "oil" | "osh" | "ysh" => Some(Self::Oil),
             _ => None,
         }
     }
@@ -224,6 +229,7 @@ fn rcfile_path_for_home(shell: Shell, home: &Path) -> Option<PathBuf> {
         Shell::Zsh => Some(home.join(".zshenv")),
         Shell::Sh | Shell::Posix => Some(home.join(".profile")),
         Shell::Tcsh => Some(home.join(".tcshrc")),
+        Shell::Oil => Some(home.join(".config").join("oil").join("oshrc")),
         Shell::Xonsh => Some(home.join(".xonshrc")),
         Shell::Elvish => Some(home.join(".elvish").join("rc.elv")),
         Shell::Fish | Shell::Nu | Shell::Powershell => None,
@@ -338,7 +344,7 @@ pub fn render_snippet(shell: Shell, shim_dir: &Path) -> Result<String, ShimDirEr
     validate_shim_dir(shim_dir)?;
     let dir = &shim_dir.to_string_lossy();
     Ok(match shell {
-        Shell::Bash | Shell::Sh | Shell::Posix => posix_snippet(dir),
+        Shell::Bash | Shell::Sh | Shell::Posix | Shell::Oil => posix_snippet(dir),
         Shell::Zsh => zsh_snippet(dir),
         Shell::Fish => fish_snippet(dir),
         Shell::Nu => nu_snippet(dir),
@@ -748,9 +754,18 @@ mod tests {
         let bash = render_snippet(Shell::Bash, dir)?;
         let sh = render_snippet(Shell::Sh, dir)?;
         let posix = render_snippet(Shell::Posix, dir)?;
+        let oil = render_snippet(Shell::Oil, dir)?;
         assert_eq!(bash, sh);
         assert_eq!(bash, posix);
+        assert_eq!(bash, oil);
         Ok(())
+    }
+
+    #[test]
+    fn shell_from_name_oil_aliases() {
+        assert_eq!(Shell::from_name("oil"), Some(Shell::Oil));
+        assert_eq!(Shell::from_name("osh"), Some(Shell::Oil));
+        assert_eq!(Shell::from_name("ysh"), Some(Shell::Oil));
     }
 
     #[test]
