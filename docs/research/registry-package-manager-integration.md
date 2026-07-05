@@ -428,7 +428,7 @@ A general pattern: intercept at the *commit / install boundary* via:
 
 - `pre-commit` (`.pre-commit-config.yaml`) — runs before `git commit`. Phylum, pip-audit, gitleaks, etc. ship `pre-commit` hooks.
 - CI gate on `lockfile change` — Renovate / Dependabot open PRs; CI scans the lockfile diff before merge.
-- Hooks like `lefthook` (Arbitraitor's own [lefthook.yml](/home/mekwall/repos/github/arbsec/arbitraitor/lefthook.yml) uses this) for pre-commit/push hooks.
+- Hooks like `lefthook` (Arbitraitor's own `lefthook.yml` uses this) for pre-commit/push hooks.
 
 These are **advisory**: they run after the developer has chosen an action. Not a substitute for install-time mediation.
 
