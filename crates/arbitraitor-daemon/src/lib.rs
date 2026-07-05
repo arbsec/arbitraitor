@@ -169,6 +169,7 @@ impl Daemon {
     ///
     /// Returns an I/O error if the socket cannot be bound or accepted.
     pub async fn run(&self) -> io::Result<()> {
+        arbitraitor_core::privilege::refuse_root();
         prepare_socket_path(&self.socket_path)?;
         let listener = UnixListener::bind(&self.socket_path)?;
         std::fs::set_permissions(

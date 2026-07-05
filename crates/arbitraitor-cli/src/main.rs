@@ -55,6 +55,14 @@ struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     config: Option<PathBuf>,
 
+    /// Allow running as root (diagnostic mode only, ADR-0009).
+    ///
+    /// Bypasses the no-root guard for the `doctor` command and integration
+    /// test harnesses. Prints a warning to stderr. Never use for fetch,
+    /// inspect, run, or any path that touches untrusted content.
+    #[arg(long, global = true)]
+    allow_root: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -283,6 +291,8 @@ struct CosignInput {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = parse_cli_from_invocation();
+
+    arbitraitor_core::privilege::refuse_root_unless(cli.allow_root);
 
     let level = match cli.verbose {
         0 => "warn",

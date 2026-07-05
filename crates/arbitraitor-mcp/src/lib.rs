@@ -1849,6 +1849,7 @@ fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) ->
 ///
 /// Returns [`StdioError`] on I/O or JSON serialization failure.
 pub fn run_stdio_server() -> Result<(), StdioError> {
+    arbitraitor_core::privilege::refuse_root();
     let server = build_default_server();
     let agent = default_agent();
     let stdin = std::io::stdin();
