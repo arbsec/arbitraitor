@@ -328,3 +328,76 @@ fn credential_findings_carry_cwe_taxonomy() -> Result<(), String> {
     );
     Ok(())
 }
+
+#[test]
+fn cwe_for_category_mapping_is_complete() {
+    use crate::detection::cwe_for_category;
+    use arbitraitor_model::taxonomy::TaxonomyName;
+    use arbitraitor_model::verdict::Confidence;
+
+    let mapped: &[(FindingCategory, &str)] = &[
+        (FindingCategory::DestructiveBehavior, "CWE-1045"),
+        (FindingCategory::Obfuscation, "CWE-454"),
+        (FindingCategory::DynamicCodeExecution, "CWE-94"),
+        (FindingCategory::CredentialAccess, "CWE-798"),
+        (FindingCategory::Persistence, "CWE-506"),
+        (FindingCategory::PrivilegeEscalation, "CWE-269"),
+        (FindingCategory::NetworkBehavior, "CWE-200"),
+        (FindingCategory::SuspiciousScriptBehavior, "CWE-78"),
+        (FindingCategory::Transport, "CWE-918"),
+    ];
+
+    for (category, expected_id) in mapped {
+        let mapping = cwe_for_category(*category);
+        assert!(
+            mapping.is_some(),
+            "{category:?} must produce a CWE taxonomy ref"
+        );
+        let Some(mapping) = mapping else {
+            continue;
+        };
+        assert_eq!(
+            mapping.name,
+            TaxonomyName::Cwe,
+            "{category:?} must map to the CWE taxonomy"
+        );
+        assert_eq!(
+            mapping.id, *expected_id,
+            "{category:?} must map to {expected_id}"
+        );
+        assert_eq!(
+            mapping.confidence,
+            Confidence::Medium,
+            "{category:?} must use Medium confidence"
+        );
+        let url = mapping.url.as_deref();
+        assert!(url.is_some(), "{category:?} must carry a CWE entry URL");
+        if let Some(url) = url {
+            let url_suffix = expected_id.strip_prefix("CWE-").unwrap_or(expected_id);
+            assert!(
+                url.contains(url_suffix),
+                "{category:?} URL {url} must derive from CWE id {expected_id}"
+            );
+        }
+    }
+
+    let unmapped: &[FindingCategory] = &[
+        FindingCategory::Provenance,
+        FindingCategory::Reputation,
+        FindingCategory::ContentMismatch,
+        FindingCategory::MalwareSignature,
+        FindingCategory::ArchiveHazard,
+        FindingCategory::PackageRisk,
+        FindingCategory::PolicyViolation,
+        FindingCategory::ParserError,
+        FindingCategory::ResourceLimitEvent,
+        FindingCategory::SupplyChain,
+    ];
+
+    for category in unmapped {
+        assert!(
+            cwe_for_category(*category).is_none(),
+            "{category:?} must remain unmapped"
+        );
+    }
+}

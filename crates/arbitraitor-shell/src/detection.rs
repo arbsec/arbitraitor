@@ -22,16 +22,31 @@ pub(crate) fn cwe_for_category(category: FindingCategory) -> Option<TaxonomyRef>
         FindingCategory::NetworkBehavior => "CWE-200",
         FindingCategory::SuspiciousScriptBehavior => "CWE-78",
         FindingCategory::Transport => "CWE-918",
-        _ => return None,
+        // Intentionally unmapped: these categories describe findings about
+        // the artifact itself (provenance, reputation, archive/policy hazards,
+        // parser/runtime resource limits, supply-chain metadata) rather than
+        // code-level weaknesses, so no CWE applies. Adding a new
+        // `FindingCategory` variant forces a compile error here until an
+        // explicit mapping or unmapped listing decision is made.
+        FindingCategory::Provenance
+        | FindingCategory::Reputation
+        | FindingCategory::ContentMismatch
+        | FindingCategory::MalwareSignature
+        | FindingCategory::ArchiveHazard
+        | FindingCategory::PackageRisk
+        | FindingCategory::PolicyViolation
+        | FindingCategory::ParserError
+        | FindingCategory::ResourceLimitEvent
+        | FindingCategory::SupplyChain => return None,
     };
+    let id_suffix = cwe_id
+        .strip_prefix("CWE-")
+        .map(|suffix| format!("https://cwe.mitre.org/data/definitions/{suffix}.html"));
     Some(TaxonomyRef {
         name: TaxonomyName::Cwe,
         id: cwe_id.to_owned(),
         confidence: Confidence::Medium,
-        url: Some(format!(
-            "https://cwe.mitre.org/data/definitions/{}.html",
-            &cwe_id[4..]
-        )),
+        url: id_suffix,
     })
 }
 
