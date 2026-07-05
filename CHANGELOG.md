@@ -79,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Contained` assurance now fail-closes unless the execution builder receives proof for every mandatory ADR-0007 control (filesystem, network, process tree, privilege suppression, syscall filtering, resource limits); receipts can now carry the per-control effective-controls matrix instead of a collapsed containment claim
+- CLI `approve` / `execute` now use a schema-versioned, plan-bound approval file that binds artifact, interpreter, argv, network policy, filesystem grants, policy snapshot, detector snapshot, nonce, expiry, and approver; any post-approval tampering is rejected at execute time
+- MCP approval-token nonces are now durably persisted in a redb-backed spent-nonce store so a nonce spent before restart cannot be replayed after restart when a stable signing secret is reused
 - CLI auto-detects native vs script execution mode from artifact classifier instead of requiring `--native` flag
 - Nightly release workflow no longer hangs on the deprecated `macos-13` (Intel) runner — `x86_64-apple-darwin` builds are dropped; Intel macOS users should build from source or run the `aarch64-apple-darwin` binary via Rosetta
 - Nightly release publishes even when some build matrix legs fail (artifacts from successful legs are still released)

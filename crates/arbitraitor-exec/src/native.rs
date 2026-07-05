@@ -139,7 +139,7 @@ impl NativeExecution {
 
     fn with_args_checked(args: Vec<String>) -> Result<Self, ExecError> {
         let environment = ExecutionContextBuilder::new(operation_plan(&args), execute_grants())
-            .assurance_level(AssuranceLevel::Contained)
+            .assurance_level(AssuranceLevel::Mediated)
             .command("/bin/true")
             .arguments(args.iter().map(String::as_str))
             .build()?;

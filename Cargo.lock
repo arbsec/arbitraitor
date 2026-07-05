@@ -222,15 +222,19 @@ dependencies = [
  "arbitraitor-yarax",
  "assert_cmd",
  "clap",
+ "hex",
  "miette",
  "predicates",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "zip",
 ]
 
@@ -289,6 +293,7 @@ dependencies = [
  "libc",
  "proptest",
  "rustix",
+ "serde",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
@@ -342,6 +347,7 @@ dependencies = [
  "arbitraitor-fetch",
  "arbitraitor-model",
  "arbitraitor-receipt",
+ "arbitraitor-store",
  "arbitraitor-workspace-hack",
  "hex",
  "hmac 0.13.0",
@@ -349,6 +355,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
@@ -454,6 +461,7 @@ dependencies = [
 name = "arbitraitor-receipt"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-exec",
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
  "minisign",

@@ -767,10 +767,15 @@ impl ApprovalPromptError {
 /// Tokens are single-use: each token carries a unique nonce and the issuer
 /// records every accepted nonce in an internally synchronised set so a
 /// replayed token is rejected even before its signature is checked.
+///
+/// When constructed with [`Self::with_durable_store`], spent nonces are also
+/// persisted to a redb-backed store so replay is rejected across process
+/// restarts (ADR-0013, #388).
 #[derive(Clone)]
 pub struct ApprovalTokenIssuer {
     signing_secret: Arc<[u8]>,
     spent_nonces: Arc<Mutex<HashSet<String>>>,
+    durable: Option<Arc<arbitraitor_store::SpentNonceStore>>,
 }
 
 impl ApprovalTokenIssuer {
@@ -783,6 +788,7 @@ impl ApprovalTokenIssuer {
         Self {
             signing_secret: Arc::from(secret.into_boxed_slice()),
             spent_nonces: Arc::new(Mutex::new(HashSet::new())),
+            durable: None,
         }
     }
 
@@ -792,7 +798,62 @@ impl ApprovalTokenIssuer {
         Self {
             signing_secret: Arc::from(secret.into().into_boxed_slice()),
             spent_nonces: Arc::new(Mutex::new(HashSet::new())),
+            durable: None,
         }
+    }
+
+    /// Creates an issuer backed by a durable spent-nonce store.
+    ///
+    /// On construction, all previously-spent nonces are loaded from `store`
+    /// into the in-memory cache. Every subsequently spent nonce is persisted
+    /// so a token used before a restart is rejected after restart (#388).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalTokenError::NonceStorePoisoned`] when the durable
+    /// store cannot be read.
+    pub fn with_durable_store(
+        store: arbitraitor_store::SpentNonceStore,
+    ) -> Result<Self, ApprovalTokenError> {
+        let nonces = store
+            .load_all()
+            .map_err(|_| ApprovalTokenError::NonceStorePoisoned)?;
+        Ok(Self {
+            signing_secret: Arc::from(
+                {
+                    let mut secret = Vec::with_capacity(32);
+                    secret.extend_from_slice(Uuid::new_v4().as_bytes());
+                    secret.extend_from_slice(Uuid::new_v4().as_bytes());
+                    secret
+                }
+                .into_boxed_slice(),
+            ),
+            spent_nonces: Arc::new(Mutex::new(nonces)),
+            durable: Some(Arc::new(store)),
+        })
+    }
+
+    /// Creates an issuer with an explicit signing secret and durable nonce
+    /// store. Intended for CI/automation where the signing secret is stable
+    /// across restarts — in that scenario durable nonce persistence is what
+    /// prevents replay of tokens issued before the restart (#388).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalTokenError::NonceStorePoisoned`] when the durable
+    /// store cannot be read.
+    pub fn with_secret_and_durable_store(
+        secret: impl Into<Vec<u8>>,
+        store: arbitraitor_store::SpentNonceStore,
+    ) -> Result<Self, ApprovalTokenError> {
+        let nonces = store
+            .load_all()
+            .map_err(|_| ApprovalTokenError::NonceStorePoisoned)?;
+        Ok(Self {
+            signing_secret: Arc::from(secret.into().into_boxed_slice()),
+            spent_nonces: Arc::new(Mutex::new(nonces)),
+            durable: Some(Arc::new(store)),
+        })
     }
 
     fn issue(
@@ -932,12 +993,30 @@ impl ApprovalTokenIssuer {
         // once. The check runs after every other validation passes so that
         // a replay of an otherwise-valid token is the only path that consumes
         // the nonce, and a replay is rejected on its second presentation.
+        //
+        // When a durable store is configured (#388), the nonce is also
+        // persisted to redb so replay is rejected across process restarts.
         let mut spent = self
             .spent_nonces
             .lock()
             .map_err(|_| ApprovalTokenError::NonceStorePoisoned)?;
         if !spent.insert(payload.nonce.clone()) {
             return Err(ApprovalTokenError::Reused);
+        }
+        if let Some(store) = &self.durable {
+            match store.insert(&payload.nonce) {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Already spent in the durable store (cross-process replay
+                    // or pre-restart spend). Roll back the in-memory insert.
+                    spent.remove(&payload.nonce);
+                    return Err(ApprovalTokenError::Reused);
+                }
+                Err(_) => {
+                    spent.remove(&payload.nonce);
+                    return Err(ApprovalTokenError::NonceStorePoisoned);
+                }
+            }
         }
 
         Ok(payload)
@@ -1680,31 +1759,44 @@ enum RunApprovedArtifactError {
 }
 
 #[derive(Debug, Error)]
-enum ApprovalTokenError {
+/// Errors returned while issuing or validating MCP approval tokens.
+pub enum ApprovalTokenError {
+    /// The token did not have the expected `v2.<payload>.<signature>` shape.
     #[error("token is malformed")]
     MalformedToken,
+    /// The token HMAC signature did not verify.
     #[error("token signature is invalid")]
     InvalidSignature,
+    /// The token was issued for a different artifact digest.
     #[error("token artifact digest does not match request")]
     ArtifactMismatch,
+    /// The token was issued for a materially different execution context.
     #[error(
         "token execution context (interpreter, network policy, or policy snapshot) does not match the request"
     )]
     ContextMismatch,
+    /// The token has expired.
     #[error("token is expired")]
     Expired,
+    /// The token nonce has already been spent.
     #[error("token has already been used and cannot be replayed")]
     Reused,
+    /// The HMAC signing key length was rejected.
     #[error("token signing key has an invalid length")]
     KeyLength,
+    /// The nonce store lock or durable backing failed.
     #[error("token nonce store is poisoned")]
     NonceStorePoisoned,
+    /// A system time was before the Unix epoch.
     #[error("token time is before Unix epoch")]
     TimeBeforeEpoch,
+    /// The token schema version is unsupported.
     #[error("token schema version is unsupported")]
     UnsupportedSchema,
+    /// Token payload JSON serialization or parsing failed.
     #[error("token serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    /// Token payload or signature hex decoding failed.
     #[error("token encoding failed: {0}")]
     Hex(#[from] hex::FromHexError),
 }
