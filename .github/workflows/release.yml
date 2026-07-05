@@ -70,6 +70,7 @@ jobs:
       - name: Count artifacts
         id: artifacts
         run: |
+          mkdir -p dist
           count=$(find dist -type f -name '*.tar.gz*' | wc -l)
           echo "count=$count" >> "$GITHUB_OUTPUT"
           if [ "$count" -eq 0 ]; then

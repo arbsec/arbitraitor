@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - CLI auto-detects native vs script execution mode from artifact classifier instead of requiring `--native` flag
+- Nightly release workflow no longer hangs on the deprecated `macos-13` (Intel) runner — `x86_64-apple-darwin` builds are dropped; Intel macOS users should build from source or run the `aarch64-apple-darwin` binary via Rosetta
+- Nightly release publishes even when some build matrix legs fail (artifacts from successful legs are still released)
+- `actions/upload-artifact` and `actions/download-artifact` bumped to v7/v8 to clear the Node.js 20 deprecation warning
 
 ## [0.1.0-alpha] — 2026-06-23
 
