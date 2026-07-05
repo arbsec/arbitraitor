@@ -26,4 +26,6 @@ pre-push:
   commands:
     test:
       run: cargo nextest run --no-tests=pass
-      glob: "*.rs"
+      glob:
+        - "*.rs"
+        - "**/*.rs"
