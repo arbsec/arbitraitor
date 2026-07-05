@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP `explain` and `sanitize_for_agent` extracted to dedicated `explain.rs` module
 - Test suites extracted to `tests.rs` files across 10 crates (mcp, cli, analysis, core, yarax, shell, provenance, archive, exec, intel, store)
 - `--native` flag repurposed as confirmation override (execution mode auto-detected from artifact type)
+- Plugin manifest now accepts a `[capabilities]` table declaring `network`, `filesystem`, `process`, `max_memory_bytes`, `max_cpu_ms`
+- `SubprocessExecutor::with_network_isolated(bool)` replaced with `with_network_capability(NetworkCapability)`; the capability must come from the plugin's admitted manifest
+
+### Security
+
+- Plugin registry now enforces ADR-0011 trust-tier capability admission: `community-reviewed` and `community-unreviewed` plugins are rejected at registration when they declare `network`, `process = "spawn"`, or `filesystem = "read-write"` capabilities (#379)
+- `OperationPlan::validate_for_plugin_capabilities` now has a production caller via `PluginRegistry::validate_plan`, tying wrapper-produced plans to the capabilities declared at admission
 
 ### Fixed
 
