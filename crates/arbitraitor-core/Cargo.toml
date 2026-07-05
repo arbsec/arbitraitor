@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 arbitraitor-model = { workspace = true }
 arbitraitor-policy = { workspace = true }
+rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
