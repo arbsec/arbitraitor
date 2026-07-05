@@ -73,6 +73,7 @@ pub(super) struct InspectedArtifact {
     detector_versions: Vec<DetectorVersion>,
     requested_url: String,
     final_url: String,
+    store_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
