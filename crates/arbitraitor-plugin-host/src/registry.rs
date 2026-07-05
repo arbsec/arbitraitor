@@ -13,48 +13,22 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arbitraitor_model::ids::Sha256Digest;
-use arbitraitor_plugin_api::{CapabilitySet, PluginManifest, PluginTrustClass, PluginType};
-use serde::{Deserialize, Serialize};
+use arbitraitor_plugin_api::{PluginManifest, PluginTrustClass, PluginType};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+use crate::admission::enforce_trust_tier_capabilities;
+use crate::manifest::parse_manifest_file;
 
 /// Filename looked for inside each plugin directory.
 const MANIFEST_FILENAME: &str = "manifest.toml";
 
-/// On-disk TOML representation of a plugin manifest.
-///
-/// This is the untrusted boundary format. Fields are parsed as strings and
-/// validated before conversion to the typed [`PluginManifest`].
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginManifestFile {
-    /// Stable plugin identifier (e.g. `dev.arbitraitor.curl`).
-    pub id: String,
-    /// Human-readable plugin name.
-    pub name: String,
-    /// Semantic version string.
-    pub version: String,
-    /// Adapter category: `detector`, `wrapper`, `intelligence`, `provenance`, `sandbox`.
-    pub plugin_type: String,
-    /// Trust tier: `built-in`, `first-party`, `community-reviewed`, `community-unreviewed`.
-    pub trust_class: String,
-    /// Optional longer description.
-    pub description: Option<String>,
-    /// Optional author or maintainer.
-    pub author: Option<String>,
-    /// Optional homepage URL.
-    pub homepage: Option<String>,
-    /// Optional minimum Arbitraitor version required.
-    pub min_arbitraitor_version: Option<String>,
-    /// Binary or `.wasm` path relative to the manifest directory.
-    pub binary: String,
-    /// Expected SHA-256 of the binary, as lowercase hex.
-    pub checksum: String,
-}
+// Re-exported so existing callers that reached these via `registry::` continue
+// to resolve now that the types live in the `manifest` submodule.
+pub use crate::manifest::{CapabilitySetFile, PluginManifestFile};
 
 /// A plugin that has passed validation and been accepted into the registry.
 #[derive(Clone, Debug)]
@@ -105,6 +79,15 @@ pub enum RegistryError {
         expected: String,
         /// Actual digest computed from the binary.
         actual: String,
+    },
+    /// The plugin's declared capabilities are denied by its trust tier
+    /// (ADR-0011).
+    #[error("plugin {plugin} denied admission: {reason}")]
+    CapabilityDeniedByTrustTier {
+        /// Plugin id.
+        plugin: String,
+        /// Safe diagnostic reason from the admission policy.
+        reason: String,
     },
     /// No plugin is registered with the requested id.
     #[error("plugin not found: {0}")]
@@ -170,12 +153,13 @@ impl PluginRegistry {
     /// Validates and registers a single plugin from its directory.
     ///
     /// The directory must contain a `manifest.toml` and the binary referenced
-    /// therein. The binary's SHA-256 is verified against the manifest checksum.
+    /// therein. The binary's SHA-256 is verified against the manifest checksum,
+    /// and ADR-0011 trust-tier capability admission is enforced.
     ///
     /// # Errors
     ///
     /// Returns [`RegistryError`] on a missing manifest, malformed fields,
-    /// missing binary, checksum mismatch, or duplicate id.
+    /// missing binary, checksum mismatch, trust-tier denial, or duplicate id.
     pub fn register(&mut self, dir: &Path) -> Result<(), RegistryError> {
         let manifest_path = dir.join(MANIFEST_FILENAME);
         let label = dir.display().to_string();
@@ -192,16 +176,50 @@ impl PluginRegistry {
                 error: err.to_string(),
             })?;
 
-        let validated = validate_manifest(&file, dir, &label)?;
+        let validated = parse_manifest_file(&file, dir, &label)?;
+        let binary_path = dir.join(&validated.binary_rel);
+        let actual = hash_file(&binary_path)?;
+        if actual != validated.expected_checksum {
+            return Err(RegistryError::ChecksumMismatch {
+                plugin: label.clone(),
+                expected: validated.expected_checksum.to_string(),
+                actual: actual.to_string(),
+            });
+        }
 
-        if self.plugins.contains_key(&validated.manifest.identity.id) {
+        enforce_trust_tier_capabilities(validated.trust_class, &validated.capabilities).map_err(
+            |err| RegistryError::CapabilityDeniedByTrustTier {
+                plugin: validated.id.clone(),
+                reason: err.to_string(),
+            },
+        )?;
+
+        let manifest = PluginManifest {
+            identity: arbitraitor_plugin_api::PluginIdentity {
+                id: validated.id,
+                version: validated.version,
+                trust_class: validated.trust_class,
+            },
+            capabilities: validated.capabilities,
+            plugin_type: validated.plugin_type,
+            description: validated.description,
+        };
+        let registered = RegisteredPlugin {
+            manifest,
+            binary_path,
+            trust_class: validated.trust_class,
+            installed_at: now_unix(),
+            checksum: actual.to_string(),
+        };
+
+        if self.plugins.contains_key(&registered.manifest.identity.id) {
             return Err(RegistryError::DuplicatePlugin(
-                validated.manifest.identity.id,
+                registered.manifest.identity.id,
             ));
         }
 
         self.plugins
-            .insert(validated.manifest.identity.id.clone(), validated);
+            .insert(registered.manifest.identity.id.clone(), registered);
         Ok(())
     }
 
@@ -226,6 +244,32 @@ impl PluginRegistry {
         self.plugins.get(id)
     }
 
+    /// Validates a wrapper-produced [`OperationPlan`] against the capabilities
+    /// declared by the registered plugin with the given id.
+    ///
+    /// This is the production caller for
+    /// [`OperationPlan::validate_for_plugin_capabilities`]: it ties a plan's
+    /// requested capabilities to the manifest declaration captured at
+    /// admission, so a wrapper cannot request authority it never declared.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`arbitraitor_plugin_api::PlanError`] when the plan is
+    /// malformed, exceeds the plugin's declared capabilities, or `plugin_id`
+    /// is not registered (reported as `CapabilityExceedsDeclaration` because
+    /// the plan cannot be reconciled against any declaration).
+    pub fn validate_plan(
+        &self,
+        plugin_id: &str,
+        plan: &arbitraitor_plugin_api::OperationPlan,
+    ) -> Result<(), arbitraitor_plugin_api::PlanError> {
+        let plugin = self
+            .plugins
+            .get(plugin_id)
+            .ok_or(arbitraitor_plugin_api::PlanError::CapabilityExceedsDeclaration)?;
+        plan.validate_for_plugin_capabilities(&plugin.manifest.capabilities)
+    }
+
     /// Removes a plugin from the registry, returning the removed entry.
     ///
     /// This does **not** delete any files on disk.
@@ -243,181 +287,6 @@ impl PluginRegistry {
             .map(|dir| dir.join("plugins"))
             .into_iter()
             .collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Validation helpers
-// ---------------------------------------------------------------------------
-
-/// Result of validating and converting a manifest file.
-fn validate_manifest(
-    file: &PluginManifestFile,
-    dir: &Path,
-    label: &str,
-) -> Result<RegisteredPlugin, RegistryError> {
-    validate_id(&file.id).map_err(|reason| RegistryError::ManifestParse {
-        plugin: label.to_owned(),
-        error: reason,
-    })?;
-
-    validate_semver(&file.version).map_err(|reason| RegistryError::ManifestParse {
-        plugin: label.to_owned(),
-        error: reason,
-    })?;
-
-    let plugin_type = parse_plugin_type(&file.plugin_type, label)?;
-    let trust_class = parse_trust_class(&file.trust_class, label)?;
-
-    // The binary path is relative to the manifest directory. Reject absolute or
-    // parent-escaping components — a manifest must not reference files outside
-    // its own directory.
-    let binary_rel = Path::new(&file.binary);
-    if binary_rel.is_absolute() || file.binary.starts_with("..") {
-        return Err(RegistryError::ManifestParse {
-            plugin: label.to_owned(),
-            error: format!(
-                "binary path must be relative to the plugin directory: {}",
-                file.binary
-            ),
-        });
-    }
-    let binary_path = dir.join(binary_rel);
-    if !binary_path.is_file() {
-        return Err(RegistryError::BinaryNotFound {
-            plugin: label.to_owned(),
-            path: binary_path,
-        });
-    }
-
-    // Parse the declared checksum into a typed digest so we get hex validation
-    // for free, then verify it against the on-disk bytes.
-    let expected =
-        Sha256Digest::from_str(&file.checksum).map_err(|err| RegistryError::ManifestParse {
-            plugin: label.to_owned(),
-            error: format!("invalid checksum: {err}"),
-        })?;
-
-    let actual = hash_file(&binary_path)?;
-    if actual != expected {
-        return Err(RegistryError::ChecksumMismatch {
-            plugin: label.to_owned(),
-            expected: expected.to_string(),
-            actual: actual.to_string(),
-        });
-    }
-
-    let manifest = PluginManifest {
-        identity: arbitraitor_plugin_api::PluginIdentity {
-            id: file.id.clone(),
-            version: file.version.clone(),
-            trust_class,
-        },
-        capabilities: CapabilitySet::default(),
-        plugin_type,
-        description: file.description.clone().unwrap_or_default(),
-    };
-
-    Ok(RegisteredPlugin {
-        manifest,
-        binary_path,
-        trust_class,
-        installed_at: now_unix(),
-        checksum: expected.to_string(),
-    })
-}
-
-/// Validates that `id` is non-empty and matches `[a-z0-9-]+`.
-fn validate_id(id: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err("plugin id must not be empty".to_owned());
-    }
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err("plugin id must match [a-z0-9-]+".to_owned());
-    }
-    Ok(())
-}
-
-/// Basic semver `MAJOR.MINOR.PATCH` validation with optional pre-release and
-/// build metadata, sufficient for manifest admission without pulling in a
-/// dedicated semver crate.
-fn validate_semver(version: &str) -> Result<(), String> {
-    let (core, _rest) = match version.split_once('+') {
-        Some((core, build)) => {
-            if build.is_empty() {
-                return Err(format!("version '{version}' has empty build metadata"));
-            }
-            (core, version)
-        }
-        None => (version, version),
-    };
-
-    let (numbers, pre) = match core.split_once('-') {
-        Some((numbers, pre)) => {
-            if pre.is_empty() {
-                return Err(format!("version '{version}' has empty pre-release"));
-            }
-            (numbers, Some(pre))
-        }
-        None => (core, None),
-    };
-
-    let parts: Vec<&str> = numbers.split('.').collect();
-    if parts.len() != 3 {
-        return Err(format!("version '{version}' must follow MAJOR.MINOR.PATCH"));
-    }
-    for part in parts {
-        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(format!("version '{version}' has non-numeric segment"));
-        }
-    }
-
-    if let Some(pre_release) = pre
-        && !pre_release
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-    {
-        return Err(format!(
-            "version '{version}' has invalid pre-release identifier"
-        ));
-    }
-
-    Ok(())
-}
-
-/// Parses the `plugin_type` string into a [`PluginType`].
-fn parse_plugin_type(value: &str, label: &str) -> Result<PluginType, RegistryError> {
-    match value {
-        "detector" => Ok(PluginType::Detector),
-        "wrapper" => Ok(PluginType::Wrapper),
-        "intelligence" => Ok(PluginType::Intelligence),
-        "provenance" => Ok(PluginType::Provenance),
-        "sandbox" => Ok(PluginType::Sandbox),
-        other => Err(RegistryError::ManifestParse {
-            plugin: label.to_owned(),
-            error: format!(
-                "unknown plugin_type '{other}'; expected one of: detector, wrapper, intelligence, provenance, sandbox"
-            ),
-        }),
-    }
-}
-
-/// Parses the `trust_class` string into a [`PluginTrustClass`].
-fn parse_trust_class(value: &str, label: &str) -> Result<PluginTrustClass, RegistryError> {
-    match value {
-        "built-in" => Ok(PluginTrustClass::BuiltIn),
-        "first-party" => Ok(PluginTrustClass::FirstParty),
-        "community-reviewed" => Ok(PluginTrustClass::CommunityReviewed),
-        "community-unreviewed" => Ok(PluginTrustClass::CommunityUnreviewed),
-        other => Err(RegistryError::ManifestParse {
-            plugin: label.to_owned(),
-            error: format!(
-                "unknown trust_class '{other}'; expected one of: built-in, first-party, community-reviewed, community-unreviewed"
-            ),
-        }),
     }
 }
 
@@ -524,6 +393,38 @@ mod tests {
                  trust_class = \"community-reviewed\"\n\
                  binary = \"plugin.bin\"\n\
                  checksum = \"{checksum}\"\n"
+            );
+            fs::write(plugin_dir.join(MANIFEST_FILENAME), manifest)?;
+            Ok(Self {
+                _root: root,
+                plugin_dir,
+            })
+        }
+
+        /// Builds a fixture whose manifest declares a `[capabilities]` table
+        /// matching `caps`. Used to exercise trust-tier admission.
+        fn with_capabilities(
+            id: &str,
+            plugin_type: &str,
+            trust_class: &str,
+            caps: &str,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            let root = TempDir::new()?;
+            let plugin_dir = root.path().join(id);
+            fs::create_dir_all(&plugin_dir)?;
+            let binary_contents = b"caps-binary";
+            fs::write(plugin_dir.join("plugin.bin"), binary_contents)?;
+            let checksum = sha256_hex(binary_contents);
+            let manifest = format!(
+                "id = \"{id}\"\n\
+                 name = \"Caps Plugin\"\n\
+                 version = \"0.1.0\"\n\
+                 plugin_type = \"{plugin_type}\"\n\
+                 trust_class = \"{trust_class}\"\n\
+                 description = \"declares capabilities\"\n\
+                 binary = \"plugin.bin\"\n\
+                 checksum = \"{checksum}\"\n\
+                 {caps}\n"
             );
             fs::write(plugin_dir.join(MANIFEST_FILENAME), manifest)?;
             Ok(Self {
@@ -774,5 +675,280 @@ mod tests {
             }
         }
         let _ = dirs;
+    }
+
+    const NET_HTTPS_TABLE: &str = "[capabilities]\nnetwork = \"outbound-https\"";
+    const PROCESS_SPAWN_TABLE: &str = "[capabilities]\nprocess = \"spawn\"";
+    const FS_READWRITE_TABLE: &str = "[capabilities]\nfilesystem = \"read-write\"";
+    const FS_READONLY_TABLE: &str = "[capabilities]\nfilesystem = \"read-only\"";
+
+    #[test]
+    fn register_rejects_community_plugin_requesting_network() -> TestResult {
+        let fixture = PluginFixture::with_capabilities(
+            "community-net",
+            "wrapper",
+            "community-reviewed",
+            NET_HTTPS_TABLE,
+        )?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        let result = registry.register(fixture.path());
+
+        assert!(
+            matches!(
+                result,
+                Err(RegistryError::CapabilityDeniedByTrustTier { .. })
+            ),
+            "community plugin must not be admitted with network capability; got {result:?}"
+        );
+        assert!(registry.get("community-net").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn register_rejects_community_unreviewed_plugin_requesting_network() -> TestResult {
+        let fixture = PluginFixture::with_capabilities(
+            "unreviewed-net",
+            "wrapper",
+            "community-unreviewed",
+            NET_HTTPS_TABLE,
+        )?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        let result = registry.register(fixture.path());
+
+        assert!(
+            matches!(
+                result,
+                Err(RegistryError::CapabilityDeniedByTrustTier { .. })
+            ),
+            "community-unreviewed plugin must not be admitted with network capability; got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_rejects_community_plugin_requesting_process_spawn() -> TestResult {
+        let fixture = PluginFixture::with_capabilities(
+            "community-proc",
+            "sandbox",
+            "community-reviewed",
+            PROCESS_SPAWN_TABLE,
+        )?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        let result = registry.register(fixture.path());
+
+        assert!(
+            matches!(
+                result,
+                Err(RegistryError::CapabilityDeniedByTrustTier { .. })
+            ),
+            "community plugin must not be admitted with process spawn; got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_rejects_community_plugin_requesting_filesystem_read_write() -> TestResult {
+        let fixture = PluginFixture::with_capabilities(
+            "community-rw",
+            "detector",
+            "community-reviewed",
+            FS_READWRITE_TABLE,
+        )?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        let result = registry.register(fixture.path());
+
+        assert!(
+            matches!(
+                result,
+                Err(RegistryError::CapabilityDeniedByTrustTier { .. })
+            ),
+            "community plugin must not be admitted with read-write filesystem; got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_admits_first_party_wrapper_requesting_network() -> TestResult {
+        let fixture = PluginFixture::with_capabilities(
+            "first-party-curl",
+            "wrapper",
+            "first-party",
+            NET_HTTPS_TABLE,
+        )?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        registry.register(fixture.path())?;
+
+        let plugin = registry
+            .get("first-party-curl")
+            .ok_or("first-party wrapper should be admitted")?;
+        assert_eq!(
+            plugin.manifest.capabilities.network,
+            arbitraitor_plugin_api::NetworkCapability::OutboundHttps
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_admits_builtin_plugin_requesting_full_network() -> TestResult {
+        let full_net = "[capabilities]\nnetwork = \"full\"";
+        let fixture =
+            PluginFixture::with_capabilities("builtin-adapter", "wrapper", "built-in", full_net)?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        registry.register(fixture.path())?;
+
+        let plugin = registry
+            .get("builtin-adapter")
+            .ok_or("built-in plugin should be admitted")?;
+        assert_eq!(
+            plugin.manifest.capabilities.network,
+            arbitraitor_plugin_api::NetworkCapability::Full
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_admits_community_plugin_with_no_capabilities() -> TestResult {
+        let (fixture, _checksum) =
+            PluginFixture::new("bare-detector", "detector", "community-reviewed", b"x")?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        registry.register(fixture.path())?;
+
+        let plugin = registry
+            .get("bare-detector")
+            .ok_or("bare community detector should be admitted")?;
+        assert_eq!(
+            plugin.manifest.capabilities,
+            arbitraitor_plugin_api::CapabilitySet::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_admits_community_plugin_requesting_read_only_filesystem() -> TestResult {
+        let fixture = PluginFixture::with_capabilities(
+            "community-ro",
+            "detector",
+            "community-reviewed",
+            FS_READONLY_TABLE,
+        )?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        registry.register(fixture.path())?;
+
+        let plugin = registry
+            .get("community-ro")
+            .ok_or("community plugin with read-only fs should be admitted")?;
+        assert_eq!(
+            plugin.manifest.capabilities.filesystem,
+            arbitraitor_plugin_api::FilesystemCapability::ReadOnly
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_rejects_unknown_capability_value() -> TestResult {
+        let bad = "[capabilities]\nnetwork = \"telepathy\"";
+        let fixture = PluginFixture::with_capabilities("bad-cap", "detector", "first-party", bad)?;
+        let mut registry = PluginRegistry::new(vec![]);
+
+        let result = registry.register(fixture.path());
+
+        assert!(
+            matches!(result, Err(RegistryError::ManifestParse { .. })),
+            "unknown capability value must be a manifest parse error; got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_plan_rejects_plan_exceeding_declared_capabilities() -> TestResult {
+        use arbitraitor_plugin_api::{
+            CapabilitySet, FilesystemCapability, NetworkCapability,
+            OPERATION_PLAN_PROTOCOL_VERSION, OperationPlan, PlannedOperation, PluginIdentity,
+            SemanticConfidence,
+        };
+        let net_table = "[capabilities]\nnetwork = \"outbound-https\"";
+        let fixture =
+            PluginFixture::with_capabilities("plan-host", "wrapper", "first-party", net_table)?;
+        let mut registry = PluginRegistry::new(vec![]);
+        registry.register(fixture.path())?;
+
+        let plan = OperationPlan {
+            protocol_version: OPERATION_PLAN_PROTOCOL_VERSION,
+            plugin: PluginIdentity {
+                id: "plan-host".to_owned(),
+                version: "0.1.0".to_owned(),
+                trust_class: arbitraitor_plugin_api::PluginTrustClass::FirstParty,
+            },
+            original_tool: "curl".to_owned(),
+            operations: vec![PlannedOperation::Retrieve {
+                url: "https://example.invalid/x".to_owned(),
+                headers: Vec::new(),
+            }],
+            requested_capabilities: CapabilitySet {
+                network: NetworkCapability::Full,
+                filesystem: FilesystemCapability::None,
+                process: arbitraitor_plugin_api::ProcessCapability::None,
+                max_memory_bytes: None,
+                max_cpu_ms: None,
+            },
+            semantic_confidence: SemanticConfidence::Exact,
+        };
+
+        let result = registry.validate_plan("plan-host", &plan);
+
+        assert!(
+            matches!(
+                result,
+                Err(arbitraitor_plugin_api::PlanError::CapabilityExceedsDeclaration)
+            ),
+            "plan requesting `full` network against an `outbound-https` declaration must be rejected; got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_plan_admits_plan_within_declared_capabilities() -> TestResult {
+        use arbitraitor_plugin_api::{
+            CapabilitySet, NetworkCapability, OPERATION_PLAN_PROTOCOL_VERSION, OperationPlan,
+            PlannedOperation, PluginIdentity, PluginTrustClass, SemanticConfidence,
+        };
+        let net_table = "[capabilities]\nnetwork = \"outbound-https\"";
+        let fixture =
+            PluginFixture::with_capabilities("plan-ok", "wrapper", "first-party", net_table)?;
+        let mut registry = PluginRegistry::new(vec![]);
+        registry.register(fixture.path())?;
+
+        let plan = OperationPlan {
+            protocol_version: OPERATION_PLAN_PROTOCOL_VERSION,
+            plugin: PluginIdentity {
+                id: "plan-ok".to_owned(),
+                version: "0.1.0".to_owned(),
+                trust_class: PluginTrustClass::FirstParty,
+            },
+            original_tool: "curl".to_owned(),
+            operations: vec![PlannedOperation::Retrieve {
+                url: "https://example.invalid/x".to_owned(),
+                headers: Vec::new(),
+            }],
+            requested_capabilities: CapabilitySet {
+                network: NetworkCapability::OutboundHttps,
+                filesystem: arbitraitor_plugin_api::FilesystemCapability::None,
+                process: arbitraitor_plugin_api::ProcessCapability::None,
+                max_memory_bytes: None,
+                max_cpu_ms: None,
+            },
+            semantic_confidence: SemanticConfidence::Exact,
+        };
+
+        registry.validate_plan("plan-ok", &plan)?;
+        Ok(())
     }
 }

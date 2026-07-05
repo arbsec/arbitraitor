@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use arbitraitor_exec::EnvDenyList;
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_plugin_api::NetworkCapability;
 use arbitraitor_sandbox::{
     ProcessResourceLimits, SandboxConfig, configure_command, configure_filesystem_isolation,
     configure_network_isolation, configure_resource_limits,
@@ -82,7 +83,7 @@ pub struct SubprocessExecutor {
     timeout: Duration,
     env_allowlist: Vec<String>,
     working_directory: Option<PathBuf>,
-    network_isolated: bool,
+    network_capability: NetworkCapability,
 }
 
 impl SubprocessExecutor {
@@ -95,7 +96,7 @@ impl SubprocessExecutor {
             timeout: DEFAULT_TIMEOUT,
             env_allowlist: Vec::new(),
             working_directory: None,
-            network_isolated: true,
+            network_capability: NetworkCapability::None,
         }
     }
 
@@ -127,20 +128,31 @@ impl SubprocessExecutor {
         self
     }
 
-    /// Enables or disables subprocess plugin network isolation.
+    /// Sets the network capability granted to the subprocess plugin by policy.
     ///
-    /// Network isolation is enabled by default and should only be disabled for
-    /// plugins that have an explicit policy grant to perform network I/O.
+    /// The capability must come from the plugin's admitted manifest
+    /// (`PluginManifest::capabilities::network`) — not from an unchecked
+    /// caller boolean. Kernel-level network isolation (`seccomp-BPF`) is
+    /// applied only when the capability is [`NetworkCapability::None`].
     #[must_use]
-    pub fn with_network_isolated(mut self, isolated: bool) -> Self {
-        self.network_isolated = isolated;
+    pub fn with_network_capability(mut self, capability: NetworkCapability) -> Self {
+        self.network_capability = capability;
         self
     }
 
     /// Returns whether subprocess plugin network isolation is enabled.
+    ///
+    /// Derived from the granted [`NetworkCapability`]: isolation is active
+    /// only when no network access has been policy-granted.
     #[must_use]
     pub const fn network_isolated(&self) -> bool {
-        self.network_isolated
+        self.network_capability.is_isolated()
+    }
+
+    /// Returns the network capability granted to the subprocess plugin.
+    #[must_use]
+    pub const fn network_capability(&self) -> NetworkCapability {
+        self.network_capability
     }
 
     /// Spawns the plugin process with sandbox hardening and framed I/O pipes.
@@ -183,7 +195,7 @@ impl SubprocessExecutor {
             fd_count: policy_limits.fd_count.map(u64::from),
         };
         configure_resource_limits(&mut command, &child_limits);
-        if self.network_isolated {
+        if self.network_isolated() {
             configure_network_isolation(&mut command);
         }
         configure_command(&mut command, SandboxConfig::default());
