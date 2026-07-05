@@ -430,7 +430,7 @@ Manages package manager compatibility shims that route tool invocations through 
 
 #### `list`
 
-List installed shims and supported tools (npm, yarn, pnpm, pip, uv, bun):
+List installed shims. Package-manager shims are not yet implemented — use `arbitraitor wrappers install` for curl/wget support:
 
 ```sh
 arbitraitor shim list
@@ -438,15 +438,16 @@ arbitraitor shim list
 
 #### `install <TOOL>`
 
-Install a compatibility shim for a package manager tool:
+Package-manager shims are not yet implemented. Use `arbitraitor wrappers install` for curl/wget support:
 
 ```sh
 arbitraitor shim install npm
+# Error: package-manager shims are not yet implemented
 ```
 
 #### `uninstall <TOOL>`
 
-Remove a compatibility shim:
+Remove a compatibility shim (not yet implemented for package managers):
 
 ```sh
 arbitraitor shim uninstall npm

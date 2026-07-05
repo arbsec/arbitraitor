@@ -85,11 +85,11 @@ impl DetectorPlugin for WasmPlugin {
         if artifact.is_empty() {
             return Vec::new();
         }
-        // Full instantiation and export calling requires wasmtime component
-        // model bindgen, which generates typed Host traits and add_to_linker
-        // functions from the WIT definitions. This will be wired in a
-        // follow-up that adds `wasmtime::component::bindgen!` and implements
-        // the generated Host trait on WasmStoreData.
+        tracing::warn!(
+            plugin = %self.identity.id,
+            "WasmPlugin detector analyze is not yet implemented (experimental-wasm feature); \
+             returning zero findings"
+        );
         Vec::new()
     }
 }

@@ -11,6 +11,10 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+experimental-wasm = ["dep:wasmtime"]
+
 [[bin]]
 name = "arbitraitor-plugin-host-mock-plugin"
 path = "tests/mock_plugin/src/main.rs"
@@ -45,7 +49,7 @@ wasmtime = { version = ">=29", default-features = false, features = [
     "component-model",
     "parallel-compilation",
     "cache",
-] }
+], optional = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
