@@ -50,6 +50,21 @@ pub struct ReleasePolicy {
     pub allow_overwrite: bool,
     /// Permit the non-atomic copy fallback when atomic publication is unavailable.
     pub allow_non_atomic_copy: bool,
+    /// Optional POSIX mode applied to the released inode via the capability
+    /// handle after atomic publish. `None` keeps ADR-0015's `0o600` default.
+    /// Callers releasing an executable cache pass `Some(0o700)` so no separate
+    /// post-release chmod reopens a TOCTOU window.
+    #[cfg(unix)]
+    pub final_mode: Option<u32>,
+}
+
+#[cfg(not(unix))]
+impl ReleasePolicy {
+    /// Returns `None`; `final_mode` is Unix-only.
+    #[must_use]
+    pub const fn final_mode(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Platform provenance attributes to apply to a released artifact.
@@ -251,6 +266,7 @@ fn release_artifact_inner(
     let bytes_written = write_and_verify_temp(&handle, scanned_digest, &temp)?;
     apply_platform_provenance(&temp.file, provenance, "apply-release-temp-provenance")?;
     let method = publish_temp(&parent, temp, destination, policy, provenance, fs_mode)?;
+    apply_final_mode(&parent.dir, &parent.name, policy)?;
     verify_final_destination(&parent.dir, &parent.name, destination, scanned_digest)?;
 
     let mut warnings = Vec::new();
@@ -990,6 +1006,41 @@ fn cleanup_partial_non_atomic_destination(parent: &DestinationParent, destinatio
     }
 }
 
+fn apply_final_mode(
+    parent: &Dir,
+    name: &OsStr,
+    policy: &ReleasePolicy,
+) -> Result<(), ReleaseError> {
+    #[cfg(unix)]
+    {
+        if let Some(mode) = policy.final_mode {
+            let mut options = OpenOptions::new();
+            options.write(true);
+            options.custom_flags(OPEN_NOFOLLOW_FLAGS);
+            let file = parent
+                .open_with(name, &options)
+                .map_err(|source| ReleaseError::Io {
+                    stage: "open-final-mode",
+                    source,
+                })?;
+            file.set_permissions(Permissions::from_mode(mode))
+                .map_err(|source| ReleaseError::Io {
+                    stage: "set-final-mode",
+                    source,
+                })?;
+            file.sync_all().map_err(|source| ReleaseError::Io {
+                stage: "fsync-final-mode",
+                source,
+            })?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (parent, name, policy);
+    }
+    Ok(())
+}
+
 fn verify_final_destination(
     parent: &Dir,
     name: &OsStr,
@@ -1415,6 +1466,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: true,
                 allow_non_atomic_copy: false,
+                ..Default::default()
             },
         )?;
         assert_eq!(receipt.method, ReleaseMethod::AtomicRename);
@@ -1462,6 +1514,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: true,
                 allow_non_atomic_copy: false,
+                ..Default::default()
             },
         )?;
 
@@ -1493,6 +1546,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: true,
                 allow_non_atomic_copy: true,
+                ..Default::default()
             },
             &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNonAtomicForTest,
@@ -1557,6 +1611,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: true,
                 allow_non_atomic_copy: false,
+                ..Default::default()
             },
         );
 
@@ -1673,6 +1728,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: false,
                 allow_non_atomic_copy: true,
+                ..Default::default()
             },
             &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNonAtomicCopyFailureForTest,
@@ -1700,6 +1756,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: true,
                 allow_non_atomic_copy: true,
+                ..Default::default()
             },
             &ProvenanceConfig::default(),
         );
@@ -1741,6 +1798,7 @@ mod tests {
             &ReleasePolicy {
                 allow_overwrite: false,
                 allow_non_atomic_copy: true,
+                ..Default::default()
             },
             &ProvenanceConfig::default(),
             ReleaseFsMode::ForceNonAtomicForTest,
@@ -1748,6 +1806,116 @@ mod tests {
         assert_eq!(receipt.method, ReleaseMethod::NonAtomicCopy);
         assert_eq!(receipt.warnings.len(), 1);
         assert_eq!(read_std_digest(&approved_destination)?, digest);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_mode_produces_executable_permission_after_atomic_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("final-mode")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let bytes = b"native binary payload";
+        let digest = store_bytes(&store, bytes).await?;
+        let destination = root.join("native.bin");
+
+        let receipt = release_artifact(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                final_mode: Some(0o700),
+                ..ReleasePolicy::default()
+            },
+        )?;
+
+        assert_eq!(receipt.destination, destination);
+        assert_eq!(fs::read(&destination)?, bytes);
+        assert_eq!(
+            fs::metadata(&destination)?.permissions().mode() & 0o777,
+            0o700,
+            "final_mode must chmod the released inode via the capability handle"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_mode_rejects_pre_created_symlink_at_destination()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("final-mode-symlink")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"native binary payload").await?;
+        let outside = root.join("outside-target");
+        let destination = root.join("native.bin");
+        fs::write(&outside, b"sensitive outside bytes")?;
+        symlink(&outside, &destination)?;
+
+        let result = release_artifact(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                final_mode: Some(0o700),
+                ..ReleasePolicy::default()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ReleaseError::ForbiddenIndirection { .. })
+        ));
+        // The symlink target must be untouched — no overwrite, no follow.
+        assert_eq!(fs::read(&outside)?, b"sensitive outside bytes");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_mode_with_overwrite_replaces_existing_executable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("final-mode-overwrite")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let bytes = b"replacement native payload";
+        let digest = store_bytes(&store, bytes).await?;
+        let destination = root.join("native.bin");
+        fs::write(&destination, b"old payload")?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))?;
+
+        release_artifact(
+            &store,
+            &digest,
+            &destination,
+            &ReleasePolicy {
+                allow_overwrite: true,
+                final_mode: Some(0o700),
+                ..ReleasePolicy::default()
+            },
+        )?;
+
+        assert_eq!(fs::read(&destination)?, bytes);
+        assert_eq!(
+            fs::metadata(&destination)?.permissions().mode() & 0o777,
+            0o700
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_final_mode_is_none_and_keeps_0600() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("final-mode-default")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let digest = store_bytes(&store, b"plain release").await?;
+        let destination = root.join("released.bin");
+
+        release_artifact(&store, &digest, &destination, &ReleasePolicy::default())?;
+
+        assert_eq!(
+            fs::metadata(&destination)?.permissions().mode() & 0o777,
+            0o600,
+            "absent final_mode must preserve ADR-0015's restrictive 0600 default"
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
