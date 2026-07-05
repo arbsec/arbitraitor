@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::io::Cursor;
 
-use arbitraitor_model::finding::{Finding, FindingCategory, SourceLocation};
+use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -45,6 +45,9 @@ pub struct Receipt {
     pub release: Option<ReleaseInfo>,
     /// Detector versions that contributed to this receipt.
     pub detector_versions: Vec<DetectorVersion>,
+    /// Binary provenance for subprocess detectors (sha256, version, ruleset digest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detector_provenance: Vec<DetectorProvenance>,
     /// Receipt creation and update timestamps.
     pub timestamps: ReceiptTimestamps,
     /// Optional detached signature over the canonical unsigned receipt.
@@ -320,6 +323,7 @@ impl ReceiptBuilder {
                 verdict,
                 release: None,
                 detector_versions: Vec::new(),
+                detector_provenance: Vec::new(),
                 timestamps,
                 signature: None,
             },
@@ -382,6 +386,13 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn detector_version(mut self, detector_version: DetectorVersion) -> Self {
         self.receipt.detector_versions.push(detector_version);
+        self
+    }
+
+    /// Add detector binary provenance metadata (subprocess detectors).
+    #[must_use]
+    pub fn detector_provenance(mut self, provenance: DetectorProvenance) -> Self {
+        self.receipt.detector_provenance.push(provenance);
         self
     }
 
@@ -596,6 +607,11 @@ mod tests {
         .detector_version(DetectorVersion {
             id: "detector.shell".to_owned(),
             version: "1.2.3".to_owned(),
+        })
+        .detector_provenance(DetectorProvenance {
+            binary_sha256: Some("sha256:abcd".to_owned()),
+            binary_version: Some("tirith 0.4.1".to_owned()),
+            ruleset_digest: Some("sha256:rules".to_owned()),
         })
         .build()
     }

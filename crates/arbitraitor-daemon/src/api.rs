@@ -23,11 +23,10 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::{EvalContext, PolicyEngine};
 use arbitraitor_receipt::{
-    FindingSummary, Receipt, ReceiptBuilder, ReceiptTimestamps, RetrievalInfo as ReceiptRetrieval,
-    VerdictInfo,
+    DetectorVersion, FindingSummary, Receipt, ReceiptBuilder, ReceiptTimestamps,
+    RetrievalInfo as ReceiptRetrieval, VerdictInfo,
 };
 use arbitraitor_store::{ContentStore, MetadataEntry, RetentionMode};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const ARBITRAITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -102,7 +101,11 @@ pub struct FetchResult {
 pub struct ReleaseResult {
     /// Destination path where bytes were written.
     pub path: PathBuf,
-    /// Whether the SHA-256 was re-verified immediately before writing.
+    /// Number of artifact bytes released.
+    pub bytes_written: u64,
+    /// Filesystem publication method used by the safe-release primitive.
+    pub method: arbitraitor_exec::release::ReleaseMethod,
+    /// Whether the SHA-256 was re-verified immediately before and after writing.
     pub sha256_verified: bool,
 }
 
@@ -159,6 +162,15 @@ pub enum ApiError {
     /// A receipt serialization or deserialization error occurred.
     #[error("receipt error: {0}")]
     Receipt(String),
+    /// No inspection receipt exists for the artifact; release requires prior analysis.
+    #[error("no inspection receipt for {0}; release requires prior inspect() or scan()")]
+    NoReceipt(String),
+    /// The policy verdict recorded for the artifact blocks release.
+    #[error("policy verdict blocks release: {0:?}")]
+    PolicyBlocked(Verdict),
+    /// The safe-release primitive (ADR-0015) rejected the destination or failed.
+    #[error("release failed: {0}")]
+    Release(String),
     /// An I/O error occurred.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -170,6 +182,12 @@ impl From<FetchError> for ApiError {
     }
 }
 
+impl From<arbitraitor_exec::release::ReleaseError> for ApiError {
+    fn from(error: arbitraitor_exec::release::ReleaseError) -> Self {
+        Self::Release(error.to_string())
+    }
+}
+
 struct ReceiptInput<'a> {
     sha256: &'a str,
     size: u64,
@@ -178,6 +196,7 @@ struct ReceiptInput<'a> {
     requested_url: &'a str,
     verdict: Verdict,
     findings: &'a [Finding],
+    detector_results: &'a [arbitraitor_analysis::DetectorResult],
 }
 
 impl ArbitraitorApi {
@@ -238,6 +257,7 @@ impl ArbitraitorApi {
             requested_url: url,
             verdict,
             findings: &result.findings,
+            detector_results: &result.detector_results,
         };
         let receipt_path = self.persist_receipt(&receipt_input)?;
         Ok(InspectionResult {
@@ -306,33 +326,56 @@ impl ArbitraitorApi {
         })
     }
 
-    /// Releases a stored artifact to `dest`, re-verifying the digest first.
+    /// Releases a stored artifact to `dest` through the ADR-0015 safe-release
+    /// primitive.
+    ///
+    /// Release requires a prior [`ArbitraitorApi::inspect`] call that produced
+    /// a receipt for the artifact, and the recorded policy verdict must permit
+    /// release (it must not be [`Verdict::Block`] or [`Verdict::Error`]). The
+    /// actual write is performed by [`arbitraitor_exec::release::release_artifact`],
+    /// which re-verifies the digest before and after writing, rejects symlinks
+    /// and hard-link surprises, writes via a sibling temporary file with
+    /// restrictive permissions, and publishes atomically when possible.
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::NotFound`] when the digest is absent, or
-    /// [`ApiError::Io`] when the destination cannot be written.
+    /// Returns [`ApiError::NotFound`] when the digest is absent or invalid,
+    /// [`ApiError::NoReceipt`] when no prior inspection receipt exists for the
+    /// artifact, [`ApiError::PolicyBlocked`] when the recorded verdict blocks
+    /// release, or [`ApiError::Release`] when the safe-release primitive
+    /// rejects the destination or fails verification.
     pub fn release(&self, sha256: &str, dest: &Path) -> Result<ReleaseResult, ApiError> {
         let digest = parse_digest(sha256)?;
-        let handle = self
-            .store
-            .get(&digest)
-            .map_err(not_found_if_missing(sha256))?;
-        let mut reader = handle.read();
-        let mut bytes = Vec::with_capacity(usize::try_from(handle.size()).unwrap_or(0));
-        reader.read_to_end(&mut bytes)?;
-        let actual = Sha256::digest(&bytes);
-        let verified = actual.as_slice() == digest.as_bytes();
-        if !verified {
-            return Err(ApiError::NotFound(format!(
-                "digest verification failed for {sha256}"
-            )));
+        let verdict = self.lookup_verdict_for_release(sha256)?;
+        if matches!(verdict, Verdict::Block | Verdict::Error) {
+            return Err(ApiError::PolicyBlocked(verdict));
         }
-        std::fs::write(dest, &bytes)?;
+        let receipt = arbitraitor_exec::release::release_artifact(
+            &self.store,
+            &digest,
+            dest,
+            &arbitraitor_exec::release::ReleasePolicy::default(),
+        )?;
         Ok(ReleaseResult {
-            path: dest.to_path_buf(),
+            path: receipt.destination,
+            bytes_written: receipt.bytes_written,
+            method: receipt.method,
             sha256_verified: true,
         })
+    }
+
+    /// Looks up the policy verdict recorded in the persisted receipt for the
+    /// given artifact digest. Release is denied when no receipt exists, proving
+    /// the artifact was never analyzed through the inspection pipeline.
+    fn lookup_verdict_for_release(&self, sha256: &str) -> Result<Verdict, ApiError> {
+        let path = self.receipts_dir.join(format!("{sha256}.json"));
+        if !path.is_file() {
+            return Err(ApiError::NoReceipt(sha256.to_owned()));
+        }
+        let data = std::fs::read(&path)?;
+        let receipt: Receipt = serde_json::from_slice(&data)
+            .map_err(|error| ApiError::Receipt(format!("{}: {error}", path.display())))?;
+        Ok(receipt.verdict.verdict)
     }
 
     /// Queries persisted receipts, optionally limited and filtered by time.
@@ -440,7 +483,7 @@ impl ArbitraitorApi {
         } else {
             retrieval
         };
-        let receipt = ReceiptBuilder::new(
+        let mut builder = ReceiptBuilder::new(
             ARBITRAITOR_VERSION,
             input.sha256,
             input.size,
@@ -448,8 +491,19 @@ impl ArbitraitorApi {
             timestamps,
         )
         .retrieval(retrieval)
-        .findings(input.findings.iter().map(FindingSummary::from))
-        .build();
+        .findings(input.findings.iter().map(FindingSummary::from));
+
+        for detector in input.detector_results {
+            builder = builder.detector_version(DetectorVersion {
+                id: detector.metadata.id.clone(),
+                version: detector.metadata.version.clone(),
+            });
+            if let Some(provenance) = &detector.provenance {
+                builder = builder.detector_provenance(provenance.clone());
+            }
+        }
+
+        let receipt = builder.build();
         let path = self.receipts_dir.join(format!("{}.json", input.sha256));
         let json = serde_json::to_vec_pretty(&receipt)
             .map_err(|error| ApiError::Receipt(error.to_string()))?;

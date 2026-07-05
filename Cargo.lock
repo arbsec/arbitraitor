@@ -140,6 +140,7 @@ dependencies = [
  "arbitraitor-core",
  "arbitraitor-intel",
  "arbitraitor-model",
+ "arbitraitor-sandbox",
  "arbitraitor-shell",
  "arbitraitor-workspace-hack",
  "async-trait",
@@ -255,6 +256,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-core",
+ "arbitraitor-exec",
  "arbitraitor-fetch",
  "arbitraitor-model",
  "arbitraitor-policy",

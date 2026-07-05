@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 arbitraitor-analysis = { workspace = true }
 arbitraitor-core = { workspace = true }
+arbitraitor-exec = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-policy = { workspace = true }

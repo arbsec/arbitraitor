@@ -44,6 +44,34 @@ fn test_config(root: &std::path::Path) -> Config {
     }
 }
 
+fn pass_policy_config(label: &str) -> Config {
+    let policy_toml = "\
+version = 1\n\
+[network]\n\
+require_https = false\n\
+block_private_networks = false\n\
+[defaults]\n\
+action = \"pass\"\n";
+    Config {
+        policy_toml: policy_toml.to_owned(),
+        ..test_config(&unique_dir(label))
+    }
+}
+
+fn block_policy_config(label: &str) -> Config {
+    let policy_toml = "\
+version = 1\n\
+[network]\n\
+require_https = false\n\
+block_private_networks = false\n\
+[defaults]\n\
+action = \"block\"\n";
+    Config {
+        policy_toml: policy_toml.to_owned(),
+        ..test_config(&unique_dir(label))
+    }
+}
+
 /// Spawns a mock HTTP server that responds with `body` and the given content type.
 async fn mock_http_server(body: &'static [u8], content_type: &'static str) -> String {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -126,21 +154,107 @@ async fn scan_existing_artifact() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn release_writes_verified_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let root = unique_dir("release");
+async fn release_without_inspection_receipt_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = unique_dir("release-no-receipt");
     let api = ArbitraitorApi::new(test_config(&root))?;
-    let payload = b"release-me-payload";
+    let payload = b"never-inspected-payload";
     let url = mock_http_server(payload, "application/octet-stream").await;
 
+    // Fetch stores the artifact but never analyzes it — no receipt exists.
     let fetched = api.fetch(&url).await?;
-    let dest = root.join("released.bin");
-    let result = api.release(&fetched.sha256, &dest)?;
+    let dest = root.join("should-not-exist.bin");
+    let result = api.release(&fetched.sha256, &dest);
+
+    assert!(
+        matches!(result, Err(ApiError::NoReceipt(_))),
+        "release without inspection receipt must be rejected, got {result:?}"
+    );
+    assert!(
+        !dest.exists(),
+        "destination must not be written on rejection"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_after_block_verdict_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    use arbitraitor_model::verdict::Verdict;
+    let root = unique_dir("release-blocked-root");
+    let config = block_policy_config("release-blocked");
+    let api = ArbitraitorApi::new(config)?;
+    let url = mock_http_server(b"blocked-content", "text/plain").await;
+
+    let inspected = api.inspect(&url).await?;
+    assert_eq!(inspected.verdict, Verdict::Block);
+
+    let dest = root.join("blocked-release.bin");
+    let result = api.release(&inspected.sha256, &dest);
+
+    assert!(
+        matches!(result, Err(ApiError::PolicyBlocked(Verdict::Block))),
+        "release after Block verdict must be rejected, got {result:?}"
+    );
+    assert!(!dest.exists());
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn release_after_inspection_uses_safe_primitive() -> Result<(), Box<dyn std::error::Error>> {
+    let config = pass_policy_config("release-safe");
+    let api = ArbitraitorApi::new(config)?;
+    let payload = b"safe-release-payload";
+    let url = mock_http_server(payload, "text/plain").await;
+
+    let inspected = api.inspect(&url).await?;
+    let dest = unique_dir("release-safe-dest").join("released.bin");
+    let result = api.release(&inspected.sha256, &dest)?;
 
     assert_eq!(result.path, dest);
     assert!(result.sha256_verified);
+    assert_eq!(result.bytes_written, u64::try_from(payload.len())?);
     let written = std::fs::read(&dest)?;
     assert_eq!(written.as_slice(), payload);
-    assert_eq!(expected_sha256(&written), fetched.sha256);
+    assert_eq!(expected_sha256(&written), inspected.sha256);
+
+    // ADR-0015: released files must have restrictive permissions (0600 on POSIX).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest)?.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "released file must have 0600 permissions, got {mode:o}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn release_rejects_symlink_destination() -> Result<(), Box<dyn std::error::Error>> {
+    let root = unique_dir("release-symlink-root");
+    let config = pass_policy_config("release-symlink");
+    let api = ArbitraitorApi::new(config)?;
+    let payload = b"symlink-reject-payload";
+    let url = mock_http_server(payload, "text/plain").await;
+
+    let inspected = api.inspect(&url).await?;
+
+    // ADR-0015: the safe-release primitive must reject symlink destinations.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("nonexistent-target"), root.join("link-dest"))?;
+
+    let dest = root.join("link-dest");
+    let result = api.release(&inspected.sha256, &dest);
+
+    assert!(
+        result.is_err(),
+        "release to a symlink destination must be rejected"
+    );
+    assert!(!root.join("nonexistent-target").exists());
     Ok(())
 }
 

@@ -25,7 +25,7 @@ use arbitraitor_intel::{
 };
 use arbitraitor_model::artifact::{ArtifactKind, ShellDialect, TarCompression};
 use arbitraitor_model::finding::{
-    DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
+    DetectorMetadata, DetectorProvenance, Evidence, EvidenceKind, Finding, FindingCategory,
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
@@ -47,6 +47,12 @@ pub trait Detector: Send + Sync {
 
     /// Analyze the artifact within the given context and return detector findings.
     fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding>;
+
+    /// Optional binary provenance (subprocess detectors). Returns `None` for
+    /// pure-Rust detectors that have no external binary or ruleset.
+    fn provenance(&self) -> Option<DetectorProvenance> {
+        None
+    }
 }
 
 /// Context provided to detectors during analysis.
@@ -101,6 +107,8 @@ pub struct DetectorResult {
     pub finding_count: usize,
     /// Detector execution duration in milliseconds.
     pub duration_ms: u64,
+    /// Binary provenance for subprocess detectors, when available.
+    pub provenance: Option<DetectorProvenance>,
 }
 
 /// Execution status for one detector.
@@ -384,6 +392,7 @@ fn run_detector(
     ctx: OwnedAnalysisContext,
     metadata: DetectorMetadata,
 ) -> DetectorExecution {
+    let provenance = detector.provenance();
     let started = Instant::now();
     let timeout = Duration::from_millis(metadata.default_timeout_ms);
     let (tx, rx) = mpsc::channel();
@@ -406,6 +415,7 @@ fn run_detector(
                     status: DetectorStatus::Ok,
                     finding_count: findings.len(),
                     duration_ms: elapsed_millis(started.elapsed()),
+                    provenance,
                 },
                 findings,
             }
@@ -417,6 +427,7 @@ fn run_detector(
                 status: DetectorStatus::Error(panic_message(payload.as_ref())),
                 finding_count: 0,
                 duration_ms: elapsed_millis(started.elapsed()),
+                provenance,
             },
         },
         Err(mpsc::RecvTimeoutError::Timeout) => DetectorExecution {
@@ -426,6 +437,7 @@ fn run_detector(
                 status: DetectorStatus::Timeout,
                 finding_count: 0,
                 duration_ms: elapsed_millis(started.elapsed()),
+                provenance,
             },
         },
         Err(mpsc::RecvTimeoutError::Disconnected) => DetectorExecution {
@@ -435,6 +447,7 @@ fn run_detector(
                 status: DetectorStatus::Error("detector thread disconnected".to_owned()),
                 finding_count: 0,
                 duration_ms: elapsed_millis(started.elapsed()),
+                provenance,
             },
         },
     }
