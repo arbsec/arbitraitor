@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
-- `arbitraitor env <shell>` — hidden alias of `wrappers init` for discoverability (supports all 11 shells)
-- Oil shell (OSH/YSH) support in shell initialization (bash-compatible PATH snippet)
+- `wrappers init --dry-run` — preview what would change without writing to rcfile
+- `wrappers init --no-backup` — skip backup file creation (backup is created by default)
+- `hook init` now emits a deprecation warning and supports `ARBITRAITOR_HOOK_DISABLE=1` bypass
 - `arbitraitor scan` — scan local files or stdin without retrieval
 - `arbitraitor explain` — explain a verdict from a receipt file
 - `arbitraitor store` — manage CAS artifacts (list, inspect, gc)
@@ -68,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed `book/src/cli-reference.md` exit codes to match actual `Verdict`-to-exit-code mapping (0/10/21/30/33/34)
 - Marked `arbitraitor-daemon` and `arbitraitor-package-manager` as experimental in architecture docs (spec §47 excludes both from pre-1.0 scope)
 - Updated CLI subcommand count from 22 to 23 in README.md and book
+- Rcfile installation now uses atomic writes (temp-file + rename) with backup by default
+- `hook init` is deprecated — emits warning recommending `wrappers install` instead; generated trap now respects `ARBITRAITOR_HOOK_DISABLE=1`
 - MCP `explain` and `sanitize_for_agent` extracted to dedicated `explain.rs` module
 - Test suites extracted to `tests.rs` files across 10 crates (mcp, cli, analysis, core, yarax, shell, provenance, archive, exec, intel, store)
 - `--native` flag repurposed as confirmation override (execution mode auto-detected from artifact type)
@@ -87,8 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `actions/upload-artifact` and `actions/download-artifact` bumped to v7/v8 to clear the Node.js 20 deprecation warning
 - Daemon in-process `release()` now requires a prior inspection receipt and a release-permitting verdict, and routes publication through ADR-0015's `release_artifact` safe-release primitive instead of `std::fs::write`
 - Tirith subprocess detector now records detector binary provenance in receipts and hardens subprocess execution with seccomp, Landlock, and pre-exec resource limits where available
-- Native binary release now routes through ADR-0015 safe-destination (`release_artifact` with `O_NOFOLLOW` + capability-rooted handle) instead of `std::fs::write`, closing TOCTOU and symlink-follow vectors at the native cache path (#375)
-- Native execution resource limits now applied in `pre_exec` (inherited across `execve`) instead of parent-side `prlimit` after spawn, closing the fork-before-prlimit race where a native binary could fork unbounded grandchildren before limits took effect (#375)
 
 ### Security
 
@@ -104,10 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server, and plugin host now refuse to run as root before any untrusted content
   is touched. A new `--allow-root` global CLI flag provides a diagnostic bypass
   for the `doctor` command and integration tests.
-
-### Security
-
-- Enforce monotonic project configuration per ADR-0017 (#376): `.arbitraitor/config.toml` is untrusted repository content and may only tighten inherited policy. Weakening attempts (enabling execution, disabling detectors, raising limits, relaxing integrity, weakening default action) are rejected with `ConfigError::PolicyWeakening`. New `ConfigSource` enum classifies layers as trusted or untrusted.
 
 ## [0.1.0-alpha] — 2026-06-23
 

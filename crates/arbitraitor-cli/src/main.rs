@@ -254,6 +254,7 @@ struct WrappersStatusCommand {
 }
 
 #[derive(Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct InitCommand {
     /// Target shell (auto-detected from $SHELL if omitted).
     shell: Option<String>,
@@ -266,6 +267,12 @@ struct InitCommand {
     /// Print detected shell and target rcfile, then exit.
     #[arg(long)]
     detect_shell: bool,
+    /// Show what would change without writing to rcfile (use with --install).
+    #[arg(long, requires = "install")]
+    dry_run: bool,
+    /// Skip backup file creation (default: backup is created).
+    #[arg(long, requires = "install")]
+    no_backup: bool,
 }
 
 /// Hidden `env` alias of `wrappers init`.
@@ -882,9 +889,33 @@ fn handle_init(cmd: &InitCommand, shim_dir: &Path) -> Result<()> {
     }
 
     if cmd.install {
-        let rcfile =
-            shell_init::install_to_rcfile(shell, shim_dir).map_err(|e| miette::miette!("{e}"))?;
-        writeln!(stdout, "installed init snippet to {}", rcfile.display()).into_diagnostic()?;
+        let options = shell_init::InstallOptions {
+            dry_run: cmd.dry_run,
+            backup: !cmd.no_backup,
+        };
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| miette::miette!("HOME not set"))?;
+        let rcfile = shell_init::install_to_rcfile_in(shell, shim_dir, &home, &options)
+            .map_err(|e| miette::miette!("{e}"))?;
+        if cmd.dry_run {
+            writeln!(
+                stdout,
+                "dry-run: would install init snippet to {}",
+                rcfile.display()
+            )
+            .into_diagnostic()?;
+        } else if !cmd.no_backup {
+            let backup = format!("{}.arbitraitor.bak", rcfile.display());
+            writeln!(
+                stdout,
+                "installed init snippet to {} (backup: {backup})",
+                rcfile.display()
+            )
+            .into_diagnostic()?;
+        } else {
+            writeln!(stdout, "installed init snippet to {}", rcfile.display()).into_diagnostic()?;
+        }
         return Ok(());
     }
 
