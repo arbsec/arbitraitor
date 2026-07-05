@@ -38,22 +38,20 @@ These flags apply to all commands:
 | Flag | Description |
 |------|-------------|
 | `--config <PATH>` | Path to TOML configuration file |
-| `--policy <PATH>` | Path to policy TOML file |
-| `--output <FORMAT>` | Output format: `text`, `json`, `yaml` (default: `text`) |
-| `--log-level <LEVEL>` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
-| `--no-color` | Disable colored output |
-| `--quiet` | Suppress non-essential output |
+| `--verbose` | Enable verbose output (repeat for more detail: `-v`, `-vv`) |
+
+> **Note:** Per-command output format flags (e.g., `--format`, `--json`) are available on specific subcommands, not as global flags.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Pass — artifact passed all policy checks |
-| 1 | Warn — artifact has findings, human review recommended |
-| 2 | Incomplete — analysis could not complete, blocking by default |
-| 3 | Block — artifact blocked by policy |
-| 4 | Error — a fatal error occurred (network, I/O, configuration) |
-| 5 | Approval required — human approval needed, non-interactive mode |
+| 10 | Warn — artifact has findings, human review recommended |
+| 21 | Prompt — human approval needed (non-interactive mode blocks by default) |
+| 30 | Block — artifact blocked by policy |
+| 33 | Error — a fatal error occurred (network, I/O, configuration) |
+| 34 | Incomplete — analysis could not complete, blocking by default |
 
 ## Inspect command
 

@@ -187,7 +187,7 @@ arbitraitor hook init
 ## Architecture
 
 ```text
-arbitraitor-cli             Command-line interface (22 subcommands)
+arbitraitor-cli             Command-line interface (23 subcommands)
 ├── arbitraitor-core         Config, metrics, health checks, state machine
 │   ├── arbitraitor-model    Domain types, receipts, findings (newtypes)
 │   └── arbitraitor-policy   TOML policy engine with rule evaluation
@@ -250,13 +250,13 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/README.md) — 26 accepted ADRs
+- [Architecture Decision Records](docs/adr/README.md) — 21 accepted, 5 proposed
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - Crate documentation: `cargo doc --workspace --open`
 
 ## Status
 
-**Pre-alpha.** Not ready for production use. The API, CLI, receipts, and policy schemas will change. 1103+ tests passing.
+**Pre-alpha.** Not ready for production use. The API, CLI, receipts, and policy schemas will change. 1117+ tests passing.
 
 ## License
 

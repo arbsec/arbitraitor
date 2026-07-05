@@ -5,8 +5,8 @@ Arbitraitor is **a security boundary** — policy-enforced download, inspection,
 **Read before writing code:**
 
 - [Development conventions](docs/conventions.md) — architecture boundaries, security invariants, coding rules.
-- [Architecture Decision Records](docs/adr/README.md) — 26 accepted ADRs.
-- [docs ownership](docs/doc-ownership.md) — surface ownership map, stability tiers.
+- [Architecture Decision Records](docs/adr/README.md) — 21 accepted, 5 proposed.
+- [Documentation ownership](docs/doc-ownership.md) — surface ownership map, stability tiers.
 
 ---
 
