@@ -39,23 +39,43 @@ async fn stored_digest(
 }
 
 mod adversary_17_project_config {
+    use arbitraitor_core::config::ConfigError;
+
     use super::*;
 
+    fn write_project_config(
+        project_dir: &std::path::Path,
+        body: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = project_dir.join(".arbitraitor");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("config.toml"), body)?;
+        Ok(())
+    }
+
     #[test]
-    fn system_then_project_config_layers_correctly() -> TestResult {
+    fn project_config_tightening_limit_accepted() -> TestResult {
         let root = temp_dir()?;
         let system = root.join("system.toml");
         std::fs::write(&system, "[fetch]\nmax_bytes = 1048576\n")?;
 
         let project = root.join("project");
-        std::fs::create_dir_all(project.join(".arbitraitor"))?;
-        std::fs::write(
-            project.join(".arbitraitor/config.toml"),
-            "[fetch]\nmax_bytes = 524288\n",
-        )?;
+        write_project_config(&project, "[fetch]\nmax_bytes = 524288\n")?;
 
         let config = Config::load_from_layers(Some(&system), None, &project)?;
         assert_eq!(config.fetch.max_bytes, 524_288);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_config_enabling_integrity_accepted() -> TestResult {
+        let root = temp_dir()?;
+        let project = root.join("project");
+        write_project_config(&project, "[integrity]\nrequire_digest = true\n")?;
+
+        let config = Config::load_from_layers(None, None, &project)?;
+        assert!(config.integrity.require_digest);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -76,6 +96,90 @@ mod adversary_17_project_config {
         let root = temp_dir()?;
         let config = Config::load_from_layers(None, None, &root)?;
         assert_eq!(config, Config::default());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_config_raising_limit_rejected() -> TestResult {
+        let root = temp_dir()?;
+        let system = root.join("system.toml");
+        std::fs::write(&system, "[fetch]\nmax_bytes = 524288\n")?;
+
+        let project = root.join("project");
+        write_project_config(&project, "[fetch]\nmax_bytes = 1048576\n")?;
+
+        let result = Config::load_from_layers(Some(&system), None, &project);
+        assert!(
+            matches!(result, Err(ConfigError::PolicyWeakening { .. })),
+            "project config must not raise fetch.max_bytes (ADR-0017)"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_config_enabling_execution_rejected() -> TestResult {
+        let root = temp_dir()?;
+        let project = root.join("project");
+        write_project_config(&project, "[execution]\nenabled = true\n")?;
+
+        let result = Config::load_from_layers(None, None, &project);
+        assert!(
+            matches!(result, Err(ConfigError::PolicyWeakening { .. })),
+            "project config must not enable execution (ADR-0017)"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_config_disabling_detector_rejected() -> TestResult {
+        let root = temp_dir()?;
+        let project = root.join("project");
+        write_project_config(&project, "[detectors]\nshell_analysis = false\n")?;
+
+        let result = Config::load_from_layers(None, None, &project);
+        assert!(
+            matches!(result, Err(ConfigError::PolicyWeakening { .. })),
+            "project config must not disable detectors (ADR-0017)"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_config_weakening_integrity_rejected() -> TestResult {
+        let root = temp_dir()?;
+        let system = root.join("system.toml");
+        std::fs::write(&system, "[integrity]\nrequire_provenance = true\n")?;
+
+        let project = root.join("project");
+        write_project_config(&project, "[integrity]\nrequire_provenance = false\n")?;
+
+        let result = Config::load_from_layers(Some(&system), None, &project);
+        assert!(
+            matches!(result, Err(ConfigError::PolicyWeakening { .. })),
+            "project config must not relax integrity requirements (ADR-0017)"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_config_weakening_default_action_rejected() -> TestResult {
+        let root = temp_dir()?;
+        let system = root.join("system.toml");
+        std::fs::write(&system, "[policy]\ndefault_action = \"block\"\n")?;
+
+        let project = root.join("project");
+        write_project_config(&project, "[policy]\ndefault_action = \"pass\"\n")?;
+
+        let result = Config::load_from_layers(Some(&system), None, &project);
+        assert!(
+            matches!(result, Err(ConfigError::PolicyWeakening { .. })),
+            "project config must not weaken default_action (ADR-0017)"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
