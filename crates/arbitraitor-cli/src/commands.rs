@@ -5,16 +5,19 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use arbitraitor_core::config::Config;
-use arbitraitor_core::health::HealthChecker;
+use arbitraitor_core::health::{HealthChecker, HealthStatus};
 use arbitraitor_mcp::sanitize_for_agent;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::PolicyEngine;
 use arbitraitor_receipt::Receipt;
 use arbitraitor_store::ContentStore;
 use arbitraitor_update::verifier::UpdateVerifier;
+use arbitraitor_wrapper::init as shell_init;
+use arbitraitor_wrapper::shim::{ShimConfig, ShimState, WrapperTarget, check_shims};
 use clap::{Args, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 use crate::{ExplainFormat, default_cas_dir, write_explainability, write_report};
 
@@ -67,6 +70,9 @@ pub struct DoctorCommand {
     pub cas_dir: Option<PathBuf>,
     #[arg(long, value_name = "DIR")]
     pub rules: Option<PathBuf>,
+    /// Output JSON instead of human-readable format.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -354,13 +360,24 @@ pub(crate) fn policy(command: &PolicyCommand) -> Result<()> {
     Ok(())
 }
 
+fn print_health_row(
+    stdout: &mut std::io::StdoutLock<'_>,
+    name: &str,
+    value: &str,
+    ok: bool,
+) -> Result<()> {
+    let mark = if ok { "✓" } else { "✗" };
+    writeln!(stdout, "  {name:<12} {value}  {mark}").into_diagnostic()
+}
+
+#[allow(clippy::too_many_lines)]
 pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     let cas_dir = command
         .cas_dir
         .clone()
         .or_else(|| config.store.cas_dir.clone())
         .unwrap_or_else(default_cas_dir);
-    let mut checker = HealthChecker::new().with_store(cas_dir);
+    let mut checker = HealthChecker::new().with_store(cas_dir.clone());
     if let Some(rules_dir) = command.rules.as_deref() {
         let versions = crate::rule_pack_versions(rules_dir)?;
         if let Some(first) = versions.first() {
@@ -369,12 +386,130 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         checker = checker.with_detector_versions(versions);
     }
     let report = checker.check();
-    let json = serde_json::to_vec_pretty(&report).into_diagnostic()?;
-    std::io::stdout()
-        .lock()
-        .write_all(&json)
-        .into_diagnostic()?;
-    Ok(())
+
+    if command.json {
+        let json = serde_json::to_vec_pretty(&report).into_diagnostic()?;
+        std::io::stdout()
+            .lock()
+            .write_all(&json)
+            .into_diagnostic()?;
+        return Ok(());
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    let mut all_healthy = true;
+
+    let store_healthy = report
+        .checks
+        .get("store")
+        .is_some_and(|c| c.status == HealthStatus::Healthy);
+
+    let shell_info = shell_init::detect_shell();
+    let shell_ok = shell_info.is_some();
+
+    let shim_dir = std::env::var_os("HOME").map_or_else(
+        || PathBuf::from("/dev/null"),
+        |h| PathBuf::from(h).join(".arbitraitor").join("shims"),
+    );
+    let shim_config = ShimConfig {
+        shim_dir: shim_dir.clone(),
+        use_symlinks: false,
+    };
+    let shim_results = check_shims(&shim_config, WrapperTarget::ALL);
+    let shims_ok = shim_results
+        .iter()
+        .any(|s| matches!(s.state, ShimState::Script | ShimState::Symlink));
+
+    let path_str = std::env::var("PATH").unwrap_or_default();
+    let path_has_shim = path_str
+        .split(if cfg!(windows) { ';' } else { ':' })
+        .any(|p| Path::new(p) == shim_dir.as_path());
+
+    let rcfile_ok = shell_info
+        .as_ref()
+        .and_then(|d| shell_init::target_rcfile(d.shell))
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .is_some_and(|content| content.contains(shell_init::MARKER_BEGIN));
+
+    writeln!(stdout, "Arbitraitor health:").into_diagnostic()?;
+    print_health_row(&mut stdout, "version", &report.version, true)?;
+    print_health_row(
+        &mut stdout,
+        "store",
+        &cas_dir.display().to_string(),
+        store_healthy,
+    )?;
+
+    let check_count = report.checks.len();
+    let healthy_count = report
+        .checks
+        .values()
+        .filter(|c| c.status == HealthStatus::Healthy)
+        .count();
+    print_health_row(
+        &mut stdout,
+        "checks",
+        &format!("{healthy_count}/{check_count} healthy"),
+        check_count > 0,
+    )?;
+
+    let shell_label = match &shell_info {
+        Some(d) => format!(
+            "{} (via {})",
+            d.shell.as_str(),
+            match d.source {
+                shell_init::DetectionSource::EnvShell => "$SHELL",
+                shell_init::DetectionSource::ParentProcess => "parent process",
+            }
+        ),
+        None => "not detected".to_owned(),
+    };
+    print_health_row(&mut stdout, "shell", &shell_label, shell_ok)?;
+
+    let shims_label = {
+        let installed: Vec<&str> = shim_results
+            .iter()
+            .filter(|s| matches!(s.state, ShimState::Script | ShimState::Symlink))
+            .map(|s| s.target.binary_name())
+            .collect();
+        if installed.is_empty() {
+            "none installed".to_owned()
+        } else {
+            installed.join(", ")
+        }
+    };
+    print_health_row(&mut stdout, "shims", &shims_label, shims_ok)?;
+    print_health_row(
+        &mut stdout,
+        "PATH",
+        &shim_dir.display().to_string(),
+        path_has_shim,
+    )?;
+
+    let rcfile_label = shell_info
+        .as_ref()
+        .and_then(|d| shell_init::target_rcfile(d.shell))
+        .map_or_else(|| "n/a".to_owned(), |p| p.display().to_string());
+    print_health_row(&mut stdout, "rcfile", &rcfile_label, rcfile_ok)?;
+
+    all_healthy = all_healthy && shims_ok && path_has_shim && rcfile_ok;
+
+    if !all_healthy {
+        writeln!(stdout).into_diagnostic()?;
+        writeln!(stdout, "Fix shell integration:").into_diagnostic()?;
+        if !shims_ok {
+            writeln!(stdout, "  arbitraitor wrappers install").into_diagnostic()?;
+        }
+        if !path_has_shim || !rcfile_ok {
+            writeln!(stdout, "  arbitraitor wrappers init --install").into_diagnostic()?;
+        }
+    }
+
+    if all_healthy {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
 }
 
 pub(crate) fn version() -> Result<()> {
