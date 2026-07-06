@@ -277,6 +277,7 @@ struct InitCommand {
 
 /// Hidden `env` alias of `wrappers init`.
 #[derive(Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct EnvCommand {
     /// Target shell (auto-detected from $SHELL if omitted).
     shell: Option<String>,
@@ -289,6 +290,12 @@ struct EnvCommand {
     /// Print detected shell and target rcfile, then exit.
     #[arg(long)]
     detect_shell: bool,
+    /// Show what would change without writing to rcfile (use with --install).
+    #[arg(long, requires = "install")]
+    dry_run: bool,
+    /// Skip backup file creation (default: backup is created).
+    #[arg(long, requires = "install")]
+    no_backup: bool,
 }
 
 #[derive(Args)]
@@ -467,6 +474,8 @@ async fn main() -> Result<()> {
                 install: env_cmd.install,
                 uninstall: env_cmd.uninstall,
                 detect_shell: env_cmd.detect_shell,
+                dry_run: env_cmd.dry_run,
+                no_backup: env_cmd.no_backup,
             };
             handle_init(&init_cmd, &shim_dir)?;
         }
@@ -889,23 +898,37 @@ fn handle_init(cmd: &InitCommand, shim_dir: &Path) -> Result<()> {
     }
 
     if cmd.install {
-        let options = shell_init::InstallOptions {
-            dry_run: cmd.dry_run,
-            backup: !cmd.no_backup,
-        };
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| miette::miette!("HOME not set"))?;
-        let rcfile = shell_init::install_to_rcfile_in(shell, shim_dir, &home, &options)
-            .map_err(|e| miette::miette!("{e}"))?;
+        let rcfile_target = shell_init::target_rcfile(shell)
+            .ok_or_else(|| miette::miette!("no rcfile known for shell '{}'", shell.as_str()))?;
         if cmd.dry_run {
+            let snippet =
+                shell_init::render_snippet(shell, shim_dir).map_err(|e| miette::miette!("{e}"))?;
+            let existing = std::fs::read_to_string(&rcfile_target).unwrap_or_default();
+            let updated = if existing.is_empty() {
+                format!("[new file] {snippet}")
+            } else {
+                snippet
+            };
             writeln!(
                 stdout,
-                "dry-run: would install init snippet to {}",
-                rcfile.display()
+                "Dry-run: would write to {}\n{updated}",
+                rcfile_target.display()
             )
             .into_diagnostic()?;
-        } else if !cmd.no_backup {
+            return Ok(());
+        }
+        let options = shell_init::InstallOptions {
+            dry_run: false,
+            backup: !cmd.no_backup,
+        };
+        let rcfile = shell_init::install_to_rcfile_in(shell, shim_dir, &home, &options)
+            .map_err(|e| miette::miette!("{e}"))?;
+        if cmd.no_backup {
+            writeln!(stdout, "installed init snippet to {}", rcfile.display()).into_diagnostic()?;
+        } else {
             let backup = format!("{}.arbitraitor.bak", rcfile.display());
             writeln!(
                 stdout,
@@ -913,8 +936,6 @@ fn handle_init(cmd: &InitCommand, shim_dir: &Path) -> Result<()> {
                 rcfile.display()
             )
             .into_diagnostic()?;
-        } else {
-            writeln!(stdout, "installed init snippet to {}", rcfile.display()).into_diagnostic()?;
         }
         return Ok(());
     }

@@ -565,7 +565,7 @@ fn atomic_write(target: &Path, content: &str, options: &InstallOptions) -> Resul
         })?;
     }
 
-    let temp = target.with_extension("arbitraitor.tmp");
+    let temp = target.with_extension(format!("arbitraitor.{}.tmp", std::process::id()));
     std::fs::write(&temp, content).map_err(|source| InitError::WriteRcfile {
         path: temp.clone(),
         source,
