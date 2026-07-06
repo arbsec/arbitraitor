@@ -92,6 +92,9 @@ enum Command {
     Graph(commands::GraphCommand),
     Approve(commands::ApproveCommand),
     Execute(commands::ExecuteCommand),
+    /// Hidden alias of `wrappers init` for discoverability.
+    #[command(hide = true)]
+    Env(EnvCommand),
     Version,
 }
 
@@ -252,6 +255,22 @@ struct WrappersStatusCommand {
 
 #[derive(Args)]
 struct InitCommand {
+    /// Target shell (auto-detected from $SHELL if omitted).
+    shell: Option<String>,
+    /// Write to shell rcfile (instead of printing to stdout).
+    #[arg(long)]
+    install: bool,
+    /// Remove previously installed lines from rcfile.
+    #[arg(long)]
+    uninstall: bool,
+    /// Print detected shell and target rcfile, then exit.
+    #[arg(long)]
+    detect_shell: bool,
+}
+
+/// Hidden `env` alias of `wrappers init`.
+#[derive(Args)]
+struct EnvCommand {
     /// Target shell (auto-detected from $SHELL if omitted).
     shell: Option<String>,
     /// Write to shell rcfile (instead of printing to stdout).
@@ -431,6 +450,18 @@ async fn main() -> Result<()> {
         }
         Command::Execute(command) => {
             commands::execute(&command, &config)?;
+        }
+        Command::Env(env_cmd) => {
+            let shim_dir = default_shim_dir().ok_or_else(|| {
+                miette::miette!("could not determine home directory for shim path")
+            })?;
+            let init_cmd = InitCommand {
+                shell: env_cmd.shell,
+                install: env_cmd.install,
+                uninstall: env_cmd.uninstall,
+                detect_shell: env_cmd.detect_shell,
+            };
+            handle_init(&init_cmd, &shim_dir)?;
         }
         Command::Version => {
             commands::version()?;

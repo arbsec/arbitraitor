@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
+- `arbitraitor env <shell>` — hidden alias of `wrappers init` for discoverability (supports all 11 shells)
+- Oil shell (OSH/YSH) support in shell initialization (bash-compatible PATH snippet)
 - `arbitraitor scan` — scan local files or stdin without retrieval
 - `arbitraitor explain` — explain a verdict from a receipt file
 - `arbitraitor store` — manage CAS artifacts (list, inspect, gc)
