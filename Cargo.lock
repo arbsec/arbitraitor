@@ -569,7 +569,7 @@ dependencies = [
  "bstr",
  "bumpalo",
  "cc",
- "cranelift-bitset 0.130.2",
+ "cranelift-bitset 0.133.1",
  "crc32fast",
  "crossbeam-utils",
  "crypto-common 0.1.7",
