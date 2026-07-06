@@ -54,13 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Documentation
 
-- 26 ADRs (was 21): ADRs 0022–0026 covering SLSA, in-toto receipts, macOS containment, OpenSSF/Scorecard, EU CRA/NIST SSDF compliance
-- 1103 tests passing (was 867+)
+- 26 ADRs total (21 accepted, 5 proposed): ADRs 0022–0026 covering SLSA, in-toto receipts, macOS containment, OpenSSF/Scorecard, EU CRA/NIST SSDF compliance. Note: ADRs 0022–0026 remain in Proposed status pending acceptance review.
+- 1117 tests passing (was 867+)
 
 ### Changed
 
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
 - `shim install` no longer generates broken package-manager shims that invoked the non-existent `pm run` subcommand. The command now errors with a helpful message pointing to `wrappers install` for curl/wget support.
+- Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
+- Fixed `book/src/cli-reference.md` global flags table: removed `--policy`, `--output`, `--log-level`, `--no-color`, `--quiet` (not implemented); documented actual global flags (`--config`, `--verbose`)
+- Fixed `book/src/cli-reference.md` exit codes to match actual `Verdict`-to-exit-code mapping (0/10/21/30/33/34)
+- Marked `arbitraitor-daemon` and `arbitraitor-package-manager` as experimental in architecture docs (spec §47 excludes both from pre-1.0 scope)
+- Updated CLI subcommand count from 22 to 23 in README.md and book
 - MCP `explain` and `sanitize_for_agent` extracted to dedicated `explain.rs` module
 - Test suites extracted to `tests.rs` files across 10 crates (mcp, cli, analysis, core, yarax, shell, provenance, archive, exec, intel, store)
 - `--native` flag repurposed as confirmation override (execution mode auto-detected from artifact type)

@@ -7,7 +7,7 @@ The Arbitraitor workspace is organized into focused crates. Each crate has a cle
 ```
 arbitraitor/                           # Workspace root (Cargo.toml)
 ├── crates/
-│   ├── arbitraitor-cli/               # CLI entry point (22 subcommands)
+│   ├── arbitraitor-cli/               # CLI entry point (23 subcommands)
 │   ├── arbitraitor-core/              # State machine, config, health checks
 │   ├── arbitraitor-model/             # Domain types, receipts, findings (newtypes)
 │   ├── arbitraitor-fetch/             # HTTP retrieval with SSRF protection
@@ -29,8 +29,8 @@ arbitraitor/                           # Workspace root (Cargo.toml)
 │   ├── arbitraitor-plugin-api/         # Plugin trait hierarchy
 │   ├── arbitraitor-plugin-host/        # Plugin runtime (subprocess + Wasmtime)
 │   ├── arbitraitor-wrapper/            # curl/wget wrapper translators + per-shell init
-│   ├── arbitraitor-daemon/             # Unix socket daemon with background queue
-│   ├── arbitraitor-package-manager/    # Registry adapters (cargo, npm, uv, pnpm, yarn, bun)
+│   ├── arbitraitor-daemon/             # Unix socket daemon (experimental)
+│   ├── arbitraitor-package-manager/    # Registry adapters (experimental: cargo, npm, uv, pnpm, yarn, bun)
 │   ├── arbitraitor-update/             # Signed update manifest verification
 │   ├── arbitraitor-testkit/            # Test infrastructure (SSRF, TLS, raw TCP helpers)
 │   └── arbitraitor-workspace-hack/      # hakari-managed dependency deduplication
@@ -126,6 +126,8 @@ Antivirus adapter trait and implementations.
 
 Registry adapter trait and per-tool implementations.
 
+> **Experimental:** This crate is under active development. Adapters provide recipe definitions and lockfile parsing, but full lifecycle enforcement (registry proxy, post-install scan, build sandbox) is not yet wired through the CLI. Per spec §39.14, per-tool adapters should eventually move to first-party plugins. The crate is included for foundational types only.
+
 **Owns:** `RegistryAdapter` trait, cargo/uv/npm/pnpm/yarn/bun adapters, lockfile parsing, build script analysis, lifecycle policy enforcement
 **Must not:** Direct execution, policy override
 
@@ -133,7 +135,9 @@ Registry adapter trait and per-tool implementations.
 
 curl/wget wrapper translators and per-shell initialization.
 
-**Owns:** Wrapper argument translation, shell init script generation (bash, zsh, fish, dash, ksh, tcsh, sh, csh, nu, pwsh), rcfile installation
+> **Shell support:** 10 shells — bash, zsh, sh, fish, nushell, xonsh, powershell, elvish, posix, tcsh. Use `arbitraitor wrappers init --detect-shell` to auto-detect.
+
+**Owns:** Wrapper argument translation, shell init script generation (10 shells), rcfile installation with idempotent markers and injection-hardened path validation
 **Must not:** Policy evaluation, execution
 
 ### `arbitraitor-update`
