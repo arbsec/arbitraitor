@@ -78,6 +78,17 @@ jobs:
           else
             echo "Publishing $count artifact(s)."
           fi
+          echo "Files in dist/:"
+          find dist -type f || true
+      - name: Delete existing nightly release
+        if: steps.artifacts.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Deleting previous nightly release (immutable releases cannot be updated)..."
+            gh release delete nightly --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          fi
       - name: Get date
         id: date
         if: steps.artifacts.outputs.count != '0'
@@ -96,7 +107,5 @@ jobs:
 
             These are pre-release binaries intended for testing. Not for production use.
           prerelease: true
-          allowUpdates: true
-          removeArtifacts: true
-          replacesArtifacts: true
-          artifacts: dist/*
+          immutableCreate: true
+          artifacts: "dist/*.tar.gz,dist/*.sha256"
