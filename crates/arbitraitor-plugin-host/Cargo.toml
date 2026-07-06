@@ -23,6 +23,7 @@ bench = false
 doc = false
 
 [dependencies]
+arbitraitor-core = { workspace = true }
 arbitraitor-exec = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-plugin-api = { workspace = true }

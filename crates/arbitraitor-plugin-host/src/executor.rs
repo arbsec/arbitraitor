@@ -36,6 +36,9 @@ pub enum ExecutorError {
     /// The configured plugin executable path does not exist.
     #[error("plugin binary not found: {0}")]
     BinaryNotFound(PathBuf),
+    /// The host process is running as root, violating ADR-0009.
+    #[error("plugin host refuses to spawn plugins while running as root (ADR-0009)")]
+    RunningAsRoot,
     /// An allowlisted environment variable is blocked by the mandatory denylist.
     ///
     /// Variables such as `LD_PRELOAD`, `BASH_ENV`, and `PYTHONPATH` can hijack a
@@ -164,6 +167,9 @@ impl SubprocessExecutor {
     /// sandbox setup fails, resource limits cannot be applied, or the child
     /// cannot be spawned with piped stdin/stdout.
     pub fn spawn(&self) -> Result<SubprocessPlugin, ExecutorError> {
+        if arbitraitor_core::privilege::is_running_as_root() {
+            return Err(ExecutorError::RunningAsRoot);
+        }
         self.verify_binary()?;
         self.verify_env_allowlist()?;
 

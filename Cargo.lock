@@ -242,6 +242,7 @@ dependencies = [
  "arbitraitor-policy",
  "arbitraitor-workspace-hack",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -392,6 +393,7 @@ dependencies = [
 name = "arbitraitor-plugin-host"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-core",
  "arbitraitor-exec",
  "arbitraitor-model",
  "arbitraitor-plugin-api",

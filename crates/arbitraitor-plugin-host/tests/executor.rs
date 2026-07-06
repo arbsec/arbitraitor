@@ -178,6 +178,23 @@ fn env_allowlist_passed_through() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[test]
+fn spawn_proceeds_past_root_check_when_unprivileged() {
+    // ADR-0009: when the host is NOT root (the normal CI/dev case), the root
+    // guard must be a no-op and spawn must advance to the next validation
+    // stage. A missing binary surfaces BinaryNotFound, proving the root check
+    // did not short-circuit the non-root path.
+    if arbitraitor_core::privilege::is_running_as_root() {
+        return;
+    }
+    let path = env::temp_dir().join("arbitraitor-root-guard-probe-binary");
+    let result = SubprocessExecutor::new(path.clone()).spawn();
+    assert!(
+        matches!(result, Err(ExecutorError::BinaryNotFound(found)) if found == path),
+        "non-root host must reach binary validation"
+    );
+}
+
 fn mock_plugin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_arbitraitor-plugin-host-mock-plugin"))
 }

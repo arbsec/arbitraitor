@@ -84,6 +84,14 @@ fn accepts_global_config_flag() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn allow_root_flag_is_accepted_globally() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "--allow-root", "doctor"])?;
+
+    assert!(cli.allow_root, "--allow-root must parse to true");
+    Ok(())
+}
+
+#[test]
 fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::try_parse_from([
         "arbitraitor",

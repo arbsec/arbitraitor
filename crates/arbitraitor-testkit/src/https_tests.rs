@@ -26,6 +26,7 @@ fn http_loopback_policy() -> FetchPolicy {
         max_redirects: 0,
         allowed_schemes: vec![FetchScheme::Http],
         allow_loopback_addresses: true,
+        allow_https_to_http_redirect: false,
         require_digest: false,
     }
 }
