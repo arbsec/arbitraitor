@@ -85,9 +85,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view nightly-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Deleting previous nightly release (immutable releases cannot be updated)..."
-            gh release delete nightly --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            gh release delete nightly-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
           fi
       - name: Get date
         id: date
@@ -97,7 +97,7 @@ jobs:
         if: steps.artifacts.outputs.count != '0'
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
         with:
-          tag: nightly
+          tag: nightly-latest
           name: Nightly Build (${{ steps.date.outputs.date }})
           body: |
             Automated nightly build of Arbitraitor.
