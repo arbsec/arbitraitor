@@ -450,5 +450,135 @@ fn context_fields_are_accessible_via_accessors() -> Result<(), Box<dyn std::erro
     let _level: AssuranceLevel = context.assurance_level();
     let _grants: &GrantedCapabilities = context.granted_capabilities();
     let _limits: &ResourceLimits = context.resource_limits();
+    let _controls: &EffectiveControls = context.effective_controls();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0007 containment control proofs (#381)
+// ---------------------------------------------------------------------------
+
+fn all_control_proofs() -> ControlProofs {
+    ControlProofs {
+        filesystem_isolation: Some("landlock".to_owned()),
+        network_isolation: Some("network-namespace".to_owned()),
+        process_tree_control: Some("pid-namespace".to_owned()),
+        privilege_suppression: Some("no-new-privs".to_owned()),
+        syscall_filtering: Some("seccomp-bpf".to_owned()),
+        resource_limits: Some("setrlimit".to_owned()),
+    }
+}
+
+#[test]
+fn contained_fails_closed_without_control_proofs() {
+    // ADR-0007: Contained assurance requires proof of EACH effective control.
+    // Missing all proofs → build must fail-closed.
+    let result = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .assurance_level(AssuranceLevel::Contained)
+        .source_environment([] as [(&str, &str); 0])
+        .build();
+    assert!(
+        matches!(result, Err(ExecError::MissingContainmentProof { .. })),
+        "Contained without control proofs must fail-closed, got {result:?}"
+    );
+}
+
+#[test]
+fn contained_fails_closed_with_partial_proofs() {
+    // Five of six proofs supplied — still must fail-closed.
+    let mut proofs = all_control_proofs();
+    proofs.syscall_filtering = None;
+    let result = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .assurance_level(AssuranceLevel::Contained)
+        .control_proofs(proofs)
+        .source_environment([] as [(&str, &str); 0])
+        .build();
+    assert!(
+        matches!(
+            result,
+            Err(ExecError::MissingContainmentProof { control: _ })
+        ),
+        "Contained with partial proofs must fail-closed"
+    );
+    if let Err(ExecError::MissingContainmentProof { control }) = &result {
+        assert!(
+            control.contains("syscall"),
+            "error must name the missing control, got '{control}'"
+        );
+    }
+}
+
+#[test]
+fn contained_with_all_proofs_records_enforced_matrix() -> Result<(), Box<dyn std::error::Error>> {
+    let proofs = all_control_proofs();
+    let context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .assurance_level(AssuranceLevel::Contained)
+        .control_proofs(proofs)
+        .source_environment([] as [(&str, &str); 0])
+        .build()?;
+
+    assert_eq!(context.assurance_level(), AssuranceLevel::Contained);
+    let controls = context.effective_controls();
+    // Every control must be recorded as Enforced with its proof.
+    let filesystem = controls
+        .filesystem_isolation
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("filesystem_isolation missing"))?;
+    let network = controls
+        .network_isolation
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("network_isolation missing"))?;
+    let process_tree = controls
+        .process_tree_control
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("process_tree_control missing"))?;
+    let privilege = controls
+        .privilege_suppression
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("privilege_suppression missing"))?;
+    let syscall = controls
+        .syscall_filtering
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("syscall_filtering missing"))?;
+    let resource_limits = controls
+        .resource_limits
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("resource_limits missing"))?;
+    assert_eq!(filesystem.applied, ControlStatus::Enforced);
+    assert_eq!(filesystem.proof.as_deref(), Some("landlock"));
+    assert_eq!(network.applied, ControlStatus::Enforced);
+    assert_eq!(process_tree.applied, ControlStatus::Enforced);
+    assert_eq!(privilege.applied, ControlStatus::Enforced);
+    assert_eq!(syscall.applied, ControlStatus::Enforced);
+    assert_eq!(resource_limits.applied, ControlStatus::Enforced);
+    Ok(())
+}
+
+#[test]
+fn mediated_does_not_require_control_proofs() -> Result<(), Box<dyn std::error::Error>> {
+    // Mediated must NOT require containment proofs.
+    let context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .assurance_level(AssuranceLevel::Mediated)
+        .source_environment([] as [(&str, &str); 0])
+        .build()?;
+    assert_eq!(context.assurance_level(), AssuranceLevel::Mediated);
+    // No containment controls recorded for non-contained levels.
+    assert_eq!(context.effective_controls(), &EffectiveControls::default());
+    Ok(())
+}
+
+#[test]
+fn inspect_level_does_not_require_control_proofs() -> Result<(), Box<dyn std::error::Error>> {
+    let context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .assurance_level(AssuranceLevel::Inspect)
+        .source_environment([] as [(&str, &str); 0])
+        .build()?;
+    assert_eq!(context.assurance_level(), AssuranceLevel::Inspect);
+    assert_eq!(context.effective_controls(), &EffectiveControls::default());
     Ok(())
 }

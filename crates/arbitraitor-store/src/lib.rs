@@ -24,10 +24,12 @@ use tracing::{debug, instrument};
 
 pub mod gc;
 pub mod metadata;
+pub mod nonce;
 pub mod retention;
 
 pub use gc::{GarbageCollector, GcStats};
 pub use metadata::{MetadataEntry, MetadataIndex};
+pub use nonce::SpentNonceStore;
 pub use retention::RetentionMode;
 
 const OBJECTS_DIR: &str = "objects";

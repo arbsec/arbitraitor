@@ -1002,3 +1002,103 @@ fn plan_digest_changes_with_execution_context() {
         "policy snapshot must affect plan digest"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0013 durable nonce persistence (#388)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn durable_store_rejects_nonce_spent_before_restart() -> Result<(), Box<dyn std::error::Error>> {
+    // Simulate: issue token, spend it, "restart" (new issuer, same store +
+    // secret), replay the same token → must be rejected.
+    let dir = tempfile::TempDir::new()?;
+    let db_path = dir.path().join("nonces.db");
+
+    let sha256: Sha256Digest = "bb".repeat(32).parse().unwrap_or_else(|error| {
+        panic!("parse digest: {error}");
+    });
+
+    let issuer1 = ApprovalTokenIssuer::with_secret_and_durable_store(
+        b"stable-secret".to_vec(),
+        arbitraitor_store::SpentNonceStore::open(&db_path)?,
+    )?;
+    let token = approval_token(&issuer1, &sha256, "plan-before-restart");
+
+    // Spend the token → succeeds and persists the nonce.
+    let first = issuer1.validate(&token, &sha256, &default_ctx(), SystemTime::now());
+    assert!(first.is_ok(), "first validation must succeed: {first:?}");
+
+    drop(issuer1);
+
+    // "Restart" — new issuer with the same durable store and secret.
+    let issuer2 = ApprovalTokenIssuer::with_secret_and_durable_store(
+        b"stable-secret".to_vec(),
+        arbitraitor_store::SpentNonceStore::open(&db_path)?,
+    )?;
+
+    let replay = issuer2.validate(&token, &sha256, &default_ctx(), SystemTime::now());
+    assert!(
+        replay.is_err(),
+        "token spent before restart must be rejected after restart"
+    );
+    match replay {
+        Err(ref err) => assert!(
+            err.to_string().contains("already been used"),
+            "expected reuse error, got: {err}"
+        ),
+        Ok(_) => unreachable!(),
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_store_accepts_fresh_token_after_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let db_path = dir.path().join("nonces.db");
+
+    let sha256: Sha256Digest = "cc".repeat(32).parse().unwrap_or_else(|error| {
+        panic!("parse digest: {error}");
+    });
+
+    let issuer1 = ApprovalTokenIssuer::with_secret_and_durable_store(
+        b"stable-secret".to_vec(),
+        arbitraitor_store::SpentNonceStore::open(&db_path)?,
+    )?;
+    // Spend one token before restart.
+    let old_token = approval_token(&issuer1, &sha256, "old plan");
+    let old_result = issuer1.validate(&old_token, &sha256, &default_ctx(), SystemTime::now());
+    assert!(
+        old_result.is_ok(),
+        "old token must validate: {old_result:?}"
+    );
+
+    drop(issuer1);
+
+    // "Restart" — fresh token must succeed.
+    let issuer2 = ApprovalTokenIssuer::with_secret_and_durable_store(
+        b"stable-secret".to_vec(),
+        arbitraitor_store::SpentNonceStore::open(&db_path)?,
+    )?;
+    let fresh_token = approval_token(&issuer2, &sha256, "fresh plan");
+    let fresh_result = issuer2.validate(&fresh_token, &sha256, &default_ctx(), SystemTime::now());
+    assert!(
+        fresh_result.is_ok(),
+        "fresh token after restart must succeed: {fresh_result:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn in_memory_issuer_still_works_without_durable_store() {
+    // Regression guard: the non-durable path must continue to function.
+    let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+    let sha256: Sha256Digest = "dd".repeat(32).parse().unwrap_or_else(|error| {
+        panic!("parse digest: {error}");
+    });
+    let token = approval_token(&issuer, &sha256, "plan");
+    assert!(
+        issuer
+            .validate(&token, &sha256, &default_ctx(), SystemTime::now())
+            .is_ok()
+    );
+}

@@ -8,6 +8,7 @@
 use std::fmt::Write as _;
 use std::io::Cursor;
 
+use arbitraitor_exec::EffectiveControls;
 use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,10 @@ pub struct Receipt {
     pub detector_provenance: Vec<DetectorProvenance>,
     /// Receipt creation and update timestamps.
     pub timestamps: ReceiptTimestamps,
+    /// Per-control effective-controls matrix (ADR-0007). Present only for
+    /// contained execution contexts; `None` for inspect/mediated.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effective_controls: Option<EffectiveControls>,
     /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
 }
@@ -325,6 +330,7 @@ impl ReceiptBuilder {
                 detector_versions: Vec::new(),
                 detector_provenance: Vec::new(),
                 timestamps,
+                effective_controls: None,
                 signature: None,
             },
         }
@@ -393,6 +399,13 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn detector_provenance(mut self, provenance: DetectorProvenance) -> Self {
         self.receipt.detector_provenance.push(provenance);
+        self
+    }
+
+    /// Set the per-control effective-controls matrix (ADR-0007).
+    #[must_use]
+    pub fn effective_controls(mut self, controls: EffectiveControls) -> Self {
+        self.receipt.effective_controls = Some(controls);
         self
     }
 
@@ -651,6 +664,80 @@ mod tests {
     fn schema_version_is_present() -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_value(sample_receipt())?;
         assert_eq!(json["schema_version"], CURRENT_SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_controls_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        use arbitraitor_exec::{ControlStatus, EffectiveControl};
+
+        let controls = EffectiveControls {
+            filesystem_isolation: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("landlock".to_owned()),
+            }),
+            network_isolation: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("network-namespace".to_owned()),
+            }),
+            process_tree_control: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Partial,
+                proof: Some("pid-namespace".to_owned()),
+            }),
+            privilege_suppression: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("no-new-privs".to_owned()),
+            }),
+            syscall_filtering: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("seccomp-bpf".to_owned()),
+            }),
+            resource_limits: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("setrlimit".to_owned()),
+            }),
+        };
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            "ab".repeat(32),
+            1,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .effective_controls(controls.clone())
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        assert!(
+            json.contains("effective_controls"),
+            "serialized receipt must include effective_controls"
+        );
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded.effective_controls, Some(controls));
+        Ok(())
+    }
+
+    #[test]
+    fn effective_controls_absent_when_not_set() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let json = serde_json::to_string(&receipt)?;
+        assert!(
+            !json.contains("effective_controls"),
+            "effective_controls must be skipped when None"
+        );
         Ok(())
     }
 

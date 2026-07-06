@@ -741,12 +741,30 @@ pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> 
         .map_or(0, |d| d.as_secs());
     let expiry = now + 300;
 
-    let approval = serde_json::json!({
-        "artifact_sha256": sha.to_owned(),
-        "approved_at": now,
-        "expires_at": expiry,
-        "verdict": format!("{verdict:?}"),
-    });
+    let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::from_str(sha)
+        .map_err(|e| miette::miette!("invalid SHA-256 in receipt: {e}"))?;
+    let plan_inputs = crate::approval::ExecutionPlanInputs {
+        artifact_sha256,
+        network_isolated: true,
+        policy_snapshot_digest: receipt
+            .policy_digest
+            .clone()
+            .unwrap_or_else(|| "unset".to_owned()),
+        detector_snapshot_digest: receipt
+            .detector_versions
+            .iter()
+            .map(|d| format!("{}:{}", d.id, d.version))
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let approval = crate::approval::ApprovalFile::for_bash_execution(
+        &plan_inputs,
+        "stdin-human-confirmation",
+        now,
+        expiry,
+        &format!("{verdict:?}"),
+    )
+    .map_err(|e| miette::miette!("failed to build approval: {e}"))?;
 
     let approval_path = command.receipt.with_extension("approval.json");
     let json = serde_json::to_vec_pretty(&approval).into_diagnostic()?;
@@ -762,26 +780,29 @@ pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> 
 
 pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     let approval_bytes = std::fs::read(&command.approval).into_diagnostic()?;
-    let approval: serde_json::Value = serde_json::from_slice(&approval_bytes)
+    let approval: crate::approval::ApprovalFile = serde_json::from_slice(&approval_bytes)
         .map_err(|e| miette::miette!("invalid approval file: {e}"))?;
-
-    let sha_str = approval
-        .get("artifact_sha256")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| miette::miette!("approval missing artifact_sha256"))?;
-    let sha = arbitraitor_model::ids::Sha256Digest::from_str(sha_str)
-        .map_err(|e| miette::miette!("invalid SHA-256 in approval: {e}"))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let expires = approval
-        .get("expires_at")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    if now > expires {
-        miette::bail!("approval has expired");
+    approval
+        .verify(now)
+        .map_err(|e| miette::miette!("approval verification failed: {e}"))?;
+
+    // The to-be-executed plan must match the approved plan. Recompute the
+    // plan digest from the actual execution inputs and compare.
+    let expected_network_isolated = !command.network;
+    if approval.network_isolated != expected_network_isolated {
+        miette::bail!(
+            "approval was issued for network_isolated={} but execute requested network_isolated={}",
+            approval.network_isolated,
+            expected_network_isolated
+        );
     }
+
+    let sha = arbitraitor_model::ids::Sha256Digest::from_str(&approval.artifact_sha256)
+        .map_err(|e| miette::miette!("invalid SHA-256 in approval: {e}"))?;
 
     let cas_dir = config.store.cas_dir.clone().unwrap_or_else(default_cas_dir);
     let store = ContentStore::open(&cas_dir).into_diagnostic()?;

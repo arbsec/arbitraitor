@@ -18,6 +18,7 @@ arbitraitor-exec = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
 arbitraitor-receipt = { workspace = true }
+arbitraitor-store = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 serde = { workspace = true }
@@ -28,3 +29,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

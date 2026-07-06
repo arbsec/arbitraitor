@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-exec = { workspace = true }
 arbitraitor-model = { workspace = true }
 minisign = { workspace = true } # Receipt signing API; MIT, pure Rust, no network behavior, no native build.
 serde = { workspace = true }

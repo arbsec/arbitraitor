@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arbitraitor_model::operation::{GrantedCapabilities, OperationPlan};
 use arbitraitor_model::verdict::AssuranceLevel;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
@@ -193,6 +194,15 @@ pub enum ExecError {
     Store {
         /// Human-readable store error.
         reason: String,
+    },
+    /// ADR-0007 fail-closed: `AssuranceLevel::Contained` was requested but
+    /// proof of a mandatory containment control was not supplied. The builder
+    /// refuses to emit a `Contained` context without proof of every effective
+    /// control so a receipt never carries an unearned containment claim.
+    #[error("contained assurance requires proof of {control}")]
+    MissingContainmentProof {
+        /// Name of the control lacking a proof.
+        control: &'static str,
     },
 }
 
@@ -594,6 +604,106 @@ impl Default for ExecutionPolicy {
     }
 }
 
+/// Status of a single containment control (ADR-0007 platform capability matrix).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlStatus {
+    /// Control is enforced and proven active.
+    Enforced,
+    /// Control is partially enforced (degraded coverage).
+    Partial,
+    /// Control is unavailable on this platform or configuration.
+    Unavailable,
+}
+
+/// One entry in the per-control effective-controls matrix recorded in receipts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EffectiveControl {
+    /// Whether the control was requested by policy.
+    pub requested: bool,
+    /// Whether the control was applied, partially applied, or unavailable.
+    pub applied: ControlStatus,
+    /// Proof or mechanism name attesting the control is active
+    /// (e.g. `"landlock"`, `"no-new-privs"`). `None` when not requested.
+    pub proof: Option<String>,
+}
+
+/// Per-control capability matrix emitted in receipts per ADR-0007.
+///
+/// Every field is `Option` so that non-contained contexts serialize compactly
+/// (all `None`) and contained contexts carry exactly one entry per mandatory
+/// control.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EffectiveControls {
+    /// Filesystem isolation (chroot, namespace, `AppContainer`, `Landlock`, ...).
+    pub filesystem_isolation: Option<EffectiveControl>,
+    /// Network isolation (namespace, filter, broker).
+    pub network_isolation: Option<EffectiveControl>,
+    /// Process-tree containment (pid namespace, job object).
+    pub process_tree_control: Option<EffectiveControl>,
+    /// Privilege suppression (`no-new-privileges` or platform equivalent).
+    pub privilege_suppression: Option<EffectiveControl>,
+    /// System-call filtering (seccomp-bpf, ...).
+    pub syscall_filtering: Option<EffectiveControl>,
+    /// Resource limits (CPU, memory, FDs, processes).
+    pub resource_limits: Option<EffectiveControl>,
+}
+
+/// Proofs supplied to the builder that each containment control is active.
+///
+/// Required when [`AssuranceLevel::Contained`] is requested. Each `Option`
+/// holds a mechanism or attestation name (e.g. `"landlock"`). A `None` entry
+/// for any mandatory control causes [`ExecError::MissingContainmentProof`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ControlProofs {
+    /// Proof of filesystem isolation.
+    pub filesystem_isolation: Option<String>,
+    /// Proof of network isolation.
+    pub network_isolation: Option<String>,
+    /// Proof of process-tree containment.
+    pub process_tree_control: Option<String>,
+    /// Proof of privilege suppression.
+    pub privilege_suppression: Option<String>,
+    /// Proof of syscall filtering.
+    pub syscall_filtering: Option<String>,
+    /// Proof of resource-limit enforcement.
+    pub resource_limits: Option<String>,
+}
+
+impl ControlProofs {
+    fn require(
+        proof: Option<String>,
+        control: &'static str,
+    ) -> Result<EffectiveControl, ExecError> {
+        let proof = proof.ok_or(ExecError::MissingContainmentProof { control })?;
+        Ok(EffectiveControl {
+            requested: true,
+            applied: ControlStatus::Enforced,
+            proof: Some(proof),
+        })
+    }
+
+    fn into_effective_controls(self) -> Result<EffectiveControls, ExecError> {
+        Ok(EffectiveControls {
+            filesystem_isolation: Some(Self::require(
+                self.filesystem_isolation,
+                "filesystem isolation",
+            )?),
+            network_isolation: Some(Self::require(self.network_isolation, "network isolation")?),
+            process_tree_control: Some(Self::require(
+                self.process_tree_control,
+                "process-tree control",
+            )?),
+            privilege_suppression: Some(Self::require(
+                self.privilege_suppression,
+                "privilege suppression",
+            )?),
+            syscall_filtering: Some(Self::require(self.syscall_filtering, "syscall filtering")?),
+            resource_limits: Some(Self::require(self.resource_limits, "resource limits")?),
+        })
+    }
+}
+
 /// A built mediated execution context for a safe child process environment.
 ///
 /// All fields are private. Use the provided read-only accessors to inspect
@@ -612,6 +722,7 @@ pub struct ExecutionContext {
     network_policy: NetworkPolicy,
     network_sandbox: NetworkSandboxPlan,
     resource_limits: ResourceLimits,
+    effective_controls: EffectiveControls,
     home_tempdir: Option<OwnedTempDir>,
     working_tempdir: Option<OwnedTempDir>,
 }
@@ -648,6 +759,7 @@ impl std::fmt::Debug for ExecutionContext {
             .field("network_policy", &self.network_policy)
             .field("network_sandbox", &self.network_sandbox)
             .field("resource_limits", &self.resource_limits)
+            .field("effective_controls", &self.effective_controls)
             .finish_non_exhaustive()
     }
 }
@@ -738,6 +850,16 @@ impl ExecutionContext {
     pub fn resource_limits(&self) -> &ResourceLimits {
         &self.resource_limits
     }
+
+    /// Returns the per-control effective-controls matrix (ADR-0007).
+    ///
+    /// For [`AssuranceLevel::Contained`] contexts this carries one enforced
+    /// entry per mandatory control. For lower assurance levels all entries
+    /// are `None`.
+    #[must_use]
+    pub fn effective_controls(&self) -> &EffectiveControls {
+        &self.effective_controls
+    }
 }
 
 /// Fluent builder for [`ExecutionContext`].
@@ -749,6 +871,7 @@ pub struct ExecutionContextBuilder {
     arguments: Vec<OsString>,
     policy: ExecutionPolicy,
     source_environment: BTreeMap<String, OsString>,
+    control_proofs: ControlProofs,
 }
 
 impl ExecutionContextBuilder {
@@ -771,6 +894,7 @@ impl ExecutionContextBuilder {
             source_environment: env::vars_os()
                 .filter_map(|(name, value)| name.into_string().ok().map(|name| (name, value)))
                 .collect(),
+            control_proofs: ControlProofs::default(),
         }
     }
 
@@ -837,6 +961,16 @@ impl ExecutionContextBuilder {
         self
     }
 
+    /// Supplies containment control proofs (ADR-0007).
+    ///
+    /// Required when the assurance level is set to
+    /// [`AssuranceLevel::Contained`]; ignored otherwise.
+    #[must_use]
+    pub fn control_proofs(mut self, proofs: ControlProofs) -> Self {
+        self.control_proofs = proofs;
+        self
+    }
+
     /// Builds the execution context without spawning any child process.
     ///
     /// # Errors
@@ -894,6 +1028,11 @@ impl ExecutionContextBuilder {
             "built mediated execution context"
         );
 
+        let effective_controls = match self.assurance_level {
+            AssuranceLevel::Inspect | AssuranceLevel::Mediated => EffectiveControls::default(),
+            AssuranceLevel::Contained => self.control_proofs.into_effective_controls()?,
+        };
+
         Ok(ExecutionContext {
             operation_plan: self.operation_plan,
             assurance_level: self.assurance_level,
@@ -907,6 +1046,7 @@ impl ExecutionContextBuilder {
             network_policy: self.policy.network_policy,
             network_sandbox,
             resource_limits: self.policy.resource_limits,
+            effective_controls,
             home_tempdir,
             working_tempdir,
         })
