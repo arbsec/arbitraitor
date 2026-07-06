@@ -18,6 +18,7 @@ use arbitraitor_model::operation::{
 };
 use arbitraitor_model::verdict::AssuranceLevel;
 use arbitraitor_sandbox::SandboxConfig;
+use arbitraitor_sandbox::{ProcessResourceLimits, configure_resource_limits};
 use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
 use tracing::debug;
 
@@ -117,16 +118,21 @@ impl NativeExecution {
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        // Security: limits are applied in-child via `setrlimit` in `pre_exec`
+        // (inherited across `execve`), not parent-side `prlimit` after spawn.
+        // This closes the #375 fork-before-prlimit race where a native binary
+        // could fork unbounded grandchildren before limits applied. Must be
+        // registered before `configure_command` so limits hold during sandbox
+        // hardening too. Mirrors plugin-host/src/executor.rs:172-185.
+        let process_limits = process_resource_limits(&self.resource_limits);
+        configure_resource_limits(&mut command, &process_limits);
         arbitraitor_sandbox::configure_command(&mut command, self.sandbox);
 
         debug!(binary = %binary_path.display(), "spawning native binary");
         let child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
-        let pid = child.id();
-        self.resource_limits
-            .apply_to(pid)
-            .map_err(|source| ExecError::Spawn { source })?;
+        // Limits were applied in pre_exec before execve — no race window.
         let output = child
             .wait_with_output()
             .map_err(|source| ExecError::Wait { source })?;
@@ -177,6 +183,15 @@ pub fn execute_native(
     NativeExecution::new()?
         .with_args(args.to_vec())
         .execute(binary_path)
+}
+
+fn process_resource_limits(limits: &ResourceLimits) -> ProcessResourceLimits {
+    ProcessResourceLimits {
+        cpu_time_secs: limits.cpu_time_secs,
+        memory_bytes: limits.memory_bytes,
+        process_count: limits.process_count.map(u64::from),
+        fd_count: limits.fd_count.map(u64::from),
+    }
 }
 
 fn operation_plan(args: &[String]) -> OperationPlan {
@@ -445,6 +460,58 @@ mod tests {
             .with_args(vec!["-c".to_owned(), "sleep 0.1; ulimit -n".to_owned()])
             .execute(&binary)?;
         assert_eq!(String::from_utf8(result.stdout)?.trim(), "32");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Regression test for the #375 fork-before-prlimit race: the limits
+    /// configured via `with_resource_limits` must be observable *inside the
+    /// child's first instruction*, proving they were applied in `pre_exec`
+    /// (inherited across `execve`) rather than parent-side `prlimit` after
+    /// spawn. Reads `ulimit -t`/`-n` immediately — no `sleep` that would mask
+    /// a post-spawn apply window.
+    ///
+    /// Fast and deterministic, so it runs in CI (not `#[ignore]`).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_pre_exec_limits_hold_before_first_instruction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("pre-exec-limits")?;
+        if !xattrs_supported(&root)? {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+        let Some(binary) = shell_copy(&root)? else {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        };
+        // Distinct values unlikely to match a host default.
+        let limits = ResourceLimits {
+            cpu_time_secs: Some(7),
+            memory_bytes: None,
+            process_count: None,
+            fd_count: Some(64),
+            output_size_bytes: None,
+        };
+        let result = NativeExecution::new()?
+            .with_resource_limits(limits)
+            .with_args(vec![
+                "-c".to_owned(),
+                // Read soft limits at once, before any other work; if the
+                // limits were applied post-spawn there would be a window
+                // where these would still show the inherited parent values.
+                "echo cpu=$(ulimit -t); echo nofile=$(ulimit -n)".to_owned(),
+            ])
+            .execute(&binary)?;
+        let stdout = String::from_utf8(result.stdout)?;
+        assert!(
+            stdout.contains("cpu=7"),
+            "RLIMIT_CPU not applied in pre_exec; stdout was: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("nofile=64"),
+            "RLIMIT_NOFILE not applied in pre_exec; stdout was: {stdout:?}"
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -87,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `actions/upload-artifact` and `actions/download-artifact` bumped to v7/v8 to clear the Node.js 20 deprecation warning
 - Daemon in-process `release()` now requires a prior inspection receipt and a release-permitting verdict, and routes publication through ADR-0015's `release_artifact` safe-release primitive instead of `std::fs::write`
 - Tirith subprocess detector now records detector binary provenance in receipts and hardens subprocess execution with seccomp, Landlock, and pre-exec resource limits where available
+- Native binary release now routes through ADR-0015 safe-destination (`release_artifact` with `O_NOFOLLOW` + capability-rooted handle) instead of `std::fs::write`, closing TOCTOU and symlink-follow vectors at the native cache path (#375)
+- Native execution resource limits now applied in `pre_exec` (inherited across `execve`) instead of parent-side `prlimit` after spawn, closing the fork-before-prlimit race where a native binary could fork unbounded grandchildren before limits took effect (#375)
 
 ### Security
 

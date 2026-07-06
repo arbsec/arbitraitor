@@ -145,7 +145,7 @@ async fn prepare_artifact(
             "fetched bytes digest mismatch".to_owned(),
         ));
     }
-    store_artifact(config, &sha256, &bytes).await?;
+    let cas_root = store_artifact(config, &sha256, &bytes).await?;
     let retrieval = AnalysisRetrievalInfo {
         requested_location: Some(command.url.clone()),
         final_location: fetch_receipt
@@ -199,6 +199,7 @@ async fn prepare_artifact(
             .final_url
             .as_ref()
             .map_or_else(|| command.url.clone(), ToString::to_string),
+        store_dir: cas_root,
     })
 }
 
@@ -206,7 +207,7 @@ async fn store_artifact(
     config: &Config,
     sha256: &Sha256Digest,
     bytes: &[u8],
-) -> std::result::Result<(), RunFailure> {
+) -> std::result::Result<PathBuf, RunFailure> {
     let cas_root = config
         .store
         .cas_dir
@@ -225,7 +226,7 @@ async fn store_artifact(
         .await
         .map_err(|error| RunFailure::Internal(error.to_string()))?;
     if stored == *sha256 {
-        Ok(())
+        Ok(cas_root)
     } else {
         Err(RunFailure::Internal("CAS digest mismatch".to_owned()))
     }
@@ -283,9 +284,7 @@ fn execute_native_artifact(
 ) -> std::result::Result<ExecutionOutput, RunFailure> {
     let _gate = NativeExecutionGate::new();
     let path = native_release_path(&artifact.sha256)?;
-    std::fs::write(&path, &artifact.bytes)
-        .map_err(|error| RunFailure::Execution(error.to_string()))?;
-    set_owner_execute_permissions(&path)?;
+    release_native_via_safe_destination(artifact, &path)?;
     NativeExecution::new()
         .map_err(|error| RunFailure::Execution(error.to_string()))?
         .execute(&path)
@@ -302,27 +301,30 @@ fn execute_native_artifact(
     ))
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn release_native_via_safe_destination(
+    artifact: &InspectedArtifact,
+    destination: &Path,
+) -> std::result::Result<(), RunFailure> {
+    use arbitraitor_exec::release::{ReleasePolicy, release_artifact};
+
+    let store = ContentStore::open(&artifact.store_dir)
+        .map_err(|error| RunFailure::Execution(error.to_string()))?;
+    let policy = ReleasePolicy {
+        allow_overwrite: true,
+        #[cfg(unix)]
+        final_mode: Some(0o700),
+        ..ReleasePolicy::default()
+    };
+    release_artifact(&store, &artifact.sha256, destination, &policy)
+        .map_err(|error| RunFailure::Execution(error.to_string()))?;
+    Ok(())
+}
+
 fn native_release_path(sha256: &Sha256Digest) -> std::result::Result<PathBuf, RunFailure> {
     let dir = arbitraitor_home()?.join("native");
     std::fs::create_dir_all(&dir).map_err(|error| RunFailure::Execution(error.to_string()))?;
     Ok(dir.join(format!("{sha256}.bin")))
-}
-
-#[cfg(unix)]
-fn set_owner_execute_permissions(path: &Path) -> std::result::Result<(), RunFailure> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path)
-        .map_err(|error| RunFailure::Execution(error.to_string()))?
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(path, permissions)
-        .map_err(|error| RunFailure::Execution(error.to_string()))
-}
-
-#[cfg(not(unix))]
-fn set_owner_execute_permissions(_path: &Path) -> std::result::Result<(), RunFailure> {
-    Ok(())
 }
 
 fn build_run_receipt(

@@ -170,6 +170,66 @@ async fn run_streams_sanitized_output() -> std::result::Result<(), Box<dyn std::
     Ok(())
 }
 
+/// Regression test for #375: the native release path must route through
+/// `release_artifact` (ADR-0015 safe-destination) rather than
+/// `std::fs::write`. A pre-planted symlink at the native cache target must be
+/// rejected — never overwritten, never followed — so an attacker who can plant
+/// the symlink cannot intercept, replace, or corrupt the released binary.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_release_rejects_symlink_at_cache_path()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use super::run_services::release_native_via_safe_destination;
+    use arbitraitor_store::ContentStore;
+
+    let root =
+        std::env::temp_dir().join(format!("arb-native-release-symlink-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let store_dir = root.join("cas");
+    std::fs::create_dir_all(&store_dir)?;
+
+    let bytes = b"#!/bin/sh\necho ok\n".to_vec();
+    let sha256 = Sha256Digest::new(Sha256::digest(&bytes).into());
+
+    let store = ContentStore::open(&store_dir)?;
+    let mut sink = store.sink(Some(&sha256))?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(sink.write_chunk(&bytes))?;
+    runtime.block_on(sink.finish())?;
+
+    let sensitive = root.join("sensitive.txt");
+    std::fs::write(&sensitive, b"must not be touched")?;
+    let symlink_target = root.join(format!("{sha256}.bin"));
+    std::os::unix::fs::symlink(&sensitive, &symlink_target)?;
+
+    let artifact = InspectedArtifact {
+        size_bytes: bytes.len(),
+        artifact_type: "ElfExecutable".to_owned(),
+        bytes: bytes.clone(),
+        sha256: sha256.clone(),
+        content_type: "application/octet-stream".to_owned(),
+        is_native: true,
+        verdict: Verdict::Pass,
+        policy_digest: String::new(),
+        findings: Vec::new(),
+        detectors: Vec::new(),
+        detector_versions: Vec::new(),
+        requested_url: "https://example.test/native".to_owned(),
+        final_url: "https://example.test/native".to_owned(),
+        store_dir: store_dir.clone(),
+    };
+
+    let result = release_native_via_safe_destination(&artifact, &symlink_target);
+    assert!(
+        matches!(result, Err(RunFailure::Execution(_))),
+        "release through symlink must fail (ADR-0015); got {result:?}"
+    );
+    // The symlink target must be untouched — no overwrite, no follow.
+    assert_eq!(std::fs::read(&sensitive)?, b"must not be touched");
+    std::fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
 fn command(native: bool, non_interactive: bool) -> RunCommand {
     RunCommand {
         url: "https://example.test/install.sh".to_owned(),
@@ -202,6 +262,7 @@ fn fake_artifact(verdict: Verdict, is_native: bool) -> InspectedArtifact {
         detector_versions: Vec::new(),
         requested_url: "https://example.test/install.sh".to_owned(),
         final_url: "https://example.test/install.sh".to_owned(),
+        store_dir: PathBuf::new(),
     }
 }
 
