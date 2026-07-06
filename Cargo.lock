@@ -590,7 +590,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "proc-macro2",
- "pulley-interpreter 43.0.2",
+ "pulley-interpreter 46.0.1",
  "quote",
  "regex",
  "regex-automata",
