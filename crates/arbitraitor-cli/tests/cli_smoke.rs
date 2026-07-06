@@ -106,3 +106,43 @@ fn unknown_subcommand_exits_non_zero() -> TestResult {
         .failure();
     Ok(())
 }
+
+#[test]
+fn doctor_defaults_to_human_panel_when_shell_integration_missing() -> TestResult {
+    let home = tempfile::tempdir()?;
+    Command::cargo_bin("arbitraitor")?
+        .arg("--allow-root")
+        .arg("doctor")
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/bash")
+        .env("PATH", "/usr/bin:/bin")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Arbitraitor Doctor"))
+        .stdout(predicate::str::contains("✓ Version:"))
+        .stdout(predicate::str::contains("Shell detection:"))
+        .stdout(predicate::str::contains("Fix shell integration:"))
+        .stdout(predicate::str::contains("arbitraitor wrappers install"))
+        .stdout(predicate::str::contains(
+            "arbitraitor wrappers init --install",
+        ));
+    Ok(())
+}
+
+#[test]
+fn doctor_json_flag_preserves_machine_readable_report() -> TestResult {
+    let home = tempfile::tempdir()?;
+    Command::cargo_bin("arbitraitor")?
+        .arg("--allow-root")
+        .arg("doctor")
+        .arg("--json")
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/bash")
+        .env("PATH", "/usr/bin:/bin")
+        .assert()
+        .failure()
+        .stdout(predicate::str::starts_with("{"))
+        .stdout(predicate::str::contains("\"checks\""))
+        .stdout(predicate::str::contains("\"version\""));
+    Ok(())
+}

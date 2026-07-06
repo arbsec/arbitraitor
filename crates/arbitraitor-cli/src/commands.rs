@@ -1,11 +1,12 @@
 //! CLI subcommand handlers added in v0.6 to close the spec §28.1 surface gap.
 
+mod doctor_command;
+
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use arbitraitor_core::config::Config;
-use arbitraitor_core::health::HealthChecker;
 use arbitraitor_mcp::sanitize_for_agent;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::PolicyEngine;
@@ -17,6 +18,8 @@ use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
 
 use crate::{ExplainFormat, default_cas_dir, write_explainability, write_report};
+
+pub(crate) use doctor_command::doctor;
 
 #[derive(Args)]
 pub struct ScanCommand {
@@ -63,6 +66,9 @@ pub struct PolicyCommand {
 
 #[derive(Args)]
 pub struct DoctorCommand {
+    /// Output the machine-readable health report as JSON.
+    #[arg(long)]
+    pub json: bool,
     #[arg(long, value_name = "DIR")]
     pub cas_dir: Option<PathBuf>,
     #[arg(long, value_name = "DIR")]
@@ -351,29 +357,6 @@ pub(crate) fn policy(command: &PolicyCommand) -> Result<()> {
     writeln!(stdout, "  Version: {}", engine.policy().version).into_diagnostic()?;
     writeln!(stdout, "  Rules: {}", engine.policy().rules.len()).into_diagnostic()?;
     writeln!(stdout, "  Digest: {}", engine.digest()).into_diagnostic()?;
-    Ok(())
-}
-
-pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
-    let cas_dir = command
-        .cas_dir
-        .clone()
-        .or_else(|| config.store.cas_dir.clone())
-        .unwrap_or_else(default_cas_dir);
-    let mut checker = HealthChecker::new().with_store(cas_dir);
-    if let Some(rules_dir) = command.rules.as_deref() {
-        let versions = crate::rule_pack_versions(rules_dir)?;
-        if let Some(first) = versions.first() {
-            checker = checker.with_rule_pack(first.clone());
-        }
-        checker = checker.with_detector_versions(versions);
-    }
-    let report = checker.check();
-    let json = serde_json::to_vec_pretty(&report).into_diagnostic()?;
-    std::io::stdout()
-        .lock()
-        .write_all(&json)
-        .into_diagnostic()?;
     Ok(())
 }
 

@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor explain` — explain a verdict from a receipt file
 - `arbitraitor store` — manage CAS artifacts (list, inspect, gc)
 - `arbitraitor policy` — validate policy TOML files
-- `arbitraitor doctor` — system health diagnostics (JSON output)
+- `arbitraitor doctor` — system health diagnostics with human-readable output by default and JSON output via `--json`
 - `arbitraitor rules` — manage YARA-X rule packs (list, validate)
 - `arbitraitor update verify` — verify signed update manifests (minisign)
 - `arbitraitor plugin` — manage plugin registry (list, info, discover, remove)
@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor execute` — execute artifact from CAS using approval file
 - `arbitraitor mcp` — start MCP JSON-RPC 2.0 server over stdio
 - `arbitraitor version` — print version, license, repository
+- `arbitraitor doctor` now checks shell integration health: shell detection, installed shims, shim directory on `PATH`, and rcfile init block presence.
 - Native binary auto-detection from artifact classifier (no manual `--native` needed)
 
 #### Package manager adapters

@@ -294,14 +294,17 @@ arbitraitor policy my-policy.toml
 arbitraitor doctor [flags]
 ```
 
-Runs system health diagnostics and outputs a JSON report covering store health, detector status, and rule pack versions.
+Runs system health diagnostics and prints a human-readable panel by default. The panel covers version, store, rules, shell detection, installed shims, shim directory presence on `PATH`, and shell rcfile integration. Use `--json` to emit the machine-readable health report for automation.
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
+| `--json` | Output the machine-readable health report as JSON |
 | `--cas-dir <DIR>` | Override the CAS directory to check |
 | `--rules <DIR>` | Path to rule packs directory |
+
+Exit code is `0` only when every health and shell-integration check is healthy. If shell integration is incomplete, `doctor` prints a `Fix shell integration:` section with only the commands needed for failing checks.
 
 ## Rules command
 
