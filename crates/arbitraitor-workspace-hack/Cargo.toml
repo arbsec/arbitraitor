@@ -24,7 +24,7 @@ bitflags = { version = "2", default-features = false, features = ["serde", "std"
 block-buffer = { version = "0.12", default-features = false, features = ["zeroize"] }
 bstr = { version = "1", features = ["serde"] }
 bumpalo = { version = "3", features = ["allocator-api2"] }
-cranelift-bitset = { version = "0.130", default-features = false, features = ["enable-serde"] }
+cranelift-bitset = { version = "0.133", default-features = false, features = ["enable-serde"] }
 crc32fast = { version = "1" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["std"] }
@@ -74,7 +74,7 @@ anyhow = { version = "1" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
-cranelift-bitset = { version = "0.130", default-features = false, features = ["enable-serde"] }
+cranelift-bitset = { version = "0.133", default-features = false, features = ["enable-serde"] }
 crossbeam-utils = { version = "0.8" }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher"] }
 hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16", default-features = false, features = ["default-hasher", "serde"] }
