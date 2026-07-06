@@ -576,12 +576,22 @@ pub(crate) fn hook(command: &HookCommand) -> Result<()> {
     Ok(())
 }
 
-const SUPPORTED_SHIMS: &[&str] = &["npm", "yarn", "pnpm", "pip", "uv", "bun"];
+const SUPPORTED_SHIMS: &[&str] = &[];
 
 pub(crate) fn shim(command: &ShimCommand) -> Result<()> {
     match &command.subcommand {
         ShimSubcommand::List => {
             let mut stdout = std::io::stdout().lock();
+            if SUPPORTED_SHIMS.is_empty() {
+                writeln!(stdout, "No package-manager shims are currently supported.")
+                    .into_diagnostic()?;
+                writeln!(
+                    stdout,
+                    "\nFor curl/wget wrapper support, use:\n  arbitraitor wrappers install"
+                )
+                .into_diagnostic()?;
+                return Ok(());
+            }
             writeln!(stdout, "Supported shims: {}", SUPPORTED_SHIMS.join(", "))
                 .into_diagnostic()?;
             writeln!(stdout).into_diagnostic()?;
@@ -601,8 +611,8 @@ pub(crate) fn shim(command: &ShimCommand) -> Result<()> {
         ShimSubcommand::Install { tool } => {
             if !SUPPORTED_SHIMS.contains(&tool.as_str()) {
                 miette::bail!(
-                    "unsupported shim '{tool}'; supported: {}",
-                    SUPPORTED_SHIMS.join(", ")
+                    "package-manager shims are not yet implemented; \
+                     use 'arbitraitor wrappers install' for curl/wget support"
                 );
             }
             let arb = std::env::current_exe()

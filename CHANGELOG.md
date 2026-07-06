@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
+- `shim install` no longer generates broken package-manager shims that invoked the non-existent `pm run` subcommand. The command now errors with a helpful message pointing to `wrappers install` for curl/wget support.
 - MCP `explain` and `sanitize_for_agent` extracted to dedicated `explain.rs` module
 - Test suites extracted to `tests.rs` files across 10 crates (mcp, cli, analysis, core, yarax, shell, provenance, archive, exec, intel, store)
 - `--native` flag repurposed as confirmation override (execution mode auto-detected from artifact type)

@@ -13,5 +13,7 @@ pub mod executor;
 pub mod frame;
 pub mod protocol;
 pub mod registry;
+#[cfg(feature = "experimental-wasm")]
 pub mod wasm_engine;
+#[cfg(feature = "experimental-wasm")]
 pub mod wasm_plugin;
