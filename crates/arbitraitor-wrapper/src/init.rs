@@ -474,10 +474,48 @@ pub fn install_to_rcfile(shell: Shell, shim_dir: &Path) -> Result<PathBuf, InitE
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| InitError::NoRcfile(shell.as_str()))?;
-    install_to_rcfile_in(shell, shim_dir, &home)
+    install_to_rcfile_in(shell, shim_dir, &home, &InstallOptions::default())
 }
 
-fn install_to_rcfile_in(shell: Shell, shim_dir: &Path, home: &Path) -> Result<PathBuf, InitError> {
+/// Options controlling rcfile installation behavior.
+#[derive(Clone, Debug)]
+pub struct InstallOptions {
+    /// If true, compute and return the diff without writing.
+    pub dry_run: bool,
+    /// If true, create `<rcfile>.arbitraitor.bak` before mutation.
+    pub backup: bool,
+}
+
+impl Default for InstallOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: false,
+            backup: true,
+        }
+    }
+}
+
+/// Result of a dry-run install — the would-be changes without touching disk.
+#[derive(Clone, Debug)]
+pub struct DryRunResult {
+    /// Target rcfile path.
+    pub rcfile: PathBuf,
+    /// Unified diff of the changes (empty if no change).
+    pub diff: String,
+}
+
+/// Internal: install to rcfile given an explicit home directory and options.
+///
+/// # Errors
+///
+/// Returns [`InitError`] if the rcfile cannot be read, written, or the
+/// snippet cannot be rendered.
+pub fn install_to_rcfile_in(
+    shell: Shell,
+    shim_dir: &Path,
+    home: &Path,
+    options: &InstallOptions,
+) -> Result<PathBuf, InitError> {
     let target =
         target_rcfile_for_home(shell, home).ok_or_else(|| InitError::NoRcfile(shell.as_str()))?;
     let snippet = render_snippet(shell, shim_dir).map_err(|e| InitError::Render(e.to_string()))?;
@@ -491,10 +529,10 @@ fn install_to_rcfile_in(shell: Shell, shim_dir: &Path, home: &Path) -> Result<Pa
 
     // Fish uses a dedicated file — just overwrite it (always idempotent).
     if matches!(shell, Shell::Fish) {
-        std::fs::write(&target, &snippet).map_err(|source| InitError::WriteRcfile {
-            path: target.clone(),
-            source,
-        })?;
+        if options.dry_run {
+            return Ok(target);
+        }
+        atomic_write(&target, &snippet, options)?;
         return Ok(target);
     }
 
@@ -509,11 +547,34 @@ fn install_to_rcfile_in(shell: Shell, shim_dir: &Path, home: &Path) -> Result<Pa
         }
     };
     let updated = replace_or_append_block(&existing, &snippet);
-    std::fs::write(&target, updated).map_err(|source| InitError::WriteRcfile {
-        path: target.clone(),
+
+    if options.dry_run {
+        return Ok(target);
+    }
+
+    atomic_write(&target, &updated, options)?;
+    Ok(target)
+}
+
+fn atomic_write(target: &Path, content: &str, options: &InstallOptions) -> Result<(), InitError> {
+    if options.backup && target.exists() {
+        let backup = target.with_extension("arbitraitor.bak");
+        std::fs::copy(target, &backup).map_err(|source| InitError::WriteRcfile {
+            path: backup,
+            source,
+        })?;
+    }
+
+    let temp = target.with_extension(format!("arbitraitor.{}.tmp", std::process::id()));
+    std::fs::write(&temp, content).map_err(|source| InitError::WriteRcfile {
+        path: temp.clone(),
         source,
     })?;
-    Ok(target)
+    std::fs::rename(&temp, target).map_err(|source| InitError::WriteRcfile {
+        path: target.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 /// Removes any existing init block from the rcfile for `shell`.
@@ -564,10 +625,14 @@ fn uninstall_from_rcfile_in(shell: Shell, home: &Path) -> Result<PathBuf, InitEr
     }
 
     let cleaned = remove_block(&existing);
-    std::fs::write(&target, cleaned).map_err(|source| InitError::WriteRcfile {
-        path: target.clone(),
-        source,
-    })?;
+    atomic_write(
+        &target,
+        &cleaned,
+        &InstallOptions {
+            dry_run: false,
+            backup: false,
+        },
+    )?;
     Ok(target)
 }
 
@@ -823,7 +888,8 @@ mod tests {
     fn install_creates_rcfile_if_missing() -> TestResult {
         let dir = TestDir::new()?;
         let shim = Path::new("/home/user/.arbitraitor/shims");
-        let rcfile = install_to_rcfile_in(Shell::Bash, shim, dir.path())?;
+        let rcfile =
+            install_to_rcfile_in(Shell::Bash, shim, dir.path(), &InstallOptions::default())?;
         assert!(rcfile.ends_with(".bashrc") || rcfile.ends_with(".bash_profile"));
         let content = std::fs::read_to_string(&rcfile)?;
         assert!(content.contains(MARKER_BEGIN));
@@ -837,8 +903,8 @@ mod tests {
     fn install_is_idempotent_single_block() -> TestResult {
         let dir = TestDir::new()?;
         let shim = Path::new("/home/user/.arbitraitor/shims");
-        install_to_rcfile_in(Shell::Bash, shim, dir.path())?;
-        install_to_rcfile_in(Shell::Bash, shim, dir.path())?;
+        install_to_rcfile_in(Shell::Bash, shim, dir.path(), &InstallOptions::default())?;
+        install_to_rcfile_in(Shell::Bash, shim, dir.path(), &InstallOptions::default())?;
 
         let rcfile =
             rcfile_path_for_home(Shell::Bash, dir.path()).ok_or("no rcfile path for bash")?;
@@ -858,7 +924,7 @@ mod tests {
         std::fs::write(&rcfile, "# user content\nexport FOO=bar\n")?;
 
         let shim = Path::new("/home/user/.arbitraitor/shims");
-        install_to_rcfile_in(Shell::Bash, shim, dir.path())?;
+        install_to_rcfile_in(Shell::Bash, shim, dir.path(), &InstallOptions::default())?;
 
         let content = std::fs::read_to_string(&rcfile)?;
         assert!(content.contains("# user content"));
@@ -875,7 +941,7 @@ mod tests {
         std::fs::write(&rcfile, "# user content\nexport FOO=bar\n")?;
 
         let shim = Path::new("/home/user/.arbitraitor/shims");
-        install_to_rcfile_in(Shell::Bash, shim, dir.path())?;
+        install_to_rcfile_in(Shell::Bash, shim, dir.path(), &InstallOptions::default())?;
         uninstall_from_rcfile_in(Shell::Bash, dir.path())?;
 
         let content = std::fs::read_to_string(&rcfile)?;
@@ -914,7 +980,8 @@ mod tests {
     fn install_fish_uses_fixed_path() -> TestResult {
         let dir = TestDir::new()?;
         let shim = Path::new("/home/user/.arbitraitor/shims");
-        let rcfile = install_to_rcfile_in(Shell::Fish, shim, dir.path())?;
+        let rcfile =
+            install_to_rcfile_in(Shell::Fish, shim, dir.path(), &InstallOptions::default())?;
         assert!(rcfile.ends_with("conf.d/arbitraitor.fish"));
         let content = std::fs::read_to_string(&rcfile)?;
         assert!(content.contains("fish_add_path"));
@@ -925,7 +992,7 @@ mod tests {
     fn install_nu_uses_fixed_path() -> TestResult {
         let dir = TestDir::new()?;
         let shim = Path::new("/home/user/.arbitraitor/shims");
-        let rcfile = install_to_rcfile_in(Shell::Nu, shim, dir.path())?;
+        let rcfile = install_to_rcfile_in(Shell::Nu, shim, dir.path(), &InstallOptions::default())?;
         assert!(rcfile.ends_with("autoload/arbitraitor.nu"));
         let content = std::fs::read_to_string(&rcfile)?;
         assert!(content.contains("prepend"));

@@ -549,20 +549,32 @@ pub(crate) fn plugin(command: &PluginCommand) -> Result<()> {
 pub(crate) fn hook(command: &HookCommand) -> Result<()> {
     match &command.subcommand {
         HookSubcommand::Init { binary } => {
+            let mut stderr = std::io::stderr().lock();
+            writeln!(
+                stderr,
+                "[arbitraitor] warning: 'hook init' is deprecated. The bash DEBUG trap has\n\
+                 performance overhead on every command and only supports bash. Use\n\
+                 'arbitraitor wrappers install' + 'arbitraitor wrappers init --install'\n\
+                 for a robust, shell-agnostic alternative.\n"
+            )
+            .into_diagnostic()?;
             let arb = match binary.as_ref() {
                 Some(p) => p.display().to_string(),
                 None => std::env::current_exe()
                     .map_or_else(|_| "arbitraitor".to_owned(), |p| p.display().to_string()),
             };
             let snippet = format!(
-                "# >>> arbitraitor hook >>>\n\
+                "# >>> arbitraitor hook (deprecated — use 'wrappers install' instead) >>>\n\
                  _arbitraitor_guard() {{\n\
                  \x20   local cmd=\"$BASH_COMMAND\"\n\
                  \x20   case \"$cmd\" in\n\
                  \x20       *'curl'*'|'*'sh'*|*'curl'*'|'*'bash'*|*'wget'*'|'*'sh'*)\n\
-                 \x20           echo \"[arbitraitor] intercepted: $cmd\" >&2\n\
-                 \x20           echo \"[arbitraitor] use '{arb} run <url>' for safe execution\" >&2\n\
-                 \x20           return 1\n\
+                 \x20           if [ -z \"$ARBITRAITOR_HOOK_DISABLE\" ]; then\n\
+                 \x20               echo \"[arbitraitor] intercepted: $cmd\" >&2\n\
+                 \x20               echo \"[arbitraitor] use '{arb} run <url>' for safe execution\" >&2\n\
+                 \x20               echo \"[arbitraitor] set ARBITRAITOR_HOOK_DISABLE=1 to bypass\" >&2\n\
+                 \x20               return 1\n\
+                 \x20           fi\n\
                  \x20           ;;\n\
                  \x20   esac\n\
                  }}\n\
