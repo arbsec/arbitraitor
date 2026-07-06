@@ -73,7 +73,7 @@ The verdict always states which level was in effect. A clean static scan with ne
 Arbitraitor is a Rust monorepo organized into focused crates:
 
 ```
-arbitraitor-cli               CLI entry point (22 subcommands)
+arbitraitor-cli               CLI entry point (23 subcommands)
 arbitraitor-core              Config, metrics, health checks, state machine
 arbitraitor-model             Domain types, receipts, findings (newtypes)
 arbitraitor-fetch             HTTP retrieval with SSRF protection + truncation detection
