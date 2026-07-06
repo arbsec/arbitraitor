@@ -149,10 +149,12 @@ fn validate_binary_path(
     label: &str,
 ) -> Result<std::path::PathBuf, RegistryError> {
     let binary_rel = Path::new(binary);
-    if binary_rel.is_absolute() || binary.starts_with("..") {
+    if binary_rel.is_absolute() || binary.contains("..") {
         return Err(manifest_parse(
             label,
-            format!("binary path must be relative to the plugin directory: {binary}"),
+            format!(
+                "binary path must be relative to the plugin directory and must not contain '..': {binary}"
+            ),
         ));
     }
     let binary_path = dir.join(binary_rel);
