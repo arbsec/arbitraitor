@@ -103,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is touched. A new `--allow-root` global CLI flag provides a diagnostic bypass
   for the `doctor` command and integration tests.
 
+### Security
+
+- Enforce monotonic project configuration per ADR-0017 (#376): `.arbitraitor/config.toml` is untrusted repository content and may only tighten inherited policy. Weakening attempts (enabling execution, disabling detectors, raising limits, relaxing integrity, weakening default action) are rejected with `ConfigError::PolicyWeakening`. New `ConfigSource` enum classifies layers as trusted or untrusted.
+
 ## [0.1.0-alpha] — 2026-06-23
 
 Initial alpha release. **Not ready for production use.**

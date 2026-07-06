@@ -62,10 +62,40 @@ pub enum ConfigError {
         #[source]
         source: arbitraitor_policy::PolicyError,
     },
+
+    /// Project configuration weakened inherited security policy (ADR-0017).
+    ///
+    /// Configuration discovered in an untrusted project directory
+    /// (`.arbitraitor/config.toml`) may only tighten inherited policy.
+    /// This error lists the specific settings that would weaken it.
+    #[error("project configuration weakens inherited policy: {detail}")]
+    PolicyWeakening {
+        /// Human-readable description of each monotonicity violation.
+        detail: String,
+    },
 }
 
 /// Convenient result alias for configuration loading.
 pub type ConfigResult<T> = Result<T, ConfigError>;
+
+/// Origin of a configuration layer, determining its trust level.
+///
+/// Per [ADR-0017], configuration discovered in an untrusted project directory
+/// (`.arbitraitor/config.toml`) is repository content — not user policy. It
+/// may only **tighten** inherited policy, never weaken it.
+///
+/// [ADR-0017]: ../../docs/adr/0017-monotonic-project-configuration.md
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigSource {
+    /// Built-in defaults, system config (`/etc/arbitraitor/config.toml`),
+    /// organization-managed config, user-owned config, or CLI options.
+    /// These layers are trusted and may freely set or override any value.
+    Trusted,
+    /// Project-local `.arbitraitor/config.toml` discovered in the working
+    /// directory. This is untrusted repository content subject to
+    /// monotonicity enforcement (ADR-0017).
+    UntrustedProject,
+}
 
 /// Top-level Arbitraitor configuration.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -350,18 +380,44 @@ impl Config {
 
     /// Loads defaults plus one explicit configuration file.
     ///
+    /// The file is treated as a trusted, user-invoked source. Use
+    /// [`Config::load_from_file_with_source`] when the file originates from
+    /// untrusted repository content.
+    ///
     /// # Errors
     ///
     /// Returns an error when the file cannot be read or parsed.
     pub fn load_from_file(path: impl AsRef<Path>) -> ConfigResult<Self> {
-        Config::default().merge_file(path.as_ref())
+        Config::default().merge_file_with_source(path.as_ref(), ConfigSource::Trusted)
+    }
+
+    /// Loads defaults plus one explicit configuration file from a known source.
+    ///
+    /// When `source` is [`ConfigSource::UntrustedProject`], the merged result is
+    /// validated for monotonicity per ADR-0017: the overlay may only tighten
+    /// inherited security policy, never weaken it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, parsed, or — for untrusted
+    /// sources — when the overlay weakens inherited security policy.
+    pub fn load_from_file_with_source(
+        path: impl AsRef<Path>,
+        source: ConfigSource,
+    ) -> ConfigResult<Self> {
+        Config::default().merge_file_with_source(path.as_ref(), source)
     }
 
     /// Loads defaults plus optional system, user, and project layers.
     ///
+    /// System and user layers are trusted. The project layer
+    /// (`.arbitraitor/config.toml`) is untrusted repository content and is
+    /// validated for monotonicity per ADR-0017.
+    ///
     /// # Errors
     ///
-    /// Returns an error when any selected configuration layer cannot be read or parsed.
+    /// Returns an error when any selected configuration layer cannot be read,
+    /// parsed, or — for the project layer — when it weakens inherited policy.
     pub fn load_from_layers(
         system_config: Option<&Path>,
         home_dir: Option<&Path>,
@@ -369,30 +425,30 @@ impl Config {
     ) -> ConfigResult<Self> {
         let mut config = Config::default();
         if let Some(path) = system_config {
-            config = config.merge_file(path)?;
+            config = config.merge_file_with_source(path, ConfigSource::Trusted)?;
         } else {
             let path = Path::new("/etc/arbitraitor/config.toml");
             if path.exists() {
-                config = config.merge_file(path)?;
+                config = config.merge_file_with_source(path, ConfigSource::Trusted)?;
             }
         }
 
         if let Some(home) = home_dir {
             let path = home.join(".config/arbitraitor/config.toml");
             if path.exists() {
-                config = config.merge_file(&path)?;
+                config = config.merge_file_with_source(&path, ConfigSource::Trusted)?;
             }
         }
 
         let project = project_dir.join(".arbitraitor/config.toml");
         if project.exists() {
-            config = config.merge_file(&project)?;
+            config = config.merge_file_with_source(&project, ConfigSource::UntrustedProject)?;
         }
 
         Ok(config)
     }
 
-    fn merge_file(self, path: &Path) -> ConfigResult<Self> {
+    fn merge_file_with_source(self, path: &Path, source: ConfigSource) -> ConfigResult<Self> {
         let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
@@ -402,7 +458,11 @@ impl Config {
                 path: path.to_path_buf(),
                 source,
             })?;
-        Ok(self.merge(overlay))
+        let merged = self.clone().merge(overlay);
+        if source == ConfigSource::UntrustedProject {
+            validate_monotonic(&self, &merged)?;
+        }
+        Ok(merged)
     }
 
     /// Resolves all `secret://` references in string-valued configuration fields.
@@ -468,6 +528,162 @@ impl Config {
             integrity: self.integrity.merge(overlay.integrity),
             metrics: self.metrics.merge(overlay.metrics),
         }
+    }
+}
+
+fn limit_violation<T: Ord + std::fmt::Display>(
+    inherited: &T,
+    merged: &T,
+    field: &str,
+) -> Option<String> {
+    (merged > inherited)
+        .then(|| format!("{field}: cannot raise limit from {inherited} to {merged}"))
+}
+
+fn action_rank(action: &str) -> Option<u8> {
+    match action {
+        "pass" => Some(0),
+        "warn" => Some(1),
+        "prompt" => Some(2),
+        "block" => Some(3),
+        _ => None,
+    }
+}
+
+fn action_violation(inherited: &str, merged: &str, field: &str) -> Option<String> {
+    match (action_rank(inherited), action_rank(merged)) {
+        (Some(before), Some(after)) if after < before => Some(format!(
+            "{field}: cannot weaken from \"{inherited}\" to \"{merged}\""
+        )),
+        _ => None,
+    }
+}
+
+fn check_security_booleans(inherited: &Config, merged: &Config, violations: &mut Vec<String>) {
+    if !inherited.execution.enabled && merged.execution.enabled {
+        violations.push("execution.enabled: cannot enable execution".to_owned());
+    }
+    if inherited.integrity.require_digest && !merged.integrity.require_digest {
+        violations.push("integrity.require_digest: cannot relax digest requirement".to_owned());
+    }
+    if inherited.integrity.require_provenance && !merged.integrity.require_provenance {
+        violations
+            .push("integrity.require_provenance: cannot relax provenance requirement".to_owned());
+    }
+    if inherited.detectors.shell_analysis && !merged.detectors.shell_analysis {
+        violations.push("detectors.shell_analysis: cannot disable detector".to_owned());
+    }
+    if inherited.detectors.powershell_analysis && !merged.detectors.powershell_analysis {
+        violations.push("detectors.powershell_analysis: cannot disable detector".to_owned());
+    }
+    if inherited.detectors.archive_inspection && !merged.detectors.archive_inspection {
+        violations.push("detectors.archive_inspection: cannot disable detector".to_owned());
+    }
+    if inherited.detectors.provenance_verification && !merged.detectors.provenance_verification {
+        violations.push("detectors.provenance_verification: cannot disable detector".to_owned());
+    }
+}
+
+fn check_numeric_limits(inherited: &Config, merged: &Config, violations: &mut Vec<String>) {
+    violations.extend(limit_violation(
+        &inherited.fetch.max_bytes,
+        &merged.fetch.max_bytes,
+        "fetch.max_bytes",
+    ));
+    violations.extend(limit_violation(
+        &inherited.fetch.max_redirects,
+        &merged.fetch.max_redirects,
+        "fetch.max_redirects",
+    ));
+    violations.extend(limit_violation(
+        &inherited.fetch.total_timeout_secs,
+        &merged.fetch.total_timeout_secs,
+        "fetch.total_timeout_secs",
+    ));
+    violations.extend(limit_violation(
+        &inherited.store.max_bytes,
+        &merged.store.max_bytes,
+        "store.max_bytes",
+    ));
+    violations.extend(limit_violation(
+        &inherited.analysis.max_time_secs,
+        &merged.analysis.max_time_secs,
+        "analysis.max_time_secs",
+    ));
+    violations.extend(limit_violation(
+        &inherited.analysis.max_depth,
+        &merged.analysis.max_depth,
+        "analysis.max_depth",
+    ));
+    violations.extend(limit_violation(
+        &inherited.analysis.max_files,
+        &merged.analysis.max_files,
+        "analysis.max_files",
+    ));
+    violations.extend(limit_violation(
+        &inherited.detectors.max_archive_depth,
+        &merged.detectors.max_archive_depth,
+        "detectors.max_archive_depth",
+    ));
+    violations.extend(limit_violation(
+        &inherited.detectors.max_extraction_bytes,
+        &merged.detectors.max_extraction_bytes,
+        "detectors.max_extraction_bytes",
+    ));
+    violations.extend(limit_violation(
+        &inherited.execution.timeout_secs,
+        &merged.execution.timeout_secs,
+        "execution.timeout_secs",
+    ));
+}
+
+fn check_policy_and_collections(inherited: &Config, merged: &Config, violations: &mut Vec<String>) {
+    violations.extend(action_violation(
+        &inherited.policy.default_action,
+        &merged.policy.default_action,
+        "policy.default_action",
+    ));
+    violations.extend(action_violation(
+        &inherited.policy.non_interactive_prompt_action,
+        &merged.policy.non_interactive_prompt_action,
+        "policy.non_interactive_prompt_action",
+    ));
+
+    for pack in &inherited.detectors.yara_rule_packs {
+        if !merged.detectors.yara_rule_packs.contains(pack) {
+            violations.push(format!(
+                "detectors.yara_rule_packs: cannot remove inherited pack {}",
+                pack.display()
+            ));
+        }
+    }
+
+    for rule in &inherited.policy.rules {
+        if !merged.policy.rules.iter().any(|r| r.id == rule.id) {
+            let rule_id = &rule.id;
+            violations.push(format!(
+                "policy.rules: cannot remove inherited rule \"{rule_id}\""
+            ));
+        }
+    }
+}
+
+/// Validates that `merged` does not weaken `inherited` (ADR-0017).
+///
+/// Project configuration is untrusted repository content. It may only tighten
+/// security policy: lower limits, enable additional detectors, require stricter
+/// integrity, or move the default action to a more restrictive value.
+fn validate_monotonic(inherited: &Config, merged: &Config) -> ConfigResult<()> {
+    let mut violations: Vec<String> = Vec::new();
+    check_security_booleans(inherited, merged, &mut violations);
+    check_numeric_limits(inherited, merged, &mut violations);
+    check_policy_and_collections(inherited, merged, &mut violations);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(ConfigError::PolicyWeakening {
+            detail: violations.join("; "),
+        })
     }
 }
 
@@ -852,7 +1068,7 @@ enabled = false
             &home.join(".config/arbitraitor/config.toml"),
             r"
 [fetch]
-max_redirects = 4
+max_redirects = 8
 total_timeout_secs = 45
 
 [execution]
@@ -863,19 +1079,19 @@ timeout_secs = 10
             &project.join(".arbitraitor/config.toml"),
             r"
 [fetch]
-max_redirects = 8
+max_redirects = 4
 
 [execution]
-enabled = true
+timeout_secs = 5
 ",
         )?;
 
         let config = Config::load_from_layers(None, Some(&home), &project)?;
 
-        assert_eq!(config.fetch.max_redirects, 8);
+        assert_eq!(config.fetch.max_redirects, 4);
         assert_eq!(config.fetch.total_timeout_secs, 45);
-        assert!(config.execution.enabled);
-        assert_eq!(config.execution.timeout_secs, 10);
+        assert!(!config.execution.enabled);
+        assert_eq!(config.execution.timeout_secs, 5);
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1083,6 +1299,271 @@ yara_rule_packs = ["rules/core", "rules/local"]
 
         assert_eq!(decoded, config);
         Ok(())
+    }
+
+    mod monotonic_enforcement {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        type MonoResult = Result<(), Box<dyn std::error::Error>>;
+
+        fn project_config(dir: &Path, body: &str) -> Result<PathBuf, std::io::Error> {
+            let path = dir.join(".arbitraitor/config.toml");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, body)?;
+            Ok(path)
+        }
+
+        fn weakening_detail(inherited: &Config, merged: &Config) -> String {
+            match validate_monotonic(inherited, merged) {
+                Err(ConfigError::PolicyWeakening { detail }) => detail,
+                Err(other) => format!("unexpected error type: {other}"),
+                Ok(()) => "validation succeeded (expected weakening rejection)".to_owned(),
+            }
+        }
+
+        #[test]
+        fn action_rank_orders_by_restrictiveness() {
+            assert_eq!(action_rank("pass"), Some(0));
+            assert_eq!(action_rank("warn"), Some(1));
+            assert_eq!(action_rank("prompt"), Some(2));
+            assert_eq!(action_rank("block"), Some(3));
+        }
+
+        #[test]
+        fn action_rank_unknown_returns_none() {
+            assert_eq!(action_rank("quarantine"), None);
+            assert_eq!(action_rank(""), None);
+        }
+
+        #[test]
+        fn identical_config_passes() {
+            let config = Config::default();
+            assert!(validate_monotonic(&config, &config).is_ok());
+        }
+
+        #[test]
+        fn lowering_limit_passes() {
+            let mut inherited = Config::default();
+            inherited.fetch.max_bytes = 1_000_000;
+            let mut merged = inherited.clone();
+            merged.fetch.max_bytes = 500_000;
+            assert!(validate_monotonic(&inherited, &merged).is_ok());
+        }
+
+        #[test]
+        fn enabling_integrity_requirement_passes() {
+            let inherited = Config::default();
+            let mut merged = inherited.clone();
+            merged.integrity.require_digest = true;
+            assert!(validate_monotonic(&inherited, &merged).is_ok());
+        }
+
+        #[test]
+        fn disabling_execution_passes() {
+            let mut inherited = Config::default();
+            inherited.execution.enabled = true;
+            let mut merged = inherited.clone();
+            merged.execution.enabled = false;
+            assert!(validate_monotonic(&inherited, &merged).is_ok());
+        }
+
+        #[test]
+        fn raising_limit_rejected() {
+            let mut inherited = Config::default();
+            inherited.fetch.max_bytes = 500_000;
+            let mut merged = inherited.clone();
+            merged.fetch.max_bytes = 1_000_000;
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("fetch.max_bytes"), "detail: {detail}");
+        }
+
+        #[test]
+        fn enabling_execution_rejected() {
+            let inherited = Config::default();
+            let mut merged = inherited.clone();
+            merged.execution.enabled = true;
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("execution.enabled"), "detail: {detail}");
+        }
+
+        #[test]
+        fn disabling_shell_detector_rejected() {
+            let inherited = Config::default();
+            let mut merged = inherited.clone();
+            merged.detectors.shell_analysis = false;
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("shell_analysis"), "detail: {detail}");
+        }
+
+        #[test]
+        fn weakening_integrity_rejected() {
+            let mut inherited = Config::default();
+            inherited.integrity.require_provenance = true;
+            let mut merged = inherited.clone();
+            merged.integrity.require_provenance = false;
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("require_provenance"), "detail: {detail}");
+        }
+
+        #[test]
+        fn weakening_default_action_rejected() {
+            let mut inherited = Config::default();
+            inherited.policy.default_action = "block".to_owned();
+            let mut merged = inherited.clone();
+            merged.policy.default_action = "pass".to_owned();
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("policy.default_action"), "detail: {detail}");
+        }
+
+        #[test]
+        fn removing_inherited_rule_pack_rejected() {
+            let mut inherited = Config::default();
+            inherited.detectors.yara_rule_packs = vec![PathBuf::from("core.yar")];
+            let merged = Config::default();
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("yara_rule_packs"), "detail: {detail}");
+        }
+
+        #[test]
+        fn removing_inherited_policy_rule_rejected() {
+            let mut inherited = Config::default();
+            inherited.policy.rules = vec![InlineRule {
+                id: "block-malware".to_owned(),
+                action: "block".to_owned(),
+                when: RuleCondition::default(),
+            }];
+            let merged = Config::default();
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("block-malware"), "detail: {detail}");
+        }
+
+        #[test]
+        fn multiple_violations_all_reported() {
+            let mut inherited = Config::default();
+            inherited.fetch.max_bytes = 500_000;
+            inherited.integrity.require_digest = true;
+            let mut merged = inherited.clone();
+            merged.fetch.max_bytes = 1_000_000;
+            merged.integrity.require_digest = false;
+            merged.execution.enabled = true;
+            let detail = weakening_detail(&inherited, &merged);
+            assert!(detail.contains("fetch.max_bytes"), "detail: {detail}");
+            assert!(detail.contains("require_digest"), "detail: {detail}");
+            assert!(detail.contains("execution.enabled"), "detail: {detail}");
+        }
+
+        #[test]
+        fn trusted_source_allows_weakening() -> MonoResult {
+            let dir = temp_dir("mono_trusted")?;
+            let path = dir.join("config.toml");
+            write_config(&path, "[execution]\nenabled = true\n")?;
+            let config = Config::load_from_file_with_source(&path, ConfigSource::Trusted)?;
+            assert!(config.execution.enabled);
+            std::fs::remove_dir_all(dir)?;
+            Ok(())
+        }
+
+        #[test]
+        fn untrusted_source_rejects_weakening() -> MonoResult {
+            let dir = temp_dir("mono_untrusted")?;
+            let path = dir.join("config.toml");
+            write_config(&path, "[execution]\nenabled = true\n")?;
+            let result = Config::load_from_file_with_source(&path, ConfigSource::UntrustedProject);
+            assert!(matches!(result, Err(ConfigError::PolicyWeakening { .. })));
+            std::fs::remove_dir_all(dir)?;
+            Ok(())
+        }
+
+        #[test]
+        fn untrusted_tightening_succeeds() -> MonoResult {
+            let dir = temp_dir("mono_tighten")?;
+            let path = project_config(&dir, "[integrity]\nrequire_digest = true\n")?;
+            let config = Config::load_from_file_with_source(&path, ConfigSource::UntrustedProject)?;
+            assert!(config.integrity.require_digest);
+            std::fs::remove_dir_all(dir)?;
+            Ok(())
+        }
+
+        proptest! {
+            #[test]
+            fn prop_raising_limit_rejected(
+                base in 1u64..1_000_000,
+                delta in 1u64..1_000_000,
+            ) {
+                let mut inherited = Config::default();
+                inherited.fetch.max_bytes = base;
+                let mut merged = inherited.clone();
+                merged.fetch.max_bytes = base + delta;
+                prop_assert!(validate_monotonic(&inherited, &merged).is_err());
+            }
+
+            #[test]
+            fn prop_lowering_limit_accepted(
+                pair in (2u64..1_000_000).prop_flat_map(|high| (Just(high), 1u64..high))
+            ) {
+                let (high, low) = pair;
+                let mut inherited = Config::default();
+                inherited.fetch.max_bytes = high;
+                let mut merged = inherited.clone();
+                merged.fetch.max_bytes = low;
+                prop_assert!(validate_monotonic(&inherited, &merged).is_ok());
+            }
+
+            #[test]
+            fn prop_disabling_detector_rejected(which in 0u8..4u8) {
+                let inherited = Config::default();
+                let mut merged = inherited.clone();
+                match which % 4 {
+                    0 => merged.detectors.shell_analysis = false,
+                    1 => merged.detectors.powershell_analysis = false,
+                    2 => merged.detectors.archive_inspection = false,
+                    _ => merged.detectors.provenance_verification = false,
+                }
+                prop_assert!(validate_monotonic(&inherited, &merged).is_err());
+            }
+
+            #[test]
+            fn prop_enabling_execution_rejected(flag in any::<bool>()) {
+                let inherited = Config::default();
+                let mut merged = inherited.clone();
+                merged.execution.enabled = flag;
+                if flag {
+                    prop_assert!(validate_monotonic(&inherited, &merged).is_err());
+                } else {
+                    prop_assert!(validate_monotonic(&inherited, &merged).is_ok());
+                }
+            }
+
+            #[test]
+            fn prop_action_weakening_rejected(
+                pair in (1u8..4u8).prop_flat_map(|from| (Just(from), 0u8..from))
+            ) {
+                let (from_rank, to_rank) = pair;
+                let actions = ["pass", "warn", "prompt", "block"];
+                let mut inherited = Config::default();
+                inherited.policy.default_action = actions[from_rank as usize].to_owned();
+                let mut merged = inherited.clone();
+                merged.policy.default_action = actions[to_rank as usize].to_owned();
+                prop_assert!(validate_monotonic(&inherited, &merged).is_err());
+            }
+
+            #[test]
+            fn prop_action_tightening_accepted(
+                pair in (0u8..3u8).prop_flat_map(|from| (Just(from), (from + 1)..4u8))
+            ) {
+                let (from_rank, to_rank) = pair;
+                let actions = ["pass", "warn", "prompt", "block"];
+                let mut inherited = Config::default();
+                inherited.policy.default_action = actions[from_rank as usize].to_owned();
+                let mut merged = inherited.clone();
+                merged.policy.default_action = actions[to_rank as usize].to_owned();
+                prop_assert!(validate_monotonic(&inherited, &merged).is_ok());
+            }
+        }
     }
 
     fn malware_finding() -> Finding {
