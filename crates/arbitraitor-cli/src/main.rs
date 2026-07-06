@@ -292,7 +292,15 @@ struct CosignInput {
 async fn main() -> Result<()> {
     let cli = parse_cli_from_invocation();
 
-    arbitraitor_core::privilege::refuse_root_unless(cli.allow_root);
+    let is_diagnostic = matches!(
+        cli.command,
+        Command::Doctor(_) | Command::Version | Command::Status(_)
+    );
+    if is_diagnostic {
+        arbitraitor_core::privilege::refuse_root_unless(cli.allow_root);
+    } else {
+        arbitraitor_core::privilege::refuse_root();
+    }
 
     let level = match cli.verbose {
         0 => "warn",
