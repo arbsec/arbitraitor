@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
+- `arbitraitor doctor --json` — machine-readable output (human-readable is now the default)
+- `arbitraitor doctor` now shows shell integration health checks (shell detection, shim status, PATH, rcfile)
 - `wrappers init --dry-run` — preview what would change without writing to rcfile
 - `wrappers init --no-backup` — skip backup file creation (backup is created by default)
 - `hook init` now emits a deprecation warning and supports `ARBITRAITOR_HOOK_DISABLE=1` bypass
