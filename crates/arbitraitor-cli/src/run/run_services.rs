@@ -311,6 +311,7 @@ pub(super) fn release_native_via_safe_destination(
     let store = ContentStore::open(&artifact.store_dir)
         .map_err(|error| RunFailure::Execution(error.to_string()))?;
     let policy = ReleasePolicy {
+        allow_overwrite: true,
         #[cfg(unix)]
         final_mode: Some(0o700),
         ..ReleasePolicy::default()
