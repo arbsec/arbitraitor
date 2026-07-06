@@ -335,6 +335,25 @@ pub struct DetectorMetadata {
     /// Whether the detector is deterministic for identical inputs.
     pub is_deterministic: bool,
 }
+
+/// Provenance metadata for a detector binary (subprocess detectors).
+///
+/// Records the SHA-256 of the detector binary, its reported version, and the
+/// digest of its ruleset at detection time. This flows into the receipt so the
+/// exact detector build that produced each finding is auditable.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectorProvenance {
+    /// SHA-256 hex digest of the detector binary file, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_sha256: Option<String>,
+    /// Version string reported by the detector binary, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_version: Option<String>,
+    /// Digest of the ruleset used by the detector, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruleset_digest: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

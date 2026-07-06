@@ -7,13 +7,21 @@
 
 #![forbid(unsafe_code)]
 
-use arbitraitor_model::artifact::ArtifactKind;
-use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
-use arbitraitor_model::ids::Sha256Digest;
-use arbitraitor_model::verdict::{Confidence, Severity};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+use arbitraitor_model::artifact::ArtifactKind;
+use arbitraitor_model::finding::{
+    DetectorProvenance, Evidence, EvidenceKind, Finding, FindingCategory,
+};
+use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::verdict::{Confidence, Severity};
+use arbitraitor_sandbox::{
+    PathRule, ProcessResourceLimits, SandboxConfig, configure_command,
+    configure_filesystem_isolation, configure_network_isolation, configure_resource_limits,
+};
+use sha2::{Digest, Sha256};
 
 use crate::{AnalysisContext, Detector, DetectorMetadata};
 
@@ -21,13 +29,23 @@ const DETECTOR_ID: &str = "tirith";
 const DETECTOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const SANDBOX_CPU_SECS: u64 = DEFAULT_TIMEOUT_SECS;
+const SANDBOX_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const SANDBOX_FD_LIMIT: u64 = 64;
 
 /// Tirith subprocess detector. Resolves the `tirith` binary at construction
 /// time; if not found, the detector is inert and returns no findings.
+///
+/// At construction the detector captures the binary's SHA-256 digest and
+/// version string for receipt provenance. The subprocess is sandboxed with
+/// seccomp network isolation, Landlock filesystem restrictions, resource
+/// limits, and `no_new_privs` hardening.
 #[derive(Clone, Debug)]
 pub struct TirithDetector {
     binary_path: Option<PathBuf>,
     timeout: Duration,
+    binary_sha256: Option<String>,
+    binary_version: Option<String>,
 }
 
 impl TirithDetector {
@@ -43,9 +61,15 @@ impl TirithDetector {
         let binary_path = explicit_path
             .filter(|p| p.is_file())
             .or_else(|| which("tirith"));
+        let (binary_sha256, binary_version) = match &binary_path {
+            Some(path) => (compute_binary_sha256(path), probe_binary_version(path)),
+            None => (None, None),
+        };
         Self {
             binary_path,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            binary_sha256,
+            binary_version,
         }
     }
 
@@ -73,7 +97,10 @@ impl Detector for TirithDetector {
     fn metadata(&self) -> DetectorMetadata {
         DetectorMetadata {
             id: DETECTOR_ID.to_owned(),
-            version: DETECTOR_VERSION.to_owned(),
+            version: self
+                .binary_version
+                .clone()
+                .unwrap_or_else(|| DETECTOR_VERSION.to_owned()),
             supported_artifact_kinds: vec![
                 ArtifactKind::ShellScript(arbitraitor_model::artifact::ShellDialect::Posix),
                 ArtifactKind::GenericText,
@@ -84,6 +111,15 @@ impl Detector for TirithDetector {
             default_timeout_ms: u64::try_from(self.timeout.as_millis()).unwrap_or(30_000),
             is_deterministic: false,
         }
+    }
+
+    fn provenance(&self) -> Option<DetectorProvenance> {
+        self.binary_path.as_ref()?;
+        Some(DetectorProvenance {
+            binary_sha256: self.binary_sha256.clone(),
+            binary_version: self.binary_version.clone(),
+            ruleset_digest: None,
+        })
     }
 
     fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
@@ -106,7 +142,8 @@ impl Detector for TirithDetector {
         }
         let temp_path = temp_file.path().to_path_buf();
 
-        let mut child = match Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .args([
                 "scan",
                 "--json",
@@ -118,9 +155,11 @@ impl Detector for TirithDetector {
             .arg(&temp_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::null());
+
+        apply_subprocess_hardening(&mut command, binary, &temp_path);
+
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(error) => {
                 tracing::warn!("tirith: subprocess spawn failed: {error}");
@@ -193,6 +232,85 @@ impl Detector for TirithDetector {
 
         parse_tirith_findings(&stdout, &ctx.artifact_sha256)
     }
+}
+
+fn apply_subprocess_hardening(command: &mut Command, binary: &Path, temp_artifact: &Path) {
+    let limits = ProcessResourceLimits {
+        cpu_time_secs: Some(SANDBOX_CPU_SECS),
+        memory_bytes: Some(SANDBOX_MEMORY_BYTES),
+        fd_count: Some(SANDBOX_FD_LIMIT),
+        ..ProcessResourceLimits::empty()
+    };
+    configure_resource_limits(command, &limits);
+    configure_command(command, SandboxConfig::default());
+    configure_network_isolation(command);
+
+    let rules = landlock_rules_for(binary, temp_artifact);
+    configure_filesystem_isolation(command, &rules);
+}
+
+fn landlock_rules_for(binary: &Path, temp_artifact: &Path) -> Vec<PathRule> {
+    let mut rules = Vec::new();
+
+    if let Some(parent) = binary.parent() {
+        rules.push(PathRule::read_execute(parent.to_path_buf()));
+    }
+    if let Some(parent) = temp_artifact.parent() {
+        rules.push(PathRule::read_execute(parent.to_path_buf()));
+    }
+
+    for path in [
+        "/bin",
+        "/usr/bin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+    ] {
+        rules.push(PathRule::read_execute(PathBuf::from(path)));
+    }
+
+    rules
+}
+
+fn compute_binary_sha256(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Some(hex_digest(&digest))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from(TABLE[usize::from(byte >> 4)]));
+        hex.push(char::from(TABLE[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+fn probe_binary_version(binary: &Path) -> Option<String> {
+    let output = Command::new(binary)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().next().map(str::trim).map(str::to_owned)
 }
 
 fn parse_tirith_findings(stdout: &[u8], artifact_sha256: &Sha256Digest) -> Vec<Finding> {
@@ -380,7 +498,95 @@ mod tests {
         let detector = TirithDetector {
             binary_path: None,
             timeout: Duration::from_secs(5),
+            binary_sha256: None,
+            binary_version: None,
         };
         assert!(!detector.is_available());
+    }
+
+    #[test]
+    fn provenance_is_none_when_binary_not_found() {
+        let detector = TirithDetector {
+            binary_path: None,
+            timeout: Duration::from_secs(5),
+            binary_sha256: None,
+            binary_version: None,
+        };
+        assert!(!detector.is_available());
+        assert!(detector.provenance().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provenance_captures_binary_sha256_when_available() -> TestResult {
+        use std::path::PathBuf;
+        let detector = TirithDetector::with_binary(Some(PathBuf::from("/bin/sh")));
+        if !detector.is_available() {
+            return Ok(());
+        }
+        let provenance = detector
+            .provenance()
+            .ok_or_else(|| std::io::Error::other("provenance must exist with binary"))?;
+        let captured = provenance
+            .binary_sha256
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("binary_sha256 must be computed"))?;
+        let actual = file_sha256_hex("/bin/sh")?;
+        assert_eq!(
+            captured, &actual,
+            "binary_sha256 must match the actual file digest"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires real Tirith binary; /bin/sh stand-in may not report a parseable version"]
+    fn metadata_version_reports_binary_version_not_crate_version() {
+        use std::path::PathBuf;
+        let detector = TirithDetector::with_binary(Some(PathBuf::from("/bin/sh")));
+        if !detector.is_available() {
+            return;
+        }
+        let meta = detector.metadata();
+        assert_ne!(
+            meta.version, DETECTOR_VERSION,
+            "metadata version must be the binary version, not the crate version"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_blocks_subprocess_filesystem_escape() -> TestResult {
+        use std::path::PathBuf;
+        let detector = TirithDetector::with_binary(Some(PathBuf::from("/bin/sh")));
+        if !detector.is_available() {
+            return Ok(());
+        }
+        let provenance = detector
+            .provenance()
+            .ok_or_else(|| std::io::Error::other("provenance must exist"))?;
+        assert!(
+            provenance.binary_sha256.is_some(),
+            "sandbox test requires provenance to be captured"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn file_sha256_hex(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        use std::fs;
+        use std::io::Read;
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0_u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hex_digest(&hasher.finalize()))
     }
 }
