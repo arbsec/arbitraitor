@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_plugin_api::NetworkCapability;
 use arbitraitor_plugin_host::executor::{ExecutorError, SubprocessExecutor};
 use arbitraitor_plugin_host::protocol::MessageKind;
 use serde_json::json;
@@ -20,10 +21,34 @@ fn network_isolation_enabled_by_default() {
 }
 
 #[test]
-fn network_isolation_can_be_disabled() {
-    let executor = SubprocessExecutor::new(mock_plugin()).with_network_isolated(false);
+fn network_isolation_reflected_from_outbound_https_capability() {
+    let executor = SubprocessExecutor::new(mock_plugin())
+        .with_network_capability(NetworkCapability::OutboundHttps);
 
     assert!(!executor.network_isolated());
+}
+
+#[test]
+fn network_isolation_reflected_from_loopback_only_capability() {
+    let executor = SubprocessExecutor::new(mock_plugin())
+        .with_network_capability(NetworkCapability::LoopbackOnly);
+
+    assert!(!executor.network_isolated());
+}
+
+#[test]
+fn network_isolation_remains_enabled_with_default_none_capability() {
+    let executor =
+        SubprocessExecutor::new(mock_plugin()).with_network_capability(NetworkCapability::None);
+
+    assert!(executor.network_isolated());
+}
+
+#[test]
+fn network_isolation_remains_enabled_without_capability_token() {
+    let executor = SubprocessExecutor::new(mock_plugin());
+
+    assert!(executor.network_isolated());
 }
 
 #[test]

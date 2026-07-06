@@ -8,9 +8,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admission;
 pub mod error;
 pub mod executor;
 pub mod frame;
+pub mod manifest;
 pub mod protocol;
 pub mod registry;
 #[cfg(feature = "experimental-wasm")]

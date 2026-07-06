@@ -130,6 +130,20 @@ pub enum NetworkCapability {
     Full,
 }
 
+impl NetworkCapability {
+    /// Returns `true` when the capability grants no network access at all and
+    /// the executor must apply its kernel-level network isolation.
+    ///
+    /// `LoopbackOnly` is intentionally treated as non-isolated: loopback
+    /// sockets require lifting the broad seccomp-BPF network syscall block.
+    /// Finer-grained loopback filtering, if needed, is the executor's
+    /// responsibility above the isolation switch reported here.
+    #[must_use]
+    pub const fn is_isolated(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// Filesystem access requested by a plugin.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
