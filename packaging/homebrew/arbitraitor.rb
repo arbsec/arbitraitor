@@ -5,24 +5,12 @@ class Arbitraitor < Formula
   license "MIT OR Apache-2.0"
   head "https://github.com/arbsec/arbitraitor.git", branch: "main"
 
-  on_macos do
-    on_arm do
-      url "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-aarch64-apple-darwin.tar.gz"
-    end
-  end
-
-  on_linux do
-    on_intel do
-      url "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-x86_64-unknown-linux-gnu.tar.gz"
-    end
-
-    on_arm do
-      url "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-aarch64-unknown-linux-gnu.tar.gz"
-    end
-  end
+  # Builds from source via cargo. For pre-built binaries, see:
+  # https://github.com/arbsec/arbitraitor/releases
+  depends_on "rust" => :build
 
   def install
-    bin.install "arbitraitor"
+    system "cargo", "install", "--path", "crates/arbitraitor-cli", "--root", prefix
   end
 
   test do
