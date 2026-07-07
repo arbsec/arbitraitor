@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### ADRs
+
+- ADRs 0022–0026 accepted: SLSA Build L3 target (0022), in-toto Statement receipt envelope (0023), macOS containment strategy (0024), OpenSSF Scorecard/deps.dev/GUAC integration (0025), EU CRA/NIST SSDF compliance mapping (0026). All 26 ADRs are now Accepted.
+
 #### CLI
 
 - `arbitraitor doctor --json` — machine-readable output (human-readable is now the default)

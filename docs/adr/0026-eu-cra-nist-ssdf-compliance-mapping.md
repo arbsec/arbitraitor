@@ -1,6 +1,6 @@
 # ADR 0026: EU CRA / NIST SSDF informational compliance mapping
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-29
 **Issue:** #276
 

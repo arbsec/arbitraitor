@@ -1,6 +1,6 @@
 # ADR 0025: OpenSSF Scorecard, deps.dev, and GUAC as optional integrations
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-29
 **Issue:** #275
 
