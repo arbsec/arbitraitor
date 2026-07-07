@@ -7,17 +7,17 @@ class Arbitraitor < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/arbsec/arbitraitor/releases/download/nightly-latest/arbitraitor-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-aarch64-apple-darwin.tar.gz"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/arbsec/arbitraitor/releases/download/nightly-latest/arbitraitor-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-x86_64-unknown-linux-gnu.tar.gz"
     end
 
     on_arm do
-      url "https://github.com/arbsec/arbitraitor/releases/download/nightly-latest/arbitraitor-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-aarch64-unknown-linux-gnu.tar.gz"
     end
   end
 

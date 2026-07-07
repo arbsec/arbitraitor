@@ -30,7 +30,7 @@ runs:
           arm64-darwin)   TARGET="aarch64-apple-darwin" ;;
           *) echo "Unsupported: $ARCH-$OS"; exit 1 ;;
         esac
-        curl -fsSL "https://github.com/arbsec/arbitraitor/releases/download/nightly-latest/arbitraitor-${TARGET}.tar.gz" | tar xz
+        curl -fsSL "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-${TARGET}.tar.gz" | tar xz
         sudo mv arbitraitor /usr/local/bin/
 
     - name: Inspect URLs
