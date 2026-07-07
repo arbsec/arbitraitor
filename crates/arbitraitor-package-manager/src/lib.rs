@@ -10,9 +10,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod advisory;
 pub mod bun;
 pub mod cargo;
 pub mod error;
+pub mod lifecycle;
 pub mod npm;
 pub mod pnpm;
 pub mod receipt;
@@ -21,7 +23,9 @@ pub mod uv;
 pub mod yarn_berry;
 pub mod yarn_classic;
 
+pub use advisory::{AdvisoryVerdict, FindingSeverity, NpmAdvisoryOutcome, PackageFinding};
 pub use error::AdapterManagerError;
+pub use lifecycle::{LifecycleParseError, LifecycleScript, parse_lifecycle_scripts};
 pub use receipt::{CapabilityGrant, LifecycleScriptStatus, PackageManagerReceipt, ProxyMode};
 pub use recipe::{
     AdapterRecipe, InspectionPattern, LifecycleScriptPolicy, LockfileFormat, RegistryAdapter,

@@ -27,6 +27,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor graph` | Render payload containment tree for archives |
 | `arbitraitor approve` | Approve execution from a receipt file |
 | `arbitraitor execute` | Execute an artifact from CAS using an approval file |
+| `arbitraitor pm` | Run a package manager through advisory scan (npm) |
 | `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
 | `arbitraitor version` | Print version, license, and repository |
 
@@ -429,27 +430,67 @@ Manages package manager compatibility shims that route tool invocations through 
 
 #### `list`
 
-List installed shims. Package-manager shims are not yet implemented — use `arbitraitor wrappers install` for curl/wget support:
+List installed shims and supported tools:
 
 ```sh
 arbitraitor shim list
+# Supported shims: npm
 ```
 
 #### `install <TOOL>`
 
-Package-manager shims are not yet implemented. Use `arbitraitor wrappers install` for curl/wget support:
+Install a compatibility shim for a supported package manager. The shim invokes `arbitraitor pm run --tool <TOOL>` so every invocation passes through advisory scan:
 
 ```sh
 arbitraitor shim install npm
-# Error: package-manager shims are not yet implemented
+# Writes ~/.arbitraitor/shims/npm
 ```
+
+Supported tools: `npm`.
 
 #### `uninstall <TOOL>`
 
-Remove a compatibility shim (not yet implemented for package managers):
+Remove a compatibility shim:
 
 ```sh
 arbitraitor shim uninstall npm
+```
+
+## PM command
+
+```sh
+arbitraitor pm run --tool <TOOL> [-- <ARGS>...]
+```
+
+Runs a package manager tool through Arbitraitor's advisory scan (spec §39.14 Phase 1), then executes it if the verdict allows. Currently supports `npm`.
+
+### Advisory scan flow (npm)
+
+1. Resolves the dependency tree via `package-lock.json` (generates it with `npm install --package-lock-only --ignore-scripts` if absent).
+2. Parses lifecycle scripts (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) from the root `package.json`.
+3. Flags dependencies with install lifecycle scripts (`hasInstallScript` in the lockfile).
+4. Flags dependencies resolved from non-registry sources (git URLs, file: links).
+5. Derives a verdict (Pass / Warn / Block) and emits a `PackageManagerReceipt`.
+6. If the verdict allows execution (Pass or Warn), runs `npm install --ignore-scripts` (scripts denied per the npm adapter's `DeniedByDefault` lifecycle policy).
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--tool <TOOL>` | Package manager tool to wrap (currently: `npm`) |
+
+### Exit codes
+
+The `pm` command uses the standard verdict-to-exit-code mapping (0=Pass, 10=Warn, 30=Block). An error during scan or execution exits with code 33.
+
+### Examples
+
+```sh
+# Advisory scan + gated install (default)
+arbitraitor pm run --tool npm
+
+# Pass extra arguments to npm
+arbitraitor pm run --tool npm -- install --save-dev lodash
 ```
 
 ## Graph command

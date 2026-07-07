@@ -26,6 +26,7 @@ arbitraitor-fetch = { workspace = true }
 arbitraitor-intel = { workspace = true }
 arbitraitor-mcp = { workspace = true }
 arbitraitor-model = { workspace = true }
+arbitraitor-package-manager = { workspace = true }
 arbitraitor-policy = { workspace = true }
 arbitraitor-plugin-host = { workspace = true }
 arbitraitor-provenance = { workspace = true }
