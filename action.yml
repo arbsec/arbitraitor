@@ -30,8 +30,21 @@ runs:
           arm64-darwin)   TARGET="aarch64-apple-darwin" ;;
           *) echo "Unsupported: $ARCH-$OS"; exit 1 ;;
         esac
-        curl -fsSL "https://github.com/arbsec/arbitraitor/releases/download/latest/arbitraitor-${TARGET}.tar.gz" | tar xz
-        sudo mv arbitraitor /usr/local/bin/
+        # Find the latest release tag
+        TAG=$(gh release list --repo arbsec/arbitraitor --json tagName --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.tagName) | last | .tagName' 2>/dev/null)
+        if [ -z "$TAG" ]; then
+          echo "No nightly release found; building from source"
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          git clone https://github.com/arbsec/arbitraitor.git /tmp/arbitraitor
+          cd /tmp/arbitraitor && cargo build --release -p arbitraitor-cli
+          sudo mv target/release/arbitraitor /usr/local/bin/
+        else
+          curl -fsSL "https://github.com/arbsec/arbitraitor/releases/download/${TAG}/arbitraitor-${TARGET}.tar.gz" | tar xz
+          sudo mv arbitraitor /usr/local/bin/
+        fi
+      env:
+        GH_TOKEN: ${{ env.GITHUB_TOKEN }}
 
     - name: Inspect URLs
       shell: bash
