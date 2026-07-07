@@ -91,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Delete nightly releases older than 7 days to keep the releases page clean
+          # Delete nightly releases older than 7 days
           cutoff_date=$(date -u -d '7 days ago' +'%Y-%m-%d' 2>/dev/null || date -u -v-7d +'%Y-%m-%d' 2>/dev/null)
           gh release list --repo "$GITHUB_REPOSITORY" --json tagName,createdAt --jq '.[] | select(.tagName | startswith("nightly-")) | "\(.tagName) \(.createdAt)"' 2>/dev/null | while read tag created; do
             if [[ "$created" < "$cutoff_date" ]]; then
@@ -99,18 +99,30 @@ jobs:
               gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
             fi
           done
-      - name: Create release
+      - name: Create draft release and upload assets
         if: steps.artifacts.outputs.count != '0'
-        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
-        with:
-          tag: ${{ steps.date.outputs.tag }}
-          name: Nightly Build (${{ steps.date.outputs.date }})
-          body: |
-            Automated nightly build of Arbitraitor.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create as DRAFT first (drafts are NOT immutable)
+          gh release create "${{ steps.date.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Nightly Build (${{ steps.date.outputs.date }})" \
+            --notes "Automated nightly build of Arbitraitor.
 
-            **Build date:** ${{ steps.date.outputs.date }}
-            **Commit:** ${{ github.sha }}
+          **Build date:** ${{ steps.date.outputs.date }}
+          **Commit:** ${{ github.sha }}
 
-            These are pre-release binaries intended for testing. Not for production use.
-          prerelease: true
-          artifacts: "dist/*.tar.gz,dist/*.sha256"
+          These are pre-release binaries intended for testing. Not for production use." \
+            --prerelease \
+            --draft \
+            dist/*.tar.gz dist/*.sha256
+      - name: Publish release (makes it immutable with all assets attached)
+        if: steps.artifacts.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Publishing the draft makes it immutable — but all assets are already attached
+          gh release edit "${{ steps.date.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
