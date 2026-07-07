@@ -10,6 +10,7 @@ use std::io::Cursor;
 
 use arbitraitor_exec::EffectiveControls;
 use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
+use arbitraitor_model::taxonomy::TaxonomyRef;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -205,10 +206,32 @@ pub struct FindingSummary {
     pub title: String,
     /// Optional source location.
     pub location: Option<SourceLocation>,
+    /// Representative evidence snippet or matched pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// Recommended remediation guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    /// External finding references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+    /// Machine-readable taxonomy mappings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taxonomies: Vec<TaxonomyRef>,
 }
 
 impl From<&Finding> for FindingSummary {
     fn from(finding: &Finding) -> Self {
+        let evidence = finding
+            .evidence
+            .iter()
+            .find_map(|evidence| evidence.content.clone())
+            .or_else(|| {
+                finding
+                    .evidence
+                    .first()
+                    .map(|evidence| evidence.description.clone())
+            });
         Self {
             id: finding.id.clone(),
             category: finding.category,
@@ -216,6 +239,10 @@ impl From<&Finding> for FindingSummary {
             confidence: finding.confidence,
             title: finding.title.clone(),
             location: finding.location.clone(),
+            evidence,
+            remediation: finding.remediation.clone(),
+            references: finding.references.clone(),
+            taxonomies: finding.taxonomies.clone(),
         }
     }
 }
@@ -610,6 +637,10 @@ mod tests {
             confidence: Confidence::High,
             title: "suspicious shell behavior".to_owned(),
             location: None,
+            evidence: None,
+            remediation: None,
+            references: Vec::new(),
+            taxonomies: Vec::new(),
         })
         .release(ReleaseInfo {
             method: ReleaseMethod::File,

@@ -1416,6 +1416,10 @@ fn signature_finding(index: usize, verification: &SignatureVerification) -> Find
         confidence: Confidence::Confirmed,
         title: signature_title(verification),
         location: None,
+        evidence: None,
+        remediation: None,
+        references: Vec::new(),
+        taxonomies: Vec::new(),
     }
 }
 
