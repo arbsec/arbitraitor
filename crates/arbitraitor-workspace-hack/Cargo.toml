@@ -17,7 +17,7 @@ license = "MIT OR Apache-2.0"
 ### BEGIN HAKARI SECTION
 [dependencies]
 aho-corasick = { version = "1" }
-allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 anstyle = { version = "1" }
 anyhow = { version = "1" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
@@ -27,8 +27,7 @@ bumpalo = { version = "3", features = ["allocator-api2"] }
 cranelift-bitset = { version = "0.133", default-features = false, features = ["enable-serde"] }
 crc32fast = { version = "1" }
 crossbeam-utils = { version = "0.8" }
-crypto-common = { version = "0.1", default-features = false, features = ["std"] }
-digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "std"] }
+digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11", features = ["alloc", "mac", "oid", "zeroize"] }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-channel = { version = "0.3", features = ["sink"] }
@@ -36,7 +35,7 @@ futures-core = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["async-await-macro", "channel", "io", "sink"] }
-hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher"] }
+hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher", "serde"] }
 hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16", default-features = false, features = ["default-hasher", "serde"] }
 id-arena = { version = "2" }
 indexmap = { version = "2", features = ["serde"] }
@@ -53,15 +52,13 @@ semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
-sha2 = { version = "0.10", default-features = false, features = ["std"] }
 simd-adler32 = { version = "0.3", default-features = false, features = ["std"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde", "union"] }
 stable_deref_trait = { version = "1", default-features = false, features = ["std"] }
 subtle = { version = "2" }
 tracing-core = { version = "0.1" }
-typenum = { version = "1", default-features = false, features = ["const-generics"] }
-wasmparser = { version = "0.252" }
+wasmparser = { version = "0.251", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
 wasmtime-internal-core = { version = "46", default-features = false, features = ["anyhow", "serde", "std"] }
 zeroize = { version = "1" }
 zstd = { version = "0.13" }
@@ -76,8 +73,7 @@ bstr = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 cranelift-bitset = { version = "0.133", default-features = false, features = ["enable-serde"] }
 crossbeam-utils = { version = "0.8" }
-hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher"] }
-hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16", default-features = false, features = ["default-hasher", "serde"] }
+hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher", "serde"] }
 id-arena = { version = "2" }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -93,7 +89,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
-wasmparser = { version = "0.252" }
+wasmparser = { version = "0.251", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
 wasmtime-internal-core = { version = "46", default-features = false, features = ["anyhow", "serde", "std"] }
 
 ### END HAKARI SECTION
