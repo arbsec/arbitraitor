@@ -1,0 +1,78 @@
+name: "Arbitraitor Inspect"
+description: "Scan URLs and artifacts in pull requests for supply-chain threats using Arbitraitor"
+branding:
+  icon: "shield"
+  color: "red"
+inputs:
+  urls:
+    description: "Comma-separated list of URLs to inspect (defaults to scanning PR diff)"
+    required: false
+    default: ""
+  fail-on:
+    description: "Fail the action if verdict matches this level (pass, warn, prompt, block)"
+    required: false
+    default: "block"
+  receipt:
+    description: "Write receipt JSON to this path"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Install Arbitraitor
+      shell: bash
+      run: |
+        ARCH=$(uname -m)
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        case "$ARCH-$OS" in
+          x86_64-linux)   TARGET="x86_64-unknown-linux-gnu" ;;
+          aarch64-linux)  TARGET="aarch64-unknown-linux-gnu" ;;
+          arm64-darwin)   TARGET="aarch64-apple-darwin" ;;
+          *) echo "Unsupported: $ARCH-$OS"; exit 1 ;;
+        esac
+        curl -fsSL "https://github.com/arbsec/arbitraitor/releases/download/nightly-latest/arbitraitor-${TARGET}.tar.gz" | tar xz
+        sudo mv arbitraitor /usr/local/bin/
+
+    - name: Inspect URLs
+      shell: bash
+      run: |
+        URLS="${{ inputs.urls }}"
+        FAIL_ON="${{ inputs.fail-on }}"
+        RECEIPT="${{ inputs.receipt }}"
+
+        if [ -z "$URLS" ]; then
+          echo "No URLs specified; skipping inspection."
+          exit 0
+        fi
+
+        EXIT_CODE=0
+        IFS=',' read -ra URL_ARRAY <<< "$URLS"
+        for url in "${URL_ARRAY[@]}"; do
+          url=$(echo "$url" | xargs)
+          [ -z "$url" ] && continue
+
+          echo "::group::Inspecting: $url"
+          ARGS=("inspect" "$url" "--non-interactive")
+          [ -n "$RECEIPT" ] && ARGS+=("--receipt" "${RECEIPT}/${url//[^a-zA-Z0-9]/_}.json")
+          arbitraitor "${ARGS[@]}" || CODE=$?
+          echo "::endgroup::"
+
+          case "$CODE" in
+            0)  VERDICT="pass" ;;
+            10) VERDICT="warn" ;;
+            21) VERDICT="prompt" ;;
+            30) VERDICT="block" ;;
+            *)  VERDICT="error" ;;
+          esac
+
+          echo "Verdict for $url: $VERDICT"
+
+          case "$FAIL_ON" in
+            pass)    EXIT_CODE=1 ;;
+            warn)    [ "$VERDICT" = "warn" ] || [ "$VERDICT" = "prompt" ] || [ "$VERDICT" = "block" ] && EXIT_CODE=1 ;;
+            prompt)  [ "$VERDICT" = "prompt" ] || [ "$VERDICT" = "block" ] && EXIT_CODE=1 ;;
+            block)   [ "$VERDICT" = "block" ] && EXIT_CODE=1 ;;
+          esac
+        done
+
+        exit $EXIT_CODE

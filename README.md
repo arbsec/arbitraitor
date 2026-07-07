@@ -63,6 +63,15 @@ cd arbitraitor
 cargo install --path crates/arbitraitor-cli
 ```
 
+### Use in CI (GitHub Actions)
+
+```yaml
+- uses: arbsec/arbitraitor@v1
+  with:
+    urls: https://example.com/install.sh
+    fail-on: block
+```
+
 ### Inspect a script
 
 ```sh
