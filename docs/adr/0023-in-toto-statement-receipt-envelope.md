@@ -1,6 +1,6 @@
 # ADR 0023: in-toto Statement receipt envelope
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-29
 **Issue:** #273
 

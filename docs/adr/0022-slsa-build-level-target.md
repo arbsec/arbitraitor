@@ -1,6 +1,6 @@
 # ADR 0022: SLSA Build Level target for Arbitraitor releases
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-29
 **Issue:** #272
 

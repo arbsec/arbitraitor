@@ -1,6 +1,6 @@
 # ADR 0024: macOS containment strategy
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-29
 **Issue:** #279
 
