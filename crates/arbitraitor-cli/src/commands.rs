@@ -723,7 +723,7 @@ pub(crate) fn hook(command: &HookCommand) -> Result<()> {
     Ok(())
 }
 
-const SUPPORTED_SHIMS: &[&str] = &[];
+const SUPPORTED_SHIMS: &[&str] = &["npm"];
 
 pub(crate) fn shim(command: &ShimCommand) -> Result<()> {
     match &command.subcommand {

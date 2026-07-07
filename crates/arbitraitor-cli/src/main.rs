@@ -4,6 +4,7 @@
 
 mod approval;
 mod commands;
+mod pm;
 mod run;
 
 use std::ffi::OsString;
@@ -93,6 +94,7 @@ enum Command {
     Graph(commands::GraphCommand),
     Approve(commands::ApproveCommand),
     Execute(commands::ExecuteCommand),
+    Pm(pm::PmCommand),
     /// Hidden alias of `wrappers init` for discoverability.
     #[command(hide = true)]
     Env(EnvCommand),
@@ -465,6 +467,9 @@ async fn main() -> Result<()> {
         }
         Command::Execute(command) => {
             commands::execute(&command, &config)?;
+        }
+        Command::Pm(command) => {
+            pm::run(&command)?;
         }
         Command::Env(env_cmd) => {
             let shim_dir = default_shim_dir().ok_or_else(|| {

@@ -209,6 +209,7 @@ dependencies = [
  "arbitraitor-intel",
  "arbitraitor-mcp",
  "arbitraitor-model",
+ "arbitraitor-package-manager",
  "arbitraitor-plugin-host",
  "arbitraitor-policy",
  "arbitraitor-provenance",

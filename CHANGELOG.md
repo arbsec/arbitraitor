@@ -35,13 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor execute` — execute artifact from CAS using approval file
 - `arbitraitor mcp` — start MCP JSON-RPC 2.0 server over stdio
 - `arbitraitor version` — print version, license, repository
+- `arbitraitor pm run --tool npm` — advisory scan of npm projects: resolves the dependency tree via `package-lock.json`, detects lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`/`prepublish`) in root and dependency packages, flags non-registry resolved URLs, and gates `npm install --ignore-scripts` behind the verdict (spec §39.14 Phase 1)
 - Native binary auto-detection from artifact classifier (no manual `--native` needed)
 
 #### Package manager adapters
 
 - `cargo` adapter — Cargo.lock parsing, build.rs analysis, lifecycle policy
 - `uv`/`uvx` adapter — uv.lock parsing, source validation, sandbox-required lifecycle
-- `npm` adapter — package-lock.json parsing, denied-by-default lifecycle
+- `npm` adapter — package-lock.json parsing, denied-by-default lifecycle, advisory scan with lifecycle-script detection and `PackageManagerReceipt` generation (spec §39.14)
 - `pnpm` adapter — RegistryAdapter trait conformance
 - `yarn` (berry + classic) adapters — trait conformance
 - `bun` adapter — trait conformance
@@ -73,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
-- `shim install` no longer generates broken package-manager shims that invoked the non-existent `pm run` subcommand. The command now errors with a helpful message pointing to `wrappers install` for curl/wget support.
+- `shim install npm` now generates a working shim that invokes `arb pm run --tool npm`, replacing the previous stub that errored with "package-manager shims are not yet implemented".
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
 - Fixed `book/src/cli-reference.md` global flags table: removed `--policy`, `--output`, `--log-level`, `--no-color`, `--quiet` (not implemented); documented actual global flags (`--config`, `--verbose`)
 - Fixed `book/src/cli-reference.md` exit codes to match actual `Verdict`-to-exit-code mapping (0/10/21/30/33/34)
