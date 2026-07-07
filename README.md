@@ -72,6 +72,18 @@ cargo install --path crates/arbitraitor-cli
     fail-on: block
 ```
 
+### Install via Nix
+
+```sh
+nix run github:arbsec/arbitraitor
+```
+
+Or add to a NixOS/flake config:
+
+```nix
+inputs.arbitraitor.url = "github:arbsec/arbitraitor";
+```
+
 ### Inspect a script
 
 ```sh
