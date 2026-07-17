@@ -95,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI exit codes now match the documented verdict-to-exit-code mapping: `run` command failure exits use 33 (Error) / 34 (Incomplete) / 21 (Prompt) instead of 1–5; `doctor` exits 33 on unhealthy; `main()` propagates errors as exit 33 instead of 1. CI pipelines can now reliably distinguish verdict types by exit code (#432)
 - `Contained` assurance now fail-closes unless the execution builder receives proof for every mandatory ADR-0007 control (filesystem, network, process tree, privilege suppression, syscall filtering, resource limits); receipts can now carry the per-control effective-controls matrix instead of a collapsed containment claim
 - CLI `approve` / `execute` now use a schema-versioned, plan-bound approval file that binds artifact, interpreter, argv, network policy, filesystem grants, policy snapshot, detector snapshot, nonce, expiry, and approver; any post-approval tampering is rejected at execute time
 - MCP approval-token nonces are now durably persisted in a redb-backed spent-nonce store so a nonce spent before restart cannot be replayed after restart when a stable signing secret is reused

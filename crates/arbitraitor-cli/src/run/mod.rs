@@ -21,11 +21,11 @@ use miette::{IntoDiagnostic, Result};
 use self::run_services::DefaultRunServices;
 
 const EXIT_SUCCESS: i32 = 0;
-const EXIT_EXECUTION_FAILED: i32 = 1;
-const EXIT_APPROVAL_DENIED: i32 = 2;
-const EXIT_FETCH_ERROR: i32 = 3;
-const EXIT_DETECTION_ERROR: i32 = 4;
-const EXIT_INTERNAL_ERROR: i32 = 5;
+const EXIT_EXECUTION_FAILED: i32 = 33;
+const EXIT_APPROVAL_DENIED: i32 = 21;
+const EXIT_FETCH_ERROR: i32 = 33;
+const EXIT_DETECTION_ERROR: i32 = 34;
+const EXIT_INTERNAL_ERROR: i32 = 33;
 
 type RunFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
