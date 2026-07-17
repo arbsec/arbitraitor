@@ -216,7 +216,13 @@ fn collect_subprocess_output(
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    tracing::debug!("tirith: non-zero exit code {}", status.code().unwrap_or(-1));
+                    let code = status.code().unwrap_or(-1);
+                    tracing::warn!("tirith: subprocess exited with non-zero code {code}");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(DetectorError::SubprocessFailure(format!(
+                        "non-zero exit code: {code}"
+                    )));
                 }
                 break;
             }
