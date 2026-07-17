@@ -58,7 +58,7 @@ smallvec = { version = "1", default-features = false, features = ["const_new", "
 stable_deref_trait = { version = "1", default-features = false, features = ["std"] }
 subtle = { version = "2" }
 tracing-core = { version = "0.1" }
-wasmparser = { version = "0.251", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
+wasmparser = { version = "0.252", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
 wasmtime-internal-core = { version = "46", default-features = false, features = ["anyhow", "serde", "std"] }
 zeroize = { version = "1" }
 zstd = { version = "0.13" }
@@ -89,7 +89,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
-wasmparser = { version = "0.251", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
+wasmparser = { version = "0.252", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
 wasmtime-internal-core = { version = "46", default-features = false, features = ["anyhow", "serde", "std"] }
 
 ### END HAKARI SECTION
