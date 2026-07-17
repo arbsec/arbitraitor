@@ -8,7 +8,7 @@
 //! Findings, not verdicts — the detector does not block release on its own.
 //! Policy interprets the findings per §18.5.
 
-use crate::{AnalysisContext, Detector};
+use crate::{AnalysisContext, Detector, DetectorError};
 use arbitraitor_model::artifact::ArtifactKind;
 use arbitraitor_model::finding::{
     DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
@@ -382,24 +382,24 @@ impl Detector for DepVulnDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         let Some(format) = Self::detect_format(ctx.artifact_bytes) else {
             tracing::debug!("dep-vuln: artifact is not a recognized lockfile format");
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
         let packages = Self::parse_packages(ctx.artifact_bytes, format);
         if packages.is_empty() {
             tracing::debug!("dep-vuln: no packages found in lockfile");
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let matches = self.lookup_advisories(&packages);
-        matches
+        Ok(matches
             .iter()
             .map(|(coordinate, advisory)| {
                 Self::advisory_to_finding(coordinate, advisory, &ctx.artifact_sha256)
             })
-            .collect()
+            .collect())
     }
 }

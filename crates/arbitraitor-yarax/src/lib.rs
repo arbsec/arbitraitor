@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arbitraitor_analysis::{AnalysisContext, Detector};
+use arbitraitor_analysis::{AnalysisContext, Detector, DetectorError};
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_model::artifact::ArtifactKind;
 use arbitraitor_model::finding::{
@@ -656,14 +656,16 @@ impl Detector for YaraDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
-        match self.scan_result(ctx.artifact_bytes, ctx.classification.artifact_type) {
-            Ok(matches) => matches
-                .iter()
-                .map(|matched| yara_match_to_finding(matched, &ctx.artifact_sha256))
-                .collect(),
-            Err(error) => vec![scanner_error_finding(&error, &ctx.artifact_sha256)],
-        }
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        Ok(
+            match self.scan_result(ctx.artifact_bytes, ctx.classification.artifact_type) {
+                Ok(matches) => matches
+                    .iter()
+                    .map(|matched| yara_match_to_finding(matched, &ctx.artifact_sha256))
+                    .collect(),
+                Err(error) => vec![scanner_error_finding(&error, &ctx.artifact_sha256)],
+            },
+        )
     }
 }
 
