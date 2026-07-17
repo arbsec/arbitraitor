@@ -94,7 +94,7 @@ fn exit_as_root() -> ! {
          --allow-root for the doctor diagnostic command only."
     );
     let _ = std::io::stderr().flush();
-    std::process::exit(1);
+    std::process::exit(33);
 }
 
 #[cfg(test)]

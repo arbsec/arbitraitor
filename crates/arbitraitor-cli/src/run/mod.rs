@@ -210,10 +210,16 @@ async fn run_with_services(
                 RunFailure::Approval("policy blocked execution".to_owned()),
             );
         }
-        Verdict::Error | Verdict::Incomplete => {
+        Verdict::Error => {
             return write_failure(
                 writer,
-                RunFailure::Detection("required detection coverage failed".to_owned()),
+                RunFailure::Internal("fatal error during analysis".to_owned()),
+            );
+        }
+        Verdict::Incomplete => {
+            return write_failure(
+                writer,
+                RunFailure::Detection("required detection coverage not achieved".to_owned()),
             );
         }
     }
