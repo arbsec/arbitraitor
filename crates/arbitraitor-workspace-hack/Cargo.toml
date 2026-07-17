@@ -17,7 +17,7 @@ license = "MIT OR Apache-2.0"
 ### BEGIN HAKARI SECTION
 [dependencies]
 aho-corasick = { version = "1" }
-allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 anstyle = { version = "1" }
 anyhow = { version = "1" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
