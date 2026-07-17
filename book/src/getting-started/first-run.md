@@ -47,7 +47,7 @@ In CI or automated contexts where no human can approve:
 arbitraitor run https://example.com/install.sh --non-interactive
 ```
 
-If the verdict is Prompt or Block, the command exits with code 5 immediately — it **never** silently approves.
+If the verdict is Prompt or Block, the command exits with code 21 (Prompt) immediately — it **never** silently approves.
 
 ## Native binary execution
 

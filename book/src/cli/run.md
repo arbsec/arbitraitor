@@ -60,7 +60,7 @@ Force the interactive approval prompt even if `--non-interactive` is set globall
 
 ### `--non-interactive`
 
-Block immediately if human approval would be required. Returns exit code 5.
+Block immediately if human approval would be required. Returns exit code 21 (Prompt).
 
 ```sh
 arbitraitor run https://example.com/install.sh --non-interactive

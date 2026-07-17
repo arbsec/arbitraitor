@@ -325,7 +325,15 @@ struct CosignInput {
 
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(error) = run_main().await {
+        let _ = writeln!(std::io::stderr().lock(), "{error:?}");
+        std::process::exit(33);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_main() -> Result<()> {
     let cli = parse_cli_from_invocation();
 
     let is_diagnostic = matches!(

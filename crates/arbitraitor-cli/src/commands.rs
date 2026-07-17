@@ -508,7 +508,7 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     if all_healthy {
         Ok(())
     } else {
-        std::process::exit(1);
+        std::process::exit(33);
     }
 }
 
@@ -962,6 +962,6 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
             .write_all(&result.stderr)
             .into_diagnostic()?;
     }
-    writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(1)).into_diagnostic()?;
+    writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(33)).into_diagnostic()?;
     Ok(())
 }
