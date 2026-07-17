@@ -40,13 +40,61 @@ const RECURSIVE_PAYLOAD_DETECTOR_ID: &str = "arbitraitor-analysis.recursive-payl
 const PAYLOAD_ORIGIN_ROOT_TAG: &str = "payload-origin:root";
 const PAYLOAD_ORIGIN_ENTRY_TAG: &str = "payload-origin:archive-entry";
 
+/// Error returned by a detector when analysis cannot be completed.
+///
+/// Distinguishes "no findings found" — the detector completed successfully and
+/// found nothing to report ([`Verdict::Pass`]) — from "could not analyze" — the
+/// detector encountered an error and produced no results ([`Verdict::Incomplete`]).
+/// This preserves security invariant §6 (fail closed): a detector error is never
+/// "clean."
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum DetectorError {
+    /// The detector's binary, ruleset, or other required resource was unavailable.
+    #[error("detector unavailable: {0}")]
+    Unavailable(String),
+    /// The detector subprocess timed out before producing results.
+    #[error("detector timed out after {0:?}")]
+    Timeout(Duration),
+    /// Subprocess output exceeded the configured byte limit.
+    #[error("detector output exceeded {limit} bytes")]
+    OutputExceeded {
+        /// Maximum bytes the detector was allowed to emit.
+        limit: usize,
+    },
+    /// The detector subprocess failed to spawn or exited abnormally.
+    #[error("subprocess failure: {0}")]
+    SubprocessFailure(String),
+    /// The detector could not parse subprocess output as valid data.
+    #[error("output parse error: {0}")]
+    ParseError(String),
+    /// An I/O or resource error prevented detector execution.
+    #[error("resource error: {0}")]
+    Resource(String),
+    /// An uncategorized analysis error not covered by another variant.
+    #[error("analysis error: {0}")]
+    Other(String),
+}
+
 /// Detector trait implemented by analysis stages.
 pub trait Detector: Send + Sync {
     /// Detector identity, version, supported artifact kinds, and execution properties.
     fn metadata(&self) -> DetectorMetadata;
 
-    /// Analyze the artifact within the given context and return detector findings.
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding>;
+    /// Analyze the artifact within the given context.
+    ///
+    /// Returns `Ok(findings)` when the detector completed analysis (even if it
+    /// found zero findings) and `Err(DetectorError)` when analysis could not be
+    /// completed — e.g. subprocess crash, parse failure, or resource
+    /// unavailability. The coordinator maps `Err` to [`DetectorStatus::Error`]
+    /// and the final verdict to [`Verdict::Incomplete`], preserving the fail-closed
+    /// security invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(DetectorError)`] when the detector cannot complete analysis.
+    /// The caller (coordinator) treats any `Err` as [`DetectorStatus::Error`],
+    /// which forces [`Verdict::Incomplete`] for the operation.
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError>;
 
     /// Optional binary provenance (subprocess detectors). Returns `None` for
     /// pure-Rust detectors that have no external binary or ruleset.
@@ -403,11 +451,11 @@ fn run_detector(
     });
 
     match rx.recv_timeout(timeout) {
-        Ok((Ok(raw_findings), artifact_sha256)) => {
+        Ok((Ok(Ok(raw_findings)), artifact_sha256)) => {
             // Enforce finding digest integrity centrally: every finding must
-            // reference the artifact SHA-256 from the analysis context,
-            // regardless of what the detector set. This prevents buggy or
-            // compromised detectors from attributing findings to wrong artifacts.
+            // reference the artifact SHA-256 from the analysis context, regardless
+            // of what the detector set. This prevents buggy or compromised
+            // detectors from attributing findings to wrong artifacts.
             let findings = rewrite_artifact_digest(raw_findings, &artifact_sha256);
             DetectorExecution {
                 result: DetectorResult {
@@ -420,6 +468,16 @@ fn run_detector(
                 findings,
             }
         }
+        Ok((Ok(Err(error)), _artifact_sha256)) => DetectorExecution {
+            findings: Vec::new(),
+            result: DetectorResult {
+                metadata,
+                status: DetectorStatus::Error(error.to_string()),
+                finding_count: 0,
+                duration_ms: elapsed_millis(started.elapsed()),
+                provenance,
+            },
+        },
         Ok((Err(payload), _artifact_sha256)) => DetectorExecution {
             findings: Vec::new(),
             result: DetectorResult {
@@ -524,11 +582,11 @@ impl Detector for ArtifactDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         if matches!(ctx.classification.artifact_type, ArtifactType::Unknown) {
-            vec![unknown_artifact_finding(ctx)]
+            Ok(vec![unknown_artifact_finding(ctx)])
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 }
@@ -555,7 +613,7 @@ impl Detector for ArchiveHazardDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         let limits = ArchiveLimits::default();
         let mut reader = match open_archive_with_limits(
             ctx.artifact_bytes,
@@ -563,15 +621,17 @@ impl Detector for ArchiveHazardDetector {
             limits.clone(),
         ) {
             Ok(reader) => reader,
-            Err(error) => return vec![archive_error_finding(ctx, &error)],
+            Err(error) => {
+                return Ok(vec![archive_error_finding(ctx, &error)]);
+            }
         };
         match reader.entries() {
             Ok(entries) => {
                 let mut findings = detect_archive_hazards(&entries, &limits);
                 findings.extend(discover_companion_findings(&entries, ctx));
-                rewrite_artifact_digest(findings, &ctx.artifact_sha256)
+                Ok(rewrite_artifact_digest(findings, &ctx.artifact_sha256))
             }
-            Err(error) => vec![archive_error_finding(ctx, &error)],
+            Err(error) => Ok(vec![archive_error_finding(ctx, &error)]),
         }
     }
 }
@@ -608,7 +668,7 @@ impl Detector for ReputationDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         let mut matches = match_indicator(
             &self.store,
             &Indicator {
@@ -628,10 +688,10 @@ impl Detector for ReputationDetector {
         }
 
         let Some(enforcement) = evaluate_matches(&matches) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
-        vec![reputation_finding(ctx, &matches, enforcement)]
+        Ok(vec![reputation_finding(ctx, &matches, enforcement)])
     }
 }
 
@@ -654,26 +714,28 @@ impl Detector for ShellDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         let mut parser = match ShellParser::with_config(ParserConfig {
             artifact_sha256: ctx.artifact_sha256.clone(),
             ..ParserConfig::default()
         }) {
             Ok(parser) => parser,
-            Err(error) => return vec![shell_setup_finding(ctx, &error.to_string())],
+            Err(error) => {
+                return Ok(vec![shell_setup_finding(ctx, &error.to_string())]);
+            }
         };
 
         let parse_result = parser.parse_bytes(ctx.artifact_bytes);
         let mut findings = rewrite_artifact_digest(parse_result.parse_errors, &ctx.artifact_sha256);
 
         let Ok(source) = std::str::from_utf8(ctx.artifact_bytes) else {
-            return findings;
+            return Ok(findings);
         };
         let normalization = match normalize(&parse_result.ast, source) {
             Ok(normalization) => normalization,
             Err(error) => {
                 findings.push(shell_normalization_finding(ctx, &error.to_string()));
-                return findings;
+                return Ok(findings);
             }
         };
 
@@ -685,7 +747,7 @@ impl Detector for ShellDetector {
             detect_system_threats(&normalization, source),
             &ctx.artifact_sha256,
         ));
-        findings
+        Ok(findings)
     }
 }
 

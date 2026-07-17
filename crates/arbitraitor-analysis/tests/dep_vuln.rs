@@ -153,13 +153,14 @@ mod end_to_end {
     }
 
     #[test]
-    fn empty_snapshot_no_findings() {
+    fn empty_snapshot_no_findings() -> Result<(), Box<dyn std::error::Error>> {
         let detector = DepVulnDetector::empty(test_digest());
-        assert!(detector.analyze(&ctx(cargo_lock())).is_empty());
+        assert!(detector.analyze(&ctx(cargo_lock()))?.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn matched_advisory_produces_finding() {
+    fn matched_advisory_produces_finding() -> Result<(), Box<dyn std::error::Error>> {
         let detector = DepVulnDetector::new(
             vec![advisory(
                 "GHSA-TEST-1",
@@ -171,15 +172,16 @@ mod end_to_end {
             )],
             test_digest(),
         );
-        let findings = detector.analyze(&ctx(cargo_lock()));
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::High);
         assert!(findings[0].id.contains("serde"));
         assert!(!findings[0].taxonomies.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn kev_advisory_produces_confirmed_finding() {
+    fn kev_advisory_produces_confirmed_finding() -> Result<(), Box<dyn std::error::Error>> {
         use arbitraitor_model::verdict::Confidence;
 
         let detector = DepVulnDetector::new(
@@ -193,14 +195,15 @@ mod end_to_end {
             )],
             test_digest(),
         );
-        let findings = detector.analyze(&ctx(cargo_lock()));
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].confidence, Confidence::Confirmed);
         assert!(findings[0].description.contains("KEV"));
+        Ok(())
     }
 
     #[test]
-    fn non_matching_advisory_produces_no_finding() {
+    fn non_matching_advisory_produces_no_finding() -> Result<(), Box<dyn std::error::Error>> {
         let detector = DepVulnDetector::new(
             vec![advisory(
                 "GHSA-NOMATCH",
@@ -212,11 +215,12 @@ mod end_to_end {
             )],
             test_digest(),
         );
-        assert!(detector.analyze(&ctx(cargo_lock())).is_empty());
+        assert!(detector.analyze(&ctx(cargo_lock()))?.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn npm_lock_with_npm_advisory() {
+    fn npm_lock_with_npm_advisory() -> Result<(), Box<dyn std::error::Error>> {
         let detector = DepVulnDetector::new(
             vec![advisory(
                 "GHSA-NPM-1",
@@ -228,8 +232,9 @@ mod end_to_end {
             )],
             test_digest(),
         );
-        let findings = detector.analyze(&ctx(npm_lock()));
+        let findings = detector.analyze(&ctx(npm_lock()))?;
         assert_eq!(findings.len(), 1);
         assert!(findings[0].id.contains("lodash"));
+        Ok(())
     }
 }

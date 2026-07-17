@@ -1,6 +1,6 @@
 use super::{
-    AnalysisContext, AnalysisCoordinator, Detector, DetectorStatus, ReputationDetector,
-    RetrievalInfo, analyze_recursive, digest, issue_to_finding,
+    AnalysisContext, AnalysisCoordinator, Detector, DetectorError, DetectorStatus,
+    ReputationDetector, RetrievalInfo, analyze_recursive, digest, issue_to_finding,
 };
 use arbitraitor_archive::{ArchiveError, ArtifactOrigin, PayloadIssue};
 use arbitraitor_artifact::ArtifactType;
@@ -469,7 +469,7 @@ fn reputation_detector_reports_enterprise_sha256_block() -> Result<(), Box<dyn s
     let detector = ReputationDetector::new(store);
     let ctx = test_context(bytes, None);
 
-    let findings = detector.analyze(&ctx);
+    let findings = detector.analyze(&ctx)?;
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].severity, Severity::Critical);
@@ -505,7 +505,7 @@ fn reputation_detector_reports_community_url_warn() -> Result<(), Box<dyn std::e
         }),
     );
 
-    let findings = detector.analyze(&ctx);
+    let findings = detector.analyze(&ctx)?;
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].severity, Severity::Medium);
@@ -527,7 +527,7 @@ fn reputation_detector_reports_no_findings_without_matches()
     let detector = ReputationDetector::new(store);
     let ctx = test_context(b"different payload", None);
 
-    assert!(detector.analyze(&ctx).is_empty());
+    assert!(detector.analyze(&ctx)?.is_empty());
     Ok(())
 }
 
@@ -544,7 +544,7 @@ fn reputation_detector_ignores_expired_entries() -> Result<(), Box<dyn std::erro
     let detector = ReputationDetector::new(store);
     let ctx = test_context(bytes, None);
 
-    assert!(detector.analyze(&ctx).is_empty());
+    assert!(detector.analyze(&ctx)?.is_empty());
     Ok(())
 }
 
@@ -563,8 +563,8 @@ impl Detector for RecordingDetector {
         test_metadata(self.id)
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
-        vec![test_finding(self.id, ctx, "recorded")]
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        Ok(vec![test_finding(self.id, ctx, "recorded")])
     }
 }
 
@@ -575,9 +575,11 @@ impl Detector for FailingDetector {
         test_metadata("failing.detector")
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
-        assert!(ctx.artifact_bytes.is_empty(), "forced detector failure");
-        Vec::new()
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        if !ctx.artifact_bytes.is_empty() {
+            return Err(DetectorError::Other("forced detector failure".to_owned()));
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -594,9 +596,9 @@ impl Detector for SlowDetector {
         metadata
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         thread::sleep(Duration::from_millis(self.sleep_ms));
-        vec![test_finding(self.id, ctx, "slow detector completed")]
+        Ok(vec![test_finding(self.id, ctx, "slow detector completed")])
     }
 }
 
@@ -607,8 +609,8 @@ impl Detector for WrongDigestDetector {
         test_metadata("wrong-digest.detector")
     }
 
-    fn analyze(&self, _ctx: &AnalysisContext<'_>) -> Vec<Finding> {
-        vec![Finding {
+    fn analyze(&self, _ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        Ok(vec![Finding {
             id: "wrong-digest.finding".to_owned(),
             detector: "wrong-digest.detector".to_owned(),
             category: FindingCategory::SuspiciousScriptBehavior,
@@ -623,7 +625,7 @@ impl Detector for WrongDigestDetector {
             references: Vec::new(),
             tags: Vec::new(),
             taxonomies: Vec::new(),
-        }]
+        }])
     }
 }
 
@@ -634,15 +636,15 @@ impl Detector for RetrievalDetector {
         test_metadata("retrieval.detector")
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         if ctx.retrieval.is_some() {
-            vec![test_finding(
+            Ok(vec![test_finding(
                 "retrieval.detector",
                 ctx,
                 "retrieval metadata observed",
-            )]
+            )])
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 }

@@ -23,7 +23,7 @@ use arbitraitor_sandbox::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{AnalysisContext, Detector, DetectorMetadata};
+use crate::{AnalysisContext, Detector, DetectorError, DetectorMetadata};
 
 const DETECTOR_ID: &str = "tirith";
 const DETECTOR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -121,24 +121,29 @@ impl Detector for TirithDetector {
             ruleset_digest: None,
         })
     }
-
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         let Some(ref binary) = self.binary_path else {
             tracing::debug!("tirith: binary not found, skipping");
-            return Vec::new();
+            return Err(DetectorError::Unavailable(
+                "tirith binary not found on PATH".to_owned(),
+            ));
         };
 
         let temp_file = match tempfile::NamedTempFile::new() {
             Ok(f) => f,
             Err(error) => {
                 tracing::warn!("tirith: failed to create temp file: {error}");
-                return Vec::new();
+                return Err(DetectorError::Resource(format!(
+                    "failed to create temp file: {error}"
+                )));
             }
         };
         if let Err(error) = std::io::Write::write_all(&mut temp_file.as_file(), ctx.artifact_bytes)
         {
             tracing::warn!("tirith: failed to write temp file: {error}");
-            return Vec::new();
+            return Err(DetectorError::Resource(format!(
+                "failed to write temp file: {error}"
+            )));
         }
         let temp_path = temp_file.path().to_path_buf();
 
@@ -159,79 +164,83 @@ impl Detector for TirithDetector {
 
         apply_subprocess_hardening(&mut command, binary, &temp_path);
 
-        let mut child = match command.spawn() {
+        let child = match command.spawn() {
             Ok(c) => c,
             Err(error) => {
                 tracing::warn!("tirith: subprocess spawn failed: {error}");
-                return Vec::new();
+                return Err(DetectorError::SubprocessFailure(format!(
+                    "spawn failed: {error}"
+                )));
             }
         };
 
-        let mut stdout = Vec::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            let mut buf = [0_u8; 8192];
-            loop {
-                match std::io::Read::read(&mut pipe, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stdout.len() + n > MAX_OUTPUT_BYTES {
-                            tracing::warn!(
-                                "tirith: output exceeded {MAX_OUTPUT_BYTES} bytes, killing subprocess"
-                            );
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            drop(temp_file);
-                            return Vec::new();
-                        }
-                        stdout.extend_from_slice(&buf[..n]);
-                    }
-                    Err(error) => {
-                        tracing::debug!("tirith: stdout read error: {error}");
-                        break;
-                    }
-                }
-            }
-        }
+        let output = collect_subprocess_output(child, self.timeout)?;
+        drop(temp_file);
+        parse_tirith_findings(&output, &ctx.artifact_sha256)
+    }
+}
 
-        let deadline = std::time::Instant::now() + self.timeout;
+fn collect_subprocess_output(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<Vec<u8>, DetectorError> {
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let mut buf = [0_u8; 8192];
         loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() {
-                        tracing::debug!(
-                            "tirith: non-zero exit code {}",
-                            status.code().unwrap_or(-1)
-                        );
-                    }
-                    break;
-                }
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
+            match std::io::Read::read(&mut pipe, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if stdout.len() + n > MAX_OUTPUT_BYTES {
                         tracing::warn!(
-                            "tirith: subprocess timed out after {:?}, killing",
-                            self.timeout
+                            "tirith: output exceeded {MAX_OUTPUT_BYTES} bytes, killing subprocess"
                         );
                         let _ = child.kill();
                         let _ = child.wait();
-                        drop(temp_file);
-                        return Vec::new();
+                        return Err(DetectorError::OutputExceeded {
+                            limit: MAX_OUTPUT_BYTES,
+                        });
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    stdout.extend_from_slice(&buf[..n]);
                 }
                 Err(error) => {
-                    tracing::warn!("tirith: subprocess wait failed: {error}");
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    drop(temp_file);
-                    return Vec::new();
+                    tracing::debug!("tirith: stdout read error: {error}");
+                    break;
                 }
             }
         }
-
-        drop(temp_file);
-
-        parse_tirith_findings(&stdout, &ctx.artifact_sha256)
     }
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    tracing::debug!("tirith: non-zero exit code {}", status.code().unwrap_or(-1));
+                }
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!("tirith: subprocess timed out after {timeout:?}, killing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(DetectorError::Timeout(timeout));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                tracing::warn!("tirith: subprocess wait failed: {error}");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DetectorError::SubprocessFailure(format!(
+                    "wait failed: {error}"
+                )));
+            }
+        }
+    }
+
+    Ok(stdout)
 }
 
 fn apply_subprocess_hardening(command: &mut Command, binary: &Path, temp_artifact: &Path) {
@@ -313,24 +322,28 @@ fn probe_binary_version(binary: &Path) -> Option<String> {
     stdout.lines().next().map(str::trim).map(str::to_owned)
 }
 
-fn parse_tirith_findings(stdout: &[u8], artifact_sha256: &Sha256Digest) -> Vec<Finding> {
+fn parse_tirith_findings(
+    stdout: &[u8],
+    artifact_sha256: &Sha256Digest,
+) -> Result<Vec<Finding>, DetectorError> {
     let json: serde_json::Value = match serde_json::from_slice(stdout) {
         Ok(v) => v,
         Err(error) => {
             tracing::debug!("tirith: failed to parse JSON output: {error}");
-            return Vec::new();
+            return Err(DetectorError::ParseError(error.to_string()));
         }
     };
 
     let findings = json.get("findings").unwrap_or(&json);
 
     if let Some(arr) = findings.as_array() {
-        arr.iter()
+        Ok(arr
+            .iter()
             .map(|item| convert_tirith_finding(item, artifact_sha256))
-            .collect()
+            .collect())
     } else {
         tracing::debug!("tirith: no findings array in output");
-        Vec::new()
+        Ok(Vec::new())
     }
 }
 
@@ -448,7 +461,7 @@ mod tests {
             ]
         });
         let stdout = serde_json::to_vec(&json)?;
-        let findings = parse_tirith_findings(&stdout, &digest);
+        let findings = parse_tirith_findings(&stdout, &digest)?;
         assert_eq!(findings.len(), 2);
         assert_eq!(findings[0].severity, Severity::Critical);
         assert_eq!(findings[1].severity, Severity::Low);
@@ -462,16 +475,17 @@ mod tests {
             {"title": "Finding 1", "rule_id": "r1"}
         ]);
         let stdout = serde_json::to_vec(&json)?;
-        let findings = parse_tirith_findings(&stdout, &digest);
+        let findings = parse_tirith_findings(&stdout, &digest)?;
         assert_eq!(findings.len(), 1);
         Ok(())
     }
 
     #[test]
-    fn parse_invalid_json_returns_empty() {
+    fn parse_invalid_json_returns_error() {
         let digest = test_digest();
-        let findings = parse_tirith_findings(b"not json", &digest);
-        assert!(findings.is_empty());
+        let result = parse_tirith_findings(b"not json", &digest);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(DetectorError::ParseError(_))));
     }
 
     #[test]
@@ -479,7 +493,7 @@ mod tests {
         let digest = test_digest();
         let json = serde_json::json!({"findings": []});
         let stdout = serde_json::to_vec(&json)?;
-        let findings = parse_tirith_findings(&stdout, &digest);
+        let findings = parse_tirith_findings(&stdout, &digest)?;
         assert!(findings.is_empty());
         Ok(())
     }

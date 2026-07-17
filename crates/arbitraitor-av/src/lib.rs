@@ -8,7 +8,7 @@
 /// Microsoft Defender command-line adapter.
 pub mod defender;
 
-use arbitraitor_analysis::{AnalysisContext, Detector};
+use arbitraitor_analysis::{AnalysisContext, Detector, DetectorError};
 use arbitraitor_model::finding::{
     DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
 };
@@ -434,22 +434,22 @@ impl Detector for AvDetector {
         }
     }
 
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Vec<Finding> {
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
         if !self.policy.enabled {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if !self.adapter.is_available() {
             return if self.policy.required {
-                vec![self.unavailable_finding(ctx)]
+                Ok(vec![self.unavailable_finding(ctx)])
             } else {
-                Vec::new()
+                Ok(Vec::new())
             };
         }
 
-        match self.adapter.scan(ctx.artifact_bytes) {
+        Ok(match self.adapter.scan(ctx.artifact_bytes) {
             Ok(result) => self.finding_for_result(ctx, result).into_iter().collect(),
             Err(error) => vec![self.scan_error_finding(ctx, &error.to_string())],
-        }
+        })
     }
 }
 
