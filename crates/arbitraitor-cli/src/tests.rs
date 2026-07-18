@@ -53,8 +53,21 @@ fn parse_fetch_source_dotdash_is_stdin() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
+fn parse_fetch_source_stdin_url() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("stdin://")?;
+    assert!(matches!(source, FetchSource::Stdin));
+    Ok(())
+}
+
+#[test]
 fn parse_fetch_source_unsupported_scheme_errors() {
     let result = parse_fetch_source("ftp://example.com/file");
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_fetch_source_non_url_scheme_errors() {
+    let result = parse_fetch_source("data:text/html,<script>alert(1)</script>");
     assert!(result.is_err());
 }
 

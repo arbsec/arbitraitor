@@ -1226,12 +1226,17 @@ fn parse_fetch_source(input: &str) -> Result<FetchSource> {
             .map_err(|()| miette::miette!("file:// URL does not resolve to a local path"))?;
         return Ok(FetchSource::File(path));
     }
-    if input.contains("://") {
-        miette::bail!(
-            "unsupported scheme in '{}': only http://, https://, and file:// are accepted; \
-             bare paths are treated as local files",
-            input
-        );
+    if let Some(colon) = input.find(':') {
+        let scheme = &input[..colon];
+        if !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            miette::bail!(
+                "unsupported URI scheme '{scheme}'; only http, https, and file are accepted"
+            );
+        }
     }
     Ok(FetchSource::File(PathBuf::from(input)))
 }
