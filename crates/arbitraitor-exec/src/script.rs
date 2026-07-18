@@ -21,6 +21,7 @@ use arbitraitor_model::operation::{
     CapabilityGrant, GrantedCapabilities, OperationPlan, OperationState, OperationType,
 };
 use arbitraitor_model::verdict::AssuranceLevel;
+use arbitraitor_sandbox::{PathRule, configure_filesystem_isolation};
 use tracing::debug;
 
 use crate::{ExecError, ExecutionContext, ExecutionContextBuilder};
@@ -266,6 +267,16 @@ impl ScriptExecution {
         // the child before exec. The unsafe pre_exec boundary stays inside the
         // sandbox crate, preserving forbid(unsafe_code) here.
         arbitraitor_sandbox::configure_command(&mut command, self.sandbox_config);
+        // Apply Landlock filesystem confinement: restrict the child to
+        // read-execute on system paths and read-write-execute on its working
+        // directory and temp home only. This prevents scripts from reading
+        // arbitrary absolute paths (e.g. ~/.ssh, ~/.aws, /etc/shadow).
+        let rules = landlock_rules_for_script_execution(
+            &self.interpreter,
+            self.environment.working_dir(),
+            self.environment.home_dir(),
+        );
+        configure_filesystem_isolation(&mut command, &rules);
         command
     }
 
@@ -295,6 +306,35 @@ impl ScriptExecution {
         command.args(self.environment.arguments());
         command
     }
+}
+
+fn landlock_rules_for_script_execution(
+    interpreter: &Path,
+    working_dir: &Path,
+    home_dir: &Path,
+) -> Vec<PathRule> {
+    let mut rules = Vec::new();
+
+    if let Some(parent) = interpreter.parent() {
+        rules.push(PathRule::read_execute(parent.to_path_buf()));
+    }
+    rules.push(PathRule::read_write_execute(working_dir.to_path_buf()));
+    rules.push(PathRule::read_write_execute(home_dir.to_path_buf()));
+
+    for path in [
+        "/bin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/tmp",
+    ] {
+        rules.push(PathRule::read_execute(PathBuf::from(path)));
+    }
+
+    rules
 }
 
 fn operation_plan(interpreter: &Path, args: &[String]) -> OperationPlan {
@@ -677,5 +717,61 @@ mod tests {
                 .arg("true")
                 .status()
                 .is_ok_and(|status| status.success())
+    }
+
+    fn landlock_enforced() -> bool {
+        let mut command = StdCommand::new("/bin/sh");
+        command.arg("-c").arg("cat /etc/hostname 2>/dev/null");
+        arbitraitor_sandbox::configure_command(
+            &mut command,
+            arbitraitor_sandbox::SandboxConfig::default(),
+        );
+        arbitraitor_sandbox::configure_filesystem_isolation(&mut command, &[]);
+        command.status().is_ok_and(|s| !s.success())
+    }
+
+    #[test]
+    fn landlock_blocks_read_of_disallowed_paths() -> Result<(), Box<dyn std::error::Error>> {
+        if !landlock_enforced() {
+            return Ok(());
+        }
+        let script = bash_or_skip()?;
+        let result = script.execute(b"cat /etc/passwd\n")?;
+        assert!(
+            result.exit_code != Some(0),
+            "reading /etc/passwd should fail under Landlock; stdout={}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn landlock_allows_working_dir_writes() -> Result<(), Box<dyn std::error::Error>> {
+        if !landlock_enforced() {
+            return Ok(());
+        }
+        let script = bash_or_skip()?;
+        let result = script.execute(b"echo hello > allowed.txt && cat allowed.txt\n")?;
+        assert!(
+            result.exit_code == Some(0),
+            "writing to working dir should succeed; stderr={}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn landlock_rules_include_standard_paths() {
+        let rules = landlock_rules_for_script_execution(
+            Path::new("/bin/bash"),
+            Path::new("/tmp/work"),
+            Path::new("/tmp/home"),
+        );
+        let paths: Vec<&Path> = rules.iter().map(|r| r.path.as_path()).collect();
+        assert!(paths.iter().any(|p| p == &Path::new("/bin")));
+        assert!(paths.iter().any(|p| p == &Path::new("/usr/bin")));
+        assert!(paths.iter().any(|p| p == &Path::new("/usr/local/bin")));
+        assert!(paths.iter().any(|p| p == &Path::new("/lib")));
+        assert!(paths.iter().any(|p| p == &Path::new("/tmp")));
     }
 }

@@ -8,7 +8,7 @@
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::os::fd::AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use arbitraitor_artifact::executable::{ExecutableInfo, is_compatible};
@@ -18,7 +18,9 @@ use arbitraitor_model::operation::{
 };
 use arbitraitor_model::verdict::AssuranceLevel;
 use arbitraitor_sandbox::SandboxConfig;
-use arbitraitor_sandbox::{ProcessResourceLimits, configure_resource_limits};
+use arbitraitor_sandbox::{
+    PathRule, ProcessResourceLimits, configure_filesystem_isolation, configure_resource_limits,
+};
 use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
 use tracing::debug;
 
@@ -127,6 +129,12 @@ impl NativeExecution {
         let process_limits = process_resource_limits(&self.resource_limits);
         configure_resource_limits(&mut command, &process_limits);
         arbitraitor_sandbox::configure_command(&mut command, self.sandbox);
+        let fs_rules = landlock_rules_for_native(
+            binary_path,
+            self.environment.working_dir(),
+            self.environment.home_dir(),
+        );
+        configure_filesystem_isolation(&mut command, &fs_rules);
 
         debug!(binary = %binary_path.display(), "spawning native binary");
         let child = command
@@ -330,6 +338,35 @@ fn is_missing_xattr(error: rustix::io::Errno) -> bool {
 
 fn rustix_to_io(error: rustix::io::Errno) -> std::io::Error {
     std::io::Error::from_raw_os_error(error.raw_os_error())
+}
+
+fn landlock_rules_for_native(
+    binary_path: &Path,
+    working_dir: &Path,
+    home_dir: &Path,
+) -> Vec<PathRule> {
+    let mut rules = Vec::new();
+
+    if let Some(parent) = binary_path.parent() {
+        rules.push(PathRule::read_execute(parent.to_path_buf()));
+    }
+    rules.push(PathRule::read_write_execute(working_dir.to_path_buf()));
+    rules.push(PathRule::read_write_execute(home_dir.to_path_buf()));
+
+    for path in [
+        "/bin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/tmp",
+    ] {
+        rules.push(PathRule::read_execute(PathBuf::from(path)));
+    }
+
+    rules
 }
 
 #[cfg(test)]
