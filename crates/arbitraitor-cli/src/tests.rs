@@ -1,7 +1,7 @@
 use super::{
-    Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
-    emit_wrapper_output, parse_cli_from_args, wrapper_output_destination, wrapper_url_argument,
-    write_status_text,
+    Cli, Command, FetchSource, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
+    emit_wrapper_output, parse_cli_from_args, parse_fetch_source, wrapper_output_destination,
+    wrapper_url_argument, write_status_text,
 };
 use clap::Parser;
 use std::fs;
@@ -9,6 +9,64 @@ use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
+
+#[test]
+fn parse_fetch_source_https_url() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("https://example.com/artifact.sh")?;
+    assert!(matches!(source, FetchSource::Url(_)));
+    Ok(())
+}
+
+#[test]
+fn parse_fetch_source_http_url() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("http://example.com/artifact.sh")?;
+    assert!(matches!(source, FetchSource::Url(_)));
+    Ok(())
+}
+
+#[test]
+fn parse_fetch_source_bare_relative_path() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("./suspicious.sh")?;
+    assert!(matches!(source, FetchSource::File(ref p) if p == &PathBuf::from("./suspicious.sh")));
+    Ok(())
+}
+
+#[test]
+fn parse_fetch_source_bare_absolute_path() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("/tmp/artifact.sh")?;
+    assert!(matches!(source, FetchSource::File(ref p) if p == &PathBuf::from("/tmp/artifact.sh")));
+    Ok(())
+}
+
+#[test]
+fn parse_fetch_source_file_url() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("file:///tmp/artifact.sh")?;
+    assert!(matches!(source, FetchSource::File(ref p) if p == &PathBuf::from("/tmp/artifact.sh")));
+    Ok(())
+}
+
+#[test]
+fn parse_fetch_source_dotdash_is_stdin() -> Result<(), Box<dyn std::error::Error>> {
+    let source = parse_fetch_source("-")?;
+    assert!(matches!(source, FetchSource::Stdin));
+    Ok(())
+}
+
+#[test]
+fn parse_fetch_source_unsupported_scheme_errors() {
+    let result = parse_fetch_source("ftp://example.com/file");
+    assert!(result.is_err());
+}
+
+#[test]
+fn inspect_accepts_local_path_in_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "inspect", "./local-artifact.sh"])?;
+    let Command::Inspect(command) = cli.command else {
+        return Err("expected Inspect command".into());
+    };
+    assert_eq!(command.url, "./local-artifact.sh");
+    Ok(())
+}
 
 #[test]
 fn inspect_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
