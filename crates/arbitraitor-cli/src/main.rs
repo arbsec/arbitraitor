@@ -20,7 +20,9 @@ use arbitraitor_artifact::classify;
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
-use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
+use arbitraitor_fetch::{
+    FetchPolicy, FetchRequest, FetchSource, FetchUrl, Fetcher, FileFetcher, HttpFetcher, VecSink,
+};
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
 use arbitraitor_model::finding::{Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
@@ -1109,7 +1111,6 @@ async fn inspect(
     config: &Config,
     explain_format: Option<ExplainFormat>,
 ) -> Result<InspectOutcome> {
-    let fetch_url = FetchUrl::parse(url).into_diagnostic()?;
     let fetch_policy = FetchPolicy {
         total_timeout: Duration::from_secs(config.fetch.total_timeout_secs),
         max_compressed_size: config.fetch.max_bytes,
@@ -1118,15 +1119,23 @@ async fn inspect(
         require_digest: config.integrity.require_digest,
         ..FetchPolicy::default()
     };
-    let mut request = FetchRequest::url(fetch_url, fetch_policy);
-    if let Some(digest) = expected_sha256 {
-        request = request.with_expected_sha256(digest);
-    }
+    let source = parse_fetch_source(url)?;
+    let request = FetchRequest {
+        source,
+        policy: fetch_policy,
+        expected_sha256,
+    };
     let mut fetch_sink = VecSink::new();
-    let fetch_receipt = HttpFetcher::new()
-        .fetch(request, &mut fetch_sink)
-        .await
-        .into_diagnostic()?;
+    let fetch_receipt = match &request.source {
+        FetchSource::File(_) => FileFetcher::new().fetch(request, &mut fetch_sink).await,
+        FetchSource::Url(_) => HttpFetcher::new().fetch(request, &mut fetch_sink).await,
+        FetchSource::Stdin => {
+            miette::bail!(
+                "stdin source is not supported by inspect; use 'arbitraitor scan --stdin'"
+            );
+        }
+    }
+    .into_diagnostic()?;
     let bytes = fetch_sink.into_bytes();
     let artifact_len = u64::try_from(bytes.len()).into_diagnostic()?;
     if artifact_len > config.store.max_bytes {
@@ -1197,6 +1206,39 @@ async fn inspect(
         bytes,
         sha256: artifact_sha256,
     })
+}
+
+fn parse_fetch_source(input: &str) -> Result<FetchSource> {
+    if input == "-" || input == "stdin://" {
+        return Ok(FetchSource::Stdin);
+    }
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return Ok(FetchSource::Url(
+            FetchUrl::parse(input).map_err(|e| miette::miette!("invalid URL: {e}"))?,
+        ));
+    }
+    if input.starts_with("file://") {
+        let parsed =
+            FetchUrl::parse(input).map_err(|e| miette::miette!("invalid file:// URL: {e}"))?;
+        let path = parsed
+            .as_url()
+            .to_file_path()
+            .map_err(|()| miette::miette!("file:// URL does not resolve to a local path"))?;
+        return Ok(FetchSource::File(path));
+    }
+    if let Some(colon) = input.find(':') {
+        let scheme = &input[..colon];
+        if !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            miette::bail!(
+                "unsupported URI scheme '{scheme}'; only http, https, and file are accepted"
+            );
+        }
+    }
+    Ok(FetchSource::File(PathBuf::from(input)))
 }
 
 fn analysis_coordinator(

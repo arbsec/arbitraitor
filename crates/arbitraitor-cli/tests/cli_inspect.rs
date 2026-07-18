@@ -14,7 +14,12 @@ fn inspect_nonexistent_file_url_fails_with_fetch_error() -> TestResult {
         .arg("file:///nonexistent/path/to/file.sh")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("fetch").or(predicate::str::contains("URL")));
+        .stderr(
+            predicate::str::contains("fetch")
+                .or(predicate::str::contains("URL"))
+                .or(predicate::str::contains("open"))
+                .or(predicate::str::contains("file")),
+        );
     Ok(())
 }
 
@@ -22,10 +27,10 @@ fn inspect_nonexistent_file_url_fails_with_fetch_error() -> TestResult {
 fn inspect_invalid_url_fails_with_parse_error() -> TestResult {
     Command::cargo_bin("arbitraitor")?
         .arg("inspect")
-        .arg("not-a-valid-url")
+        .arg("ftp://not-a-valid-scheme")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("URL").or(predicate::str::contains("url")));
+        .stderr(predicate::str::contains("scheme").or(predicate::str::contains("unsupported")));
     Ok(())
 }
 
