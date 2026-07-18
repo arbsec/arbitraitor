@@ -356,6 +356,7 @@ fn landlock_rules_for_native(
     for path in [
         "/bin",
         "/usr/bin",
+        "/usr/local/bin",
         "/lib",
         "/lib64",
         "/usr/lib",
