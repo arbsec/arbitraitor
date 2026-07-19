@@ -65,11 +65,17 @@ Show store health including disk usage, corruption checks, and garbage collectio
 
 ## Exit codes
 
+`arbitraitor status` follows the stable exit codes defined in spec §29
+(see [CLI reference → Exit codes](../cli-reference.md#exit-codes)).
+
+The codes most relevant to `status` are:
+
 | Code | Meaning |
 |------|---------|
-| 0 | All health checks passed |
-| 1 | One or more warnings |
-| 2 | One or more checks failed |
+| 0 | Status reported, no health issues |
+| 1 | General operational error (cannot read store, daemon unreachable but not expected) |
+| 33 | Required detector unavailable or stale — surfaced as a health finding |
+| 60 | Internal integrity invariant failure |
 
 ## Examples
 

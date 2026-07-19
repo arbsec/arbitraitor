@@ -11,6 +11,7 @@ use std::pin::Pin;
 
 use arbitraitor_core::config::Config;
 use arbitraitor_mcp::{PlanContext, sanitize_for_agent};
+use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
@@ -20,12 +21,15 @@ use miette::{IntoDiagnostic, Result};
 
 use self::run_services::DefaultRunServices;
 
-const EXIT_SUCCESS: i32 = 0;
-const EXIT_EXECUTION_FAILED: i32 = 33;
-const EXIT_APPROVAL_DENIED: i32 = 21;
-const EXIT_FETCH_ERROR: i32 = 33;
-const EXIT_DETECTION_ERROR: i32 = 34;
-const EXIT_INTERNAL_ERROR: i32 = 33;
+// Spec §29 exit codes. The constants below are kept as private aliases so
+// the historical `i32`-typed call sites in this module can switch to
+// `ExitCode` incrementally without a wide-bore refactor in this PR.
+const EXIT_SUCCESS: i32 = ExitCode::Success.as_i32();
+const EXIT_EXECUTION_FAILED: i32 = ExitCode::ExecutionFailed.as_i32();
+const EXIT_APPROVAL_DENIED: i32 = ExitCode::ApprovalDeclined.as_i32();
+const EXIT_FETCH_ERROR: i32 = ExitCode::NetworkRetrievalFailure.as_i32();
+const EXIT_DETECTION_ERROR: i32 = ExitCode::RequiredDetectorUnavailable.as_i32();
+const EXIT_INTERNAL_ERROR: i32 = ExitCode::InternalInvariantFailure.as_i32();
 
 type RunFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 

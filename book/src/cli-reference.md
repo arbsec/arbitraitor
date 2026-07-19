@@ -46,14 +46,34 @@ These flags apply to all commands:
 
 ## Exit codes
 
+Arbitraitor uses the stable exit codes defined in spec §29. Each code
+encodes a distinct policy decision or operational condition so CI
+pipelines, shell scripts, and process supervisors can react precisely.
+Machine consumers should prefer `--json` or `--sarif` output for full
+evidence; exit codes are a coarse-grained summary.
+
 | Code | Meaning |
 |------|---------|
-| 0 | Pass — artifact passed all policy checks |
-| 10 | Warn — artifact has findings, human review recommended |
-| 21 | Prompt — human approval needed (non-interactive mode blocks by default) |
-| 30 | Block — artifact blocked by policy |
-| 33 | Error — a fatal error occurred (network, I/O, configuration) |
-| 34 | Incomplete — analysis could not complete, blocking by default |
+| 0 | Pass — artifact passed all required checks and the requested release completed |
+| 1 | General operational error (no more specific code applies) |
+| 2 | Invalid arguments or configuration (semantic invalidity after parsing) |
+| 10 | Warning verdict, no release requested |
+| 20 | Interactive approval declined by the user |
+| 21 | Prompt required in non-interactive mode |
+| 30 | Blocked by policy (generic) |
+| 31 | Confirmed malicious indicator (signed feed or `Confidence::Confirmed` finding) |
+| 32 | Integrity or signature failure (digest mismatch, bad signature, missing trust root) |
+| 33 | Required detector unavailable or stale |
+| 34 | Analysis incomplete due to resource limit (time, memory, depth, byte budget) |
+| 40 | Network retrieval failure |
+| 41 | Redirect or transport policy violation (cross-origin, HTTPS→HTTP, SSRF) |
+| 42 | Content type or size policy violation |
+| 50 | Execution failed after approval (non-zero child exit, signal, sandbox violation) |
+| 60 | Internal integrity invariant failure (e.g. running as root per ADR-0009) |
+
+These numeric values are stable for the lifetime of the project. New codes
+may be added (with a corresponding spec change); existing codes are not
+renumbered.
 
 ## Inspect command
 

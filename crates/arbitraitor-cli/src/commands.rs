@@ -7,7 +7,7 @@ use std::str::FromStr;
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::{HealthChecker, HealthStatus};
 use arbitraitor_mcp::sanitize_for_agent;
-use arbitraitor_model::verdict::Verdict;
+use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_policy::PolicyEngine;
 use arbitraitor_receipt::Receipt;
 use arbitraitor_store::ContentStore;
@@ -236,16 +236,9 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
         write_explainability(&result.findings, "scan", fmt)?;
     }
 
-    let exit_code = match result.verdict {
-        Verdict::Pass => 0,
-        Verdict::Warn => 10,
-        Verdict::Block => 30,
-        Verdict::Prompt => 21,
-        Verdict::Error => 33,
-        Verdict::Incomplete => 34,
-    };
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    let exit_code = ExitCode::from(result.verdict);
+    if exit_code != ExitCode::Success {
+        std::process::exit(exit_code.as_i32());
     }
     Ok(())
 }
@@ -509,6 +502,9 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     if all_healthy {
         Ok(())
     } else {
+        // Spec §29 code 33: Required detector unavailable or stale. doctor
+        // is responsible for surfacing detector and configuration health;
+        // an unhealthy doctor result is the canonical 33 trigger.
         std::process::exit(33);
     }
 }
@@ -963,6 +959,6 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
             .write_all(&result.stderr)
             .into_diagnostic()?;
     }
-    writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(33)).into_diagnostic()?;
+    writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(50)).into_diagnostic()?;
     Ok(())
 }

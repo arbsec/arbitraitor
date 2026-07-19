@@ -297,7 +297,11 @@ struct InitScriptCommand {}
 async fn main() {
     if let Err(error) = run_main().await {
         let _ = writeln!(std::io::stderr().lock(), "{error:?}");
-        std::process::exit(33);
+        // Spec §29 code 1: General operational error. Distinct from
+        // `RequiredDetectorUnavailable` (33, previously used here) which is
+        // reserved for cases where a detector marked `required = true` was
+        // unavailable or stale at analysis time.
+        std::process::exit(1);
     }
 }
 

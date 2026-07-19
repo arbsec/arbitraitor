@@ -132,14 +132,33 @@ emit receipt
 
 ## Exit codes
 
+`arbitraitor run` follows the stable exit codes defined in spec §29
+(see also [CLI reference → Exit codes](../cli-reference.md#exit-codes)).
+
+The codes most relevant to `run` are:
+
 | Code | Meaning |
 |------|---------|
-| 0 | Executed successfully, pass verdict |
-| 1 | Executed with warnings |
-| 2 | Incomplete (analysis could not finish) |
-| 3 | Blocked by policy |
-| 4 | Error (network, I/O, configuration) |
-| 5 | Approval required in non-interactive mode |
+| 0 | Pass — inspection and execution both completed |
+| 1 | General operational error |
+| 20 | Interactive approval declined by the user |
+| 21 | Prompt required in non-interactive mode |
+| 30 | Blocked by policy |
+| 31 | Confirmed malicious indicator |
+| 32 | Integrity or signature failure |
+| 33 | Required detector unavailable or stale |
+| 34 | Analysis incomplete (resource limit) |
+| 40 | Network retrieval failure |
+| 41 | Redirect or transport policy violation |
+| 42 | Content type or size policy violation |
+| 50 | Execution failed after approval |
+| 60 | Internal integrity invariant failure |
+
+The exit code of `arbitraitor run` **is not** the exit code of the executed
+child process. The child's exit code is recorded in the receipt and is
+visible in `arbitraitor explain <receipt>`. If the child exits non-zero
+after approval was granted, Arbitraitor exits `50` (Execution failed after
+approval).
 
 ## Examples
 

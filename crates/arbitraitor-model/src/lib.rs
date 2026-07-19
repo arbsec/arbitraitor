@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 pub mod artifact;
+pub mod exit_code;
 pub mod finding;
 pub mod ids;
 pub mod operation;
