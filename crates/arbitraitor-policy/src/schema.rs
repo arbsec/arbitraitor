@@ -17,7 +17,16 @@ use serde::{Deserialize, Serialize};
 /// The complete policy document parsed from TOML.
 ///
 /// A policy has a version, default behaviour, network constraints, resource
-/// limits, and an ordered list of matching rules.
+/// limits, provenance requirements, detector configuration, and an ordered
+/// list of matching rules.
+///
+/// This schema accepts the full spec §23.3 example policy. Field paths
+/// beyond `finding.*` and `context.*` (e.g. `caller_origin.class`,
+/// `execution.network`, `integrity.digest_match`, `findings.max_severity`)
+/// are accepted at parse time. Whether they actually resolve to values at
+/// evaluation time depends on the `EvalContext` provided by the caller; an
+/// unresolved field is treated as `Unavailable` and falls through to the
+/// configured default per `DefaultsConfig::fail_closed_on_unavailable`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -40,6 +49,21 @@ pub struct Policy {
     /// Integrity constraints applied to artifact retrieval.
     #[serde(default)]
     pub integrity: IntegrityConfig,
+
+    /// Provenance + signature requirements (spec §14, §23.3).
+    ///
+    /// Parsed and fingerprinted; enforcement at evaluation time is wired
+    /// by the analysis pipeline.
+    #[serde(default)]
+    pub provenance: ProvenanceConfig,
+
+    /// Detector configuration keyed by detector id (spec §15, §23.3).
+    ///
+    /// The map accepts arbitrary detector names (e.g. `yara_x`, `clamav`,
+    /// `script_ast`). Each detector's `required`/`required_for`/`required_on`
+    /// policy is enforced by the analysis coordinator.
+    #[serde(default)]
+    pub detectors: BTreeMap<String, DetectorConfig>,
 
     /// Ordered rules evaluated top-to-bottom; first match wins.
     #[serde(default)]
@@ -175,6 +199,54 @@ pub struct IntegrityConfig {
     /// Require a caller-provided expected SHA-256 digest before retrieval.
     #[serde(default)]
     pub require_digest: bool,
+}
+
+/// Provenance + signature requirements (spec §14.3, §23.3).
+///
+/// Parsed into the policy fingerprint; enforcement happens in the
+/// analysis pipeline when the provenance verifier runs (issue #514).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceConfig {
+    /// Artifact classes that require a valid signature before release.
+    ///
+    /// Spec example: `require_signature_for = ["executable"]`.
+    #[serde(default)]
+    pub require_signature_for: Vec<String>,
+
+    /// Required Sigstore signer identities (issuer + subject pattern).
+    #[serde(default)]
+    pub trusted_sigstore_identities: Vec<SigstoreIdentity>,
+}
+
+/// A trusted Sigstore signer identity (spec §14.3, §23.3 example).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SigstoreIdentity {
+    /// Fulcio OIDC issuer URL (e.g. `https://token.actions.githubusercontent.com`).
+    pub issuer: String,
+    /// SAN pattern (e.g. `https://github.com/acme/*/.github/workflows/release.yml@refs/tags/*`).
+    pub subject: String,
+}
+
+/// Per-detector policy (spec §15, §23.3 example).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorConfig {
+    /// Whether this detector is required for a passing verdict.
+    #[serde(default)]
+    pub required: bool,
+
+    /// Artifact classes (e.g. `["shell", "powershell"]`) for which this
+    /// detector is mandatory. If non-empty, `required` is implied `true`
+    /// for matching classes.
+    #[serde(default)]
+    pub required_for: Vec<String>,
+
+    /// Platform targets (e.g. `["windows"]`) on which this detector must
+    /// succeed.
+    #[serde(default)]
+    pub required_on: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -328,6 +400,12 @@ pub enum MatchOp {
     /// Membership in a set of acceptable values.
     OneOf(Vec<ScalarValue>),
 
+    /// Non-membership in a set: matches when the resolved value is not in
+    /// the supplied list. Complement of [`OneOf`](Self::OneOf). Used by the
+    /// spec §23.1.1 example policy for `caller_origin.mcp_server_id
+    /// not_in = ["trusted-mcp-server-1"]`.
+    NotIn(Vec<ScalarValue>),
+
     /// Substring containment (for text fields) or list membership (for
     /// `finding.tags`).
     Contains(String),
@@ -384,6 +462,8 @@ struct RawCondition {
     #[serde(default)]
     one_of: Option<Vec<ScalarValue>>,
     #[serde(default)]
+    not_in: Option<Vec<ScalarValue>>,
+    #[serde(default)]
     contains: Option<String>,
     #[serde(default)]
     greater_than: Option<ScalarValue>,
@@ -408,6 +488,7 @@ impl Condition {
         let forms = combinators + shorthand + field_match;
         let operators = u8::from(raw.equals.is_some())
             + u8::from(raw.one_of.is_some())
+            + u8::from(raw.not_in.is_some())
             + u8::from(raw.contains.is_some())
             + u8::from(raw.greater_than.is_some());
 
@@ -434,13 +515,27 @@ impl Condition {
         }
         if let Some(map) = raw.finding {
             // Shorthand: each key → equality match on `finding.<key>`.
+            //
+            // Special case: if the key ends with `_contains` (e.g.
+            // `tags_contains` from spec §23.3), strip the suffix and use
+            // the `Contains` operator against the named field (e.g.
+            // `finding.tags Contains "<value>"`). This accepts the spec
+            // example `[rules.when.finding] tags_contains = "privilege-escalation"`
+            // without requiring the user to write the longer inline form.
             let matches: Vec<Condition> = map
                 .into_iter()
                 .map(|(key, value)| {
-                    Condition::Match(FieldMatch {
-                        field: format!("finding.{key}"),
-                        op: MatchOp::Equals(ScalarValue::Str(value)),
-                    })
+                    if let Some(field_name) = key.strip_suffix("_contains") {
+                        Condition::Match(FieldMatch {
+                            field: format!("finding.{field_name}"),
+                            op: MatchOp::Contains(value),
+                        })
+                    } else {
+                        Condition::Match(FieldMatch {
+                            field: format!("finding.{key}"),
+                            op: MatchOp::Equals(ScalarValue::Str(value)),
+                        })
+                    }
                 })
                 .collect();
             return Ok(Self::All(matches));
@@ -450,7 +545,13 @@ impl Condition {
         let field = raw
             .field
             .ok_or_else(|| "field match requires a `field` key".to_owned())?;
-        let op = MatchOp::from_raw(raw.equals, raw.one_of, raw.contains, raw.greater_than)?;
+        let op = MatchOp::from_raw(
+            raw.equals,
+            raw.one_of,
+            raw.not_in,
+            raw.contains,
+            raw.greater_than,
+        )?;
         Ok(Self::Match(FieldMatch { field, op }))
     }
 }
@@ -459,18 +560,20 @@ impl MatchOp {
     fn from_raw(
         equals: Option<ScalarValue>,
         one_of: Option<Vec<ScalarValue>>,
+        not_in: Option<Vec<ScalarValue>>,
         contains: Option<String>,
         greater_than: Option<ScalarValue>,
     ) -> Result<Self, String> {
         let count = u8::from(equals.is_some())
             + u8::from(one_of.is_some())
+            + u8::from(not_in.is_some())
             + u8::from(contains.is_some())
             + u8::from(greater_than.is_some());
         if count == 0 {
-            return Err("field match requires exactly one operator: `equals`, `one_of`, `contains`, or `greater_than`".to_owned());
+            return Err("field match requires exactly one operator: `equals`, `one_of`, `not_in`, `contains`, or `greater_than`".to_owned());
         }
         if count > 1 {
-            return Err("field match must use exactly one operator: `equals`, `one_of`, `contains`, or `greater_than`".to_owned());
+            return Err("field match must use exactly one operator: `equals`, `one_of`, `not_in`, `contains`, or `greater_than`".to_owned());
         }
         if let Some(v) = equals {
             return Ok(Self::Equals(v));
@@ -478,10 +581,13 @@ impl MatchOp {
         if let Some(v) = one_of {
             return Ok(Self::OneOf(v));
         }
+        if let Some(v) = not_in {
+            return Ok(Self::NotIn(v));
+        }
         if let Some(v) = contains {
             return Ok(Self::Contains(v));
         }
-        // SAFETY: count > 0 guarantees one of the four is Some.
+        // SAFETY: count > 0 guarantees one of the five is Some.
         let v = greater_than.ok_or_else(|| "greater_than was expected but is None".to_owned())?;
         Ok(Self::GreaterThan(v))
     }
@@ -512,7 +618,7 @@ mod schema_tests {
 
     #[test]
     fn match_op_rejects_zero_operators() {
-        let result = MatchOp::from_raw(None, None, None, None);
+        let result = MatchOp::from_raw(None, None, None, None, None);
         assert!(result.is_err());
     }
 
@@ -521,6 +627,7 @@ mod schema_tests {
         let result = MatchOp::from_raw(
             Some(ScalarValue::Str("x".into())),
             Some(vec![ScalarValue::Str("y".into())]),
+            None,
             None,
             None,
         );

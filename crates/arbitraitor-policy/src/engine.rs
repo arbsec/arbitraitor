@@ -388,6 +388,16 @@ impl MatchOp {
                 scalars.iter().any(|s| normalize_scalar(s) == *canonical)
             }
 
+            // --- NotIn (complement of OneOf; spec §23.1.1 example) ---
+            (MatchOp::NotIn(scalars), FieldValue::Text { canonical, .. }) => {
+                !scalars.iter().any(|s| normalize_scalar(s) == *canonical)
+            }
+            (MatchOp::NotIn(scalars), FieldValue::Bool(b)) => !scalars.iter().any(|s| match s {
+                ScalarValue::Bool(v) => *v == *b,
+                ScalarValue::Str(text) => parse_bool(text).is_some_and(|v| v == *b),
+                ScalarValue::Int(_) => false,
+            }),
+
             // --- Contains ---
             (MatchOp::Contains(needle), FieldValue::Text { canonical, .. }) => {
                 canonical.contains(&normalize_str(needle))
@@ -570,6 +580,14 @@ fn validate_condition(cond: &Condition) -> Result<(), PolicyError> {
 }
 
 /// Checks that a dotted field path references a known field.
+///
+/// All field paths must start with one of the recognized namespace
+/// prefixes. Recognized prefixes whose specific fields are not yet wired
+/// into the [`EvalContext`](crate::EvalContext) still parse — they
+/// resolve to `FieldValue::Unavailable` at evaluation time, which
+/// triggers the configured fail-closed behaviour. This lets policy
+/// authors write forward-compatible TOML referencing features that are
+/// still being implemented (tracked in #488).
 fn validate_field(field: &str) -> Result<(), PolicyError> {
     const FINDING_FIELDS: &[&str] = &[
         "category",
@@ -589,6 +607,12 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         "source_url",
         "artifact_type",
     ];
+    // Forward-compatible namespaces accepted per spec §23.1, §23.1.1, §23.3.
+    // Field paths within these namespaces are accepted by the parser but
+    // only resolve to values when the caller's EvalContext carries the
+    // corresponding data (tracked in #488).
+    const FORWARD_COMPATIBLE_PREFIXES: &[&str] =
+        &["caller_origin.", "execution.", "integrity.", "findings."];
 
     if let Some(rest) = field.strip_prefix("finding.") {
         if FINDING_FIELDS.contains(&rest) {
@@ -606,8 +630,15 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
             "unknown context field: '{field}'"
         )));
     }
+    if FORWARD_COMPATIBLE_PREFIXES
+        .iter()
+        .any(|prefix| field.starts_with(prefix))
+    {
+        return Ok(());
+    }
     Err(PolicyError::Invalid(format!(
-        "field path must start with 'finding.' or 'context.': '{field}'"
+        "field path must start with 'finding.', 'context.', 'caller_origin.', \
+         'execution.', 'integrity.', or 'findings.': '{field}'"
     )))
 }
 
