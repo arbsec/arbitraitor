@@ -10,7 +10,7 @@ publish = false
 
 [lints.rust]
 unsafe_code = "deny"
-missing_docs = "warn"
+missing_docs = "deny"
 unexpected_cfgs = "warn"
 
 [lints.clippy]
