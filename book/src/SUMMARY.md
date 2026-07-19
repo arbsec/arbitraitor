@@ -61,6 +61,7 @@
   - [ADR 0024: macOS containment strategy](./adr/0024-macos-containment-strategy.md)
   - [ADR 0025: OpenSSF Scorecard, deps.dev, and GUAC as optional integrations](./adr/0025-ossf-scorecard-depsdev-guac-integration.md)
   - [ADR 0026: EU CRA / NIST SSDF informational compliance mapping](./adr/0026-eu-cra-nist-ssdf-compliance-mapping.md)
+  - [ADR 0027: CLI inspect pipeline boundary](./adr/0027-cli-pipeline-boundary.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)

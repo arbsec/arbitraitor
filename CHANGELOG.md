@@ -95,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refactor: extract `inspect` pipeline orchestration from main.rs into `crates/arbitraitor-cli/src/pipeline.rs` (#436)
 - CLI exit codes now match the documented verdict-to-exit-code mapping: `run` command failure exits use 33 (Error) / 34 (Incomplete) / 21 (Prompt) instead of 1–5; `doctor` exits 33 on unhealthy; `main()` propagates errors as exit 33 instead of 1. CI pipelines can now reliably distinguish verdict types by exit code (#432)
 - `arbitraitor inspect` now accepts local file paths and `file://` URLs in addition to `https://` URLs; bare paths (relative or absolute) are treated as local files and routed through the file fetcher (#431)
 - Script and native execution (`arbitraitor run`) now applies Landlock filesystem confinement on Linux 5.13+, restricting the child process to read-execute on system paths (`/bin`, `/usr/bin`, `/lib`, etc.) and read-write-execute on its working directory and temp home only — preventing scripts from reading arbitrary absolute paths like `~/.ssh`, `~/.aws`, or `/etc/shadow` (#433)
