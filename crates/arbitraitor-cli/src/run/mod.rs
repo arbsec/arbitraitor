@@ -100,6 +100,9 @@ pub(super) enum RunFailure {
     Approval(String),
     Execution(String),
     Internal(String),
+    Blocked(String),
+    PromptRequired(String),
+    AnalysisIncomplete(String),
 }
 
 pub(super) trait RunServices {
@@ -172,7 +175,7 @@ async fn run_with_services(
         if command.non_interactive {
             return write_failure(
                 writer,
-                RunFailure::Approval(
+                RunFailure::PromptRequired(
                     "native binary detected; pass --native to confirm native execution".to_owned(),
                 ),
             );
@@ -195,7 +198,7 @@ async fn run_with_services(
         Verdict::Prompt if command.non_interactive => {
             return write_failure(
                 writer,
-                RunFailure::Approval("approval required in non-interactive mode".to_owned()),
+                RunFailure::PromptRequired("approval required in non-interactive mode".to_owned()),
             );
         }
         Verdict::Prompt => {
@@ -211,19 +214,21 @@ async fn run_with_services(
         Verdict::Block => {
             return write_failure(
                 writer,
-                RunFailure::Approval("policy blocked execution".to_owned()),
+                RunFailure::Blocked("policy blocked execution".to_owned()),
             );
         }
         Verdict::Error => {
             return write_failure(
                 writer,
-                RunFailure::Internal("fatal error during analysis".to_owned()),
+                RunFailure::Detection("fatal error during analysis".to_owned()),
             );
         }
         Verdict::Incomplete => {
             return write_failure(
                 writer,
-                RunFailure::Detection("required detection coverage not achieved".to_owned()),
+                RunFailure::AnalysisIncomplete(
+                    "required detection coverage not achieved".to_owned(),
+                ),
             );
         }
     }
@@ -315,6 +320,21 @@ fn write_failure(writer: &mut impl Write, failure: RunFailure) -> Result<i32> {
         RunFailure::Approval(message) => (EXIT_APPROVAL_DENIED, "approval denied", message),
         RunFailure::Execution(message) => (EXIT_EXECUTION_FAILED, "execution error", message),
         RunFailure::Internal(message) => (EXIT_INTERNAL_ERROR, "internal error", message),
+        RunFailure::Blocked(message) => (
+            ExitCode::BlockedByPolicy.as_i32(),
+            "blocked by policy",
+            message,
+        ),
+        RunFailure::PromptRequired(message) => (
+            ExitCode::PromptInNonInteractive.as_i32(),
+            "prompt required in non-interactive mode",
+            message,
+        ),
+        RunFailure::AnalysisIncomplete(message) => (
+            ExitCode::AnalysisIncomplete.as_i32(),
+            "analysis incomplete",
+            message,
+        ),
     };
     writeln!(writer, "{label}: {message}").into_diagnostic()?;
     Ok(code)

@@ -10,9 +10,10 @@ use clap::Parser;
 use sha2::{Digest, Sha256};
 
 use super::{
-    EXIT_APPROVAL_DENIED, EXIT_SUCCESS, ExecutionMode, ExecutionOutput, InspectedArtifact,
-    RunCommand, RunFailure, RunFuture, RunServices, run_with_services,
+    EXIT_SUCCESS, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand, RunFailure,
+    RunFuture, RunServices, run_with_services,
 };
+use arbitraitor_model::exit_code::ExitCode;
 
 #[test]
 fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -90,7 +91,7 @@ async fn run_native_non_interactive_blocked_without_flag()
 
     let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
 
-    assert_eq!(code, EXIT_APPROVAL_DENIED);
+    assert_eq!(code, ExitCode::PromptInNonInteractive.as_i32());
     assert!(!services.approval_requested);
     assert!(!services.executed);
     let rendered = String::from_utf8(output)?;
@@ -125,8 +126,8 @@ async fn run_non_interactive_blocks_on_prompt_verdict()
     // When: the verdict is evaluated.
     let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
 
-    // Then: the command exits with the approval-required code.
-    assert_eq!(code, EXIT_APPROVAL_DENIED);
+    // Then: the command exits with the prompt-in-non-interactive code (21).
+    assert_eq!(code, ExitCode::PromptInNonInteractive.as_i32());
     assert!(!services.approval_requested);
     assert!(!services.executed);
     Ok(())
