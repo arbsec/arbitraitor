@@ -28,6 +28,8 @@ use arbitraitor_receipt::{
 use arbitraitor_store::ContentStore;
 use sha2::{Digest, Sha256};
 
+use crate::pipeline::{default_cas_dir, timestamp};
+
 use super::{
     DetectorSummary, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand, RunFailure,
     RunFuture, RunServices,
@@ -108,7 +110,7 @@ impl RunServices for DefaultRunServices {
         let dir = arbitraitor_home()?.join("receipts");
         std::fs::create_dir_all(&dir).map_err(|error| RunFailure::Internal(error.to_string()))?;
         let digest_prefix: String = artifact.sha256.to_string().chars().take(12).collect();
-        let path = dir.join(format!("{}-{digest_prefix}.json", crate::timestamp()));
+        let path = dir.join(format!("{}-{digest_prefix}.json", timestamp()));
         let receipt = build_run_receipt(artifact, output)?;
         let json = serde_json::to_vec_pretty(&receipt)
             .map_err(|error| RunFailure::Internal(error.to_string()))?;
@@ -208,11 +210,7 @@ async fn store_artifact(
     sha256: &Sha256Digest,
     bytes: &[u8],
 ) -> std::result::Result<PathBuf, RunFailure> {
-    let cas_root = config
-        .store
-        .cas_dir
-        .clone()
-        .unwrap_or_else(crate::default_cas_dir);
+    let cas_root = config.store.cas_dir.clone().unwrap_or_else(default_cas_dir);
     let store =
         ContentStore::open(&cas_root).map_err(|error| RunFailure::Internal(error.to_string()))?;
     let mut sink = store
@@ -331,7 +329,7 @@ fn build_run_receipt(
     artifact: &InspectedArtifact,
     output: &ExecutionOutput,
 ) -> std::result::Result<arbitraitor_receipt::Receipt, RunFailure> {
-    let now = crate::timestamp();
+    let now = timestamp();
     let artifact_size = u64::try_from(artifact.size_bytes)
         .map_err(|error| RunFailure::Internal(error.to_string()))?;
     let mut builder = ReceiptBuilder::new(

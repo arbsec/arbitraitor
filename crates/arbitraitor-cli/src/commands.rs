@@ -19,7 +19,7 @@ use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-use crate::{ExplainFormat, default_cas_dir, write_explainability, write_report};
+use crate::{ExplainFormat, pipeline::default_cas_dir, write_explainability, write_report};
 
 #[derive(Args)]
 pub struct ScanCommand {
@@ -213,7 +213,8 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
 
     let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::new(Sha256::digest(&bytes).into());
 
-    let (coordinator, _rule_pack_versions) = crate::analysis_coordinator(command.rules.as_deref())?;
+    let (coordinator, _rule_pack_versions) =
+        crate::pipeline::analysis_coordinator(command.rules.as_deref())?;
     let result = coordinator.analyze(&bytes);
 
     let cas_root = config.store.cas_dir.clone().unwrap_or_else(default_cas_dir);

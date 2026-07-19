@@ -1,8 +1,9 @@
 use super::{
-    Cli, Command, FetchSource, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
-    emit_wrapper_output, parse_cli_from_args, parse_fetch_source, wrapper_output_destination,
-    wrapper_url_argument, write_status_text,
+    Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
+    emit_wrapper_output, parse_cli_from_args, pipeline::parse_fetch_source,
+    wrapper_output_destination, wrapper_url_argument, write_status_text,
 };
+use arbitraitor_fetch::FetchSource;
 use clap::Parser;
 use std::fs;
 use std::io::{Cursor, Write};
@@ -403,7 +404,7 @@ fn unpack_command_extracts_safe_archive() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 fn rejects_unpaired_signature_flags() {
-    let signatures = super::signature_inputs(
+    let signatures = super::pipeline::signature_inputs(
         vec!["artifact.minisig".into()],
         Vec::new(),
         Vec::new(),

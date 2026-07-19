@@ -48,6 +48,7 @@ supersede it.
 | [0024](0024-macos-containment-strategy.md) | macOS containment strategy | Accepted | #279 |
 | [0025](0025-ossf-scorecard-depsdev-guac-integration.md) | OpenSSF Scorecard, deps.dev, and GUAC as optional integrations | Accepted | #275 |
 | [0026](0026-eu-cra-nist-ssdf-compliance-mapping.md) | EU CRA / NIST SSDF informational compliance mapping | Accepted | #276 |
+| [0027](0027-cli-pipeline-boundary.md) | CLI inspect pipeline boundary | Accepted | #436 |
 
 ## Format
 
