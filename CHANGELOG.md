@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### CLI
+
+- `arbitraitor version` now reports build provenance: target architecture
+  (`x86_64`/`aarch64`), Rust toolchain version, build commit (when set
+  via `ARBITRAITOR_BUILD_COMMIT` env at compile time), build date (when
+  set via `ARBITRAITOR_BUILD_DATE` env at compile time), and build
+  profile (`debug`/`release`). Per spec §28.1.
+
 #### Fetch
 
 - `arbitraitor-fetch::FetchPolicy::allow_cross_origin_redirect` and
