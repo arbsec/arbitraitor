@@ -387,6 +387,11 @@ impl MatchOp {
             (MatchOp::OneOf(scalars), FieldValue::Text { canonical, .. }) => {
                 scalars.iter().any(|s| normalize_scalar(s) == *canonical)
             }
+            (MatchOp::OneOf(scalars), FieldValue::Bool(b)) => scalars.iter().any(|s| match s {
+                ScalarValue::Bool(v) => *v == *b,
+                ScalarValue::Str(text) => parse_bool(text).is_some_and(|v| v == *b),
+                ScalarValue::Int(_) => false,
+            }),
 
             // --- NotIn (complement of OneOf; spec §23.1.1 example) ---
             (MatchOp::NotIn(scalars), FieldValue::Text { canonical, .. }) => {
