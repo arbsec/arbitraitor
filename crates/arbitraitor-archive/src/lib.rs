@@ -31,12 +31,13 @@ pub use payload::{
     PayloadIssue, PayloadNode, discover_payloads, is_archive_type, walk_payloads,
 };
 
-const DEFAULT_MAX_DEPTH: u32 = 32;
+const DEFAULT_MAX_DEPTH: u32 = 5;
 const DEFAULT_MAX_FILES: u32 = 10_000;
 const DEFAULT_MAX_TOTAL_UNPACKED_BYTES: u64 = 1_073_741_824;
-const DEFAULT_MAX_SINGLE_FILE_BYTES: u64 = 536_870_912;
-const DEFAULT_MAX_COMPRESSION_RATIO: u32 = 100;
-const DEFAULT_MAX_PROCESSING_TIME: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_SINGLE_FILE_BYTES: u64 = 268_435_456;
+const DEFAULT_MAX_COMPRESSION_RATIO: u32 = 200;
+const DEFAULT_MAX_SYMLINKS: u32 = 0;
+const DEFAULT_MAX_PROCESSING_TIME: Duration = Duration::from_mins(1);
 const COPY_BUFFER_SIZE: usize = 16 * 1024;
 const SINGLE_FILE_ENTRY_NAME: &str = "payload";
 const TAR_MAGIC_OFFSET: usize = 257;
@@ -96,19 +97,36 @@ pub struct ArchiveEntry {
 }
 
 /// Resource limits applied while listing and extracting archives.
+///
+/// Defaults follow spec §19.2. Callers that need looser limits (e.g. an
+/// enterprise-internal scan of a trusted release bundle that legitimately
+/// contains many symlinks) must do so explicitly via
+/// [`ArchiveLimits::default`] field overrides — never by ignoring the limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveLimits {
-    /// Maximum path depth allowed for an entry.
+    /// Maximum path depth allowed for an entry. Default `5` per spec §19.2.
     pub max_depth: u32,
     /// Maximum number of entries allowed in one archive operation.
+    /// Default `10_000` per spec §19.2.
     pub max_files: u32,
     /// Maximum total unpacked bytes allowed in one archive operation.
+    /// Default `1 GiB` per spec §19.2.
     pub max_total_unpacked_bytes: u64,
     /// Maximum unpacked bytes allowed for a single file entry.
+    /// Default `256 MiB` per spec §19.2.
     pub max_single_file_bytes: u64,
     /// Maximum allowed uncompressed-to-compressed size ratio.
+    /// Default `200` per spec §19.2.
     pub max_compression_ratio: u32,
+    /// Maximum number of symbolic-link entries permitted in one archive
+    /// operation. Default `0` per spec §19.2 — any symlink triggers a
+    /// `LimitExceeded { limit: "max_symlinks" }` error. This enforces
+    /// spec invariant 15 (no archive path escape via symlinks) at the
+    /// extraction gate; the per-entry `symlink_target_escapes` check
+    /// remains as defense-in-depth.
+    pub max_symlinks: u32,
     /// Maximum wall-clock processing time allowed in one archive operation.
+    /// Default `60 s` per spec §19.2.
     pub max_processing_time: Duration,
 }
 
@@ -120,6 +138,7 @@ impl Default for ArchiveLimits {
             max_total_unpacked_bytes: DEFAULT_MAX_TOTAL_UNPACKED_BYTES,
             max_single_file_bytes: DEFAULT_MAX_SINGLE_FILE_BYTES,
             max_compression_ratio: DEFAULT_MAX_COMPRESSION_RATIO,
+            max_symlinks: DEFAULT_MAX_SYMLINKS,
             max_processing_time: DEFAULT_MAX_PROCESSING_TIME,
         }
     }
@@ -281,6 +300,9 @@ fn extract_to_directory(
     let mut metadata_tracker = LimitTracker::new(limits);
     for entry in &entries {
         metadata_tracker.record_entry(&entry.name, entry.size, entry.compressed_size)?;
+        if entry.is_symlink {
+            metadata_tracker.record_symlink()?;
+        }
         validate_extractable_entry(entry)?;
     }
 
@@ -461,6 +483,9 @@ impl ArchiveReader for ZipReader {
             };
 
             tracker.record_entry(&name, size, Some(compressed_size))?;
+            if is_symlink {
+                tracker.record_symlink()?;
+            }
             entries.push(ArchiveEntry {
                 name,
                 size,
@@ -655,6 +680,9 @@ fn list_tar_entries(
             .map(|target| target.to_string_lossy().into_owned());
 
         tracker.record_entry(&name, size, None)?;
+        if is_symlink {
+            tracker.record_symlink()?;
+        }
         entries.push(ArchiveEntry {
             name,
             size,
@@ -1203,6 +1231,7 @@ struct LimitTracker<'a> {
     started_at: Instant,
     files: u32,
     total_unpacked_bytes: u64,
+    symlinks: u32,
 }
 
 impl<'a> LimitTracker<'a> {
@@ -1212,6 +1241,7 @@ impl<'a> LimitTracker<'a> {
             started_at: Instant::now(),
             files: 0,
             total_unpacked_bytes: 0,
+            symlinks: 0,
         }
     }
 
@@ -1234,6 +1264,27 @@ impl<'a> LimitTracker<'a> {
         self.check_single_file(size)?;
         self.add_unpacked_bytes(size)?;
         self.check_ratio(size, compressed_size)
+    }
+
+    /// Counts a symlink entry against `max_symlinks`. Must be called for
+    /// every archive entry whose `is_symlink` flag is true, in addition to
+    /// [`record_entry`](Self::record_entry). The spec default of
+    /// `max_symlinks = 0` means any symlink entry triggers
+    /// `ArchiveError::LimitExceeded` with `limit = "max_symlinks"`.
+    fn record_symlink(&mut self) -> Result<(), ArchiveError> {
+        self.check_time()?;
+        self.symlinks = self
+            .symlinks
+            .checked_add(1)
+            .ok_or(ArchiveError::LimitExceeded {
+                limit: "max_symlinks",
+            })?;
+        if self.symlinks > self.limits.max_symlinks {
+            return Err(ArchiveError::LimitExceeded {
+                limit: "max_symlinks",
+            });
+        }
+        Ok(())
     }
 
     fn record_file_metadata(&mut self, name: &str) -> Result<(), ArchiveError> {

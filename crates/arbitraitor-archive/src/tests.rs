@@ -36,6 +36,37 @@ fn zip_lists_and_extracts_multiple_entries() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Locks `ArchiveLimits::default()` to spec §19.2 values. Adding a new
+/// field or changing a default requires extending this test alongside
+/// the spec change so accidental drift is caught at compile-test time.
+#[test]
+fn archive_limits_defaults_match_spec_section_19_2() {
+    let defaults = ArchiveLimits::default();
+    assert_eq!(defaults.max_depth, 5, "spec §19.2 max_depth = 5");
+    assert_eq!(defaults.max_files, 10_000, "spec §19.2 max_files = 10_000");
+    assert_eq!(
+        defaults.max_total_unpacked_bytes, 1_073_741_824,
+        "spec §19.2 max_total_unpacked_bytes = 1 GiB"
+    );
+    assert_eq!(
+        defaults.max_single_file_bytes, 268_435_456,
+        "spec §19.2 max_single_file_bytes = 256 MiB"
+    );
+    assert_eq!(
+        defaults.max_compression_ratio, 200,
+        "spec §19.2 max_compression_ratio = 200"
+    );
+    assert_eq!(
+        defaults.max_symlinks, 0,
+        "spec §19.2 max_symlinks = 0 (any symlink trips the limit)"
+    );
+    assert_eq!(
+        defaults.max_processing_time,
+        Duration::from_mins(1),
+        "spec §19.2 max_processing_time = 60 s"
+    );
+}
+
 #[test]
 fn tar_lists_files_directories_and_extracts_file() -> Result<(), Box<dyn Error>> {
     let data = tar_bytes()?;
@@ -368,6 +399,7 @@ fn test_limits() -> ArchiveLimits {
         max_total_unpacked_bytes: 1_048_576,
         max_single_file_bytes: 1_048_576,
         max_compression_ratio: 1_000,
+        max_symlinks: u32::MAX,
         max_processing_time: Duration::from_secs(5),
     }
 }

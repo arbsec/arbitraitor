@@ -469,6 +469,7 @@ mod tests {
             max_total_unpacked_bytes: 1_048_576,
             max_single_file_bytes: 1_048_576,
             max_compression_ratio: 1_000,
+            max_symlinks: u32::MAX,
             max_processing_time: Duration::from_secs(5),
         }
     }
