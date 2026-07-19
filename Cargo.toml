@@ -40,7 +40,7 @@ homepage = "https://github.com/arbsec/arbitraitor"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
+missing_docs = "deny"
 unexpected_cfgs = "warn"
 
 [workspace.lints.clippy]
