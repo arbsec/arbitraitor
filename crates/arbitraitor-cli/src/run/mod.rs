@@ -11,6 +11,7 @@ use std::pin::Pin;
 
 use arbitraitor_core::config::Config;
 use arbitraitor_mcp::{PlanContext, sanitize_for_agent};
+use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
@@ -20,12 +21,15 @@ use miette::{IntoDiagnostic, Result};
 
 use self::run_services::DefaultRunServices;
 
-const EXIT_SUCCESS: i32 = 0;
-const EXIT_EXECUTION_FAILED: i32 = 33;
-const EXIT_APPROVAL_DENIED: i32 = 21;
-const EXIT_FETCH_ERROR: i32 = 33;
-const EXIT_DETECTION_ERROR: i32 = 34;
-const EXIT_INTERNAL_ERROR: i32 = 33;
+// Spec §29 exit codes. The constants below are kept as private aliases so
+// the historical `i32`-typed call sites in this module can switch to
+// `ExitCode` incrementally without a wide-bore refactor in this PR.
+const EXIT_SUCCESS: i32 = ExitCode::Success.as_i32();
+const EXIT_EXECUTION_FAILED: i32 = ExitCode::ExecutionFailed.as_i32();
+const EXIT_APPROVAL_DENIED: i32 = ExitCode::ApprovalDeclined.as_i32();
+const EXIT_FETCH_ERROR: i32 = ExitCode::NetworkRetrievalFailure.as_i32();
+const EXIT_DETECTION_ERROR: i32 = ExitCode::RequiredDetectorUnavailable.as_i32();
+const EXIT_INTERNAL_ERROR: i32 = ExitCode::InternalInvariantFailure.as_i32();
 
 type RunFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
@@ -96,6 +100,9 @@ pub(super) enum RunFailure {
     Approval(String),
     Execution(String),
     Internal(String),
+    Blocked(String),
+    PromptRequired(String),
+    AnalysisIncomplete(String),
 }
 
 pub(super) trait RunServices {
@@ -168,7 +175,7 @@ async fn run_with_services(
         if command.non_interactive {
             return write_failure(
                 writer,
-                RunFailure::Approval(
+                RunFailure::PromptRequired(
                     "native binary detected; pass --native to confirm native execution".to_owned(),
                 ),
             );
@@ -191,7 +198,7 @@ async fn run_with_services(
         Verdict::Prompt if command.non_interactive => {
             return write_failure(
                 writer,
-                RunFailure::Approval("approval required in non-interactive mode".to_owned()),
+                RunFailure::PromptRequired("approval required in non-interactive mode".to_owned()),
             );
         }
         Verdict::Prompt => {
@@ -207,19 +214,21 @@ async fn run_with_services(
         Verdict::Block => {
             return write_failure(
                 writer,
-                RunFailure::Approval("policy blocked execution".to_owned()),
+                RunFailure::Blocked("policy blocked execution".to_owned()),
             );
         }
         Verdict::Error => {
             return write_failure(
                 writer,
-                RunFailure::Internal("fatal error during analysis".to_owned()),
+                RunFailure::Detection("fatal error during analysis".to_owned()),
             );
         }
         Verdict::Incomplete => {
             return write_failure(
                 writer,
-                RunFailure::Detection("required detection coverage not achieved".to_owned()),
+                RunFailure::AnalysisIncomplete(
+                    "required detection coverage not achieved".to_owned(),
+                ),
             );
         }
     }
@@ -311,6 +320,21 @@ fn write_failure(writer: &mut impl Write, failure: RunFailure) -> Result<i32> {
         RunFailure::Approval(message) => (EXIT_APPROVAL_DENIED, "approval denied", message),
         RunFailure::Execution(message) => (EXIT_EXECUTION_FAILED, "execution error", message),
         RunFailure::Internal(message) => (EXIT_INTERNAL_ERROR, "internal error", message),
+        RunFailure::Blocked(message) => (
+            ExitCode::BlockedByPolicy.as_i32(),
+            "blocked by policy",
+            message,
+        ),
+        RunFailure::PromptRequired(message) => (
+            ExitCode::PromptInNonInteractive.as_i32(),
+            "prompt required in non-interactive mode",
+            message,
+        ),
+        RunFailure::AnalysisIncomplete(message) => (
+            ExitCode::AnalysisIncomplete.as_i32(),
+            "analysis incomplete",
+            message,
+        ),
     };
     writeln!(writer, "{label}: {message}").into_diagnostic()?;
     Ok(code)

@@ -53,14 +53,21 @@ fn evaluate_root_policy(running_as_root: bool, allow_root: bool) -> RootPolicyOu
 
 /// Refuses to continue when running as root.
 ///
-/// Writes a clear error to stderr and exits with status 1 if the effective
-/// user ID is 0. Call this at the very start of every entry point
-/// (`main`, daemon boot, MCP server boot, plugin-host boot) before any
-/// untrusted content is parsed, scanned, or executed.
+/// Writes a clear error to stderr and exits with status code 60
+/// (`InternalInvariantFailure` per spec §29) if the effective user ID is
+/// 0. Call this at the very start of every entry point (`main`, daemon
+/// boot, MCP server boot, plugin-host boot) before any untrusted content
+/// is parsed, scanned, or executed.
 ///
 /// This is the unconditional form — there is no bypass. For the diagnostic
 /// bypass used by `doctor` and integration tests, see
-/// [`refuse_root_unless`].
+/// [`refuse_root_unless`]. The numeric exit code mirrors the
+/// [`arbitraitor_model::exit_code::ExitCode::InternalInvariantFailure`]
+/// variant; it is duplicated here as a constant so that `arbitraitor-core`
+/// does not depend on `arbitraitor-model` (which sits below it in the
+/// crate DAG). If the model value changes, this constant must change in
+/// lockstep — guarded by `exit_code_constants_match_spec` test in
+/// `arbitraitor-cli`.
 pub fn refuse_root() {
     match evaluate_root_policy(is_running_as_root(), false) {
         RootPolicyOutcome::NotRoot | RootPolicyOutcome::AllowedWithWarning => {}
@@ -94,7 +101,11 @@ fn exit_as_root() -> ! {
          --allow-root for the doctor diagnostic command only."
     );
     let _ = std::io::stderr().flush();
-    std::process::exit(33);
+    // Spec §29 code 60: Internal integrity invariant failure.
+    // Mirrors `arbitraitor_model::exit_code::ExitCode::InternalInvariantFailure`.
+    // See the doc comment on `refuse_root` for the rationale on duplicating
+    // the constant here instead of taking a model dependency.
+    std::process::exit(60);
 }
 
 #[cfg(test)]

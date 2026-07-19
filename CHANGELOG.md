@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Model
+
+- `arbitraitor_model::exit_code::ExitCode` — typed enum for the 16 stable
+  exit codes defined in spec §29. Includes `From<Verdict>` for the
+  conservative default mapping and `as_i32()` / `exit()` helpers. Pass and
+  Warn map to 0 and 10 respectively; Prompt maps to 21 (callers override
+  to 20 on explicit decline); Block maps to 30 (callers override to 31 for
+  confirmed-malicious findings, or 32 for integrity failures); Error and
+  Incomplete map to 33 and 34 as before.
+
+#### CLI
+
+- All `std::process::exit(N)` call sites in the CLI now go through the
+  typed `ExitCode` enum or its documented spec §29 numeric value:
+  - `main` now exits `1` (OperationalError) on `run_main` failure instead
+    of `33` (RequiredDetectorUnavailable). Code `33` is reserved for the
+    condition its name describes; a general pipeline failure is not it.
+  - `arbitraitor-core::privilege::refuse_root` now exits `60`
+    (InternalInvariantFailure) instead of `33`, matching ADR-0009's
+    treatment of the no-root invariant as a non-recoverable invariant
+    breach.
+  - `arbitraitor-cli::run::RunFailure` variants now map per spec §29:
+    `Fetch` → `40` (NetworkRetrievalFailure), previously `33`;
+    `Detection` → `33` (RequiredDetectorUnavailable), unchanged;
+    `Approval` → `20` (ApprovalDeclined), previously `21` (which is
+    "Prompt required in non-interactive mode" — a different condition);
+    `Execution` → `50` (ExecutionFailed), previously `33`; `Internal`
+    → `60` (InternalInvariantFailure), previously `33`.
+  - `arbitraitor-cli::commands::scan` verdict exit-code mapping is now
+    `ExitCode::from(verdict)`, eliminating the inline match.
+  - `arbitraitor-cli::commands::execute` default child exit code (when
+    killed by signal or no code reported) is now `50`
+    (ExecutionFailed) instead of `33`.
+  - `arbitraitor-cli::pm::run` advisory-verdict mapping now uses the
+    typed `ExitCode` enum (Pass → 0, Warn → 10, Block → 30).
+
+#### Documentation
+
+- `book/src/cli-reference.md` Exit codes table now lists all 16 spec §29
+  codes with precise meanings (previously only 6 codes were documented,
+  and code 33 was mis-described as "Error — a fatal error occurred").
+- `book/src/cli/run.md` Exit codes table now reflects spec §29 (replaces
+  a stale 0–5 table that did not match any version of the code).
+- `book/src/cli/status.md` Exit codes table now references spec §29
+  instead of the inaccurate 0/1/2 codes.
+
+### Changed
+
 #### ADRs
 
 - ADRs 0022–0026 accepted: SLSA Build L3 target (0022), in-toto Statement receipt envelope (0023), macOS containment strategy (0024), OpenSSF Scorecard/deps.dev/GUAC integration (0025), EU CRA/NIST SSDF compliance mapping (0026). All 26 ADRs are now Accepted.

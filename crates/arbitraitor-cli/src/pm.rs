@@ -11,6 +11,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_package_manager::advisory::{self, AdvisoryVerdict, FindingSeverity};
 use arbitraitor_package_manager::lifecycle::LifecycleScript;
@@ -116,12 +117,12 @@ fn run_npm(args: &[String]) -> Result<()> {
     }
 
     let exit_code = match outcome.verdict {
-        AdvisoryVerdict::Pass => 0,
-        AdvisoryVerdict::Warn => 10,
-        AdvisoryVerdict::Block => 30,
+        AdvisoryVerdict::Pass => ExitCode::Success,
+        AdvisoryVerdict::Warn => ExitCode::WarningNoRelease,
+        AdvisoryVerdict::Block => ExitCode::BlockedByPolicy,
     };
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if exit_code != ExitCode::Success {
+        std::process::exit(exit_code.as_i32());
     }
     Ok(())
 }
