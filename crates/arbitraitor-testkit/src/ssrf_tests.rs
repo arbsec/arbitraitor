@@ -26,6 +26,8 @@ fn ssrf_policy() -> FetchPolicy {
         allowed_schemes: vec![FetchScheme::Http],
         allow_loopback_addresses: false,
         allow_https_to_http_redirect: false,
+        allow_cross_origin_redirect: true,
+        forward_authorization_cross_origin: false,
         require_digest: false,
     }
 }

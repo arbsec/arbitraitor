@@ -134,6 +134,16 @@ impl Default for NetworkConfig {
 }
 
 /// HTTP redirect limits.
+///
+/// Defaults match spec §11.4 (lines 644-653). The cross-origin defaults
+/// are:
+/// - `allow_cross_origin = true` — most legitimate downloads redirect
+///   across origins (e.g. GitHub release → CDN).
+/// - `forward_authorization_cross_origin = false` — Authorization
+///   headers must never silently follow a redirect to a new origin.
+///   This is the critical credential-leak defence from spec §11.2
+///   (lines 608-612); callers opt in to cross-origin credential
+///   forwarding only when the redirect chain is fully trusted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedirectsConfig {
@@ -144,6 +154,26 @@ pub struct RedirectsConfig {
     /// Whether redirecting from HTTPS to HTTP is permitted.
     #[serde(default = "default_false")]
     pub allow_https_to_http: bool,
+
+    /// Whether cross-origin redirects are permitted.
+    ///
+    /// Two URLs are same-origin when scheme, host, and port all match.
+    /// Defaults to `true` because the common case (release artifact →
+    /// CDN) involves a cross-origin redirect. Set to `false` to refuse
+    /// any redirect that changes the origin, useful for high-assurance
+    /// pinned-source policies.
+    #[serde(default = "default_true")]
+    pub allow_cross_origin: bool,
+
+    /// Whether `Authorization` (and other credential-bearing) headers
+    /// may be forwarded across origins during a redirect chain.
+    ///
+    /// Defaults to `false` per spec §11.2. When `false`, any redirect
+    /// that lands on a different origin triggers a forced strip of
+    /// `Authorization` and `Cookie` headers from subsequent requests in
+    /// the chain. When `true`, the original headers are preserved.
+    #[serde(default = "default_false")]
+    pub forward_authorization_cross_origin: bool,
 }
 
 impl Default for RedirectsConfig {
@@ -151,6 +181,8 @@ impl Default for RedirectsConfig {
         Self {
             max: default_redirect_max(),
             allow_https_to_http: false,
+            allow_cross_origin: true,
+            forward_authorization_cross_origin: false,
         }
     }
 }

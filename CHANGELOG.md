@@ -9,105 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Archive limits
+#### Fetch
 
-- `arbitraitor-archive::ArchiveLimits::max_symlinks` — new field
-  enforcing spec §19.2's `max_symlinks = 0` default. Any symlink entry
-  now triggers `ArchiveError::LimitExceeded { limit: "max_symlinks" }`
-  at the extraction gate, hardening spec invariant 15 (no archive path
-  escape via symlinks). Per-entry `symlink_target_escapes` detection
-  remains as defense-in-depth. Callers needing to inspect archives that
-  legitimately contain symlinks must override `max_symlinks` explicitly.
-
-#### Model
-
-- `arbitraitor_model::exit_code::ExitCode` — typed enum for the 16 stable
-  exit codes defined in spec §29. Includes `From<Verdict>` for the
-  conservative default mapping and `as_i32()` / `exit()` helpers. Pass and
-  Warn map to 0 and 10 respectively; Prompt maps to 21 (callers override
-  to 20 on explicit decline); Block maps to 30 (callers override to 31 for
-  confirmed-malicious findings, or 32 for integrity failures); Error and
-  Incomplete map to 33 and 34 as before.
-
-#### Policy
-
-- `arbitraitor-policy::ProvenanceConfig` — new top-level `[provenance]`
-  policy section accepting `require_signature_for: Vec<String>` and
-  `trusted_sigstore_identities: Vec<SigstoreIdentity>` (spec §14.3, §23.3
-  example). Parsed into the policy fingerprint; semantic enforcement is
-  wired by the analysis pipeline.
-- `arbitraitor-policy::DetectorConfig` — new top-level `[detectors.<id>]`
-  policy section accepting `required`, `required_for`, `required_on`
-  fields (spec §15, §23.3 example). Parsed into the policy fingerprint;
-  semantic enforcement is wired by the analysis coordinator.
-- `arbitraitor-policy::MatchOp::NotIn` — new complement-of-OneOf
-  operator. Used by the spec §23.1.1 example policy for
-  `caller_origin.mcp_server_id not_in = ["trusted-mcp-server-1"]`.
-- `arbitraitor-policy` finding shorthand now accepts the
-  `<field>_contains = "<value>"` suffix to route through the `Contains`
-  operator against the named field. Spec §23.3 example
-  `[rules.when.finding] tags_contains = "privilege-escalation"` now
-  parses without falling back to the longer inline form.
-- Field paths under `caller_origin.*`, `execution.*`, `integrity.*`, and
-  `findings.*` are now accepted at parse time (spec §23.1, §23.1.1,
-  §23.3 example). Resolution at evaluation time depends on the caller's
-  `EvalContext` carrying the corresponding data (tracked separately in
-  #488).
-
-#### CLI
-
-- All `std::process::exit(N)` call sites in the CLI now go through the
-  typed `ExitCode` enum or its documented spec §29 numeric value:
-  - `main` now exits `1` (OperationalError) on `run_main` failure instead
-    of `33` (RequiredDetectorUnavailable). Code `33` is reserved for the
-    condition its name describes; a general pipeline failure is not it.
-  - `arbitraitor-core::privilege::refuse_root` now exits `60`
-    (InternalInvariantFailure) instead of `33`, matching ADR-0009's
-    treatment of the no-root invariant as a non-recoverable invariant
-    breach.
-  - `arbitraitor-cli::run::RunFailure` variants now map per spec §29:
-    `Fetch` → `40` (NetworkRetrievalFailure), previously `33`;
-    `Detection` → `33` (RequiredDetectorUnavailable), unchanged;
-    `Approval` → `20` (ApprovalDeclined), previously `21` (which is
-    "Prompt required in non-interactive mode" — a different condition);
-    `Execution` → `50` (ExecutionFailed), previously `33`; `Internal`
-    → `60` (InternalInvariantFailure), previously `33`.
-  - `arbitraitor-cli::commands::scan` verdict exit-code mapping is now
-    `ExitCode::from(verdict)`, eliminating the inline match.
-  - `arbitraitor-cli::commands::execute` default child exit code (when
-    killed by signal or no code reported) is now `50`
-    (ExecutionFailed) instead of `33`.
-  - `arbitraitor-cli::pm::run` advisory-verdict mapping now uses the
-    typed `ExitCode` enum (Pass → 0, Warn → 10, Block → 30).
-
-#### Documentation
-
-- `book/src/cli-reference.md` Exit codes table now lists all 16 spec §29
-  codes with precise meanings (previously only 6 codes were documented,
-  and code 33 was mis-described as "Error — a fatal error occurred").
-- `book/src/cli/run.md` Exit codes table now reflects spec §29 (replaces
-  a stale 0–5 table that did not match any version of the code).
-- `book/src/cli/status.md` Exit codes table now references spec §29
-  instead of the inaccurate 0/1/2 codes.
-
-### Changed
-
-#### Archive
-
-- `arbitraitor-archive::ArchiveLimits` defaults now match spec §19.2
-  exactly (previously diverged on four fields):
-  - `max_depth`: 32 → **5**
-  - `max_single_file_bytes`: 512 MiB → **256 MiB**
-  - `max_compression_ratio`: 100 → **200**
-  - `max_processing_time`: 30 s → **60 s**
-  - `max_files`: 10 000 (unchanged)
-  - `max_total_unpacked_bytes`: 1 GiB (unchanged)
-
-  The tighter defaults may reject archives that previously inspected
-  successfully; enterprise-internal scans of trusted release bundles
-  that legitimately need deeper recursion or larger single-file limits
-  must override `ArchiveLimits` fields explicitly via the
-  `open_archive_with_limits` constructor.
+- `arbitraitor-fetch::FetchPolicy::allow_cross_origin_redirect` and
+  `forward_authorization_cross_origin` — new fields implementing spec
+  §11.2 (lines 608-612) and §11.4 (lines 644-653) redirect policy:
+  - `allow_cross_origin_redirect` (default `true`) controls whether
+    redirect chains may cross origin boundaries (scheme + host + port).
+    When `false`, cross-origin redirects return
+    `FetchError::CrossOriginRedirect`.
+  - `forward_authorization_cross_origin` (default `false`) gates
+    whether credential-bearing headers survive across origin
+    boundaries. Forward-compatible: currently a no-op because
+    `execute_request` sends a bare GET (user-supplied headers tracked
+    in #498).
+- `arbitraitor-policy::RedirectsConfig::allow_cross_origin` and
+  `forward_authorization_cross_origin` — corresponding TOML policy
+  fields per spec §11.4 example.
 
 #### ADRs
 
@@ -173,22 +91,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-#### Archive
-
-- `arbitraitor-archive::ArchiveLimits` defaults now match spec §19.2
-  exactly (previously diverged on four fields):
-  - `max_depth`: 32 → **5**
-  - `max_single_file_bytes`: 512 MiB → **256 MiB**
-  - `max_compression_ratio`: 100 → **200**
-  - `max_processing_time`: 30 s → **60 s**
-  - `max_files`: 10 000 (unchanged)
-  - `max_total_unpacked_bytes`: 1 GiB (unchanged)
-
-  The tighter defaults may reject archives that previously inspected
-  successfully; enterprise-internal scans of trusted release bundles
-  that legitimately need deeper recursion or larger single-file limits
-  must override `ArchiveLimits` fields explicitly via the
-  `open_archive_with_limits` constructor.
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
 - `shim install npm` now generates a working shim that invokes `arb pm run --tool npm`, replacing the previous stub that errored with "package-manager shims are not yet implemented".
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
