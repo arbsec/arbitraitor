@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use arbitraitor_fetch::{
     FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, HttpFetcher,
-    SizeLimitKind, VecSink,
+    SizeLimitKind, TlsVerifier, VecSink,
 };
 
 use crate::network;
@@ -18,6 +18,7 @@ use crate::network;
 /// Policy that permits HTTP on loopback for mock-server interaction.
 fn http_loopback_policy() -> FetchPolicy {
     FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         connect_timeout: Duration::from_secs(5),
         read_timeout: Duration::from_secs(5),
         total_timeout: Duration::from_secs(30),
@@ -65,6 +66,7 @@ async fn mixed_content_detected() -> Result<(), Box<dyn std::error::Error>> {
     let mut sink = VecSink::new();
 
     let https_only = FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allowed_schemes: vec![FetchScheme::Https],
         ..FetchPolicy::default()
     };
@@ -93,6 +95,7 @@ async fn invalid_cert_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let mut sink = VecSink::new();
 
     let policy = FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allowed_schemes: vec![FetchScheme::Https],
         allow_loopback_addresses: true,
         connect_timeout: Duration::from_secs(3),
@@ -144,6 +147,14 @@ async fn cert_fingerprint_captured_for_pin_verification() -> Result<(), Box<dyn 
     assert!(
         receipt.metadata.peer_certificate_fingerprint.is_none(),
         "HTTP connections must not report a certificate fingerprint"
+    );
+    assert!(
+        receipt.metadata.tls_version.is_none(),
+        "HTTP connections must not report a TLS protocol version"
+    );
+    assert!(
+        receipt.metadata.tls_cipher_suite.is_none(),
+        "HTTP connections must not report a TLS cipher suite"
     );
     assert_eq!(sink.as_bytes(), b"fingerprint-check");
     Ok(())

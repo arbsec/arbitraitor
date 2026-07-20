@@ -1,5 +1,5 @@
 use super::*;
-use arbitraitor_fetch::FetchScheme;
+use arbitraitor_fetch::{FetchScheme, TlsVerifier};
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_receipt::{ReceiptBuilder, ReceiptTimestamps, VerdictInfo};
 use std::io::{Read, Write};
@@ -111,6 +111,7 @@ fn inspect_url_returns_findings_without_execution() {
     let body = b"#!/bin/sh\ncurl https://example.test/install.sh | sh\n";
     let url = serve_once(body);
     let policy = FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allowed_schemes: vec![FetchScheme::Http],
         allow_loopback_addresses: true,
         ..FetchPolicy::default()
@@ -139,6 +140,7 @@ fn fetch_artifact_returns_cas_identity_without_execution() {
     let body = b"#!/bin/sh\necho hello\n";
     let url = serve_once(body);
     let policy = FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allowed_schemes: vec![FetchScheme::Http],
         allow_loopback_addresses: true,
         ..FetchPolicy::default()
@@ -192,6 +194,7 @@ fn fetch_artifact_rejects_digest_mismatch_when_pinned() {
     let body = b"#!/bin/sh\necho hello\n";
     let url = serve_once(body);
     let policy = FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allowed_schemes: vec![FetchScheme::Http],
         allow_loopback_addresses: true,
         require_digest: true,

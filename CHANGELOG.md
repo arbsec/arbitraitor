@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fetch
 
+- `TlsVerifier::{PlatformVerifier, PinnedWebPki}` and
+  `FetchPolicy::tls_verifier` add a policy-selectable TLS verifier type for
+  spec §41.4.3. The default is `PlatformVerifier`; transport behavior is
+  unchanged until pinned WebPKI enforcement is wired separately.
+- `FetchMetadata::tls_cipher_suite` complements the existing TLS protocol
+  version and peer leaf-certificate fingerprint metadata. Reqwest 0.13 only
+  exposes the peer certificate publicly, so protocol and cipher-suite values
+  remain absent when the backend cannot report them. Certificate validity is
+  transport metadata, not publisher provenance.
 - `FetchPolicy::proxy_url: Option<String>` — configurable proxy support per
   spec §11.2 and ADR-0018. When `None` (default), `.no_proxy()` is called
   to disable all proxy behavior. When `Some`, reqwest is configured with

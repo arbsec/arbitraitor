@@ -176,6 +176,20 @@ impl FetchRequest {
     }
 }
 
+/// TLS certificate verifier selected by fetch policy.
+///
+/// The current reqwest transport continues to use its platform verifier for
+/// both variants; this policy type records the requested verifier without
+/// changing TLS behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TlsVerifier {
+    /// Use the operating system's platform certificate verifier.
+    #[default]
+    PlatformVerifier,
+    /// Request verification against a pinned `WebPKI` root set.
+    PinnedWebPki,
+}
+
 /// Transport policy applied by fetchers.
 ///
 /// Each bool field is a documented security policy axis with an explicit
@@ -188,6 +202,8 @@ impl FetchRequest {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct FetchPolicy {
+    /// TLS certificate verifier requested by policy.
+    pub tls_verifier: TlsVerifier,
     /// TCP/TLS connection timeout.
     pub connect_timeout: Duration,
     /// Per-read idle timeout.
@@ -255,6 +271,7 @@ pub struct FetchPolicy {
 impl Default for FetchPolicy {
     fn default() -> Self {
         Self {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             read_timeout: DEFAULT_READ_TIMEOUT,
             total_timeout: DEFAULT_TOTAL_TIMEOUT,
@@ -286,6 +303,8 @@ impl FetchPolicy {
 pub struct FetchMetadata {
     /// TLS protocol version when exposed by the transport backend.
     pub tls_version: Option<String>,
+    /// TLS cipher suite when exposed by the transport backend.
+    pub tls_cipher_suite: Option<String>,
     /// SHA-256 fingerprint of the DER-encoded peer leaf certificate.
     pub peer_certificate_fingerprint: Option<Sha256Digest>,
     /// DNS addresses resolved before the request.
@@ -806,6 +825,7 @@ async fn stream_response(
 
     let metadata = FetchMetadata {
         tls_version: None,
+        tls_cipher_suite: None,
         peer_certificate_fingerprint,
         resolved_ips,
         connected_ip,
@@ -1335,9 +1355,9 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_cross_origin_allowed,
-        ensure_no_insecure_downgrade, execute_request, strip_credentials_on_cross_origin,
-        verify_connected_peer,
+        FetchError, FetchPolicy, FetchScheme, TlsVerifier, build_http_client,
+        ensure_cross_origin_allowed, ensure_no_insecure_downgrade, execute_request,
+        strip_credentials_on_cross_origin, verify_connected_peer,
     };
     use url::Url;
 
@@ -1368,6 +1388,7 @@ mod tests {
 
         let url = format!("http://rebind.invalid:{}/artifact", addr.port()).parse()?;
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allow_loopback_addresses: true,
             ..FetchPolicy::default()
         };
@@ -1443,6 +1464,7 @@ mod tests {
     #[test]
     fn insecure_downgrade_blocked_by_default() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allowed_schemes: vec![FetchScheme::Http, FetchScheme::Https],
             ..FetchPolicy::default()
         };
@@ -1456,6 +1478,7 @@ mod tests {
     #[test]
     fn insecure_downgrade_allowed_when_opted_in() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allowed_schemes: vec![FetchScheme::Http, FetchScheme::Https],
             allow_https_to_http_redirect: true,
             ..FetchPolicy::default()
@@ -1493,6 +1516,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fetch_policy_defaults_to_platform_tls_verifier() {
+        let policy = FetchPolicy::default();
+        assert_eq!(policy.tls_verifier, TlsVerifier::PlatformVerifier);
+    }
+
     // -----------------------------------------------------------------
     // Cross-origin redirect policy (spec §11.2, §11.4)
     // -----------------------------------------------------------------
@@ -1520,6 +1549,7 @@ mod tests {
     #[test]
     fn cross_origin_redirect_blocked_when_disallowed() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allow_cross_origin_redirect: false,
             ..FetchPolicy::default()
         };
@@ -1535,6 +1565,7 @@ mod tests {
     #[test]
     fn same_origin_redirect_allowed_when_cross_origin_disallowed() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allow_cross_origin_redirect: false,
             ..FetchPolicy::default()
         };
@@ -1550,6 +1581,7 @@ mod tests {
     #[test]
     fn cross_origin_redirect_allowed_when_policy_permits() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allow_cross_origin_redirect: true,
             ..FetchPolicy::default()
         };
@@ -1565,6 +1597,7 @@ mod tests {
     #[test]
     fn different_port_is_treated_as_cross_origin() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allow_cross_origin_redirect: false,
             ..FetchPolicy::default()
         };
@@ -1582,6 +1615,7 @@ mod tests {
     #[test]
     fn different_scheme_is_treated_as_cross_origin() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allow_cross_origin_redirect: false,
             ..FetchPolicy::default()
         };
@@ -1647,6 +1681,7 @@ mod tests {
     #[test]
     fn strip_credentials_preserves_headers_when_opted_in() {
         let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             forward_authorization_cross_origin: true,
             ..FetchPolicy::default()
         };

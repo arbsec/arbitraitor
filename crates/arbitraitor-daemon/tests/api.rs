@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arbitraitor_daemon::api::{ApiError, Arbitraitor, ArbitraitorApi, Config};
-use arbitraitor_fetch::{FetchPolicy, FetchScheme};
+use arbitraitor_fetch::{FetchPolicy, FetchScheme, TlsVerifier};
 use arbitraitor_policy::PolicyEngine;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,6 +37,7 @@ fn test_config(root: &std::path::Path) -> Config {
         store_path: root.join("cas"),
         receipts_path: root.join("receipts"),
         fetch_policy: FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allowed_schemes: vec![FetchScheme::Http],
             allow_loopback_addresses: true,
             ..FetchPolicy::default()

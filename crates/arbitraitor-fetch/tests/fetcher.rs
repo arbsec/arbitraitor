@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_fetch::{
     FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, FileFetcher,
-    HttpFetcher, SizeLimitKind, VecSink, redact_url, validate_ip,
+    HttpFetcher, SizeLimitKind, TlsVerifier, VecSink, redact_url, validate_ip,
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_testkit::mock_server::MockHttpServer;
@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 fn http_policy() -> FetchPolicy {
     FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         connect_timeout: Duration::from_secs(5),
         read_timeout: Duration::from_secs(5),
         total_timeout: Duration::from_secs(30),
@@ -36,6 +37,7 @@ fn http_policy() -> FetchPolicy {
 
 fn ssrf_policy() -> FetchPolicy {
     FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allow_loopback_addresses: false,
         ..http_policy()
     }
