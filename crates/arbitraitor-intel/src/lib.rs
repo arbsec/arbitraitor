@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod feed;
+pub mod governance;
 pub mod review;
 pub mod submission;
 pub mod transparency;
