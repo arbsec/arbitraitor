@@ -83,6 +83,10 @@ enum Command {
     Graph(commands::GraphCommand),
     Approve(commands::ApproveCommand),
     Execute(commands::ExecuteCommand),
+    /// Report user feedback on findings (spec §21.7).
+    Report(commands::ReportCommand),
+    /// Record a scoped allow exception for an artifact digest (spec §21.7).
+    Allow(commands::AllowCommand),
     Pm(pm::PmCommand),
     /// Hidden alias of `wrappers init` for discoverability.
     #[command(hide = true)]
@@ -449,6 +453,12 @@ async fn run_main() -> Result<()> {
         }
         Command::Execute(command) => {
             commands::execute(&command, &config)?;
+        }
+        Command::Report(command) => {
+            commands::report(&command)?;
+        }
+        Command::Allow(command) => {
+            commands::allow(&command)?;
         }
         Command::Pm(command) => {
             pm::run(&command)?;

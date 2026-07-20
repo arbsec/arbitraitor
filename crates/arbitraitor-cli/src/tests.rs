@@ -121,6 +121,8 @@ fn inspect_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Graph(_)
         | Command::Approve(_)
         | Command::Execute(_)
+        | Command::Report(_)
+        | Command::Allow(_)
         | Command::Pm(_)
         | Command::Env(_)
         | Command::Version => {
@@ -203,6 +205,8 @@ fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Erro
         | Command::Graph(_)
         | Command::Approve(_)
         | Command::Execute(_)
+        | Command::Report(_)
+        | Command::Allow(_)
         | Command::Pm(_)
         | Command::Env(_)
         | Command::Version => {
@@ -259,6 +263,8 @@ fn inspect_accepts_signature_flags() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Graph(_)
         | Command::Approve(_)
         | Command::Execute(_)
+        | Command::Report(_)
+        | Command::Allow(_)
         | Command::Pm(_)
         | Command::Env(_)
         | Command::Version => {
@@ -357,6 +363,8 @@ fn unpack_accepts_archive_and_output_flags() -> Result<(), Box<dyn std::error::E
         | Command::Graph(_)
         | Command::Approve(_)
         | Command::Execute(_)
+        | Command::Report(_)
+        | Command::Allow(_)
         | Command::Pm(_)
         | Command::Env(_)
         | Command::Version => {
@@ -1030,5 +1038,234 @@ fn wrappers_rejects_unknown_target_name() {
     assert!(
         result.is_ok(),
         "unknown target is a runtime error, not parse"
+    );
+}
+
+#[test]
+fn report_false_positive_parses_finding_id() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "report", "false-positive", "SHELL-EVAL-001"])?;
+
+    match cli.command {
+        Command::Report(commands::ReportCommand {
+            subcommand: commands::ReportSubcommand::FalsePositive { finding_id },
+        }) => {
+            assert_eq!(finding_id, "SHELL-EVAL-001");
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn report_false_positive_handles_whitespace_finding_id() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "report", "false-positive", "   "])?;
+
+    match cli.command {
+        Command::Report(commands::ReportCommand {
+            subcommand: commands::ReportSubcommand::FalsePositive { finding_id },
+        }) => {
+            assert_eq!(finding_id, "   ");
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn allow_parses_required_scope_expires_reason() -> Result<(), Box<dyn std::error::Error>> {
+    let digest = "ab".repeat(32);
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "allow",
+        &format!("sha256:{digest}"),
+        "--scope",
+        "project",
+        "--expires",
+        "7d",
+        "--reason",
+        "approved by sec review #482",
+    ])?;
+
+    match cli.command {
+        Command::Allow(cmd) => {
+            assert_eq!(cmd.hash, digest);
+            assert_eq!(cmd.scope, commands::AllowScope::Project);
+            assert_eq!(cmd.expires, "7d");
+            assert_eq!(cmd.reason, "approved by sec review #482");
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn allow_rejects_missing_scope_flag() {
+    let digest = "cd".repeat(32);
+    let result = Cli::try_parse_from([
+        "arbitraitor",
+        "allow",
+        &format!("sha256:{digest}"),
+        "--expires",
+        "7d",
+        "--reason",
+        "missing scope",
+    ]);
+    assert!(result.is_err(), "--scope is required");
+}
+
+#[test]
+fn allow_rejects_missing_expires_flag() {
+    let digest = "ef".repeat(32);
+    let result = Cli::try_parse_from([
+        "arbitraitor",
+        "allow",
+        &format!("sha256:{digest}"),
+        "--scope",
+        "user",
+        "--reason",
+        "missing expires",
+    ]);
+    assert!(result.is_err(), "--expires is required");
+}
+
+#[test]
+fn allow_rejects_missing_reason_flag() {
+    let digest = "12".repeat(32);
+    let result = Cli::try_parse_from([
+        "arbitraitor",
+        "allow",
+        &format!("sha256:{digest}"),
+        "--scope",
+        "org",
+        "--expires",
+        "24h",
+    ]);
+    assert!(result.is_err(), "--reason is required");
+}
+
+#[test]
+fn allow_rejects_unknown_scope_value() {
+    let digest = "34".repeat(32);
+    let result = Cli::try_parse_from([
+        "arbitraitor",
+        "allow",
+        &format!("sha256:{digest}"),
+        "--scope",
+        "global",
+        "--expires",
+        "7d",
+        "--reason",
+        "wrong scope",
+    ]);
+    assert!(result.is_err(), "scope must be user, project, or org");
+}
+
+#[test]
+fn allow_rejects_hash_without_sha256_prefix() {
+    let digest = "ab".repeat(32);
+    let result = Cli::try_parse_from([
+        "arbitraitor",
+        "allow",
+        &digest,
+        "--scope",
+        "user",
+        "--expires",
+        "7d",
+        "--reason",
+        "no prefix",
+    ]);
+    assert!(result.is_err(), "hash must include the sha256: prefix");
+}
+
+#[test]
+fn report_handler_rejects_empty_finding_id() {
+    let cmd = commands::ReportCommand {
+        subcommand: commands::ReportSubcommand::FalsePositive {
+            finding_id: String::new(),
+        },
+    };
+    let result = commands::report(&cmd);
+    assert!(result.is_err(), "empty finding_id must be rejected");
+}
+
+#[test]
+fn allow_handler_rejects_invalid_hash_prefix() {
+    let digest = "ab".repeat(32);
+    let cmd = commands::AllowCommand {
+        hash: digest,
+        scope: commands::AllowScope::User,
+        expires: "7d".to_owned(),
+        reason: "missing prefix".to_owned(),
+    };
+    let result = commands::allow(&cmd);
+    assert!(result.is_err(), "sha256: prefix is mandatory");
+}
+
+#[test]
+fn allow_handler_rejects_zero_duration() {
+    let digest = "ab".repeat(32);
+    let cmd = commands::AllowCommand {
+        hash: format!("sha256:{digest}"),
+        scope: commands::AllowScope::User,
+        expires: "0d".to_owned(),
+        reason: "bad duration".to_owned(),
+    };
+    let result = commands::allow(&cmd);
+    assert!(result.is_err(), "duration must be greater than zero");
+}
+
+#[test]
+fn allow_handler_rejects_unknown_duration_unit() {
+    let digest = "ab".repeat(32);
+    let cmd = commands::AllowCommand {
+        hash: format!("sha256:{digest}"),
+        scope: commands::AllowScope::User,
+        expires: "7w".to_owned(),
+        reason: "bad unit".to_owned(),
+    };
+    let result = commands::allow(&cmd);
+    assert!(result.is_err(), "unknown duration unit must be rejected");
+}
+
+#[test]
+fn allow_handler_rejects_empty_reason() {
+    let digest = "ab".repeat(32);
+    let cmd = commands::AllowCommand {
+        hash: format!("sha256:{digest}"),
+        scope: commands::AllowScope::User,
+        expires: "7d".to_owned(),
+        reason: "   ".to_owned(),
+    };
+    let result = commands::allow(&cmd);
+    assert!(result.is_err(), "empty reason must be rejected");
+}
+
+#[test]
+fn allow_handler_accepts_valid_inputs() {
+    let digest = "ab".repeat(32);
+    let cmd = commands::AllowCommand {
+        hash: format!("sha256:{digest}"),
+        scope: commands::AllowScope::Project,
+        expires: "7d".to_owned(),
+        reason: "approved".to_owned(),
+    };
+    let result = commands::allow(&cmd);
+    assert!(
+        result.is_ok(),
+        "valid allow command must succeed: {result:?}"
+    );
+}
+
+#[test]
+fn report_handler_accepts_valid_finding_id() {
+    let cmd = commands::ReportCommand {
+        subcommand: commands::ReportSubcommand::FalsePositive {
+            finding_id: "SHELL-EVAL-001".to_owned(),
+        },
+    };
+    let result = commands::report(&cmd);
+    assert!(
+        result.is_ok(),
+        "valid report command must succeed: {result:?}"
     );
 }
