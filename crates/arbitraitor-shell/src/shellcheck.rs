@@ -1,10 +1,8 @@
-//! `ShellCheck`-compatible JSON output adapter.
+//! `ShellCheck` interoperability.
 //!
-//! Produces output in the [`ShellCheck` JSON format][format] so that tools
-//! which consume `ShellCheck` reports (editors, CI linters, review tools)
-//! can display Arbitraitor findings without modification.
-//!
-//! Arbitraitor does **not** invoke `ShellCheck` — it emits compatible JSON.
+//! Exports Arbitraitor findings in [`ShellCheck` JSON format][format] for
+//! editor and CI integrations, and invokes the optional `shellcheck` binary
+//! to import its advisory diagnostics.
 //!
 //! [format]: https://github.com/koalaman/shellcheck/wiki/Integration#json-format
 
@@ -13,6 +11,11 @@
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::verdict::Severity;
 use serde::Serialize;
+
+#[path = "shellcheck_subprocess.rs"]
+mod subprocess;
+
+pub use subprocess::{ShellCheckError, ShellCheckFinding, run_shellcheck};
 
 /// `ShellCheck` report — the top-level JSON array wrapper.
 #[derive(Clone, Debug, Serialize)]
