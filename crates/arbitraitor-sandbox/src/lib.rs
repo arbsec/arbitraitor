@@ -10,8 +10,11 @@ mod resource_limits;
 mod seccomp;
 
 pub use landlock::{PathRule, access_fs, configure_filesystem_isolation};
+pub use observed::{FileOperation, OBSERVED_EVENT_SCHEMA_VERSION, ObservedEvent, ObservedEventLog};
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
 pub use seccomp::configure_network_isolation;
+
+mod observed;
 
 use std::io;
 use std::process::Command;

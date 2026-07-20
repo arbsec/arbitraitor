@@ -9,19 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### CLI
+#### Sandbox
 
-- `arbitraitor report false-positive <finding-id>` — new subcommand
-  marking a finding as a false positive per spec §21.7. Stub
-  implementation validates inputs and reports what would be recorded;
-  intel-store persistence lands in a follow-up PR.
-- `arbitraitor allow sha256:<HEX> --scope <user|project|org> --expires <DURATION> --reason <TEXT>`
-  — new subcommand recording a scoped, time-bounded allow exception
-  for an artifact digest per spec §21.7. `--scope`, `--expires`, and
-  `--reason` are all required; the duration parser accepts `s`, `m`,
-  `h`, and `d` units. Stub implementation validates inputs and reports
-  what would be recorded; intel-store persistence lands in a follow-up
-  PR.
+- `arbitraitor_sandbox::observed::{ObservedEvent, ObservedEventLog,
+  FileOperation, OBSERVED_EVENT_SCHEMA_VERSION}` — new public types for
+  spec §27.6 dynamic-adapter event reporting. `ObservedEvent` is a
+  `serde`-tagged enum covering all ten spec-mandated event classes
+  (process tree, file read/write/delete, network connection, DNS
+  request, privilege change, persistence creation, credential store
+  access, child download with SHA-256, library load with SHA-256,
+  attempted security-control modification). `ObservedEventLog` is an
+  ordered, append-only log carrying a `schema_version` field and using
+  `#[serde(deny_unknown_fields)]` so audit consumers reject smuggled
+  fields. `FileOperation` is the read/write/delete label for file
+  events, serialized as lowercase strings to stay stable across Rust
+  version bumps.
 
 #### YARA-X
 

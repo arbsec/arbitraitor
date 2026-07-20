@@ -482,6 +482,8 @@ dependencies = [
  "arbitraitor-workspace-hack",
  "libc",
  "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
