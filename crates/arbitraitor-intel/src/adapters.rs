@@ -34,28 +34,6 @@ impl FeedAdapter for ThreatFoxAdapter {
     }
 }
 
-/// Offline stub for the `OpenSSF` malicious-packages feed.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct OpenSSFMaliciousAdapter;
-
-impl FeedAdapter for OpenSSFMaliciousAdapter {
-    fn name(&self) -> &'static str {
-        "openssf-malicious"
-    }
-
-    fn fetch_indicators(&self) -> Result<Vec<FeedEntry>> {
-        Ok(Vec::new())
-    }
-
-    fn source_class(&self) -> FeedSourceClass {
-        FeedSourceClass::Authoritative
-    }
-
-    fn feed_url(&self) -> &'static str {
-        ""
-    }
-}
-
 /// Offline stub for the OSV advisory feed, including CISA KEV records.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OSVAdapter;
@@ -201,11 +179,8 @@ mod tests {
     #[test]
     fn stub_adapters_implement_feed_adapter_surface() -> std::result::Result<(), Box<dyn Error>> {
         // Given
-        let adapters: [(&dyn FeedAdapter, &str); 3] = [
-            (&ThreatFoxAdapter, "threatfox"),
-            (&OpenSSFMaliciousAdapter, "openssf-malicious"),
-            (&OSVAdapter, "osv"),
-        ];
+        let adapters: [(&dyn FeedAdapter, &str); 2] =
+            [(&ThreatFoxAdapter, "threatfox"), (&OSVAdapter, "osv")];
 
         // When / Then
         for (adapter, expected_name) in adapters {
