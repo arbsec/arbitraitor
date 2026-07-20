@@ -88,6 +88,7 @@ pub(crate) async fn inspect(
         policy: fetch_policy,
         expected_sha256,
         cancellation: arbitraitor_fetch::FetchCancellation::new(),
+        credentials: arbitraitor_fetch::RequestCredentials::default(),
     };
     let mut fetch_sink = VecSink::new();
     let fetch_receipt = match &request.source {
@@ -413,7 +414,8 @@ pub(crate) fn receipt_retrieval_info(
                 .iter()
                 .map(ToString::to_string),
         )
-        .with_byte_count(fetch_receipt.bytes_written);
+        .with_byte_count(fetch_receipt.bytes_written)
+        .with_redirect_credential_secrecy(fetch_receipt.metadata.redirect_credential_secrecy);
     if let Some(final_url) = &fetch_receipt.metadata.final_url {
         retrieval = retrieval.with_final_url(final_url.to_string());
     }
