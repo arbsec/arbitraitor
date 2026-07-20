@@ -144,6 +144,7 @@ When Level 3 (Contained) execution is requested, the following controls are veri
 | Capability probe | Proves controls are active |
 
 These are reported per-control in the receipt, not as a single boolean.
+Landlock ABI probing and receipt recording are documented in ADR 0028.
 
 ## Receipt integrity
 

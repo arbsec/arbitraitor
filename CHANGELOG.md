@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Sandbox
 
+- `arbitraitor_sandbox::LandlockAbiVersion` and
+  `probe_landlock_abi_version()` record the running Linux kernel's Landlock ABI
+  via `LANDLOCK_CREATE_RULESET_VERSION`, exposing the observed ABI in
+  contained-execution receipt controls without changing enforcement policy.
 - `arbitraitor-sandbox::windows_adapters` — new public module with five
   Windows sandbox adapter stubs per spec §27.5: `WindowsSandboxAdapter`,
   `AppContainerAdapter`, `JobObjectsAdapter`, `WdacAdapter`,

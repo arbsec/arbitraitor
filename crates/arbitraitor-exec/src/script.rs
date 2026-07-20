@@ -320,7 +320,6 @@ fn landlock_rules_for_script_execution(
     }
     rules.push(PathRule::read_write_execute(working_dir.to_path_buf()));
     rules.push(PathRule::read_write_execute(home_dir.to_path_buf()));
-
     for path in [
         "/bin",
         "/usr/bin",
@@ -544,17 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn script_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
-        if !Path::new("/proc/self/status").exists() {
-            return Ok(());
-        }
+    fn script_sandbox_requests_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
         let script = bash_or_skip()?;
-        let result = script.execute(b"grep '^NoNewPrivs:' /proc/self/status\n")?;
-        assert_eq!(
-            String::from_utf8(result.stdout)?.trim(),
-            "NoNewPrivs:\t1",
-            "script child must run with NoNewPrivs set"
-        );
+        // Runtime proof lives in arbitraitor-sandbox::tests::apply_sandbox_sets_no_new_privs.
+        // This broker test verifies script execution delegates to the secure default.
+        assert!(script.sandbox_config().no_new_privs);
         Ok(())
     }
 

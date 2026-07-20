@@ -520,6 +520,7 @@ fn all_control_proofs() -> ControlProofs {
         privilege_suppression: Some("no-new-privs".to_owned()),
         syscall_filtering: Some("seccomp-bpf".to_owned()),
         resource_limits: Some("setrlimit".to_owned()),
+        landlock_abi_version: Some(arbitraitor_sandbox::LandlockAbiVersion::V7),
     }
 }
 
@@ -608,6 +609,10 @@ fn contained_with_all_proofs_records_enforced_matrix() -> Result<(), Box<dyn std
     assert_eq!(privilege.applied, ControlStatus::Enforced);
     assert_eq!(syscall.applied, ControlStatus::Enforced);
     assert_eq!(resource_limits.applied, ControlStatus::Enforced);
+    assert_eq!(
+        controls.landlock_abi_version,
+        Some(arbitraitor_sandbox::LandlockAbiVersion::V7)
+    );
     Ok(())
 }
 
