@@ -20,7 +20,9 @@ use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
 use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
-use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
+use arbitraitor_intel::{
+    IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
+};
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::origin::CallerOrigin;
@@ -200,6 +202,12 @@ struct UpdateCommand {
     /// Override the `URLhaus` feed URL (CSV or JSON).
     #[arg(long, value_name = "URL")]
     urlhaus_url: Option<String>,
+    /// Ingest `OpenSSF` malicious-packages `MAL-` IDs from an OSV querybatch response.
+    #[arg(long)]
+    ossf_malicious_packages: bool,
+    /// Override the `OpenSSF` malicious-packages OSV querybatch URL or signed mirror.
+    #[arg(long, value_name = "URL")]
+    ossf_malicious_packages_url: Option<String>,
     /// Override the local intel store path.
     #[arg(long, value_name = "PATH")]
     intel_store: Option<PathBuf>,
@@ -741,26 +749,42 @@ fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
 
 async fn intel(command: IntelCommand) -> Result<()> {
     let IntelSubcommand::Update(update) = command.subcommand;
-    if !update.urlhaus {
-        miette::bail!("no feed selected; pass --urlhaus to ingest the URLhaus feed");
+    if !update.urlhaus && !update.ossf_malicious_packages {
+        miette::bail!(
+            "no feed selected; pass --urlhaus or --ossf-malicious-packages to ingest a feed"
+        );
     }
-    let adapter = match update.urlhaus_url {
-        Some(url) => UrlhausAdapter::with_url(url),
-        None => UrlhausAdapter::new(),
-    };
     let store_path = update
         .intel_store
         .unwrap_or_else(|| PathBuf::from(".arbitraitor/intel.json"));
     let mut store = IntelStore::open(&store_path).into_diagnostic()?;
-    let report = ingest_feed(
-        &adapter,
-        &HttpFetcher::new(),
-        &mut store,
-        &FetchPolicy::default(),
-    )
-    .await
-    .into_diagnostic()?;
-    write_intel_report(&mut std::io::stderr().lock(), &report)
+    let fetcher = HttpFetcher::new();
+    let policy = FetchPolicy::default();
+    let mut writer = std::io::stderr().lock();
+
+    if update.urlhaus {
+        let adapter = match update.urlhaus_url {
+            Some(url) => UrlhausAdapter::with_url(url),
+            None => UrlhausAdapter::new(),
+        };
+        let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
+            .await
+            .into_diagnostic()?;
+        write_intel_report(&mut writer, &report)?;
+    }
+
+    if update.ossf_malicious_packages {
+        let adapter = match update.ossf_malicious_packages_url {
+            Some(url) => OssfMaliciousPackagesAdapter::with_url(url),
+            None => OssfMaliciousPackagesAdapter::new(),
+        };
+        let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
+            .await
+            .into_diagnostic()?;
+        write_intel_report(&mut writer, &report)?;
+    }
+
+    Ok(())
 }
 
 fn write_intel_report(writer: &mut impl std::io::Write, report: &IngestionReport) -> Result<()> {
