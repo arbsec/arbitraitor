@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   .resolve_to_addrs is skipped so reqwest uses the proxy's DNS resolution,
   and receipt metadata records that connected-peer verification observes
   the proxy peer, not the actual target.
+- `arbitraitor-fetch::FetchMetadata::tls_cipher_suite` — new optional TLS
+  metadata slot for spec §41.4.3. `reqwest` 0.13 exposes the peer certificate
+  through `reqwest::tls::TlsInfo` but not the negotiated TLS version or cipher
+  suite, so both `tls_version` and `tls_cipher_suite` remain `None` until a
+  transport backend exposes those values; the existing peer certificate
+  fingerprint remains recorded.
+- `arbitraitor-fetch::TlsVerifier` and `FetchPolicy::tls_verifier` — new
+  policy surface for selecting `PlatformVerifier`, `PinnedWebPki`, or explicit
+  insecure acceptance without adding a user-facing "ignore all TLS errors"
+  shortcut. The default remains platform validation, preserving existing TLS
+  behavior.
 
 #### Antivirus
 

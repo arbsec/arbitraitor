@@ -32,6 +32,7 @@ fn http_loopback_policy() -> FetchPolicy {
         require_digest: false,
         proxy_url: None,
         behind_proxy: false,
+        ..FetchPolicy::default()
     }
 }
 

@@ -250,6 +250,12 @@ pub struct FetchPolicy {
     pub behind_proxy: bool,
     /// Requires callers to provide an expected SHA-256 digest before fetching.
     pub require_digest: bool,
+    /// TLS verifier policy selected for HTTPS connections.
+    ///
+    /// Per ADR-0003 §TLS, this defaults to [`TlsVerifier::PlatformVerifier`]
+    /// with full certificate and hostname validation. The
+    /// [`TlsVerifier::ExplicitAccept`] variant must be selected explicitly.
+    pub tls_verifier: TlsVerifier,
 }
 
 impl Default for FetchPolicy {
@@ -269,6 +275,7 @@ impl Default for FetchPolicy {
             proxy_url: None,
             behind_proxy: false,
             require_digest: false,
+            tls_verifier: TlsVerifier::default(),
         }
     }
 }
@@ -281,11 +288,54 @@ impl FetchPolicy {
     }
 }
 
+/// TLS verifier policy selected by [`FetchPolicy::tls_verifier`].
+///
+/// Per ADR-0003 §TLS, Arbitraitor never exposes a user-facing
+/// "ignore all TLS errors" shortcut. The fetcher keeps the current
+/// rustls validation behavior while this policy surface lets callers
+/// make verifier intent explicit and auditable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TlsVerifier {
+    /// Platform trust store with full certificate and hostname validation.
+    #[default]
+    PlatformVerifier,
+    /// Caller-pinned `WebPKI` trust anchors with hostname validation.
+    PinnedWebPki,
+    /// Explicit insecure acceptance policy marker.
+    ///
+    /// This variant is never selected by [`Default`]. It exists so
+    /// policy wiring can require a deliberate caller opt-in instead
+    /// of offering a user-facing "ignore all TLS errors" shortcut.
+    ExplicitAccept,
+}
+
+impl fmt::Display for TlsVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlatformVerifier => formatter.write_str("platform"),
+            Self::PinnedWebPki => formatter.write_str("pinned-webpki"),
+            Self::ExplicitAccept => formatter.write_str("explicit-accept"),
+        }
+    }
+}
+
 /// Metadata recorded during retrieval.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FetchMetadata {
     /// TLS protocol version when exposed by the transport backend.
+    ///
+    /// Spec §41.4.3 requires recording the negotiated protocol. The
+    /// current `reqwest` (0.13.x) backend only surfaces the peer
+    /// certificate through [`reqwest::tls::TlsInfo`]; the negotiated
+    /// version string is not exposed to the response extension.
     pub tls_version: Option<String>,
+    /// Negotiated TLS cipher suite identifier when exposed by the
+    /// transport backend.
+    ///
+    /// The current `reqwest` (0.13.x) backend does not surface the
+    /// negotiated cipher suite through [`reqwest::tls::TlsInfo`], so
+    /// this field is `None` today.
+    pub tls_cipher_suite: Option<String>,
     /// SHA-256 fingerprint of the DER-encoded peer leaf certificate.
     pub peer_certificate_fingerprint: Option<Sha256Digest>,
     /// DNS addresses resolved before the request.
@@ -806,6 +856,7 @@ async fn stream_response(
 
     let metadata = FetchMetadata {
         tls_version: None,
+        tls_cipher_suite: None,
         peer_certificate_fingerprint,
         resolved_ips,
         connected_ip,
@@ -1335,9 +1386,9 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_cross_origin_allowed,
-        ensure_no_insecure_downgrade, execute_request, strip_credentials_on_cross_origin,
-        verify_connected_peer,
+        FetchError, FetchMetadata, FetchPolicy, FetchScheme, TlsVerifier, build_http_client,
+        ensure_cross_origin_allowed, ensure_no_insecure_downgrade, execute_request,
+        strip_credentials_on_cross_origin, verify_connected_peer,
     };
     use url::Url;
 
@@ -1379,6 +1430,26 @@ mod tests {
         let request = server.await??;
         assert!(request.contains(&format!("host: rebind.invalid:{}", addr.port())));
         Ok(())
+    }
+
+    #[test]
+    fn fetch_policy_defaults_to_platform_tls_verifier() {
+        let policy = FetchPolicy::default();
+        assert_eq!(policy.tls_verifier, TlsVerifier::PlatformVerifier);
+    }
+
+    #[test]
+    fn tls_verifier_variants_have_stable_policy_labels() {
+        assert_eq!(TlsVerifier::PlatformVerifier.to_string(), "platform");
+        assert_eq!(TlsVerifier::PinnedWebPki.to_string(), "pinned-webpki");
+        assert_eq!(TlsVerifier::ExplicitAccept.to_string(), "explicit-accept");
+    }
+
+    #[test]
+    fn fetch_metadata_defaults_leave_unexposed_tls_fields_empty() {
+        let metadata = FetchMetadata::default();
+        assert!(metadata.tls_version.is_none());
+        assert!(metadata.tls_cipher_suite.is_none());
     }
 
     // --- ADR-0018: post-connect peer verification (Issue #383) ---

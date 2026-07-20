@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_fetch::{
     FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, FileFetcher,
-    HttpFetcher, SizeLimitKind, VecSink, redact_url, validate_ip,
+    HttpFetcher, SizeLimitKind, TlsVerifier, VecSink, redact_url, validate_ip,
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_testkit::mock_server::MockHttpServer;
@@ -31,6 +31,7 @@ fn http_policy() -> FetchPolicy {
         require_digest: false,
         proxy_url: None,
         behind_proxy: false,
+        tls_verifier: TlsVerifier::PlatformVerifier,
     }
 }
 
@@ -162,6 +163,8 @@ async fn http_fetch_streams_exact_response_bytes() -> Result<(), Box<dyn std::er
     );
     assert!(receipt.metadata.connected_ip.is_some());
     assert!(!receipt.metadata.resolved_ips.is_empty());
+    assert!(receipt.metadata.tls_version.is_none());
+    assert!(receipt.metadata.tls_cipher_suite.is_none());
     Ok(())
 }
 
