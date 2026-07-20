@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Archive
+
+- `FindingCategory::ParserDifferential` and archive `ParserSmelting` hazard
+  coverage for spec §19.1/§19.3 parser consensus failures (CWE-436).
+
 #### Receipt
 
 - `arbitraitor_model::vex` now models the VEX format matrix for receipt
@@ -487,6 +492,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Tar archive inspection now checks for parser-smelting PAX `size=` desync
+  patterns and records `parser_differential` findings that refuse release;
+  `arbitraitor doctor` verifies the locked `tar` crate is at the patched
+  0.4.46 floor for GHSA-3pv8-6f4r-ffg2 (#459).
 - Plugin registry now enforces ADR-0011 trust-tier capability admission: `community-reviewed` and `community-unreviewed` plugins are rejected at registration when they declare `network`, `process = "spawn"`, or `filesystem = "read-write"` capabilities (#379)
 - `OperationPlan::validate_for_plugin_capabilities` now has a production caller via `PluginRegistry::validate_plan`, tying wrapper-produced plans to the capabilities declared at admission
 

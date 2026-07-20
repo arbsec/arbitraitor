@@ -24,3 +24,6 @@ xz2 = { workspace = true }
 zip = { workspace = true }
 zstd = { workspace = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::taxonomy::{TaxonomyName, TaxonomyRef};
 use arbitraitor_model::verdict::{Confidence, Severity};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
@@ -44,6 +45,13 @@ const TAR_MAGIC_OFFSET: usize = 257;
 const TAR_MAGIC: &[u8] = b"ustar";
 const DETECTOR_ID: &str = "arbitraitor-archive.hazards";
 const ARCHIVE_HAZARD_REFERENCE: &str = "Arbitraitor spec section 19.3";
+const PARSER_DIFFERENTIAL_REFERENCE: &str = "Arbitraitor spec section 19.1";
+const CWE_436_URL: &str = "https://cwe.mitre.org/data/definitions/436.html";
+const TAR_BLOCK_SIZE: usize = 512;
+const TAR_NAME_RANGE: std::ops::Range<usize> = 0..100;
+const TAR_SIZE_RANGE: std::ops::Range<usize> = 124..136;
+const TAR_TYPEFLAG_OFFSET: usize = 156;
+const TAR_PREFIX_RANGE: std::ops::Range<usize> = 345..500;
 const SETUID_BIT: u32 = 0o4000;
 const SETGID_BIT: u32 = 0o2000;
 const UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
@@ -94,6 +102,17 @@ pub struct ArchiveEntry {
     pub permissions: Option<u32>,
     /// Whether ZIP metadata marks this member as encrypted.
     pub is_encrypted: bool,
+}
+
+/// Spec §19.3 archive hazard type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveHazardType {
+    /// Archive member paths or links escape the extraction root.
+    PathTraversal,
+    /// Archive metadata can exhaust bounded processing limits.
+    ResourceExhaustion,
+    /// Archive parser ambiguity can produce different member sets.
+    ParserSmelting,
 }
 
 /// Resource limits applied while listing and extracting archives.
@@ -818,6 +837,291 @@ pub fn detect_archive_hazards(entries: &[ArchiveEntry], limits: &ArchiveLimits) 
     }
 
     findings
+}
+
+/// Scans tar parser consensus hazards that can make member lists parser-dependent.
+#[must_use]
+pub fn detect_tar_parser_differentials(
+    data: &[u8],
+    primary_entries: &[ArchiveEntry],
+    limits: &ArchiveLimits,
+) -> Vec<Finding> {
+    match consensus_tar_members(data, limits) {
+        Ok(report) => {
+            parser_differential_findings(primary_entries, &report.members, report.hazards)
+        }
+        Err(error) => vec![parser_differential_finding(
+            "consensus-parser-error",
+            "Tar consensus parser could not complete",
+            format!(
+                "The bounded tar consensus parser failed while checking parser agreement: {error}."
+            ),
+            Some(format!("error={error}")),
+        )],
+    }
+}
+
+/// Emits parser-differential findings for disagreeing primary and consensus member lists.
+#[must_use]
+pub fn parser_differential_findings(
+    primary_entries: &[ArchiveEntry],
+    consensus_members: &[String],
+    mut hazards: Vec<ParserDifferentialHazard>,
+) -> Vec<Finding> {
+    let primary_members: Vec<String> = primary_entries
+        .iter()
+        .filter(|entry| !entry.is_dir)
+        .map(|entry| entry.name.clone())
+        .collect();
+
+    if primary_members != consensus_members {
+        hazards.push(ParserDifferentialHazard::MemberListMismatch {
+            primary_members,
+            consensus_members: consensus_members.to_vec(),
+        });
+    }
+
+    hazards
+        .into_iter()
+        .enumerate()
+        .map(|(index, hazard)| hazard.into_finding(index))
+        .collect()
+}
+
+/// Bounded tar consensus parser hazard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParserDifferentialHazard {
+    /// A PAX `size=` record appears before an intermediary extension header.
+    PaxSizeAppliesAcrossExtensionHeader {
+        /// Extension header block index with PAX size state pending.
+        block_index: u64,
+        /// Intermediary tar typeflag (`L`, `K`, `x`, or `g`).
+        typeflag: u8,
+    },
+    /// Primary tar-rs member list differs from the consensus scanner.
+    MemberListMismatch {
+        /// Member list returned by the primary parser.
+        primary_members: Vec<String>,
+        /// Member list returned by the consensus scanner.
+        consensus_members: Vec<String>,
+    },
+}
+
+impl ParserDifferentialHazard {
+    fn into_finding(self, index: usize) -> Finding {
+        match self {
+            Self::PaxSizeAppliesAcrossExtensionHeader {
+                block_index,
+                typeflag,
+            } => parser_differential_finding(
+                &format!("archive.parser-differential.pax-size-extension-header.{index}"),
+                "Tar PAX size metadata crosses an extension header",
+                "A PAX extended header contains `size=` while an intermediary GNU/PAX extension header appears before the file entry. POSIX applies PAX records to the file entry, not to extension headers; vulnerable parsers can desynchronize the member stream.".to_owned(),
+                Some(format!(
+                    "block_index={block_index}; typeflag={}",
+                    char::from(typeflag)
+                )),
+            ),
+            Self::MemberListMismatch {
+                primary_members,
+                consensus_members,
+            } => parser_differential_finding(
+                &format!("archive.parser-differential.member-list.{index}"),
+                "Tar parsers disagree about member list",
+                "The primary archive parser and bounded consensus scanner produced different member lists for the same tar bytes.".to_owned(),
+                Some(format!(
+                    "primary_members={primary_members:?}; consensus_members={consensus_members:?}"
+                )),
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ConsensusTarReport {
+    members: Vec<String>,
+    hazards: Vec<ParserDifferentialHazard>,
+}
+
+fn consensus_tar_members(
+    data: &[u8],
+    limits: &ArchiveLimits,
+) -> Result<ConsensusTarReport, ArchiveError> {
+    let mut tracker = LimitTracker::new(limits);
+    let mut members = Vec::new();
+    let mut hazards = Vec::new();
+    let mut offset = 0_usize;
+    let mut block_index = 0_u64;
+    let mut pax_size_pending = false;
+
+    while let Some(header) = data.get(offset..offset.saturating_add(TAR_BLOCK_SIZE)) {
+        if header.len() < TAR_BLOCK_SIZE {
+            return Err(ArchiveError::MalformedArchive(
+                "truncated tar header".to_owned(),
+            ));
+        }
+        if header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+
+        tracker.check_time()?;
+        let typeflag = header[TAR_TYPEFLAG_OFFSET];
+        let size = parse_tar_octal(&header[TAR_SIZE_RANGE])?;
+        let content_offset =
+            offset
+                .checked_add(TAR_BLOCK_SIZE)
+                .ok_or(ArchiveError::LimitExceeded {
+                    limit: "max_total_unpacked_bytes",
+                })?;
+
+        if is_pax_header_typeflag(typeflag) {
+            let pax_content = tar_content(data, content_offset, size)?;
+            if pax_content_has_size_record(pax_content) {
+                pax_size_pending = true;
+            }
+        } else if is_tar_extension_header(typeflag) {
+            if pax_size_pending {
+                hazards.push(
+                    ParserDifferentialHazard::PaxSizeAppliesAcrossExtensionHeader {
+                        block_index,
+                        typeflag,
+                    },
+                );
+            }
+        } else {
+            pax_size_pending = false;
+            let name = tar_header_name(header)?;
+            tracker.record_entry(&name, size, None)?;
+            if !is_directory_typeflag(typeflag) {
+                members.push(name);
+            }
+        }
+
+        let padded_size = padded_tar_size(size)?;
+        offset = content_offset
+            .checked_add(padded_size)
+            .ok_or(ArchiveError::LimitExceeded {
+                limit: "max_total_unpacked_bytes",
+            })?;
+        block_index = block_index
+            .checked_add(1)
+            .ok_or(ArchiveError::LimitExceeded { limit: "max_files" })?;
+    }
+
+    Ok(ConsensusTarReport { members, hazards })
+}
+
+fn tar_content(data: &[u8], offset: usize, size: u64) -> Result<&[u8], ArchiveError> {
+    let size = usize::try_from(size).map_err(|_| ArchiveError::LimitExceeded {
+        limit: "max_single_file_bytes",
+    })?;
+    data.get(offset..offset.saturating_add(size))
+        .ok_or_else(|| ArchiveError::MalformedArchive("truncated tar content".to_owned()))
+}
+
+fn tar_header_name(header: &[u8]) -> Result<String, ArchiveError> {
+    let name = tar_string(&header[TAR_NAME_RANGE]);
+    let prefix = tar_string(&header[TAR_PREFIX_RANGE]);
+    let raw_name = if prefix.is_empty() {
+        name
+    } else {
+        format!("{prefix}/{name}")
+    };
+    safe_entry_name(&raw_name)
+}
+
+fn tar_string(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+fn parse_tar_octal(bytes: &[u8]) -> Result<u64, ArchiveError> {
+    let value = bytes
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .try_fold(0_u64, |acc, byte| {
+            if !(b'0'..=b'7').contains(&byte) {
+                return Err(ArchiveError::MalformedArchive(
+                    "tar size field is not octal".to_owned(),
+                ));
+            }
+            acc.checked_mul(8)
+                .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+                .ok_or(ArchiveError::LimitExceeded {
+                    limit: "max_single_file_bytes",
+                })
+        })?;
+    Ok(value)
+}
+
+fn padded_tar_size(size: u64) -> Result<usize, ArchiveError> {
+    let padding = (TAR_BLOCK_SIZE as u64 - size % TAR_BLOCK_SIZE as u64) % TAR_BLOCK_SIZE as u64;
+    usize::try_from(
+        size.checked_add(padding)
+            .ok_or(ArchiveError::LimitExceeded {
+                limit: "max_single_file_bytes",
+            })?,
+    )
+    .map_err(|_| ArchiveError::LimitExceeded {
+        limit: "max_single_file_bytes",
+    })
+}
+
+fn pax_content_has_size_record(content: &[u8]) -> bool {
+    String::from_utf8_lossy(content).lines().any(|line| {
+        line.split_once(' ')
+            .is_some_and(|(_, record)| record.starts_with("size="))
+    })
+}
+
+fn is_pax_header_typeflag(typeflag: u8) -> bool {
+    matches!(typeflag, b'x' | b'g')
+}
+
+fn is_tar_extension_header(typeflag: u8) -> bool {
+    matches!(typeflag, b'L' | b'K' | b'x' | b'g')
+}
+
+fn is_directory_typeflag(typeflag: u8) -> bool {
+    typeflag == b'5'
+}
+
+fn parser_differential_finding(
+    id: &str,
+    title: &str,
+    description: String,
+    evidence_content: Option<String>,
+) -> Finding {
+    Finding {
+        id: id.to_owned(),
+        detector: DETECTOR_ID.to_owned(),
+        category: FindingCategory::ParserDifferential,
+        severity: Severity::Medium,
+        confidence: Confidence::Confirmed,
+        title: title.to_owned(),
+        description,
+        evidence: vec![Evidence {
+            kind: EvidenceKind::Other,
+            description: "tar parser consensus".to_owned(),
+            content: evidence_content,
+        }],
+        artifact_sha256: Sha256Digest::new([0_u8; 32]),
+        location: None,
+        remediation: Some("Refuse release until the tar stream is rebuilt without parser-dependent extension-header state and all parsers agree on the member set.".to_owned()),
+        references: vec![PARSER_DIFFERENTIAL_REFERENCE.to_owned()],
+        tags: vec!["archive-hazard".to_owned(), "parser-smelting".to_owned()],
+        taxonomies: vec![TaxonomyRef {
+            name: TaxonomyName::Cwe,
+            id: "CWE-436".to_owned(),
+            confidence: Confidence::High,
+            url: Some(CWE_436_URL.to_owned()),
+        }],
+    }
 }
 
 fn detect_path_hazards(entry: &ArchiveEntry, index: usize, findings: &mut Vec<Finding>) {

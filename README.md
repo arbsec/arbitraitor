@@ -220,7 +220,7 @@ arbitraitor-cli             Command-line interface (23 subcommands)
 │   ├── arbitraitor-shell       Shell script analyzer (bash/dash)
 │   ├── arbitraitor-powershell  PowerShell AST analyzer
 │   ├── arbitraitor-yarax       YARA-X scanner integration
-│   ├── arbitraitor-archive     Archive inspection (6 formats, 15 hazard types)
+│   ├── arbitraitor-archive     Archive inspection (6 formats, 16 hazard types)
 │   └── arbitraitor-av          Antivirus adapters (ClamAV, Microsoft Defender)
 ├── arbitraitor-provenance   Signature/attestation verification
 ├── arbitraitor-intel        Threat intelligence feeds
@@ -272,7 +272,7 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/README.md) — 29 accepted
+- [Architecture Decision Records](docs/adr/README.md) — 30 accepted
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - Crate documentation: `cargo doc --workspace --open`
 

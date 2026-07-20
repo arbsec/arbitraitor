@@ -454,6 +454,9 @@ fn print_health_row(
     writeln!(stdout, "  {name:<12} {value}  {mark}").into_diagnostic()
 }
 
+const MIN_SAFE_TAR_RS_VERSION: &str = "0.4.46";
+const WORKSPACE_LOCK: &str = include_str!("../../../Cargo.lock");
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     let cas_dir = command
@@ -515,6 +518,11 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         .and_then(|p| std::fs::read_to_string(&p).ok())
         .is_some_and(|content| content.contains(shell_init::MARKER_BEGIN));
 
+    let tar_rs_version = locked_crate_version(WORKSPACE_LOCK, "tar");
+    let tar_rs_ok = tar_rs_version
+        .as_deref()
+        .is_some_and(|version| semver_at_least(version, MIN_SAFE_TAR_RS_VERSION));
+
     writeln!(stdout, "Arbitraitor health:").into_diagnostic()?;
     print_health_row(&mut stdout, "version", &report.version, true)?;
     print_health_row(
@@ -575,8 +583,14 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         .and_then(|d| shell_init::target_rcfile(d.shell))
         .map_or_else(|| "n/a".to_owned(), |p| p.display().to_string());
     print_health_row(&mut stdout, "rcfile", &rcfile_label, rcfile_ok)?;
+    print_health_row(
+        &mut stdout,
+        "tar-rs",
+        tar_rs_version.as_deref().unwrap_or("not locked"),
+        tar_rs_ok,
+    )?;
 
-    all_healthy = all_healthy && shims_ok && path_has_shim && rcfile_ok;
+    all_healthy = all_healthy && shims_ok && path_has_shim && rcfile_ok && tar_rs_ok;
 
     if !all_healthy {
         writeln!(stdout).into_diagnostic()?;
@@ -586,6 +600,13 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         }
         if !path_has_shim || !rcfile_ok {
             writeln!(stdout, "  arbitraitor wrappers init --install").into_diagnostic()?;
+        }
+        if !tar_rs_ok {
+            writeln!(
+                stdout,
+                "  update tar-rs to at least {MIN_SAFE_TAR_RS_VERSION} (GHSA-3pv8-6f4r-ffg2)"
+            )
+            .into_diagnostic()?;
         }
     }
 
@@ -597,6 +618,37 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         // an unhealthy doctor result is the canonical 33 trigger.
         std::process::exit(33);
     }
+}
+
+fn locked_crate_version(lock: &str, crate_name: &str) -> Option<String> {
+    let mut in_matching_package = false;
+    for line in lock.lines() {
+        match line {
+            "[[package]]" => in_matching_package = false,
+            line if line == format!("name = \"{crate_name}\"") => in_matching_package = true,
+            line if in_matching_package && line.starts_with("version = ") => {
+                return line
+                    .strip_prefix("version = \"")
+                    .and_then(|value| value.strip_suffix('"'))
+                    .map(str::to_owned);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn semver_at_least(version: &str, minimum: &str) -> bool {
+    parse_semver_triplet(version) >= parse_semver_triplet(minimum)
+}
+
+fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split_once('-').map_or(version, |(core, _)| core);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
 }
 
 pub(crate) fn version() -> Result<()> {

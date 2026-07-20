@@ -12,7 +12,9 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
+use arbitraitor_archive::{
+    ArchiveLimits, detect_archive_hazards, detect_tar_parser_differentials, extract_to_output_dir,
+};
 use arbitraitor_artifact::classify;
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
@@ -708,7 +710,10 @@ fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
         arbitraitor_archive::open_archive_with_limits(&bytes, artifact_type, limits.clone())
             .into_diagnostic()?;
     let entries = reader.entries().into_diagnostic()?;
-    let hazards = detect_archive_hazards(&entries, &limits);
+    let mut hazards = detect_archive_hazards(&entries, &limits);
+    if artifact_type == arbitraitor_artifact::ArtifactType::TarArchive {
+        hazards.extend(detect_tar_parser_differentials(&bytes, &entries, &limits));
+    }
     if !hazards.is_empty() {
         write_unpack_hazards(&mut std::io::stderr().lock(), &hazards)?;
         miette::bail!("archive hazards block hardened unpack");
