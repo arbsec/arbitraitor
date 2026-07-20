@@ -22,6 +22,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FeedSourceClass::OssfMaliciousPackages` so malicious npm packages can be
   ingested into the signed local intel store without raw string IDs.
 
+#### Exec
+
+- `ExecError::script_io(stage, source, child_exit_code, child_stderr)`
+  — new public constructor for `ExecError::ScriptIo` that pre-renders a
+  stable, bounded (≤1 KiB) `child_detail` suffix from the captured child
+  state. The `ScriptIo` variant now carries `child_exit_code:
+  Option<i32>`, `child_stderr: Vec<u8>`, and `child_detail: String` fields
+  so callers see the actual root cause (e.g. `bash: !DOCTYPE: event not
+  found`, `unshare: operation not permitted`) when the interpreter exits
+  before consuming the streamed script bytes. Fixes the diagnostic-loss
+  half of #612: when bash or `unshare` exits early, the user-visible
+  error now distinguishes "I fed bash junk" from "kernel denied the user
+  namespace" from "Landlock blocked the interpreter path".
+- `ExecError::script_io_detail(child_exit_code, child_stderr)` — shared
+  public helper that renders the `child_detail` suffix. `PowerShellError::
+  ScriptIo` mirrors the new fields and reuses this helper so PowerShell
+  execution gets the same diagnostic improvement when wired.
+- `spawn::best_effort_capture(child, limit)` — internal drain helper that
+  captures a child's exit code and piped stdout/stderr after a prior
+  operation (typically `write_all` to the child's stdin) has already
+  failed. Swallows secondary `read_with_limit` errors so the original
+  I/O error remains the primary signal.
+
+### Changed
+
+#### CLI
+
+- `arbitraitor run` now gates execution by classified `ArtifactType`.
+  Only `ShellScript(_)` (`Posix` / `Bash` / `Zsh`) and native executable
+  types (`PeExecutable`, `ElfExecutable`, `MachOExecutable`) reach
+  `ExecutionMode::Script` / `ExecutionMode::Native`. Every other type —
+  `HtmlDocument`, `JsonDocument`, `XmlDocument`, `GenericText`,
+  `GenericBinary`, archives (`ZipArchive`, `TarArchive`,
+  `*Compressed`), `PowerShellScript`, `PythonScript`, `JavaScript`, and
+  `Unknown` — fails closed with `RunFailure::Blocked` (exit code
+  `BlockedByPolicy`) before reaching the execution layer. Piping those
+  bytes to `/bin/bash` was incorrect (bash doesn't understand them) and
+  unsafe (HTML/JSON/XML can incidentally contain bash-parseable
+  `$(...)`, redirections, and pipes). Fixes the content-type-gate half
+  of #612. See ADR-0036 for the rationale.
+- `InspectedArtifact` (private to `arbitraitor-cli/src/run/`) now carries
+  `ArtifactType` directly rather than its stringified `{:?}` form, and the
+  `is_native: bool` field is dropped in favor of deriving native vs.
+  script from `artifact_type` via `execution_mode_for_type`. Receipt
+  serialization is unchanged (`format!("{:?}", artifact_type)` is passed
+  to `ReceiptBuilder::artifact_type` on demand).
+
+### Added
+
 #### Receipt
 
 - `arbitraitor_model::vex` now models the VEX format matrix for receipt

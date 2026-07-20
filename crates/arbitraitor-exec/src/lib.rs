@@ -137,13 +137,38 @@ pub enum ExecError {
         source: io::Error,
     },
     /// Piping the script bytes to the interpreter's standard input failed.
-    #[error("script input I/O failure during {stage}")]
+    ///
+    /// When `write_all` or `flush` fails it is usually because the interpreter
+    /// process exited before consuming the script bytes (`EPIPE`) — for example
+    /// because the script bytes were not valid syntax for the interpreter, or
+    /// because a pre-exec sandbox step (such as `unshare --user`) was denied
+    /// by the kernel or container runtime. To preserve the actual root cause,
+    /// the variant also carries whatever the child printed to its stderr and
+    /// the exit code it died with, captured best-effort after the failed
+    /// write. Callers SHOULD surface `child_stderr` in user-facing diagnostics
+    /// when it is non-empty; absent a captured stderr, the `source` I/O error
+    /// is the only available signal.
+    #[error("script input I/O failure during {stage}{child_detail}")]
     ScriptIo {
         /// Operation stage identifier (e.g. `"write-script-stdin"`).
         stage: &'static str,
         /// Source I/O error.
         #[source]
         source: io::Error,
+        /// Exit code the child reported before the write failed, when the
+        /// child could be reaped. `None` when the child was still running,
+        /// was killed by a signal, or could not be waited on.
+        child_exit_code: Option<i32>,
+        /// Best-effort capture of the child's stderr stream after the failed
+        /// write. May be empty when the child produced no stderr, when output
+        /// exceeded the cap and the child was killed, or when reaping failed
+        /// before any bytes could be drained.
+        child_stderr: Vec<u8>,
+        /// Pre-rendered human-readable detail derived from
+        /// `child_exit_code` / `child_stderr` so thiserror's `Display` impl
+        /// can append it without a custom `fmt::Display` override. Built once
+        /// at construction by [`ScriptIo::new`].
+        child_detail: String,
     },
     /// Native execution lacks both explicit CLI approval and trusted policy approval.
     #[error("native execution requires explicit --native or trusted policy approval")]
@@ -209,6 +234,65 @@ pub enum ExecError {
         /// Name of the control lacking a proof.
         control: &'static str,
     },
+}
+
+impl ExecError {
+    /// Constructs a [`ExecError::ScriptIo`] with the supplied stage, source,
+    /// and best-effort child state. Renders a stable, human-readable
+    /// `child_detail` suffix so the [`Display`](std::fmt::Display)
+    /// representation surfaces the actual root cause (e.g. `bash: !DOCTYPE:
+    /// event not found`, `unshare: operation not permitted`) when one was
+    /// captured.
+    ///
+    /// Empty `child_stderr` and `None` exit code yield an empty
+    /// `child_detail`, leaving the existing message form unchanged.
+    #[must_use]
+    pub fn script_io(
+        stage: &'static str,
+        source: io::Error,
+        child_exit_code: Option<i32>,
+        child_stderr: Vec<u8>,
+    ) -> Self {
+        let child_detail = Self::script_io_detail(child_exit_code, child_stderr.as_slice());
+        Self::ScriptIo {
+            stage,
+            source,
+            child_exit_code,
+            child_stderr,
+            child_detail,
+        }
+    }
+
+    /// Renders the suffix appended after `script input I/O failure during
+    /// {stage}` for [`ExecError::ScriptIo`]. Exposed publicly so sibling
+    /// executors (e.g. [`PowerShellError::ScriptIo`](crate::PowerShellError::ScriptIo))
+    /// can share the same rendering rule without re-implementing it.
+    /// Returns an empty string when no child state was captured so the
+    /// message stays as terse as before.
+    #[must_use]
+    pub fn script_io_detail(child_exit_code: Option<i32>, child_stderr: &[u8]) -> String {
+        // Cap rendered stderr to keep failure messages and receipts bounded.
+        // 1 KiB is ample for the "bash: parse error" / "unshare: not permitted"
+        // class of diagnostics and holds even multi-line shell errors.
+        const MAX_STDERR_LEN: usize = 1024;
+        let trimmed = std::str::from_utf8(child_stderr)
+            .unwrap_or("")
+            .trim_end_matches(['\n', '\r', ' ']);
+        if trimmed.is_empty() && child_exit_code.is_none() {
+            return String::new();
+        }
+        if trimmed.is_empty() {
+            return format!(" (child exited with code {child_exit_code:?})");
+        }
+        let mut stderr_preview = trimmed;
+        if stderr_preview.len() > MAX_STDERR_LEN {
+            stderr_preview = &stderr_preview[..MAX_STDERR_LEN];
+        }
+        match child_exit_code {
+            Some(code) => format!(" (child exited {code}; stderr: {stderr_preview:?})"),
+            None => format!(" (child exited before reading stdin; stderr: {stderr_preview:?})"),
+        }
+    }
 }
 
 /// Network access policy prepared for downstream sandbox enforcement.

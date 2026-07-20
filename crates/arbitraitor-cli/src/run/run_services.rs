@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
-use arbitraitor_artifact::ArtifactType;
 use arbitraitor_core::config::Config;
 use arbitraitor_exec::script::ExecutionResult;
 #[cfg(target_os = "linux")]
@@ -190,8 +189,7 @@ async fn prepare_artifact(
         size_bytes: usize::try_from(fetch_receipt.bytes_written)
             .map_err(|error| RunFailure::Internal(error.to_string()))?,
         content_type,
-        artifact_type: format!("{:?}", result.classification.artifact_type),
-        is_native: is_native_artifact(result.classification.artifact_type),
+        artifact_type: result.classification.artifact_type,
         verdict,
         policy_digest,
         findings: result.findings,
@@ -261,13 +259,6 @@ fn policy_digest(command: &RunCommand) -> std::result::Result<String, RunFailure
     PolicyEngine::load(&policy_toml)
         .map(|engine| engine.digest())
         .map_err(|error| RunFailure::Internal(error.to_string()))
-}
-
-fn is_native_artifact(artifact_type: ArtifactType) -> bool {
-    matches!(
-        artifact_type,
-        ArtifactType::PeExecutable | ArtifactType::ElfExecutable | ArtifactType::MachOExecutable
-    )
 }
 
 fn execution_output(result: ExecutionResult) -> ExecutionOutput {
@@ -349,7 +340,7 @@ fn build_run_receipt(
         },
     )
     .policy_digest(artifact.policy_digest.clone())
-    .artifact_type(artifact.artifact_type.clone())
+    .artifact_type(format!("{:?}", artifact.artifact_type))
     .retrieval(
         RetrievalInfo::new(artifact.requested_url.clone())
             .with_final_url(artifact.final_url.clone()),

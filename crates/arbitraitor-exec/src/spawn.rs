@@ -73,6 +73,22 @@ pub(crate) fn apply_limits_fenced(
 /// Captured exit code and piped output from a capped child read.
 pub(crate) type CapturedOutput = (Option<i32>, Vec<u8>, Vec<u8>);
 
+/// Best-effort capture of a child's exit code and piped stdout/stderr after a
+/// prior operation (typically `write_all` to the child's stdin) has already
+/// failed.
+///
+/// The caller has already lost the script I/O; the goal here is diagnostic
+/// preservation — surface whatever the child printed before exiting so the
+/// user can tell `bash: !DOCTYPE: event not found` (caller fed bash junk)
+/// from `unshare: operation not permitted` (kernel denied the user
+/// namespace). Any secondary failure (the child's combined output exceeded
+/// the cap, or the child could not be reaped) is swallowed and yields
+/// `(None, Vec::new(), Vec::new())`: nothing further is captured, but the
+/// original I/O error is still propagated by the caller.
+pub(crate) fn best_effort_capture(child: &mut Child, limit: u64) -> CapturedOutput {
+    read_with_limit(child, limit).unwrap_or((None, Vec::new(), Vec::new()))
+}
+
 /// Reads stdout and stderr concurrently, enforcing a combined byte cap.
 ///
 /// Both pipes are drained in dedicated threads so that a child writing to both

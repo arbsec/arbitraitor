@@ -123,21 +123,73 @@ pub enum PowerShellError {
         source: std::io::Error,
     },
     /// Piping the script bytes to the interpreter's standard input failed.
-    #[error("script I/O failed during {stage}: {source}")]
+    ///
+    /// Mirrors [`ExecError::ScriptIo`]: when `write_all` or `flush` fails
+    /// because the PowerShell interpreter exited early (syntax error,
+    /// `-ExecutionPolicy` rejection, pre-exec sandbox failure), the variant
+    /// also carries whatever the child printed to its stderr and the exit
+    /// code it died with, captured best-effort after the failed write.
+    #[error("script I/O failed during {stage}: {source}{child_detail}")]
     ScriptIo {
         /// Operation stage identifier (e.g. `"write-script-stdin"`).
         stage: &'static str,
         /// Source I/O error.
         #[source]
         source: std::io::Error,
+        /// Exit code the child reported before the write failed, when the
+        /// child could be reaped. `None` when the child was still running,
+        /// was killed by a signal, or could not be waited on.
+        child_exit_code: Option<i32>,
+        /// Best-effort capture of the child's stderr stream after the failed
+        /// write. May be empty when the child produced no stderr, when output
+        /// exceeded the cap and the child was killed, or when reaping failed
+        /// before any bytes could be drained.
+        child_stderr: Vec<u8>,
+        /// Pre-rendered human-readable detail derived from
+        /// `child_exit_code` / `child_stderr`, built once at construction.
+        child_detail: String,
     },
+}
+
+impl PowerShellError {
+    /// Constructs a [`PowerShellError::ScriptIo`] with the supplied stage,
+    /// source, and best-effort child state. Mirrors
+    /// [`ExecError::script_io`].
+    #[must_use]
+    pub fn script_io(
+        stage: &'static str,
+        source: std::io::Error,
+        child_exit_code: Option<i32>,
+        child_stderr: Vec<u8>,
+    ) -> Self {
+        let child_detail = ExecError::script_io_detail(child_exit_code, child_stderr.as_slice());
+        Self::ScriptIo {
+            stage,
+            source,
+            child_exit_code,
+            child_stderr,
+            child_detail,
+        }
+    }
 }
 
 impl From<ExecError> for PowerShellError {
     fn from(error: ExecError) -> Self {
         match error {
             ExecError::Spawn { source } => Self::Spawn { source },
-            ExecError::ScriptIo { stage, source } => Self::ScriptIo { stage, source },
+            ExecError::ScriptIo {
+                stage,
+                source,
+                child_exit_code,
+                child_stderr,
+                child_detail,
+            } => Self::ScriptIo {
+                stage,
+                source,
+                child_exit_code,
+                child_stderr,
+                child_detail,
+            },
             other => Self::Execution {
                 message: other.to_string(),
             },
@@ -355,16 +407,26 @@ impl PowerShellExecution {
         // read-driven control flow before we wait for it. The child has been
         // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(script_bytes)
-                .map_err(|source| PowerShellError::ScriptIo {
-                    stage: "write-script-stdin",
+            if let Err(source) = stdin.write_all(script_bytes) {
+                let (child_exit_code, _, child_stderr) =
+                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
+                return Err(PowerShellError::script_io(
+                    "write-script-stdin",
                     source,
-                })?;
-            stdin.flush().map_err(|source| PowerShellError::ScriptIo {
-                stage: "flush-script-stdin",
-                source,
-            })?;
+                    child_exit_code,
+                    child_stderr,
+                ));
+            }
+            if let Err(source) = stdin.flush() {
+                let (child_exit_code, _, child_stderr) =
+                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
+                return Err(PowerShellError::script_io(
+                    "flush-script-stdin",
+                    source,
+                    child_exit_code,
+                    child_stderr,
+                ));
+            }
         }
 
         let (exit_code, stdout, stderr) =

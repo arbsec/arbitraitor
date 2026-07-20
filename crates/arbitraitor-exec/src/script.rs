@@ -230,16 +230,26 @@ impl ScriptExecution {
         // read-driven control flow before we wait for it. The child has been
         // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(script_bytes)
-                .map_err(|source| ExecError::ScriptIo {
-                    stage: "write-script-stdin",
+            if let Err(source) = stdin.write_all(script_bytes) {
+                let (child_exit_code, _, child_stderr) =
+                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
+                return Err(ExecError::script_io(
+                    "write-script-stdin",
                     source,
-                })?;
-            stdin.flush().map_err(|source| ExecError::ScriptIo {
-                stage: "flush-script-stdin",
-                source,
-            })?;
+                    child_exit_code,
+                    child_stderr,
+                ));
+            }
+            if let Err(source) = stdin.flush() {
+                let (child_exit_code, _, child_stderr) =
+                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
+                return Err(ExecError::script_io(
+                    "flush-script-stdin",
+                    source,
+                    child_exit_code,
+                    child_stderr,
+                ));
+            }
         }
 
         let (exit_code, stdout, stderr) =
@@ -766,5 +776,88 @@ mod tests {
         assert!(paths.iter().any(|p| p == &Path::new("/usr/local/bin")));
         assert!(paths.iter().any(|p| p == &Path::new("/lib")));
         assert!(paths.iter().any(|p| p == &Path::new("/tmp")));
+    }
+
+    /// Regression test for #612 (Fix B): when bash exits before consuming
+    /// all streamed script bytes, `ScriptExecution::execute` must:
+    ///
+    /// 1. Return `ExecError::ScriptIo { stage: "write-script-stdin", ... }`
+    ///    (or `"flush-script-stdin"`).
+    /// 2. Populate `child_exit_code` with the early-exit code.
+    /// 3. Populate `child_stderr` with whatever bash printed before dying.
+    /// 4. Render the captured stderr into the `Display` representation so
+    ///    the CLI-level failure message identifies the real root cause.
+    ///
+    /// Before the fix, the function returned at `write_all` failure without
+    /// ever reading the child's captured stderr — leaving the user with a
+    /// generic "script input I/O failure during write-script-stdin" message
+    /// and no clue that bash had rejected the input as a parse error.
+    #[test]
+    fn execute_preserves_child_stderr_when_bash_exits_early()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new("/bin/bash").exists() {
+            return Ok(());
+        }
+        let script = bash_or_skip()?;
+        // Bash reads line 1, writes "expected-diagnostic\n" to its stderr
+        // pipe, reads line 2 (`exit 1`), and exits. By that point the parent
+        // is still blocked in `write_all` on the 256 KB stdin pipe (Linux
+        // pipe buffers are ~64 KB) — closing the read end on bash exit
+        // causes `write_all` to fail with EPIPE, exercising the regression
+        // path from issue #612. The 256 KiB padding exceeds the pipe buffer
+        // so write_all cannot drain before bash exits.
+        let mut script_bytes = b"echo expected-diagnostic >&2\nexit 1\n".to_vec();
+        script_bytes.resize(256 * 1024, b'\n');
+        let error = match script.execute(&script_bytes) {
+            Err(err) => err,
+            Ok(result) => {
+                return Err(format!(
+                    "expected execute() to fail (early child exit), but it succeeded: {result:?}"
+                )
+                .into());
+            }
+        };
+        let ExecError::ScriptIo {
+            stage,
+            ref child_exit_code,
+            ref child_stderr,
+            ..
+        } = error
+        else {
+            return Err(format!(
+                "expected ScriptIo variant, got {error:?} — pipeline is no longer surfacing child-exit failure as ScriptIo"
+            )
+            .into());
+        };
+        let child_exit_code = *child_exit_code;
+        let child_stderr = child_stderr.clone();
+        assert!(
+            stage == "write-script-stdin" || stage == "flush-script-stdin",
+            "stage should be a script-stdin write/flush failure, got {stage:?}"
+        );
+        let stderr_text = String::from_utf8_lossy(&child_stderr);
+        assert!(
+            stderr_text.contains("expected-diagnostic"),
+            "child_stderr must be captured even when write_all failed; got {stderr_text:?}"
+        );
+        assert_eq!(
+            child_exit_code,
+            Some(1),
+            "child_exit_code should be 1 (exit 1); got {child_exit_code:?}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("write-script-stdin") || rendered.contains("flush-script-stdin"),
+            "rendered error should name the stage; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("expected-diagnostic"),
+            "rendered error should include the captured stderr so users can see the real root cause; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("child exited 1"),
+            "rendered error should mention the child exit code; got {rendered:?}"
+        );
+        Ok(())
     }
 }

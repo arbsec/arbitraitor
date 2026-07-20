@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use arbitraitor_artifact::{ArtifactType, ShellKind};
 use arbitraitor_core::config::Config;
 use arbitraitor_mcp::PlanContext;
 use arbitraitor_model::ids::Sha256Digest;
@@ -154,6 +155,117 @@ async fn run_writes_receipt_on_success() -> std::result::Result<(), Box<dyn std:
     Ok(())
 }
 
+/// Regression test for #612 (Fix A): `arbitraitor run` must refuse to execute
+/// artifacts whose classified `ArtifactType` is not interpretable by the
+/// `run` pipeline. HTML, JSON, XML, archives, compressed payloads,
+/// `GenericText`, `GenericBinary`, `Unknown`, and the not-yet-wired script
+/// types (PowerShell, Python, JavaScript) all fall in this category. Feeding
+/// their bytes to `/bin/bash` is incorrect (bash can't parse them) and
+/// unsafe (they may incidentally contain bash-parseable constructs). The
+/// pipeline fails closed with `BlockedByPolicy` before reaching execution.
+#[tokio::test]
+async fn run_blocks_non_executable_artifact_types()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for artifact_type in [
+        ArtifactType::HtmlDocument,
+        ArtifactType::JsonDocument,
+        ArtifactType::XmlDocument,
+        ArtifactType::GenericText,
+        ArtifactType::GenericBinary,
+        ArtifactType::ZipArchive,
+        ArtifactType::TarArchive,
+        ArtifactType::GzipCompressed,
+        ArtifactType::XzCompressed,
+        ArtifactType::Bzip2Compressed,
+        ArtifactType::ZstdCompressed,
+        ArtifactType::PowerShellScript,
+        ArtifactType::PythonScript,
+        ArtifactType::JavaScript,
+        ArtifactType::Unknown,
+    ] {
+        let command = command(false, false);
+        let mut services =
+            FakeServices::with_artifact(fake_artifact_with_type(Verdict::Pass, artifact_type));
+        let mut output = Vec::new();
+
+        let code =
+            run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
+        // BlockedByPolicy exit code per ExitCode::BlockedByPolicy.
+        assert_eq!(
+            code,
+            ExitCode::BlockedByPolicy.as_i32(),
+            "artifact type {artifact_type:?} should be blocked, not executed"
+        );
+        assert!(
+            !services.executed,
+            "pipeline executed artifact type {artifact_type:?}; should have been blocked"
+        );
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(
+            rendered.contains("blocked by policy"),
+            "output for {artifact_type:?} should say 'blocked by policy'; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("is not executable"),
+            "output for {artifact_type:?} should explain the artifact is not executable; got: {rendered}"
+        );
+    }
+    Ok(())
+}
+
+/// Positive control for #612 (Fix A): classified `ShellScript(Posix)` and
+/// `ShellScript(Bash)` must still pass through the gate. Guards against an
+/// over-restrictive regression that would block legitimate shell-script
+/// execution.
+#[tokio::test]
+async fn run_executes_shell_script_artifact_types()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for shell_kind in [ShellKind::Posix, ShellKind::Bash, ShellKind::Zsh] {
+        let command = command(false, false);
+        let mut services = FakeServices::with_artifact(fake_artifact_with_type(
+            Verdict::Pass,
+            ArtifactType::ShellScript(shell_kind),
+        ));
+        let mut output = Vec::new();
+        let code =
+            run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+        assert_eq!(
+            code, EXIT_SUCCESS,
+            "shell script ({shell_kind:?}) should execute"
+        );
+        assert!(
+            services.executed,
+            "shell script ({shell_kind:?}) should reach execute()"
+        );
+    }
+    Ok(())
+}
+
+/// Positive control for #612 (Fix A): a native `ElfExecutable` must still
+/// pass through the gate (auto-approved via `--native`). Guards against an
+/// over-restrictive regression that would block legitimate native execution.
+#[tokio::test]
+async fn run_executes_native_artifact_type() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let native_command = command(true, false);
+    let mut services = FakeServices::with_artifact(fake_artifact_with_type(
+        Verdict::Pass,
+        ArtifactType::ElfExecutable,
+    ));
+    let mut output = Vec::new();
+    let code = run_with_services(
+        &native_command,
+        &Config::default(),
+        &mut services,
+        &mut output,
+    )
+    .await?;
+    assert_eq!(code, EXIT_SUCCESS, "ELF executable should execute");
+    assert!(services.executed, "ELF executable should reach execute()");
+    Ok(())
+}
+
 #[tokio::test]
 async fn run_streams_sanitized_output() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Given: child output containing terminal controls and marker text.
@@ -208,11 +320,10 @@ fn native_release_rejects_symlink_at_cache_path()
 
     let artifact = InspectedArtifact {
         size_bytes: bytes.len(),
-        artifact_type: "ElfExecutable".to_owned(),
+        artifact_type: ArtifactType::ElfExecutable,
         bytes: bytes.clone(),
         sha256: sha256.clone(),
         content_type: "application/octet-stream".to_owned(),
-        is_native: true,
         verdict: Verdict::Pass,
         policy_digest: String::new(),
         findings: Vec::new(),
@@ -248,17 +359,36 @@ fn fake_artifact(verdict: Verdict, is_native: bool) -> InspectedArtifact {
     let bytes = b"#!/bin/sh\necho test\n".to_vec();
     let sha256 = Sha256Digest::new(Sha256::digest(&bytes).into());
     let artifact_type = if is_native {
-        "ElfExecutable"
+        ArtifactType::ElfExecutable
     } else {
-        "Shellscript"
+        ArtifactType::ShellScript(ShellKind::Posix)
     };
     InspectedArtifact {
         size_bytes: bytes.len(),
-        artifact_type: artifact_type.to_owned(),
+        artifact_type,
         bytes,
         sha256,
         content_type: "text/x-shellscript".to_owned(),
-        is_native,
+        verdict,
+        policy_digest: String::new(),
+        findings: Vec::new(),
+        detectors: Vec::new(),
+        detector_versions: Vec::new(),
+        requested_url: "https://example.test/install.sh".to_owned(),
+        final_url: "https://example.test/install.sh".to_owned(),
+        store_dir: PathBuf::new(),
+    }
+}
+
+fn fake_artifact_with_type(verdict: Verdict, artifact_type: ArtifactType) -> InspectedArtifact {
+    let bytes = b"#!/bin/sh\necho test\n".to_vec();
+    let sha256 = Sha256Digest::new(Sha256::digest(&bytes).into());
+    InspectedArtifact {
+        size_bytes: bytes.len(),
+        artifact_type,
+        bytes,
+        sha256,
+        content_type: "application/octet-stream".to_owned(),
         verdict,
         policy_digest: String::new(),
         findings: Vec::new(),

@@ -212,6 +212,33 @@ arbitraitor run https://example.com/binary --native --network
 arbitraitor run https://example.com/install.sh --policy ./my-policy.toml
 ```
 
+### Supported artifact types
+
+Only shell scripts and native executables are runnable by `arbitraitor run`
+(see [ADR-0036](../../docs/adr/0036-run-pipeline-content-type-execution-gate.md)
+for the rationale):
+
+| `ArtifactType`                                  | Executable via       |
+|-------------------------------------------------|----------------------|
+| `ShellScript(Posix \| Bash \| Zsh)`             | `/bin/bash`          |
+| `PeExecutable`, `ElfExecutable`, `MachOExecutable` | native binary     |
+
+All other classified types — `HtmlDocument`, `JsonDocument`, `XmlDocument`,
+`GenericText`, `GenericBinary`, archives (`ZipArchive`, `TarArchive`,
+`*Compressed`), `PowerShellScript`, `PythonScript`, `JavaScript`, and
+`Unknown` — fail closed with `blocked by policy` (exit code
+`BlockedByPolicy`) before reaching the execution layer. Piping such bytes to
+`/bin/bash` is incorrect (bash doesn't understand them) and unsafe (HTML,
+JSON, and XML can incidentally contain bash-parseable `$(...)`,
+redirections, and pipes).
+
+When a script or native execution does fail, the user-visible error now
+includes the captured child stderr so the actual root cause is visible
+(e.g. `script input I/O failure during write-script-stdin (child exited 1;
+stderr: "bash: !DOCTYPE: event not found")`), distinguishing "I fed bash
+junk" from "kernel denied the user namespace" from "Landlock blocked the
+interpreter path". See #612 for the bug report and Fix B details.
+
 ## Wrappers command
 
 ```sh

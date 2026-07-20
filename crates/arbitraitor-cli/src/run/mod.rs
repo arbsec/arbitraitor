@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+use arbitraitor_artifact::ArtifactType;
 use arbitraitor_core::config::Config;
 use arbitraitor_mcp::{PlanContext, sanitize_for_agent};
 use arbitraitor_model::exit_code::ExitCode;
@@ -68,8 +69,7 @@ pub(super) struct InspectedArtifact {
     sha256: Sha256Digest,
     size_bytes: usize,
     content_type: String,
-    artifact_type: String,
-    is_native: bool,
+    artifact_type: ArtifactType,
     verdict: Verdict,
     policy_digest: String,
     findings: Vec<Finding>,
@@ -158,10 +158,9 @@ async fn run_with_services(
     write_fetch_summary(writer, &artifact)?;
     write_detection_summary(writer, &artifact)?;
 
-    let mode = if artifact.is_native {
-        ExecutionMode::Native
-    } else {
-        ExecutionMode::Script
+    let mode = match execution_mode_for_type(artifact.artifact_type) {
+        Ok(mode) => mode,
+        Err(message) => return write_failure(writer, RunFailure::Blocked(message)),
     };
     let network_isolated = !command.network;
     let plan = execution_plan(mode, network_isolated);
@@ -263,6 +262,33 @@ fn execution_plan(mode: ExecutionMode, network_isolated: bool) -> String {
         "network allowed"
     };
     format!("{executor} with {network}")
+}
+
+/// Maps an [`ArtifactType`] to the execution mode the `run` pipeline will
+/// use to dispatch it.
+///
+/// Only shell scripts and native executables are runnable by the current
+/// `run` pipeline. PowerShell, Python, and JavaScript artifacts would need
+/// interpreter discovery + path canonicalization that is not yet wired into
+/// `run_services`; attempting to execute them by piping their bytes to
+/// `/bin/bash` is incorrect (the interpreter does not understand them) and
+/// unsafe (the bytes may incidentally contain bash-parseable constructs).
+/// Piping arbitrary text/markup (HTML, JSON, XML, `GenericText`,
+/// `GenericBinary`, archives, compressed payloads, `Unknown`) to bash is
+/// likewise a foot-gun: HTML can contain `$(...)` and redirections that
+/// bash would happily run. We fail closed instead — see ADR-0036 for the
+/// rationale.
+fn execution_mode_for_type(artifact_type: ArtifactType) -> Result<ExecutionMode, String> {
+    match artifact_type {
+        ArtifactType::ShellScript(_) => Ok(ExecutionMode::Script),
+        ArtifactType::PeExecutable
+        | ArtifactType::ElfExecutable
+        | ArtifactType::MachOExecutable => Ok(ExecutionMode::Native),
+        other => Err(format!(
+            "artifact type {other:?} is not executable via the run pipeline; \
+             only shell scripts and native executables are runnable"
+        )),
+    }
 }
 
 fn write_fetch_summary(writer: &mut impl Write, artifact: &InspectedArtifact) -> Result<()> {
