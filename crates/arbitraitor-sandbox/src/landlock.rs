@@ -308,6 +308,8 @@ fn parse_landlock_abi_probe(ret: libc::c_long) -> Option<LandlockAbiVersion> {
 
 #[cfg(target_os = "linux")]
 const fn supported_access_mask(abi: u32) -> u64 {
+    // Only ABI v1-v3 filesystem rights are enforced today. ABI v4+ controls
+    // are recorded for receipts only until ADR-0028's planned matrix is wired.
     match abi {
         0 => 0,
         1 => ABI_V1_ACCESS,
@@ -437,15 +439,40 @@ mod tests {
     }
 
     #[test]
-    fn landlock_abi_version_parses_nonzero_versions() {
-        // Given: kernel ABI probe result values at the lower and current upper bounds.
+    fn landlock_abi_version_parses_nonzero_versions() -> Result<(), Box<dyn std::error::Error>> {
+        // Given: kernel ABI probe result values in the documented v1-v10 range.
         // When: values are parsed into the Landlock ABI newtype.
-        // Then: zero is rejected and non-zero ABI versions preserve their number.
-        assert_eq!(LandlockAbiVersion::new(0), None);
-        assert_eq!(LandlockAbiVersion::new(1), Some(LandlockAbiVersion::V1));
-        assert_eq!(LandlockAbiVersion::new(10), Some(LandlockAbiVersion::V10));
+        // Then: every non-zero ABI version preserves its number.
+        let versions = [
+            LandlockAbiVersion::V1,
+            LandlockAbiVersion::V2,
+            LandlockAbiVersion::V3,
+            LandlockAbiVersion::V4,
+            LandlockAbiVersion::V5,
+            LandlockAbiVersion::V6,
+            LandlockAbiVersion::V7,
+            LandlockAbiVersion::V8,
+            LandlockAbiVersion::V9,
+            LandlockAbiVersion::V10,
+        ];
+        for (index, expected) in versions.into_iter().enumerate() {
+            let version = u32::try_from(index + 1)?;
+            assert_eq!(LandlockAbiVersion::new(version), Some(expected));
+            assert_eq!(expected.get(), version);
+            let json = serde_json::to_string(&expected)?;
+            let decoded: LandlockAbiVersion = serde_json::from_str(&json)?;
+            assert_eq!(decoded, expected);
+        }
         assert_eq!(LandlockAbiVersion::V10.get(), 10);
         assert_eq!(LandlockAbiVersion::V10.to_string(), "v10");
+        Ok(())
+    }
+
+    #[test]
+    fn landlock_abi_version_rejects_zero_and_negative_json() {
+        assert_eq!(LandlockAbiVersion::new(0), None);
+        assert!(serde_json::from_str::<LandlockAbiVersion>("0").is_err());
+        assert!(serde_json::from_str::<LandlockAbiVersion>("-1").is_err());
     }
 
     #[cfg(target_os = "linux")]

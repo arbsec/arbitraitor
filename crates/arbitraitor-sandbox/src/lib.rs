@@ -402,8 +402,6 @@ pub struct SandboxConfig {
     pub dumpable: bool,
     /// Close all inherited file descriptors other than standard input, output, and error.
     pub close_fds: bool,
-    /// Landlock ABI version observed for this host, when Landlock is available.
-    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 impl Default for SandboxConfig {
@@ -412,7 +410,6 @@ impl Default for SandboxConfig {
             no_new_privs: true,
             dumpable: false,
             close_fds: true,
-            landlock_abi_version: probe_landlock_abi_version(),
         }
     }
 }
