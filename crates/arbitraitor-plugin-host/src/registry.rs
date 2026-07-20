@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_plugin_api::{PluginManifest, PluginTrustClass, PluginType};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -330,6 +331,255 @@ fn home_arbitraitor_dir() -> Option<PathBuf> {
         std::env::var_os("USERPROFILE")
             .map(PathBuf::from)
             .map(|home| home.join(".arbitraitor"))
+    }
+}
+
+/// Schema version for [`RegistryMetadata`] and the surrounding registry
+/// document types.
+///
+/// Bump on any non-backwards-compatible change to the wire format. Deserializers
+/// MUST reject unknown schema versions — see [`RegistryMetadata::SCHEMA_VERSION`].
+pub const REGISTRY_METADATA_SCHEMA_VERSION: u32 = 1;
+
+/// Outcome of verifying the publisher's signature over the release metadata
+/// (spec §39.20).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureStatus {
+    /// Metadata is covered by a valid publisher signature.
+    Signed,
+    /// No signature was provided for this release.
+    Unsigned,
+    /// A signature was present but did not verify against the publisher key.
+    Invalid,
+}
+
+/// Outcome of verifying a provenance attestation against the release artifact
+/// (spec §39.20).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceStatus {
+    /// SLSA / Sigstore / minisign attestation verified against the artifact.
+    Verified,
+    /// An attestation was provided but verification failed.
+    Failed,
+    /// No provenance attestation was supplied with the release.
+    Missing,
+}
+
+/// Result of an external security audit of the release (spec §39.20).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityAuditStatus {
+    /// No audit has been recorded for this release.
+    NotAudited,
+    /// An audit was performed and found no blocking findings.
+    Audited,
+    /// An audit was performed and recorded one or more blocking findings.
+    Failed,
+}
+
+/// Result of conformance testing against the supported plugin API version
+/// (spec §39.20).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConformanceStatus {
+    /// Release passes the conformance suite for the declared API version.
+    Conformant,
+    /// Release does not pass conformance — do not load.
+    NonConformant,
+    /// Conformance testing is queued or in progress.
+    Pending,
+}
+
+/// Lifecycle state of a release (spec §39.20).
+///
+/// `Active` releases are eligible for installation. `Revoked` releases MUST be
+/// rejected by the registry loader regardless of any other field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationStatus {
+    /// Release is currently usable.
+    Active,
+    /// Release has been revoked by the publisher or operator.
+    Revoked,
+}
+
+/// Rollout plan for a staged release (spec §39.20).
+///
+/// `percentage` is the fraction of eligible hosts that should receive the
+/// release (0–100 inclusive). `target_audience` names the cohort that should
+/// receive the release first (e.g. `"canary"`, `"dogfood"`, `"beta"`,
+/// `"all"`). Hosts not in `target_audience` defer the update until the
+/// rollout reaches their cohort.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagedRollout {
+    /// Rollout percentage in the inclusive range `0..=100`.
+    pub percentage: u8,
+    /// Free-form cohort label identifying the first recipients.
+    pub target_audience: String,
+}
+
+impl StagedRollout {
+    /// Construct a rollout covering `percentage` of the named audience.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `percentage > 100`. Callers in production code MUST validate
+    /// the value before constructing.
+    #[must_use]
+    pub fn new(percentage: u8, target_audience: impl Into<String>) -> Self {
+        assert!(
+            percentage <= 100,
+            "staged rollout percentage must be in 0..=100, got {percentage}"
+        );
+        Self {
+            percentage,
+            target_audience: target_audience.into(),
+        }
+    }
+}
+
+/// State of a permission-diff review between the currently-installed release
+/// and the proposed update (spec §39.20).
+///
+/// The registry loader MUST refuse to install an update while the diff is
+/// `PendingApproval` and MUST refuse to install updates whose diff is
+/// `Blocked`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDiffStatus {
+    /// The operator has approved the permission changes.
+    Approved,
+    /// The operator has blocked the permission changes — release must not
+    /// proceed.
+    Blocked,
+    /// Permission changes await operator review.
+    PendingApproval,
+}
+
+/// Recorded publisher or operator revocation of a plugin release (spec §39.20).
+///
+/// Multiple revocations may exist for the same `(plugin_id, version)` pair —
+/// the most recent entry by `revoked_at` is authoritative.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevocationEntry {
+    /// Plugin id whose release is being revoked.
+    pub plugin_id: String,
+    /// Version string of the release being revoked.
+    pub version: String,
+    /// Identifier of the publisher or operator who issued the revocation.
+    pub issuer: String,
+    /// Unix timestamp (seconds) at which the revocation was recorded.
+    pub revoked_at: u64,
+    /// Human-readable, non-secret reason for the revocation.
+    pub reason: String,
+}
+
+/// Signed metadata describing a published plugin release (spec §39.20).
+///
+/// This is the artifact the registry loader evaluates to decide whether an
+/// update is admissible: signature and provenance must verify, revocation
+/// must not be set, the staged rollout must apply to the current host, and
+/// the permission diff must be approved by an operator. All fields are
+/// carried verbatim from the registry response — the registry does not
+/// interpret them, only routes them to the admission pipeline.
+///
+/// The struct is `Serialize + Deserialize` so it can be embedded in receipts
+/// and audit logs. The `schema_version` field lets downstream consumers
+/// reject documents produced by a newer or older registry than they
+/// understand.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryMetadata {
+    /// Schema version of this document. Bumped on any non-backwards-compatible
+    /// change to the wire format.
+    pub schema_version: u32,
+    /// Plugin id this metadata describes.
+    pub plugin_id: String,
+    /// Version string this metadata describes.
+    pub version: String,
+    /// Identity of the publisher who signed this release (key id, account
+    /// id, or other stable label).
+    pub publisher_identity: String,
+    /// All release versions previously published for this plugin id, in
+    /// ascending order (oldest first). Used for rollback / downgrade checks.
+    pub version_history: Vec<String>,
+    /// Platform triples this release is built for (e.g.
+    /// `x86_64-unknown-linux-gnu`). An empty list means the release applies
+    /// to no supported platform and must be rejected.
+    pub supported_platforms: Vec<String>,
+    /// Capabilities the release declares it requires. Compared against the
+    /// currently installed release to compute the permission diff that an
+    /// operator must approve.
+    pub requested_permissions: Vec<String>,
+    /// Outcome of signature verification over the release metadata.
+    pub signature_status: SignatureStatus,
+    /// Outcome of provenance attestation verification.
+    pub provenance_status: ProvenanceStatus,
+    /// Result of the most recent external security audit.
+    pub security_audit_status: SecurityAuditStatus,
+    /// Result of API conformance testing.
+    pub conformance_status: ConformanceStatus,
+    /// Advisory identifiers for known vulnerabilities affecting this
+    /// release. An empty list means no advisories are recorded.
+    pub known_vulnerabilities: Vec<String>,
+    /// Revocation status for this release.
+    pub revocation_status: RevocationStatus,
+    /// SHA-256 (lowercase hex) of the artifact associated with this metadata.
+    /// Tying the metadata to a digest prevents metadata-swap attacks where
+    /// valid metadata is replayed against a different artifact.
+    pub download_digest: String,
+}
+
+impl RegistryMetadata {
+    /// Current schema version stamped onto newly constructed metadata.
+    pub const SCHEMA_VERSION: u32 = REGISTRY_METADATA_SCHEMA_VERSION;
+
+    /// Construct a metadata document stamped with the current schema version
+    /// and `RevocationStatus::Active`.
+    #[must_use]
+    pub fn new(
+        plugin_id: impl Into<String>,
+        version: impl Into<String>,
+        publisher_identity: impl Into<String>,
+        download_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            plugin_id: plugin_id.into(),
+            version: version.into(),
+            publisher_identity: publisher_identity.into(),
+            version_history: Vec::new(),
+            supported_platforms: Vec::new(),
+            requested_permissions: Vec::new(),
+            signature_status: SignatureStatus::Unsigned,
+            provenance_status: ProvenanceStatus::Missing,
+            security_audit_status: SecurityAuditStatus::NotAudited,
+            conformance_status: ConformanceStatus::Pending,
+            known_vulnerabilities: Vec::new(),
+            revocation_status: RevocationStatus::Active,
+            download_digest: download_digest.into(),
+        }
+    }
+
+    /// Returns `true` iff the release is admissible purely from its
+    /// verification fields. This is a convenience predicate — the loader
+    /// applies the full admission policy, including permission-diff and
+    /// staged-rollout checks.
+    #[must_use]
+    pub fn is_verification_clean(&self) -> bool {
+        matches!(self.signature_status, SignatureStatus::Signed)
+            && matches!(self.provenance_status, ProvenanceStatus::Verified)
+            && matches!(
+                self.security_audit_status,
+                SecurityAuditStatus::Audited | SecurityAuditStatus::NotAudited
+            )
+            && matches!(self.conformance_status, ConformanceStatus::Conformant)
+            && matches!(self.revocation_status, RevocationStatus::Active)
+            && self.known_vulnerabilities.is_empty()
     }
 }
 
@@ -949,6 +1199,284 @@ mod tests {
         };
 
         registry.validate_plan("plan-ok", &plan)?;
+        Ok(())
+    }
+
+    fn sample_registry_metadata() -> RegistryMetadata {
+        RegistryMetadata {
+            schema_version: REGISTRY_METADATA_SCHEMA_VERSION,
+            plugin_id: "clamav-scanner".to_owned(),
+            version: "1.2.3".to_owned(),
+            publisher_identity: "key:ed25519:abc123".to_owned(),
+            version_history: vec!["1.0.0".to_owned(), "1.1.0".to_owned(), "1.2.3".to_owned()],
+            supported_platforms: vec![
+                "x86_64-unknown-linux-gnu".to_owned(),
+                "aarch64-unknown-linux-gnu".to_owned(),
+            ],
+            requested_permissions: vec![
+                "filesystem.read-only".to_owned(),
+                "process.spawn".to_owned(),
+            ],
+            signature_status: SignatureStatus::Signed,
+            provenance_status: ProvenanceStatus::Verified,
+            security_audit_status: SecurityAuditStatus::Audited,
+            conformance_status: ConformanceStatus::Conformant,
+            known_vulnerabilities: Vec::new(),
+            revocation_status: RevocationStatus::Active,
+            download_digest: "0".repeat(64),
+        }
+    }
+
+    #[test]
+    fn registry_metadata_round_trips_through_json() -> TestResult {
+        let original = sample_registry_metadata();
+        let json = serde_json::to_string(&original)?;
+        let decoded: RegistryMetadata = serde_json::from_str(&json)?;
+        assert_eq!(decoded, original);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_metadata_schema_version_is_current() {
+        let meta = sample_registry_metadata();
+        assert_eq!(meta.schema_version, REGISTRY_METADATA_SCHEMA_VERSION);
+        assert_eq!(
+            RegistryMetadata::SCHEMA_VERSION,
+            REGISTRY_METADATA_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn registry_metadata_new_stamps_active_and_schema() {
+        let meta = RegistryMetadata::new("plugin", "1.0.0", "publisher", "0".repeat(64).as_str());
+        assert_eq!(meta.schema_version, REGISTRY_METADATA_SCHEMA_VERSION);
+        assert_eq!(meta.plugin_id, "plugin");
+        assert_eq!(meta.version, "1.0.0");
+        assert_eq!(meta.publisher_identity, "publisher");
+        assert_eq!(meta.revocation_status, RevocationStatus::Active);
+        assert_eq!(meta.signature_status, SignatureStatus::Unsigned);
+        assert_eq!(meta.provenance_status, ProvenanceStatus::Missing);
+        assert_eq!(meta.conformance_status, ConformanceStatus::Pending);
+        assert!(meta.version_history.is_empty());
+        assert!(meta.supported_platforms.is_empty());
+        assert!(meta.requested_permissions.is_empty());
+        assert!(meta.known_vulnerabilities.is_empty());
+    }
+
+    #[test]
+    fn registry_metadata_rejects_unknown_fields() -> TestResult {
+        let mut json = serde_json::to_value(sample_registry_metadata()).map_err(Box::new)?;
+        json.as_object_mut()
+            .ok_or("expected object")?
+            .insert("sneaky".to_owned(), serde_json::Value::Bool(true));
+        let result = serde_json::from_value::<RegistryMetadata>(json);
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields must reject smuggled field"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_metadata_is_verification_clean_only_when_all_green() {
+        let mut meta = sample_registry_metadata();
+        assert!(meta.is_verification_clean());
+
+        meta.signature_status = SignatureStatus::Invalid;
+        assert!(!meta.is_verification_clean());
+        meta.signature_status = SignatureStatus::Signed;
+
+        meta.provenance_status = ProvenanceStatus::Failed;
+        assert!(!meta.is_verification_clean());
+        meta.provenance_status = ProvenanceStatus::Missing;
+        assert!(!meta.is_verification_clean());
+        meta.provenance_status = ProvenanceStatus::Verified;
+
+        meta.security_audit_status = SecurityAuditStatus::Failed;
+        assert!(!meta.is_verification_clean());
+        meta.security_audit_status = SecurityAuditStatus::Audited;
+
+        meta.conformance_status = ConformanceStatus::NonConformant;
+        assert!(!meta.is_verification_clean());
+        meta.conformance_status = ConformanceStatus::Pending;
+        assert!(!meta.is_verification_clean());
+        meta.conformance_status = ConformanceStatus::Conformant;
+
+        meta.revocation_status = RevocationStatus::Revoked;
+        assert!(!meta.is_verification_clean());
+        meta.revocation_status = RevocationStatus::Active;
+
+        meta.known_vulnerabilities.push("CVE-2026-0001".to_owned());
+        assert!(!meta.is_verification_clean());
+        meta.known_vulnerabilities.clear();
+
+        assert!(meta.is_verification_clean());
+    }
+
+    #[test]
+    fn revocation_entry_round_trips_through_json() -> TestResult {
+        let entry = RevocationEntry {
+            plugin_id: "clamav-scanner".to_owned(),
+            version: "1.0.0".to_owned(),
+            issuer: "publisher:acme".to_owned(),
+            revoked_at: 1_700_000_000,
+            reason: "RCE in network scanner".to_owned(),
+        };
+        let json = serde_json::to_string(&entry)?;
+        let decoded: RevocationEntry = serde_json::from_str(&json)?;
+        assert_eq!(decoded, entry);
+        Ok(())
+    }
+
+    #[test]
+    fn revocation_entry_rejects_unknown_fields() -> TestResult {
+        let mut json = serde_json::json!({
+            "plugin_id": "clamav-scanner",
+            "version": "1.0.0",
+            "issuer": "publisher:acme",
+            "revoked_at": 1_700_000_000_u64,
+            "reason": "RCE",
+        });
+        let object = json.as_object_mut().ok_or("expected json object")?;
+        object.insert("sneaky".to_owned(), serde_json::Value::Bool(true));
+        let result = serde_json::from_value::<RevocationEntry>(json);
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields must reject smuggled field"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staged_rollout_round_trips_through_json() -> TestResult {
+        let rollout = StagedRollout::new(10, "canary");
+        let json = serde_json::to_string(&rollout)?;
+        let decoded: StagedRollout = serde_json::from_str(&json)?;
+        assert_eq!(decoded, rollout);
+        assert_eq!(decoded.percentage, 10);
+        assert_eq!(decoded.target_audience, "canary");
+        Ok(())
+    }
+
+    #[test]
+    fn staged_rollout_rejects_unknown_fields() -> TestResult {
+        let mut json = serde_json::json!({"percentage": 50, "target_audience": "beta"});
+        let object = json.as_object_mut().ok_or("expected json object")?;
+        object.insert(
+            "sneaky".to_owned(),
+            serde_json::Value::String("x".to_owned()),
+        );
+        let result = serde_json::from_value::<StagedRollout>(json);
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields must reject smuggled field"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "staged rollout percentage must be in 0..=100")]
+    fn staged_rollout_panics_above_one_hundred() {
+        let _ = StagedRollout::new(101, "all");
+    }
+
+    #[test]
+    fn staged_rollout_accepts_boundary_values() {
+        let zero = StagedRollout::new(0, "none");
+        assert_eq!(zero.percentage, 0);
+        let hundred = StagedRollout::new(100, "all");
+        assert_eq!(hundred.percentage, 100);
+    }
+
+    #[test]
+    fn permission_diff_status_serializes_as_snake_case() -> TestResult {
+        for (variant, expected) in [
+            (PermissionDiffStatus::Approved, "\"approved\""),
+            (PermissionDiffStatus::Blocked, "\"blocked\""),
+            (
+                PermissionDiffStatus::PendingApproval,
+                "\"pending_approval\"",
+            ),
+        ] {
+            let json = serde_json::to_string(&variant)?;
+            assert_eq!(json, expected, "variant {variant:?}");
+            let back: PermissionDiffStatus = serde_json::from_str(&json)?;
+            assert_eq!(back, variant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signature_status_serializes_as_snake_case() -> TestResult {
+        for (variant, expected) in [
+            (SignatureStatus::Signed, "\"signed\""),
+            (SignatureStatus::Unsigned, "\"unsigned\""),
+            (SignatureStatus::Invalid, "\"invalid\""),
+        ] {
+            let json = serde_json::to_string(&variant)?;
+            assert_eq!(json, expected, "variant {variant:?}");
+            let back: SignatureStatus = serde_json::from_str(&json)?;
+            assert_eq!(back, variant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_status_serializes_as_snake_case() -> TestResult {
+        for (variant, expected) in [
+            (ProvenanceStatus::Verified, "\"verified\""),
+            (ProvenanceStatus::Failed, "\"failed\""),
+            (ProvenanceStatus::Missing, "\"missing\""),
+        ] {
+            let json = serde_json::to_string(&variant)?;
+            assert_eq!(json, expected, "variant {variant:?}");
+            let back: ProvenanceStatus = serde_json::from_str(&json)?;
+            assert_eq!(back, variant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn security_audit_status_serializes_as_snake_case() -> TestResult {
+        for (variant, expected) in [
+            (SecurityAuditStatus::NotAudited, "\"not_audited\""),
+            (SecurityAuditStatus::Audited, "\"audited\""),
+            (SecurityAuditStatus::Failed, "\"failed\""),
+        ] {
+            let json = serde_json::to_string(&variant)?;
+            assert_eq!(json, expected, "variant {variant:?}");
+            let back: SecurityAuditStatus = serde_json::from_str(&json)?;
+            assert_eq!(back, variant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn conformance_status_serializes_as_snake_case() -> TestResult {
+        for (variant, expected) in [
+            (ConformanceStatus::Conformant, "\"conformant\""),
+            (ConformanceStatus::NonConformant, "\"non_conformant\""),
+            (ConformanceStatus::Pending, "\"pending\""),
+        ] {
+            let json = serde_json::to_string(&variant)?;
+            assert_eq!(json, expected, "variant {variant:?}");
+            let back: ConformanceStatus = serde_json::from_str(&json)?;
+            assert_eq!(back, variant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn revocation_status_serializes_as_snake_case() -> TestResult {
+        for (variant, expected) in [
+            (RevocationStatus::Active, "\"active\""),
+            (RevocationStatus::Revoked, "\"revoked\""),
+        ] {
+            let json = serde_json::to_string(&variant)?;
+            assert_eq!(json, expected, "variant {variant:?}");
+            let back: RevocationStatus = serde_json::from_str(&json)?;
+            assert_eq!(back, variant);
+        }
         Ok(())
     }
 }
