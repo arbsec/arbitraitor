@@ -89,12 +89,16 @@ impl Default for UrlhausAdapter {
 }
 
 impl FeedAdapter for UrlhausAdapter {
-    fn source_class(&self) -> FeedSourceClass {
-        FeedSourceClass::Authoritative
+    fn name(&self) -> &'static str {
+        "urlhaus"
     }
 
-    fn source_name(&self) -> &'static str {
-        "urlhaus"
+    fn fetch_indicators(&self) -> Result<Vec<FeedEntry>> {
+        Ok(Vec::new())
+    }
+
+    fn source_class(&self) -> FeedSourceClass {
+        FeedSourceClass::Authoritative
     }
 
     fn feed_url(&self) -> &str {
@@ -460,7 +464,7 @@ mod tests {
     fn adapter_source_metadata_is_authoritative() {
         let adapter = UrlhausAdapter::new();
         assert_eq!(adapter.source_class(), FeedSourceClass::Authoritative);
-        assert_eq!(adapter.source_name(), "urlhaus");
+        assert_eq!(adapter.name(), "urlhaus");
         assert_eq!(adapter.feed_url(), URLHAUS_DEFAULT_CSV_URL);
     }
 

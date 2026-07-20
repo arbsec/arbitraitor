@@ -14,44 +14,51 @@ use tracing::{debug, instrument, warn};
 
 use crate::{FeedEntry, FeedSourceClass, IntelError, IntelStore, Result};
 
-/// Shared behavior for an external threat-intelligence feed source.
+/// Shared behavior for a threat-intelligence feed source.
 ///
-/// Implementations translate a vendor-specific representation into
-/// [`FeedEntry`] records. They deliberately do not perform network I/O: the
-/// ingestion pipeline ([`ingest_feed`]) drives a
-/// [`arbitraitor_fetch::Fetcher`] and hands the received bytes back to the
-/// adapter via [`FeedAdapter::parse`]. This keeps the adapter pure, testable
-/// without a live HTTP server, and compliant with ADR 0003 (no reqwest types
-/// cross crate boundaries).
+/// Adapters expose a stable name, source trust class, and an offline indicator
+/// retrieval surface. Network-backed adapters may additionally override
+/// [`FeedAdapter::feed_url`] and [`FeedAdapter::parse`] so [`ingest_feed`] can
+/// retrieve payloads through [`arbitraitor_fetch::Fetcher`].
 pub trait FeedAdapter: Send + Sync {
+    /// Stable lowercase source label written into entries and reports.
+    fn name(&self) -> &str;
+
+    /// Return indicators available from the adapter's configured offline source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-specific [`IntelError`] when the offline source cannot
+    /// be read or decoded.
+    fn fetch_indicators(&self) -> Result<Vec<FeedEntry>>;
+
     /// Source trust class advertised on entries produced by this adapter.
     fn source_class(&self) -> FeedSourceClass;
 
-    /// Stable lowercase source label written into entries and reports.
-    fn source_name(&self) -> &'static str;
-
-    /// Canonical URL fetched by [`ingest_feed`]. The pipeline parses this with
-    /// [`arbitraitor_fetch::FetchUrl`] before retrieval.
+    /// Canonical URL fetched by [`ingest_feed`].
+    ///
+    /// Offline-only adapters return an empty string and therefore cannot be
+    /// passed to [`ingest_feed`].
     fn feed_url(&self) -> &str;
 
     /// Decode a fetched feed payload into [`FeedEntry`] records.
     ///
-    /// Structural failures (invalid UTF-8, malformed JSON, missing CSV header)
-    /// must return [`IntelError::FeedDecode`]. Individual malformed rows
-    /// should be skipped with a diagnostic so one bad row does not discard
-    /// the whole feed.
+    /// Offline-only adapters use [`FeedAdapter::fetch_indicators`] by default.
+    /// Network-backed adapters override this method to parse `bytes`.
     ///
     /// # Errors
     ///
-    /// Returns [`IntelError::FeedDecode`] when the payload cannot be decoded
-    /// as the adapter's expected format.
-    fn parse(&self, bytes: &[u8]) -> Result<Vec<FeedEntry>>;
+    /// Returns an adapter-specific [`IntelError`] when indicators cannot be
+    /// read or the payload cannot be decoded.
+    fn parse(&self, _bytes: &[u8]) -> Result<Vec<FeedEntry>> {
+        self.fetch_indicators()
+    }
 }
 
 /// Statistics produced by merging a batch of feed entries into an [`IntelStore`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IngestionReport {
-    /// Source label copied from [`FeedAdapter::source_name`].
+    /// Source label copied from [`FeedAdapter::name`].
     pub source: String,
     /// Entries inserted into the store for the first time.
     pub entries_added: usize,
@@ -90,7 +97,7 @@ impl IngestionReport {
 /// Returns [`IntelError::Fetch`] when retrieval fails,
 /// [`IntelError::FeedDecode`] when the adapter cannot decode the payload, and
 /// store I/O errors when the merge cannot be persisted.
-#[instrument(skip(adapter, fetcher, store, policy), fields(source = adapter.source_name()))]
+#[instrument(skip(adapter, fetcher, store, policy), fields(source = adapter.name()))]
 pub async fn ingest_feed(
     adapter: &dyn FeedAdapter,
     fetcher: &dyn Fetcher,
@@ -109,13 +116,13 @@ pub async fn ingest_feed(
         .map_err(IntelError::Fetch)?;
     let bytes = sink.into_bytes();
     debug!(
-        source = adapter.source_name(),
+        source = adapter.name(),
         bytes = receipt.bytes_written,
         "fetched feed payload"
     );
 
     let entries = adapter.parse(&bytes)?;
-    let mut report = ingest_entries(entries, store, adapter.source_name())?;
+    let mut report = ingest_entries(entries, store, adapter.name())?;
     match store.purge_expired() {
         Ok(expired) => {
             report.entries_expired = expired;
