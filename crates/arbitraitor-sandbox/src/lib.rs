@@ -16,6 +16,148 @@ pub use seccomp::configure_network_isolation;
 use std::io;
 use std::process::Command;
 
+/// Sandbox containment mode per spec §27.2.
+///
+/// The mode declares the *intent* of the runtime sandbox envelope. It is a
+/// declarative policy knob, not an enforcement claim: the actual capability
+/// matrix for a given run is recorded in the receipt (§27.7) so downstream
+/// auditors can verify which controls were effective.
+///
+/// Modes are ordered by strength of containment. `None` performs no
+/// containment at all; `Disposable` provides the strongest guarantees,
+/// including an ephemeral root filesystem.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxMode {
+    /// No sandbox envelope is constructed. The artifact runs in the
+    /// inherited process context with the inherited environment.
+    ///
+    /// Spec §27.2 mode 1. Equivalent to running the artifact directly.
+    /// No containment capability is claimed.
+    None,
+
+    /// Observation-only mode. The sandbox crate (or platform equivalent —
+    /// Endpoint Security on macOS, audit/ptrace on Linux) records
+    /// process-tree, file-access, and network events without blocking any
+    /// operation.
+    ///
+    /// Spec §27.2 mode 2. No enforcement capability is claimed because
+    /// observation is not a containment boundary. Receipts record the
+    /// mode so auditors know the run was supervised, not contained.
+    Observe,
+
+    /// Restricted mode applies the platform containment primitives
+    /// available on the host (Linux: Landlock filesystem isolation,
+    /// seccomp-BPF syscall filtering, `no_new_privs`, `close_range` fd
+    /// closing, and `rlimit`-based resource limits). On macOS this
+    /// degrades to mediated execution per ADR-0024.
+    ///
+    /// Spec §27.2 mode 3. Enforces filesystem, network, syscall,
+    /// privilege, and resource controls but does *not* discard the
+    /// filesystem image after the run — the host filesystem persists.
+    Restricted,
+
+    /// Disposable mode is `Restricted` plus an ephemeral filesystem
+    /// (overlayfs or tmpfs root) that is torn down after the run. The
+    /// artifact sees an isolated, throwaway root that cannot observe or
+    /// mutate any host state outside its allowlisted mount points.
+    ///
+    /// Spec §27.2 mode 4. Strongest guarantees: even if every other
+    /// control is bypassed, the attacker cannot reach durable host
+    /// storage.
+    Disposable,
+}
+
+impl SandboxMode {
+    /// Return the enforcement capability set this mode declares.
+    ///
+    /// These are *declared* capabilities — what the mode is *supposed* to
+    /// enforce. The actually-effective capabilities are a property of the
+    /// platform and the runtime; they are recorded in the receipt per
+    /// spec §27.7. Callers must not collapse this struct into a single
+    /// `sandboxed: bool` (ADR-0007).
+    #[must_use]
+    pub const fn capabilities(&self) -> SandboxCapabilities {
+        match self {
+            // None (no envelope) and Observe (supervision only) both
+            // declare zero enforcement capabilities: the matrix only
+            // tracks enforcement, and observation is not containment.
+            Self::None | Self::Observe => SandboxCapabilities::none(),
+
+            // Restricted enforces everything except an ephemeral root.
+            Self::Restricted => SandboxCapabilities {
+                filesystem_isolation: true,
+                network_isolation: true,
+                process_tree_containment: true,
+                privilege_suppression: true,
+                syscall_filtering: true,
+                resource_limits: true,
+                ephemeral_filesystem: false,
+            },
+
+            // Disposable is Restricted plus ephemeral root.
+            Self::Disposable => SandboxCapabilities {
+                filesystem_isolation: true,
+                network_isolation: true,
+                process_tree_containment: true,
+                privilege_suppression: true,
+                syscall_filtering: true,
+                resource_limits: true,
+                ephemeral_filesystem: true,
+            },
+        }
+    }
+}
+
+/// Enforcement capability set declared by a [`SandboxMode`].
+///
+/// Every field is an independent boolean — never collapse into a single
+/// `sandboxed` flag (ADR-0007). The capability matrix is part of the
+/// receipt and is what downstream auditors verify.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "spec §27.2 + ADR-0007 mandate this exact per-control matrix shape; collapsing booleans into enums would break the receipt schema"
+)]
+pub struct SandboxCapabilities {
+    /// Filesystem access is restricted to an explicit allowlist
+    /// (Landlock on Linux, App Sandbox on macOS, etc.).
+    pub filesystem_isolation: bool,
+    /// Outbound network is blocked at the namespace / filter / broker
+    /// layer.
+    pub network_isolation: bool,
+    /// The child process cannot spawn processes outside its allowlisted
+    /// tree; descendants cannot escape.
+    pub process_tree_containment: bool,
+    /// `no_new_privs` (or platform equivalent) prevents privilege
+    /// elevation via setuid, file capabilities, etc.
+    pub privilege_suppression: bool,
+    /// A seccomp-BPF / platform syscall filter is installed.
+    pub syscall_filtering: bool,
+    /// `RLIMIT_*` resource caps (CPU, memory, file size, fds, …) are
+    /// enforced for the child.
+    pub resource_limits: bool,
+    /// The child runs against an ephemeral root filesystem that is
+    /// discarded after the run.
+    pub ephemeral_filesystem: bool,
+}
+
+impl SandboxCapabilities {
+    /// All-false capability set. Returned by [`SandboxMode::None`] and
+    /// [`SandboxMode::Observe`].
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            filesystem_isolation: false,
+            network_isolation: false,
+            process_tree_containment: false,
+            privilege_suppression: false,
+            syscall_filtering: false,
+            resource_limits: false,
+            ephemeral_filesystem: false,
+        }
+    }
+}
+
 /// Privilege and isolation settings for child processes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SandboxConfig {
@@ -240,5 +382,99 @@ mod tests {
             "child inherited fd {probe_fd} from parent despite close_fds = true"
         );
         Ok(())
+    }
+
+    #[test]
+    fn none_mode_declares_no_capabilities() {
+        let caps = SandboxMode::None.capabilities();
+        assert!(!caps.filesystem_isolation);
+        assert!(!caps.network_isolation);
+        assert!(!caps.process_tree_containment);
+        assert!(!caps.privilege_suppression);
+        assert!(!caps.syscall_filtering);
+        assert!(!caps.resource_limits);
+        assert!(!caps.ephemeral_filesystem);
+    }
+
+    #[test]
+    fn observe_mode_declares_no_enforcement_capabilities() {
+        // Observation is not a containment boundary (ADR-0024): the
+        // capability struct only tracks enforcement, not supervision.
+        let caps = SandboxMode::Observe.capabilities();
+        assert_eq!(caps, SandboxCapabilities::none());
+    }
+
+    #[test]
+    fn restricted_mode_enforces_everything_except_ephemeral_root() {
+        let caps = SandboxMode::Restricted.capabilities();
+        assert!(caps.filesystem_isolation);
+        assert!(caps.network_isolation);
+        assert!(caps.process_tree_containment);
+        assert!(caps.privilege_suppression);
+        assert!(caps.syscall_filtering);
+        assert!(caps.resource_limits);
+        // The host filesystem persists — ephemeral filesystem is the
+        // Disposable-only capability.
+        assert!(!caps.ephemeral_filesystem);
+    }
+
+    #[test]
+    fn disposable_mode_enforces_everything_including_ephemeral_root() {
+        let caps = SandboxMode::Disposable.capabilities();
+        assert!(caps.filesystem_isolation);
+        assert!(caps.network_isolation);
+        assert!(caps.process_tree_containment);
+        assert!(caps.privilege_suppression);
+        assert!(caps.syscall_filtering);
+        assert!(caps.resource_limits);
+        assert!(caps.ephemeral_filesystem);
+    }
+
+    #[test]
+    fn disposable_is_a_superset_of_restricted() {
+        let r = SandboxMode::Restricted.capabilities();
+        let d = SandboxMode::Disposable.capabilities();
+        // Disposable must enable everything Restricted does, plus the
+        // ephemeral root.
+        assert!(d.filesystem_isolation >= r.filesystem_isolation);
+        assert!(d.network_isolation >= r.network_isolation);
+        assert!(d.process_tree_containment >= r.process_tree_containment);
+        assert!(d.privilege_suppression >= r.privilege_suppression);
+        assert!(d.syscall_filtering >= r.syscall_filtering);
+        assert!(d.resource_limits >= r.resource_limits);
+        assert!(d.ephemeral_filesystem && !r.ephemeral_filesystem);
+    }
+
+    #[test]
+    fn sandbox_capabilities_none_is_all_false() {
+        let caps = SandboxCapabilities::none();
+        assert!(!caps.filesystem_isolation);
+        assert!(!caps.network_isolation);
+        assert!(!caps.process_tree_containment);
+        assert!(!caps.privilege_suppression);
+        assert!(!caps.syscall_filtering);
+        assert!(!caps.resource_limits);
+        assert!(!caps.ephemeral_filesystem);
+    }
+
+    #[test]
+    fn sandbox_mode_variants_are_distinct() {
+        // Spec §27.2 enumerates exactly four modes; this test fails if a
+        // variant is added or removed without updating coverage.
+        let modes = [
+            SandboxMode::None,
+            SandboxMode::Observe,
+            SandboxMode::Restricted,
+            SandboxMode::Disposable,
+        ];
+        for (i, a) in modes.iter().enumerate() {
+            for (j, b) in modes.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b, "modes at indices {i} and {j} must differ");
+                }
+            }
+        }
     }
 }

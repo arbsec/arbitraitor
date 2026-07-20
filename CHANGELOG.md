@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Sandbox
+
+- `arbitraitor-sandbox::SandboxMode` — public enum with the four
+  containment modes required by spec §27.2 (`None`, `Observe`,
+  `Restricted`, `Disposable`), each documented with its intended
+  capability set (#539).
+- `arbitraitor-sandbox::SandboxCapabilities` — per-control boolean
+  capability matrix (`filesystem_isolation`, `network_isolation`,
+  `process_tree_containment`, `privilege_suppression`,
+  `syscall_filtering`, `resource_limits`, `ephemeral_filesystem`),
+  exposed via `SandboxMode::capabilities()`. Per ADR-0007, the matrix is
+  never collapsed into a single `sandboxed` flag.
+
 #### Exec
 
 - `arbitraitor-exec::ReleasePolicy::verdict_max_age` and
