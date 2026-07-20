@@ -896,6 +896,7 @@ impl ApprovalTokenIssuer {
             requester_integration: agent.integration.clone(),
             requester_agent_name: agent.agent_name.clone(),
             requester_session_id: agent.session_id.clone(),
+            human_approver_identity: std::env::var("USER").ok(),
         };
         let payload_bytes = serde_json::to_vec(&payload)?;
         let signature = self.sign(&payload_bytes)?;
@@ -1088,6 +1089,8 @@ struct ApprovalTokenPayload {
     requester_integration: String,
     requester_agent_name: String,
     requester_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    human_approver_identity: Option<String>,
 }
 
 /// Tool that requests human approval for a canonical artifact execution plan.

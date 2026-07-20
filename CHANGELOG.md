@@ -9,26 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Sandbox
+#### MCP
 
-- `arbitraitor-sandbox::EffectiveControls` — per-control matrix recording
-  which containment controls are actually in effect at runtime per spec
-  §27.7. Seven independent fields (`filesystem_isolation`,
-  `network_isolation`, `process_tree_containment`, `privilege_suppression`,
-  `syscall_filtering`, `platform_settings_isolation`, `resource_limits`)
-  with three states each (`Available` / `Degraded` / `Unavailable`) — never
-  collapsed into a single `sandboxed: bool` (ADR-0007). Receipt consumers
-  drive fail-closed decisions via `is_fully_contained` and `has_unavailable`.
-- `arbitraitor-sandbox::ControlState` — enum (`Available` / `Degraded` /
-  `Unavailable`) backing the effective-controls matrix.
-- `arbitraitor_sandbox::compute_effective_controls(mode, platform)` —
-  maps a requested [`SandboxMode`] and the runtime platform string into
-  the effective matrix. Linux returns all-`Available` for `Restricted`/
-  `Disposable`; macOS returns all-`Unavailable` pending the deferred
-  containment ADR (ADR-0024); Windows returns all-`Unavailable` until a
-  Windows sandbox ADR ships; unknown platforms fail closed. Case-insensitive
-  platform matching (`linux` / `Linux` / `LINUX`, `macos` / `darwin`,
-  `windows`).
+- Approval token payloads now carry an optional `human_approver_identity`
+  field (spec §33.4). At issuance the MCP server populates it from the
+  TTY user via `$USER`; older tokens without the field continue to
+  validate unchanged via `#[serde(default)]`.
 
 #### Daemon
 

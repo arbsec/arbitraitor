@@ -1102,3 +1102,90 @@ fn in_memory_issuer_still_works_without_durable_store() {
             .is_ok()
     );
 }
+
+#[test]
+fn approval_token_payload_round_trips_human_approver_identity() {
+    let sha256: Sha256Digest = "ab".repeat(32).parse().unwrap_or_else(|error| {
+        panic!("parse digest: {error}");
+    });
+
+    // With the field set: serialize must include it; deserialize must preserve it.
+    let payload_with_id_json = serde_json::json!({
+        "schema_version": 3,
+        "sha256": sha256.to_string(),
+        "plan_digest": "deadbeef",
+        "interpreter": "/bin/bash",
+        "interpreter_digest": "",
+        "interpreter_arguments": ["/bin/bash", "--noprofile", "--norc", "-e"],
+        "network_isolated": true,
+        "policy_snapshot_digest": "",
+        "detector_snapshot_digest": "",
+        "intelligence_snapshot_digest": "",
+        "operation": "execute",
+        "release_mode": "execute",
+        "environment_profile_digest": "default",
+        "working_directory_policy": "scratch",
+        "filesystem_grants": [],
+        "sandbox_capabilities": "default",
+        "release_destination": "/dev/null",
+        "expires_at_unix_seconds": 0,
+        "nonce": "id-nonce",
+        "approval_method": "stdin-human-confirmation",
+        "requester_integration": "test",
+        "requester_agent_name": "test",
+        "requester_session_id": "test",
+        "human_approver_identity": "operator-alice"
+    });
+    let json = serde_json::to_string(&payload_with_id_json)
+        .unwrap_or_else(|e| panic!("encode with id: {e}"));
+    assert!(
+        json.contains("\"human_approver_identity\":\"operator-alice\""),
+        "human_approver_identity must appear in serialized JSON: {json}"
+    );
+    let decoded: ApprovalTokenPayload =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("decode with id: {e}"));
+    assert_eq!(
+        decoded.human_approver_identity.as_deref(),
+        Some("operator-alice")
+    );
+
+    // Backward compat: JSON without the field deserializes with identity None
+    // and absence round-trips back out (skip_serializing_if keeps it omitted).
+    let payload_without_id_json = serde_json::json!({
+        "schema_version": 3,
+        "sha256": sha256.to_string(),
+        "plan_digest": "deadbeef",
+        "interpreter": "/bin/bash",
+        "interpreter_digest": "",
+        "interpreter_arguments": ["/bin/bash", "--noprofile", "--norc", "-e"],
+        "network_isolated": true,
+        "policy_snapshot_digest": "",
+        "detector_snapshot_digest": "",
+        "intelligence_snapshot_digest": "",
+        "operation": "execute",
+        "release_mode": "execute",
+        "environment_profile_digest": "default",
+        "working_directory_policy": "scratch",
+        "filesystem_grants": [],
+        "sandbox_capabilities": "default",
+        "release_destination": "/dev/null",
+        "expires_at_unix_seconds": 0,
+        "nonce": "no-id-nonce",
+        "approval_method": "stdin-human-confirmation",
+        "requester_integration": "test",
+        "requester_agent_name": "test",
+        "requester_session_id": "test"
+    });
+    let legacy_decoded: ApprovalTokenPayload = serde_json::from_value(payload_without_id_json)
+        .unwrap_or_else(|e| panic!("decode legacy: {e}"));
+    assert_eq!(
+        legacy_decoded.human_approver_identity, None,
+        "legacy tokens must deserialize with identity None"
+    );
+    let legacy_json = serde_json::to_string(&legacy_decoded)
+        .unwrap_or_else(|e| panic!("encode legacy back: {e}"));
+    assert!(
+        !legacy_json.contains("human_approver_identity"),
+        "absent identity must stay omitted when re-serialized: {legacy_json}"
+    );
+}
