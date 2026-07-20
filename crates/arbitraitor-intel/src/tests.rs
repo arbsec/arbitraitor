@@ -24,6 +24,7 @@ fn sample_entry(indicator: Indicator) -> FeedEntry {
         source_class: FeedSourceClass::ArbitraitorReviewed,
         first_seen: "2026-06-01T00:00:00Z".to_owned(),
         last_seen: "2026-06-17T00:00:00Z".to_owned(),
+        source_update_time: None,
         expires_at: None,
         sources: vec![FeedSource {
             source_type: "analyst".to_owned(),
@@ -218,6 +219,43 @@ fn expired_entries_are_ignored_by_match_indicator() -> std::result::Result<(), B
     assert!(match_indicator(&store, &indicator).is_empty());
     let _ = fs::remove_file(path);
     Ok(())
+}
+
+#[test]
+fn is_expired_is_false_when_no_expiration_set() {
+    let entry = sample_entry(sample_indicator(IndicatorType::Sha256, &"aa".repeat(32)));
+    assert!(entry.expires_at.is_none());
+    assert!(!entry.is_expired("2026-07-20T00:00:00Z"));
+    assert!(!entry.is_expired("1970-01-01T00:00:00Z"));
+}
+
+#[test]
+fn is_expired_is_false_when_expiration_is_in_the_future() {
+    let mut entry = sample_entry(sample_indicator(IndicatorType::Sha256, &"bb".repeat(32)));
+    entry.expires_at = Some("2099-01-01T00:00:00Z".to_owned());
+
+    assert!(!entry.is_expired("2026-07-20T00:00:00Z"));
+    assert!(!entry.is_expired("2098-12-31T23:59:59Z"));
+}
+
+#[test]
+fn is_expired_is_true_when_expiration_is_in_the_past() {
+    let mut entry = sample_entry(sample_indicator(IndicatorType::Sha256, &"cc".repeat(32)));
+    entry.expires_at = Some("1970-01-01T00:00:00Z".to_owned());
+
+    assert!(entry.is_expired("2026-07-20T00:00:00Z"));
+    assert!(entry.is_expired("1970-01-02T00:00:00Z"));
+}
+
+#[test]
+fn is_expired_uses_strict_inequality_at_boundary() {
+    // Spec §21.6: an entry is expired once `now` is strictly past `expires_at`.
+    // At the exact expiration timestamp the entry is still considered fresh.
+    let mut entry = sample_entry(sample_indicator(IndicatorType::Sha256, &"dd".repeat(32)));
+    entry.expires_at = Some("2026-07-20T00:00:00Z".to_owned());
+
+    assert!(!entry.is_expired("2026-07-20T00:00:00Z"));
+    assert!(entry.is_expired("2026-07-20T00:00:01Z"));
 }
 
 #[test]

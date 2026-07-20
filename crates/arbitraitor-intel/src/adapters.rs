@@ -139,6 +139,7 @@ fn allow_deny_entry(value: &str, observed_at: &str) -> FeedEntry {
         source_class: FeedSourceClass::EnterpriseDeny,
         first_seen: observed_at.to_owned(),
         last_seen: observed_at.to_owned(),
+        source_update_time: None,
         expires_at: None,
         sources: vec![FeedSource {
             source_type: "internal".to_owned(),
