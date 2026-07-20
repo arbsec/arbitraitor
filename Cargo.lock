@@ -345,6 +345,7 @@ name = "arbitraitor-mcp"
 version = "0.1.0"
 dependencies = [
  "arbitraitor-analysis",
+ "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-exec",
  "arbitraitor-fetch",

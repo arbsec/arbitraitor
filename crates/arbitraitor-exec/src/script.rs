@@ -860,4 +860,125 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Regression test for #612 acceptance criterion (c): reproduction of
+    /// the unshare-denied path. When the kernel or container runtime denies
+    /// `unshare --user --map-current-user --net` (e.g.
+    /// `/proc/sys/kernel/unprivileged_userns_clone=0`, a seccomp filter
+    /// blocking `CLONE_NEWUSER`, or a container runtime that doesn't allow
+    /// userns), unshare writes `unshare: ... Operation not permitted` to
+    /// stderr and exits before consuming the parent's stdin script bytes.
+    /// Before Fix B, the user saw a generic
+    /// `script input I/O failure during write-script-stdin` message with no
+    /// hint that userns was the actual blocker.
+    ///
+    /// Reproducing the real unshare-denied failure mode requires a
+    /// system/container where `unshare --user` is actually denied. CI
+    /// runners typically allow userns, so this test cannot exercise the
+    /// real unshare binary directly. Instead it installs a fake interpreter
+    /// that EXACTLY mimics unshare's failure signature (write the canonical
+    /// `unshare: unshare failed: Operation not permitted` message to
+    /// stderr, exit 1, never read stdin) and runs it through the same
+    /// `ScriptExecution::execute` code path that the real unshare-wrapped
+    /// bash invocation would hit. The Fix B machinery (`best_effort_capture`
+    /// plus `ExecError::script_io` plus `script_io_detail` rendering) is
+    /// identical whether the early-exiting child is the real unshare or this
+    /// fake — the same `write_all` EPIPE then capture then render path is
+    /// exercised in both cases.
+    #[test]
+    fn execute_surfaces_unshare_denied_diagnostic_when_child_exits_early()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new("/bin/sh").exists() {
+            return Ok(());
+        }
+        // The fake "interpreter" mimics util-linux unshare's behavior when
+        // the kernel denies CLONE_NEWUSER: emit the canonical diagnostic to
+        // stderr, exit 1, never read stdin. Real unshare output:
+        //   `unshare: unshare failed: Operation not permitted`
+        // (https://github.com/util-linux/util-linux/blob/master/sys-utils/unshare.c)
+        let fake_unshare_dir =
+            std::env::temp_dir().join(format!("arb-fake-unshare-{}", std::process::id()));
+        std::fs::remove_dir_all(&fake_unshare_dir).ok();
+        std::fs::create_dir_all(&fake_unshare_dir)?;
+        let fake_unshare_path = fake_unshare_dir.join("fake-unshare");
+        std::fs::write(
+            &fake_unshare_path,
+            b"#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted' >&2\nexit 1\n",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_unshare_path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        // Use ScriptExecution::new() with the fake interpreter. The default
+        // network_isolated=true would wrap this in a real unshare, defeating
+        // the purpose (we want to substitute FOR unshare, not layer on top
+        // of it). No resource limits are needed because the fake exits
+        // before any execution begins.
+        let execution = ScriptExecution::new(
+            fake_unshare_path.clone(),
+            std::iter::empty::<&'static str>(),
+        )?
+        .with_network_isolated(false);
+        // 256 KiB padding guarantees `write_all` cannot drain before the
+        // fake-unshare exits; the parent's `write_all` then fails with
+        // EPIPE, exercising the same Fix B path the real unshare-denied
+        // case would exercise.
+        let mut script_bytes: Vec<u8> = Vec::with_capacity(256 * 1024);
+        script_bytes.resize(256 * 1024, b'\n');
+        let error = match execution.execute(&script_bytes) {
+            Err(err) => err,
+            Ok(result) => {
+                std::fs::remove_dir_all(&fake_unshare_dir).ok();
+                return Err(format!(
+                    "expected execute() to fail via fake-unshare early exit, but it succeeded: {result:?}"
+                )
+                .into());
+            }
+        };
+        let ExecError::ScriptIo {
+            stage,
+            ref child_exit_code,
+            ref child_stderr,
+            ..
+        } = error
+        else {
+            std::fs::remove_dir_all(&fake_unshare_dir).ok();
+            return Err(format!(
+                "expected ScriptIo variant for unshare-denied path, got {error:?}"
+            )
+            .into());
+        };
+        let child_exit_code = *child_exit_code;
+        let child_stderr = child_stderr.clone();
+        assert!(
+            stage == "write-script-stdin" || stage == "flush-script-stdin",
+            "stage should be a script-stdin write/flush failure for the unshare-denied path, got {stage:?}"
+        );
+        let stderr_text = String::from_utf8_lossy(&child_stderr);
+        assert!(
+            stderr_text.contains("unshare failed") && stderr_text.contains("not permitted"),
+            "child_stderr must capture the unshare-denied diagnostic for issue #612 acceptance (c); got {stderr_text:?}"
+        );
+        assert_eq!(
+            child_exit_code,
+            Some(1),
+            "child_exit_code should be 1 (unshare exits 1 on denial); got {child_exit_code:?}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("unshare failed"),
+            "rendered error must surface the unshare-denied diagnostic so the user can distinguish 'kernel denied userns' from 'I fed bash junk'; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("not permitted"),
+            "rendered error must include 'not permitted' from unshare's diagnostic; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("child exited 1"),
+            "rendered error should mention the child exit code; got {rendered:?}"
+        );
+        std::fs::remove_dir_all(&fake_unshare_dir).ok();
+        Ok(())
+    }
 }

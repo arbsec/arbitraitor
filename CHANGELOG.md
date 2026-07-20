@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed. Swallows secondary `read_with_limit` errors so the original
   I/O error remains the primary signal.
 
+#### MCP
+
+- `RunApprovedArtifactError::NotExecutable { artifact_type }` — new
+  variant produced by `RunApprovedArtifactTool::run` when an
+  approved-but-non-shell-script artifact's bytes are about to be piped to
+  `/bin/bash`. Closes Blocker 4 from the adversarial review of #615: an
+  agent can no longer approve an HTML / JSON / XML / archive / Unknown
+  artifact via `request_approval` and execute it via
+  `run_approved_artifact` — only `ArtifactType::ShellScript(_)` is
+  runnable through the MCP approved-execution path. CLI `run` and MCP
+  `run_approved_artifact` now enforce the same content-type gate
+  (ADR-0028, issue #612).
+
 ### Changed
 
 #### CLI
@@ -68,6 +81,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script from `artifact_type` via `execution_mode_for_type`. Receipt
   serialization is unchanged (`format!("{:?}", artifact_type)` is passed
   to `ReceiptBuilder::artifact_type` on demand).
+
+### Fixed
+
+#### Exec
+
+- `ExecError::script_io_detail` is now panic-safe when the captured child
+  stderr is attacker-controlled UTF-8 longer than 1 KiB. The previous
+  byte-index slice `&str[..1024]` panicked if byte 1024 fell inside a
+  multibyte codepoint; the fix truncates the BYTES first, then
+  lossy-decodes via `String::from_utf8_lossy`, which replaces any partial
+  trailing codepoint with U+FFFD. Found by 3 of the 5 adversarial
+  reviewers of #615 (Blocker 1, MEDIUM severity).
+- `ExecError::script_io_detail` now escapes Arbitraitor untrusted-data
+  markers (`<<ARBITRAITOR_UNTRUSTED_DATA_START>>` /
+  `<<ARBITRAITOR_UNTRUSTED_DATA_END>>`) inside the captured child
+  stderr, satisfying the Safe Presentation invariant (ADR-0016) that
+  untrusted text must be escaped and bounded before display. The
+  `{:?}` debug-format at the call site already neutralizes ANSI control
+  sequences; the marker escape additionally prevents prompt-injection
+  in downstream agent consumers that rely on the markers to fence
+  untrusted content. Found by 2 of the 5 adversarial reviewers of #615
+  (Blocker 2, MEDIUM severity).
 
 ### Added
 

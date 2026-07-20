@@ -167,7 +167,10 @@ pub enum ExecError {
         /// Pre-rendered human-readable detail derived from
         /// `child_exit_code` / `child_stderr` so thiserror's `Display` impl
         /// can append it without a custom `fmt::Display` override. Built once
-        /// at construction by [`ScriptIo::new`].
+        /// at construction by [`ExecError::script_io`]. Callers MUST use
+        /// that constructor rather than building the struct literal directly
+        /// so the `child_detail` field stays consistent with the
+        /// `child_exit_code` / `child_stderr` fields.
         child_detail: String,
     },
     /// Native execution lacks both explicit CLI approval and trusted policy approval.
@@ -245,7 +248,10 @@ impl ExecError {
     /// captured.
     ///
     /// Empty `child_stderr` and `None` exit code yield an empty
-    /// `child_detail`, leaving the existing message form unchanged.
+    /// `child_detail`, leaving the existing message form unchanged. Callers
+    /// MUST use this constructor rather than building the variant struct
+    /// directly so the `child_detail` field stays consistent with the
+    /// `child_exit_code` / `child_stderr` fields.
     #[must_use]
     pub fn script_io(
         stage: &'static str,
@@ -269,28 +275,59 @@ impl ExecError {
     /// can share the same rendering rule without re-implementing it.
     /// Returns an empty string when no child state was captured so the
     /// message stays as terse as before.
+    ///
+    /// The captured stderr is byte-truncated to 1 KiB before UTF-8 lossy
+    /// decoding: `String::from_utf8_lossy` replaces any partial trailing
+    /// codepoint with U+FFFD, so this is panic-safe even when the
+    /// attacker-controlled child stderr ends mid-multibyte-char right at the
+    /// cap. This matters because the bytes come from the executed child
+    /// (bash, unshare, pwsh, ...) whose output the parent does not control.
+    ///
+    /// ADR-0016 (Safe Presentation) requires untrusted text to be escaped
+    /// and bounded before display. Because `arbitraitor-exec` sits BELOW
+    /// the `arbitraitor-mcp::sanitize_for_agent` renderer in the dependency
+    /// stack, we apply the two crucial defenses inline: (1) the `{:?}`
+    /// debug-format at the call site quotes the preview and escapes all C0
+    /// control bytes including ANSI sequences, preventing terminal injection;
+    /// (2) this function replaces Arbitraitor's untrusted-data markers
+    /// (`<<ARBITRAITOR_UNTRUSTED_DATA_START>>` / `<<ARBITRAITOR_UNTRUSTED_DATA_END>>`)
+    /// with placeholder text so an attacker who controls the child stderr
+    /// cannot spoof the markers and confuse downstream agent consumers that
+    /// rely on them to fence untrusted content.
     #[must_use]
     pub fn script_io_detail(child_exit_code: Option<i32>, child_stderr: &[u8]) -> String {
         // Cap rendered stderr to keep failure messages and receipts bounded.
         // 1 KiB is ample for the "bash: parse error" / "unshare: not permitted"
         // class of diagnostics and holds even multi-line shell errors.
         const MAX_STDERR_LEN: usize = 1024;
-        let trimmed = std::str::from_utf8(child_stderr)
-            .unwrap_or("")
-            .trim_end_matches(['\n', '\r', ' ']);
-        if trimmed.is_empty() && child_exit_code.is_none() {
-            return String::new();
-        }
-        if trimmed.is_empty() {
-            return format!(" (child exited with code {child_exit_code:?})");
-        }
-        let mut stderr_preview = trimmed;
-        if stderr_preview.len() > MAX_STDERR_LEN {
-            stderr_preview = &stderr_preview[..MAX_STDERR_LEN];
-        }
-        match child_exit_code {
-            Some(code) => format!(" (child exited {code}; stderr: {stderr_preview:?})"),
-            None => format!(" (child exited before reading stdin; stderr: {stderr_preview:?})"),
+        // Escape Arbitraitor untrusted-data markers per ADR-0016 so an
+        // attacker who controls the child stderr cannot spoof markers and
+        // confuse downstream agent consumers (See Safe Presentation
+        // invariant in docs/conventions.md). The literals are duplicated
+        // here rather than imported from `arbitraitor-mcp` because
+        // `arbitraitor-exec` sits below `arbitraitor-mcp` in the dependency
+        // stack.
+        const ARBITRAITOR_UNTRUSTED_START: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_START>>";
+        const ARBITRAITOR_UNTRUSTED_END: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_END>>";
+        // Truncate bytes FIRST, then lossy-decode. `from_utf8_lossy` replaces
+        // any partial trailing codepoint with U+FFFD, so a slice that ends mid
+        // multibyte char cannot panic (the previous `&str[..usize]` form
+        // would panic in the same position).
+        let truncated_bytes: &[u8] = if child_stderr.len() > MAX_STDERR_LEN {
+            &child_stderr[..MAX_STDERR_LEN]
+        } else {
+            child_stderr
+        };
+        let decoded = String::from_utf8_lossy(truncated_bytes);
+        let sanitized = decoded
+            .replace(ARBITRAITOR_UNTRUSTED_START, "[escaped-untrusted-start]")
+            .replace(ARBITRAITOR_UNTRUSTED_END, "[escaped-untrusted-end]");
+        let trimmed = sanitized.trim_end_matches(['\n', '\r', ' ']);
+        match (child_exit_code, trimmed.is_empty()) {
+            (None, true) => String::new(),
+            (Some(code), true) => format!(" (child exited with code {code})"),
+            (Some(code), false) => format!(" (child exited {code}; stderr: {trimmed:?})"),
+            (None, false) => format!(" (child exited before reading stdin; stderr: {trimmed:?})"),
         }
     }
 }

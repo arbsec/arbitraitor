@@ -641,3 +641,142 @@ fn inspect_level_does_not_require_control_proofs() -> Result<(), Box<dyn std::er
     assert_eq!(context.effective_controls(), &EffectiveControls::default());
     Ok(())
 }
+
+/// Regression test for the review of #615 (Blocker 1, found by 3 of 5
+/// adversarial reviewers): `ExecError::script_io_detail` previously sliced
+/// `&str[..MAX_STDERR_LEN]` at byte offset 1024, which panics if byte 1024
+/// falls inside a multibyte UTF-8 codepoint. The bytes come from the
+/// executed child (bash, unshare, ...) which an attacker can control via
+/// the script bytes, so this is a reachable panic on the error path —
+/// violates the workspace `clippy::panic = "deny"` lint, the Safe
+/// Presentation invariant (ADR-0016), and the Fail Closed invariant.
+///
+/// The fix truncates BYTES before UTF-8 lossy decoding. `from_utf8_lossy`
+/// replaces any partial trailing codepoint with U+FFFD, so a slice that
+/// ends mid-char cannot panic.
+#[test]
+fn script_io_detail_does_not_panic_when_cap_splits_multibyte_char() {
+    // 1023 ASCII bytes followed by a 2-byte char (é = 0xC3 0xA9). Total
+    // byte length = 1025, but the 1024-byte cap (0-indexed 0..=1023) lands
+    // on byte 0xC3 — the lead byte of the 2-byte codepoint. The pre-fix
+    // `&str[..1024]` would panic here.
+    let mut stderr: Vec<u8> = vec![b'a'; 1023];
+    stderr.extend_from_slice("é".as_bytes());
+    assert_eq!(stderr.len(), 1025);
+
+    // Must not panic; must include the 1023 'a' bytes; must replace the
+    // split trailing char with U+FFFD ("�").
+    let detail = ExecError::script_io_detail(Some(1), &stderr);
+    assert!(
+        detail.starts_with(" (child exited 1; stderr: \""),
+        "unexpected format: {detail:?}"
+    );
+    assert!(
+        detail.contains("aaa"),
+        "should include the 1023 ASCII 'a' bytes; got {detail:?}"
+    );
+    // U+FFFD = '\u{FFFD}' = 0xEF 0xBF 0xBD. The decoder must emit one
+    // replacement char in place of the split codepoint.
+    assert!(
+        detail.contains('\u{FFFD}'),
+        "should contain U+FFFD for the truncated multibyte char; got {detail:?}"
+    );
+
+    // Also exercise a much larger input to ensure no panic at any cap.
+    let huge: Vec<u8> = std::iter::repeat_n(b'\xC3', 8192).collect();
+    let _ = ExecError::script_io_detail(Some(2), &huge);
+}
+
+/// Regression test for #615: `script_io_detail` with empty stderr and no
+/// exit code yields an empty `child_detail` so the user-visible error stays
+/// terse (preserves the previous behavior for tests that don't capture
+/// child state).
+#[test]
+fn script_io_detail_is_empty_when_no_state_captured() {
+    assert_eq!(ExecError::script_io_detail(None, &[]), "");
+}
+
+/// Regression test for #615: `script_io_detail` handles invalid UTF-8
+/// stderr by lossy-decoding rather than silently dropping it. Previously
+/// `std::str::from_utf8(stderr).unwrap_or("")` discarded all bytes when
+/// any byte was invalid; the fix uses `from_utf8_lossy` so partial garbage
+/// still surfaces something useful to the operator.
+#[test]
+fn script_io_detail_lossily_decodes_invalid_utf8_stderr() {
+    let stderr: Vec<u8> = vec![b'b', b'a', b's', b'h', b':', b' ', 0xFF, 0xFE, b'!'];
+    let detail = ExecError::script_io_detail(Some(2), &stderr);
+    assert!(
+        detail.contains("bash:"),
+        "should preserve the valid UTF-8 prefix; got {detail:?}"
+    );
+    assert!(
+        detail.contains('\u{FFFD}'),
+        "should include U+FFFD for the invalid bytes; got {detail:?}"
+    );
+}
+
+/// Regression test for the review of #615 (Blocker 2, ADR-0016 Safe
+/// Presentation): an attacker who controls the executed child (e.g. via a
+/// shell script that emits an `ARBITRAITOR_UNTRUSTED_DATA_START` marker to
+/// stderr) could otherwise spoof Arbitraitor's untrusted-data markers in
+/// the captured stderr, confusing downstream agent consumers that rely on
+/// the markers to fence untrusted content.
+///
+/// The fix replaces the markers with safe placeholder text before
+/// formatting. This test asserts the spoofed marker does not appear in the
+/// rendered error string and IS replaced with `[escaped-untrusted-start]`.
+#[test]
+fn script_io_detail_escapes_arbitraitor_untrusted_data_markers() {
+    const SPOOFED_STDERR: &[u8] =
+        b"<<ARBITRAITOR_UNTRUSTED_DATA_START>>hello<<ARBITRAITOR_UNTRUSTED_DATA_END>>";
+    let detail = ExecError::script_io_detail(Some(1), SPOOFED_STDERR);
+    assert!(
+        !detail.contains("<<ARBITRAITOR_UNTRUSTED_DATA_START>>"),
+        "untrusted-start marker must be escaped; got {detail:?}"
+    );
+    assert!(
+        !detail.contains("<<ARBITRAITOR_UNTRUSTED_DATA_END>>"),
+        "untrusted-end marker must be escaped; got {detail:?}"
+    );
+    assert!(
+        detail.contains("[escaped-untrusted-start]"),
+        "escaped placeholder should appear; got {detail:?}"
+    );
+    assert!(
+        detail.contains("[escaped-untrusted-end]"),
+        "escaped placeholder should appear; got {detail:?}"
+    );
+}
+
+/// Regression test for the review of #615 (Blocker 2): control bytes in
+/// captured child stderr must NOT reach the rendered error string as live
+/// terminal control characters. The fix relies on Rust's `{:?}` debug
+/// format for `&str`, which escapes C0/C1 control bytes (including ANSI
+/// escape sequences) as `\xNN` literal text. This test feeds a script that
+/// emits an ANSI "red text" sequence plus a cursor-move sequence to
+/// stderr, then verifies the rendered error string contains the ESC byte
+/// as the literal text `\x1b` rather than as a live escape.
+#[test]
+fn script_io_detail_neutralizes_ansi_control_sequences_in_stderr() {
+    // 0x1b 0x5b 0x33 0x31 0x6d = ESC [ 3 1 m  ("red foreground")
+    // 0x1b 0x5b 0x48           = ESC [ H    ("cursor home")
+    let mut stderr: Vec<u8> = Vec::new();
+    stderr.extend_from_slice(b"sh: ");
+    stderr.extend_from_slice(&[0x1b, b'[', b'3', b'1', b'm', b'e', b'r', b'r']);
+    stderr.extend_from_slice(&[0x1b, b'[', b'0', b'm', 0x1b, b'[', b'H']);
+    stderr.extend_from_slice(b"\n");
+    let detail = ExecError::script_io_detail(Some(2), &stderr);
+    // No live ESC byte should appear in the rendered string.
+    assert!(
+        !detail.contains(0x1b as char),
+        "live ESC byte must not reach terminal; got {detail:?}"
+    );
+    // Rust's `{:?}` format escapes ESC as the literal text `\u{1b}` (Unicode
+    // escape syntax) inside the quoted string. Verify the escape is present
+    // in the rendered output so reviewers can confirm no live control byte
+    // slipped through.
+    assert!(
+        detail.contains("\\u{1b}"),
+        "ESC should be escaped as `\\u{{1b}}` literal text; got {detail:?}"
+    );
+}

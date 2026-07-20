@@ -556,8 +556,11 @@ fn request_approval_denial_returns_no_token() {
 fn run_approved_artifact_executes_with_valid_token() {
     let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
     let store = Arc::new(InMemoryArtifactStore::new());
+    // Shebang-tagged shell script so the artifact classifier returns
+    // `ArtifactType::ShellScript(Posix)` and the ADR-0028 content-type gate
+    // passes the bytes through to ScriptExecution.
     let digest = store
-        .record(b"printf 'approved output'\n".to_vec())
+        .record(b"#!/bin/sh\nprintf 'approved output'\n".to_vec())
         .unwrap_or_else(|error| panic!("record artifact: {error}"));
     // Issue and validate under an open (non-isolated) context so the test
     // does not depend on unshare(2) being permitted by the CI container.
@@ -667,6 +670,105 @@ fn run_approved_artifact_rejects_unapproved_args() {
     assert_error_contains(
         &response,
         "runtime args are not part of the approved execution plan",
+    );
+}
+
+/// Regression test for the review of #615 (Blocker 4, ADR-0028, issue #612):
+/// the MCP `run_approved_artifact` tool gates execution by classified
+/// `ArtifactType`. An agent that approves an HTML / JSON / XML / archive /
+/// `GenericText` / `GenericBinary` / `PowerShellScript` / `PythonScript` /
+/// `JavaScript` / `Unknown` artifact via `request_approval` cannot then
+/// execute it via `run_approved_artifact` and have the bytes fed to
+/// `/bin/bash` (which is unsafe per the same rationale as the CLI `run`
+/// gate). Only `ArtifactType::ShellScript(_)` is runnable through this MCP
+/// path; everything else fails closed with `NotExecutable`.
+#[test]
+fn run_approved_artifact_rejects_non_shell_script_artifact_types() {
+    for (label, bytes, expected_type_fragment) in [
+        (
+            "html",
+            b"<!DOCTYPE html>\n<html></html>\n".to_vec(),
+            "HtmlDocument",
+        ),
+        ("json", b"{\"key\":\"value\"}\n".to_vec(), "JsonDocument"),
+        (
+            "xml",
+            b"<?xml version=\"1.0\"?>\n<root/>\n".to_vec(),
+            "XmlDocument",
+        ),
+        ("generic text", b"hello world\n".to_vec(), "GenericText"),
+        (
+            "zip archive",
+            {
+                let mut zip = vec![
+                    0x50, 0x4b, 0x05, 0x06, // End Of Central Directory signature
+                ];
+                zip.extend_from_slice(&[0u8; 18]); // EOCD body (zeros => empty archive)
+                zip
+            },
+            "ZipArchive",
+        ),
+        ("unknown binary", vec![0x00; 64], "GenericBinary"),
+    ] {
+        let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+        let store = Arc::new(InMemoryArtifactStore::new());
+        let digest = store
+            .record(bytes)
+            .unwrap_or_else(|error| panic!("record {label} artifact: {error}"));
+        // Open (non-isolated) context so the token validation does not
+        // depend on unshare(2); the gate runs before token validation
+        // would matter for execution semantics.
+        let ctx = open_ctx();
+        let token = approval_token_with_ctx(&issuer, &digest, "run approved non-script", &ctx);
+        let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+        let response = tool.handle(
+            json!({ "sha256": digest.to_string(), "approval_token": token }),
+            &agent(),
+        );
+
+        assert!(
+            response.is_error,
+            "non-shell-script artifact ({label}) should be rejected, not executed"
+        );
+        assert_error_contains(&response, "is not executable via the approved MCP run path");
+        assert_error_contains(&response, expected_type_fragment);
+    }
+}
+
+/// Positive control for the review of #615 (Blocker 4): a classified
+/// `ShellScript(Posix)` artifact that is approved via the MCP flow still
+/// executes through bash (validates the gate doesn't over-tighten).
+#[test]
+#[cfg(target_os = "linux")]
+fn run_approved_artifact_executes_shell_script_through_gate() {
+    let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
+    let store = Arc::new(InMemoryArtifactStore::new());
+    let digest = store
+        .record(b"#!/bin/sh\necho 'posix shell through MCP gate'\n".to_vec())
+        .unwrap_or_else(|error| panic!("record artifact: {error}"));
+    // Open (non-isolated) context so the test does not depend on unshare(2).
+    let ctx = open_ctx();
+    let token =
+        approval_token_with_ctx(&issuer, &digest, "run shell script through MCP gate", &ctx);
+    let tool = RunApprovedArtifactTool::new(store, issuer).with_network_isolated(false);
+
+    let response = tool.handle(
+        json!({ "sha256": digest.to_string(), "approval_token": token }),
+        &agent(),
+    );
+
+    assert!(!response.is_error, "response was {response:?}");
+    let McpContent::Json { json } = &response.content[0] else {
+        panic!("expected json content");
+    };
+    assert_eq!(json["capability"], "execute");
+    assert_eq!(json["execution_performed"], true);
+    assert_eq!(json["result"]["exit_code"], 0);
+    assert!(
+        json["result"]["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout.contains("posix shell through MCP gate"))
     );
 }
 

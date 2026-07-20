@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_analysis::{AnalysisCoordinator, DetectorStatus, RetrievalInfo};
+use arbitraitor_artifact::{ArtifactType, classify};
 use arbitraitor_exec::script::ScriptExecution;
 use arbitraitor_fetch::{
     FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink, redact_url,
@@ -1428,6 +1429,23 @@ impl RunApprovedArtifactTool {
             .lookup_artifact(&digest)
             .ok_or(RunApprovedArtifactError::ArtifactNotFound)?;
         verify_bytes_digest(&bytes, &digest)?;
+        // ADR-0028 / issue #612 (Blocker 4 from adversarial review): gate
+        // the approved artifact by classified ArtifactType before piping bytes
+        // to bash. The approval token binds the interpreter to bash, but an
+        // agent (or a confused human operator driving the agent) could
+        // approve an HTML / JSON / XML / archive / Unknown artifact for
+        // execution. Piping such bytes to bash is unsafe (HTML etc. can
+        // incidentally contain bash-parseable `$(...)`, redirections, pipes)
+        // and incorrect (bash doesn't understand them). Only shell scripts
+        // are runnable through this MCP path; native executables are gated
+        // out as well because the MCP approval flow always binds to the
+        // bash interpreter (see [`PlanContext::for_bash`]).
+        let classification = classify(&bytes);
+        if !matches!(classification.artifact_type, ArtifactType::ShellScript(_)) {
+            return Err(RunApprovedArtifactError::NotExecutable {
+                artifact_type: classification.artifact_type,
+            });
+        }
         let execution = ScriptExecution::bash()?.with_network_isolated(self.ctx.network_isolated);
         let result = execution.execute(&bytes)?;
         Ok(json!({
@@ -1880,6 +1898,22 @@ enum RunApprovedArtifactError {
     ArtifactDigestMismatch,
     #[error("runtime args are not part of the approved execution plan")]
     UnapprovedArguments,
+    /// Artifact bytes were classified as a non-executable content type. The
+    /// MCP-approved execution path gates the same way the CLI `run` pipeline
+    /// does (ADR-0028, issue #612): only `ArtifactType::ShellScript(_)` and
+    /// the native executable types can be approved for bash execution.
+    /// Everything else — HTML, JSON, XML, archives, `GenericText`,
+    /// `GenericBinary`, `PowerShellScript`, `PythonScript`, `JavaScript`,
+    /// `Unknown` — fails closed with this error so an agent that approves an
+    /// HTML artifact via `request_approval` cannot then execute it via
+    /// `run_approved_artifact` and have the bytes fed to `/bin/bash`.
+    #[error(
+        "artifact type {artifact_type:?} is not executable via the approved MCP run path; only shell scripts are runnable"
+    )]
+    NotExecutable {
+        /// The classified [`ArtifactType`] that was rejected.
+        artifact_type: ArtifactType,
+    },
     #[error("script execution failed: {0}")]
     Exec(#[from] arbitraitor_exec::ExecError),
 }

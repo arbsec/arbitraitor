@@ -242,27 +242,40 @@ async fn run_executes_shell_script_artifact_types()
     Ok(())
 }
 
-/// Positive control for #612 (Fix A): a native `ElfExecutable` must still
-/// pass through the gate (auto-approved via `--native`). Guards against an
-/// over-restrictive regression that would block legitimate native execution.
+/// Positive control for #612 (Fix A): all three native executable types
+/// (`ElfExecutable`, `PeExecutable`, `MachOExecutable`) must pass through
+/// the gate and reach `services.execute()` (which is a fake in test mode;
+/// native execution machinery is gated by `cfg(target_os = "linux")` and
+/// the host kernel decides whether each binary can actually run, but the
+/// content-type gate must not block them pre-emptively).
 #[tokio::test]
 async fn run_executes_native_artifact_type() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
-    let native_command = command(true, false);
-    let mut services = FakeServices::with_artifact(fake_artifact_with_type(
-        Verdict::Pass,
+    for native_type in [
         ArtifactType::ElfExecutable,
-    ));
-    let mut output = Vec::new();
-    let code = run_with_services(
-        &native_command,
-        &Config::default(),
-        &mut services,
-        &mut output,
-    )
-    .await?;
-    assert_eq!(code, EXIT_SUCCESS, "ELF executable should execute");
-    assert!(services.executed, "ELF executable should reach execute()");
+        ArtifactType::PeExecutable,
+        ArtifactType::MachOExecutable,
+    ] {
+        let native_command = command(true, false);
+        let mut services =
+            FakeServices::with_artifact(fake_artifact_with_type(Verdict::Pass, native_type));
+        let mut output = Vec::new();
+        let code = run_with_services(
+            &native_command,
+            &Config::default(),
+            &mut services,
+            &mut output,
+        )
+        .await?;
+        assert_eq!(
+            code, EXIT_SUCCESS,
+            "native type {native_type:?} should pass the content-type gate"
+        );
+        assert!(
+            services.executed,
+            "native type {native_type:?} should reach execute()"
+        );
+    }
     Ok(())
 }
 
