@@ -648,6 +648,154 @@ fn civil_from_days(days_since_epoch: u64) -> (i64, u64, u64) {
     )
 }
 
+/// Placeholder substituted for redacted values in community reports (spec §22.6).
+pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
+
+/// Lowercased query parameter keys whose values must be redacted from URLs
+/// before inclusion in community reports (spec §22.6).
+///
+/// Comparison is case-insensitive; the literal key value in the URL is
+/// preserved (only the value is replaced with [`REDACTED_PLACEHOLDER`]).
+const SENSITIVE_QUERY_KEYS: &[&str] = &["token", "secret", "key", "password", "sig", "signature"];
+
+/// Uppercased environment-variable suffixes that mark a variable as sensitive
+/// regardless of value (spec §22.6).
+const SENSITIVE_ENV_SUFFIXES: &[&str] = &["_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+
+/// Strips credentials and sensitive query parameters from a URL for safe
+/// inclusion in community reports and feeds (spec §22.6).
+///
+/// Userinfo is removed entirely; only the username/password are dropped so the
+/// host, path, and remaining query survive. Query parameter values whose
+/// lowercased key matches [`SENSITIVE_QUERY_KEYS`] are replaced with
+/// [`REDACTED_PLACEHOLDER`]; keys and ordering are preserved.
+///
+/// URLs that fail to parse are returned unchanged so callers can distinguish
+/// malformed input from intentionally redacted output.
+#[must_use]
+pub fn redact_url(input: &str) -> String {
+    let Ok(mut url) = Url::parse(input) else {
+        return input.to_owned();
+    };
+
+    let has_credentials = !url.username().is_empty() || url.password().is_some();
+    if has_credentials {
+        // `set_username("")` only fails for non-special schemes that already
+        // rejected userinfo during `Url::parse` — in which case we return the
+        // original input rather than silently dropping the URL.
+        if url.set_username("").is_err() {
+            return input.to_owned();
+        }
+        if url.set_password(None).is_err() {
+            return input.to_owned();
+        }
+    }
+
+    if let Some(query) = url.query() {
+        let redacted = redact_query_string(query);
+        if redacted != query {
+            url.set_query(Some(&redacted));
+        }
+    }
+
+    url.to_string()
+}
+
+fn redact_query_string(query: &str) -> String {
+    query
+        .split('&')
+        .map(redact_query_pair)
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn redact_query_pair(pair: &str) -> String {
+    let Some((key, _value)) = pair.split_once('=') else {
+        return pair.to_owned();
+    };
+    let lower = key.to_ascii_lowercase();
+    // Substring match is intentionally permissive: a query parameter named
+    // `api_key` or `access_token` must be redacted, and over-redacting common
+    // search params (e.g. `keyword`) is preferable to leaking secrets.
+    if SENSITIVE_QUERY_KEYS
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        format!("{key}={REDACTED_PLACEHOLDER}")
+    } else {
+        pair.to_owned()
+    }
+}
+
+/// Redacts local paths so home-directory and user-prefixed absolute paths
+/// collapse to `~/` for safe inclusion in community reports (spec §22.6).
+///
+/// Replacement applies in two passes:
+/// 1. If `path` begins with the current value of the `HOME` environment
+///    variable, that prefix is rewritten to `~`.
+/// 2. Any remaining `/home/<user>/...` prefix is rewritten to `~/...` so
+///    paths produced by other users on shared systems are also collapsed.
+///
+/// Paths that do not match either prefix are returned unchanged.
+#[must_use]
+pub fn redact_path(path: &str) -> String {
+    let home = std::env::var_os("HOME").and_then(|value| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        }
+    });
+    redact_path_with_home(path, home.as_deref())
+}
+
+fn redact_path_with_home(path: &str, home: Option<&Path>) -> String {
+    let mut result = path.to_owned();
+    if let Some(home) = home
+        && let Some(home_str) = home.to_str()
+        && !home_str.is_empty()
+        && let Some(stripped) = result.strip_prefix(home_str)
+    {
+        result = format!("~{stripped}");
+    }
+    redact_home_user_prefix(&result)
+}
+
+fn redact_home_user_prefix(path: &str) -> String {
+    let Some(after_home) = path.strip_prefix("/home/") else {
+        return path.to_owned();
+    };
+    let Some(slash_index) = after_home.find('/') else {
+        return path.to_owned();
+    };
+    let suffix = &after_home[slash_index + 1..];
+    format!("~/{suffix}")
+}
+
+/// Returns `Some(value)` when `name` is safe to surface in a community
+/// report, and `None` when it matches a sensitive naming pattern
+/// (spec §22.6).
+///
+/// Names ending in `_KEY`, `_TOKEN`, `_SECRET`, or `_PASSWORD`
+/// (case-insensitive) are treated as sensitive regardless of value. Other
+/// names are returned verbatim so callers can decide whether to render or
+/// further inspect the value.
+#[must_use]
+pub fn redact_env_var(name: &str, value: &str) -> Option<String> {
+    if is_sensitive_env_name(name) {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn is_sensitive_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SENSITIVE_ENV_SUFFIXES
+        .iter()
+        .any(|suffix| upper.ends_with(suffix))
+}
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

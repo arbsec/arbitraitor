@@ -9,14 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Analysis
+#### Intel
 
-- `arbitraitor_analysis::AnalysisBudget` — new struct bounding recursive
-  graph expansion across bytes (1 GiB default), nodes (10,000 default),
-  and depth (5 default) per spec §41.16. Includes `deterministic_mode`
-  flag (default true) that fixes detector ordering for reproducible
-  receipts. `AnalysisCoordinator` now accepts a budget via `.with_budget()`
-  and exposes it via `.budget()`. 10 new tests.
+- `arbitraitor-intel::redact_url`, `redact_path`, and `redact_env_var` —
+  new public helpers that strip credentials, sensitive query parameters,
+  home-directory paths, and sensitive environment-variable values from
+  artifacts before inclusion in community reports and feeds (spec §22.6).
+  `redact_url` removes userinfo entirely and replaces values whose key
+  matches `token`, `secret`, `key`, `password`, `sig`, or `signature`
+  (case-insensitive substring match) with `[REDACTED]`. `redact_path`
+  collapses `$HOME`-prefixed and `/home/<user>/` paths to `~/`.
+  `redact_env_var` returns `None` for names ending in `_KEY`, `_TOKEN`,
+  `_SECRET`, or `_PASSWORD` (case-insensitive) and `Some(value)` otherwise.
 
 #### Exec
 
@@ -83,18 +87,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Thin wrapper over the existing `From<Verdict>` impl; gives daemon/CLI
   call sites a single, named function to point at when the mapping rule
   changes.
-
-#### MCP
-
-- `fetch_artifact` MCP tool — retrieves a URL once via
-  `arbitraitor_fetch::HttpFetcher` and returns the CAS identity
-  (SHA-256, byte count, content type, final URL) without releasing or
-  executing the artifact (spec §33.1). The tool is registered with
-  capability class `Inspect` and accepts an optional `sha256` digest
-  pin for callers that want provenance verification at retrieval
-  time. No scan/analysis is performed — callers can chain
-  `inspect_url` or `scan_artifact` against the returned digest for
-  classification.
 
 #### Fetch
 

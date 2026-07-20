@@ -225,3 +225,189 @@ fn formats_unix_epoch_as_rfc3339_utc() {
     assert_eq!(format_unix_timestamp(0), "1970-01-01T00:00:00Z");
     assert_eq!(format_unix_timestamp(86_400), "1970-01-02T00:00:00Z");
 }
+
+#[test]
+fn redact_url_strips_userinfo_and_keeps_host_and_path() {
+    let redacted = redact_url("https://user:secret@api.example.com/v1/tool?token=abc");
+    assert!(
+        !redacted.contains("user"),
+        "username must not survive redaction: {redacted}"
+    );
+    assert!(
+        !redacted.contains("secret"),
+        "password must not survive redaction: {redacted}"
+    );
+    assert!(
+        redacted.contains("api.example.com"),
+        "host must be preserved: {redacted}"
+    );
+    assert!(
+        redacted.contains("/v1/tool"),
+        "path must be preserved: {redacted}"
+    );
+    assert!(
+        redacted.contains("token=[REDACTED]"),
+        "sensitive query value must be replaced: {redacted}"
+    );
+    assert!(
+        !redacted.contains("token=abc"),
+        "sensitive query value must not survive: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_strips_username_only_when_no_password() {
+    let redacted = redact_url("https://alice@example.com/path?page=1");
+    assert!(
+        !redacted.contains("alice"),
+        "username must not survive redaction: {redacted}"
+    );
+    assert!(
+        redacted.contains("example.com/path"),
+        "host and path must be preserved: {redacted}"
+    );
+    assert!(
+        redacted.contains("page=1"),
+        "non-sensitive query param must be preserved: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_handles_multiple_sensitive_query_params() {
+    let redacted = redact_url("https://example.com/path?token=t1&page=2&api_key=k1&signature=sig1");
+    assert!(
+        redacted.contains("token=[REDACTED]"),
+        "token must be redacted: {redacted}"
+    );
+    assert!(
+        redacted.contains("api_key=[REDACTED]"),
+        "api_key must be redacted: {redacted}"
+    );
+    assert!(
+        redacted.contains("signature=[REDACTED]"),
+        "signature must be redacted: {redacted}"
+    );
+    assert!(
+        redacted.contains("page=2"),
+        "non-sensitive param must be preserved: {redacted}"
+    );
+    assert!(!redacted.contains("t1"), "t1 must not survive: {redacted}");
+    assert!(!redacted.contains("k1"), "k1 must not survive: {redacted}");
+    assert!(
+        !redacted.contains("sig1"),
+        "sig1 must not survive: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_matches_sensitive_query_keys_case_insensitively() {
+    let redacted =
+        redact_url("https://example.com/p?TOKEN=upper&Key=mixed&PASSWORD=lower&Sig=short");
+    assert!(redacted.contains("TOKEN=[REDACTED]"), "got: {redacted}");
+    assert!(redacted.contains("Key=[REDACTED]"), "got: {redacted}");
+    assert!(redacted.contains("PASSWORD=[REDACTED]"), "got: {redacted}");
+    assert!(redacted.contains("Sig=[REDACTED]"), "got: {redacted}");
+}
+
+#[test]
+fn redact_url_leaves_non_sensitive_query_alone() {
+    let redacted = redact_url("https://example.com/search?q=hello&page=3");
+    assert_eq!(redacted, "https://example.com/search?q=hello&page=3");
+}
+
+#[test]
+fn redact_url_returns_unparseable_input_unchanged() {
+    let input = "not a url at all";
+    assert_eq!(redact_url(input), input);
+}
+
+#[test]
+fn redact_url_handles_empty_query_and_credentials() {
+    assert_eq!(
+        redact_url("https://example.com/path"),
+        "https://example.com/path"
+    );
+    assert_eq!(
+        redact_url("https://example.com/path?"),
+        "https://example.com/path?"
+    );
+}
+
+#[test]
+fn redact_path_collapses_home_directory_prefix() {
+    let redacted = redact_path_with_home("/home/alice/projects/x", Some(Path::new("/home/alice")));
+    assert_eq!(redacted, "~/projects/x");
+}
+
+#[test]
+fn redact_path_collapses_home_directory_prefix_to_root() {
+    let redacted = redact_path_with_home("/home/alice/", Some(Path::new("/home/alice")));
+    assert_eq!(redacted, "~/");
+}
+
+#[test]
+fn redact_path_collapses_home_user_prefix_when_home_unset() {
+    let redacted = redact_path_with_home("/home/bob/projects/x", None);
+    assert_eq!(redacted, "~/projects/x");
+}
+
+#[test]
+fn redact_path_leaves_relative_paths_alone() {
+    let redacted = redact_path_with_home("./relative/file.txt", None);
+    assert_eq!(redacted, "./relative/file.txt");
+    let redacted = redact_path_with_home("just/a/path", None);
+    assert_eq!(redacted, "just/a/path");
+}
+
+#[test]
+fn redact_path_leaves_already_tilde_paths_alone() {
+    let redacted = redact_path_with_home("~/already/redacted", None);
+    assert_eq!(redacted, "~/already/redacted");
+}
+
+#[test]
+fn redact_path_handles_missing_trailing_slash() {
+    // "/home/alice" with no sub-path is ambiguous; we leave it alone rather
+    // than guess at the user's home boundary.
+    let redacted = redact_path_with_home("/home/alice", None);
+    assert_eq!(redacted, "/home/alice");
+}
+
+#[test]
+fn redact_env_var_returns_none_for_sensitive_suffixes() {
+    assert_eq!(redact_env_var("API_KEY", "abc"), None);
+    assert_eq!(redact_env_var("AUTH_TOKEN", "abc"), None);
+    assert_eq!(redact_env_var("DB_SECRET", "abc"), None);
+    assert_eq!(redact_env_var("ROOT_PASSWORD", "abc"), None);
+}
+
+#[test]
+fn redact_env_var_matches_sensitive_suffixes_case_insensitively() {
+    assert_eq!(redact_env_var("api_key", "abc"), None);
+    assert_eq!(redact_env_var("Auth_Token", "abc"), None);
+    assert_eq!(redact_env_var("Db_Password", "abc"), None);
+    assert_eq!(redact_env_var("foo_secret", "abc"), None);
+}
+
+#[test]
+fn redact_env_var_returns_value_for_safe_names() {
+    assert_eq!(
+        redact_env_var("HOME", "/home/alice"),
+        Some("/home/alice".to_owned())
+    );
+    assert_eq!(
+        redact_env_var("PATH", "/usr/bin:/bin"),
+        Some("/usr/bin:/bin".to_owned())
+    );
+    assert_eq!(redact_env_var("USER", "alice"), Some("alice".to_owned()));
+}
+
+#[test]
+fn redact_env_var_does_not_match_without_underscore_prefix() {
+    // "TOKEN" alone does not end in "_TOKEN", so it must not be treated as a
+    // sensitive name — only the documented *_SUFFIX pattern counts.
+    assert_eq!(
+        redact_env_var("TOKEN", "public-value"),
+        Some("public-value".to_owned())
+    );
+}
