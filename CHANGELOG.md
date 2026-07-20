@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Plugin Host
+
+- `arbitraitor_plugin_host::registry::{RegistryMetadata,
+  REGISTRY_METADATA_SCHEMA_VERSION, SignatureStatus, ProvenanceStatus,
+  SecurityAuditStatus, ConformanceStatus, RevocationStatus,
+  RevocationEntry, StagedRollout, PermissionDiffStatus}` — new public
+  types for spec §39.20 plugin registry signed metadata, publisher
+  revocation, staged rollout, and permission-diff approval. `RegistryMetadata`
+  is the document the registry loader evaluates to decide whether an
+  update is admissible: signature status, provenance status, security
+  audit status, conformance status, revocation status, known
+  vulnerabilities, version history, supported platforms, requested
+  permissions, and SHA-256 `download_digest` (pinning metadata to the
+  artifact prevents metadata-swap attacks). The struct carries a
+  `schema_version` field and uses `#[serde(deny_unknown_fields)]` so
+  audit consumers reject smuggled fields. `RevocationEntry` records a
+  publisher or operator revocation of a `(plugin_id, version)` pair
+  with issuer, timestamp, and reason. `StagedRollout` carries the
+  rollout percentage and target audience for a phased release.
+  `PermissionDiffStatus` is the state machine (`Approved`, `Blocked`,
+  `PendingApproval`) for operator review of permission changes between
+  the currently installed release and the proposed update.
+
 #### Sandbox
 
 - `arbitraitor-sandbox::linux_adapters` — new public module with four
