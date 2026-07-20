@@ -221,6 +221,14 @@ pub struct FeedEntry {
     pub first_seen: String,
     /// Last observed timestamp as an RFC 3339 string.
     pub last_seen: String,
+    /// Timestamp the source last updated this indicator, as an RFC 3339 string.
+    ///
+    /// Distinct from [`Self::last_seen`]: `last_seen` records when Arbitraitor
+    /// last observed the indicator, while `source_update_time` records when
+    /// the originating feed last touched it. Required by spec §21.6 so callers
+    /// can distinguish freshly-published indicators from stale feed rows that
+    /// simply survived a resync.
+    pub source_update_time: Option<String>,
     /// Expiration timestamp as an RFC 3339 string, when the entry expires.
     pub expires_at: Option<String>,
     /// Sources supporting this entry.
@@ -267,12 +275,18 @@ pub struct EnforcementResult {
 }
 
 impl FeedEntry {
-    /// Returns true when the entry is expired at the supplied RFC 3339 timestamp.
+    /// Returns true when the entry has expired relative to the supplied RFC 3339 `now`.
+    ///
+    /// An entry is expired when `expires_at` is set and strictly precedes `now`.
+    /// Entries without an expiration timestamp are never expired. This implements
+    /// the spec §21.6 freshness rule: expired indicators should not silently remain
+    /// blocking unless policy says so, so the moment an entry is past its
+    /// expiration it is no longer considered fresh.
     #[must_use]
-    pub fn is_expired_at(&self, timestamp: &str) -> bool {
+    pub fn is_expired(&self, now: &str) -> bool {
         self.expires_at
             .as_deref()
-            .is_some_and(|expires_at| expires_at <= timestamp)
+            .is_some_and(|expires_at| expires_at < now)
     }
 }
 
@@ -405,7 +419,7 @@ impl IntelStore {
     pub fn purge_expired(&mut self) -> Result<usize> {
         let now = current_utc_timestamp();
         let before = self.entries.len();
-        self.entries.retain(|entry| !entry.is_expired_at(&now));
+        self.entries.retain(|entry| !entry.is_expired(&now));
         let purged = before - self.entries.len();
         if purged > 0 {
             self.persist()?;
@@ -438,7 +452,7 @@ pub fn match_indicator(store: &IntelStore, indicator: &Indicator) -> Vec<MatchRe
     let mut matches: Vec<(u8, MatchResult)> = store
         .entries()
         .iter()
-        .filter(|entry| !entry.is_expired_at(&now))
+        .filter(|entry| !entry.is_expired(&now))
         .filter_map(|entry| match_rank(entry, indicator).map(|rank| (rank, entry)))
         .map(|(rank, entry)| {
             (

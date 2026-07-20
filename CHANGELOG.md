@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indicator revoked from the feed, paired with a `FeedSignature` so the
   public revocation history is tamper-evident (spec §22 revocation
   history).
+- `arbitraitor-intel::FeedEntry::source_update_time` — new optional
+  RFC 3339 timestamp recording when the originating feed last updated the
+  indicator (spec §21.6 freshness). Distinct from `last_seen`, which tracks
+  when Arbitraitor last observed the indicator.
+- `arbitraitor-intel::FeedEntry::is_expired` — new helper that returns
+  `true` when the entry has an `expires_at` strictly before the supplied
+  RFC 3339 `now` (spec §21.6 freshness). Replaces `is_expired_at` so the
+  strict-less-than semantic matches the spec and the existing
+  `IntelStore::purge_expired` / `match_indicator` filters stay consistent.
 
 #### Exec
 

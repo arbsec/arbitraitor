@@ -730,6 +730,7 @@ fn entry(indicator_type: IndicatorType, value: &str, source_class: FeedSourceCla
         source_class,
         first_seen: "2026-06-01T00:00:00Z".to_owned(),
         last_seen: "2026-06-17T00:00:00Z".to_owned(),
+        source_update_time: None,
         expires_at: None,
         sources: vec![FeedSource {
             source_type: "test".to_owned(),

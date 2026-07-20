@@ -209,6 +209,7 @@ mod tests {
             source_class: FeedSourceClass::ArbitraitorReviewed,
             first_seen: first_seen.to_owned(),
             last_seen: last_seen.to_owned(),
+            source_update_time: None,
             expires_at: None,
             sources: Vec::new(),
             evidence: FeedEvidence {

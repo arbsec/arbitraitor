@@ -272,7 +272,8 @@ fn urlhaus_record_to_entry(record: UrlhausRecord, now_seconds: u64, ttl_days: u6
         disposition: Disposition::Block,
         source_class: FeedSourceClass::Authoritative,
         first_seen: normalize_urlhaus_timestamp(&record.date_added, &now_ts),
-        last_seen: now_ts,
+        last_seen: now_ts.clone(),
+        source_update_time: Some(normalize_urlhaus_timestamp(&record.date_added, &now_ts)),
         expires_at: Some(expires_at),
         sources: vec![FeedSource {
             source_type: "osint".to_owned(),
