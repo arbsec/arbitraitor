@@ -55,6 +55,7 @@ supersede it.
 | [0031](0031-ossf-malicious-packages-feed.md) | OpenSSF malicious-packages feed via OSV.dev | Accepted | #474 |
 | [0032](0032-tar-parser-consensus-check.md) | Tar parser consensus check | Accepted | #459 |
 | [0033](0033-fetch-cross-protocol-credential-secrecy.md) | Fetch cross-protocol credential secrecy | Accepted | #472 |
+| [0034](0034-apple-containerization-ga-strategy.md) | Apple Containerization GA strategy for macOS 26+ | Proposed | #475 |
 
 ## Format
 

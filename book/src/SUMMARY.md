@@ -68,6 +68,7 @@
   - [ADR 0031: OpenSSF malicious-packages feed via OSV.dev](./adr/0031-ossf-malicious-packages-feed.md)
   - [ADR 0032: Tar parser consensus check](./adr/0032-tar-parser-consensus-check.md)
   - [ADR 0033: Fetch cross-protocol credential secrecy](./adr/0033-fetch-cross-protocol-credential-secrecy.md)
+  - [ADR 0034: Apple Containerization GA strategy for macOS 26+](./adr/0034-apple-containerization-ga-strategy.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)
