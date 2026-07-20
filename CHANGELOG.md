@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `forward_authorization_cross_origin` — corresponding TOML policy
   fields per spec §11.4 example.
 
+#### Wrapper
+
+- `arbitraitor-wrapper::wget::WgetRequest` now carries a `findings` field so
+  callers can surface transport-safety findings raised during argv
+  translation. Per spec §39.9, `--no-check-certificate` is no longer silently
+  dropped: the wrapper emits a `Finding` with `FindingCategory::Transport`,
+  `Severity::High`, `Confidence::High`, detector `arbitraitor-wrapper`, and
+  stable id `wget-no-check-certificate`. The flag remains on
+  `WgetRequest::no_check_certificate` so existing consumers keep their
+  semantics; the finding is the auditable signal required by spec §39.9.
+
 #### ADRs
 
 - ADRs 0022–0026 accepted: SLSA Build L3 target (0022), in-toto Statement receipt envelope (0023), macOS containment strategy (0024), OpenSSF Scorecard/deps.dev/GUAC integration (0025), EU CRA/NIST SSDF compliance mapping (0026). All 26 ADRs are now Accepted.

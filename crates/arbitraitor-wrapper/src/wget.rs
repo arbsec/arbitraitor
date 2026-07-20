@@ -5,13 +5,30 @@
 //! flags that Arbitraitor owns (`-q`/`--quiet`, `-v`/`--verbose`) are ignored,
 //! and any flag outside the supported subset is rejected so that semantically
 //! significant options cannot silently change download behavior.
+//!
+//! Per spec §39.9, flags that disable transport safety guarantees (currently
+//! `--no-check-certificate`) are surfaced as [`arbitraitor_model::Finding`]
+//! entries on the returned [`WgetRequest`] instead of being silently dropped,
+//! so the wrapper caller can raise the appropriate verdict.
 
 use std::path::PathBuf;
 
+use arbitraitor_model::{
+    finding::{Evidence, EvidenceKind, Finding, FindingCategory},
+    ids::Sha256Digest,
+    verdict::{Confidence, Severity},
+};
+
 pub use crate::error::WrapperError;
 
+/// Detector identifier reported on findings produced by this wrapper.
+pub const WGET_WRAPPER_DETECTOR: &str = "arbitraitor-wrapper";
+
+/// Stable finding identifier for `--no-check-certificate` detections.
+const WGET_NO_CHECK_CERTIFICATE_FINDING_ID: &str = "wget-no-check-certificate";
+
 /// Parsed wget arguments translated to Arbitraitor's fetch model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WgetRequest {
     /// URL to retrieve.
     pub url: String,
@@ -27,6 +44,9 @@ pub struct WgetRequest {
     pub max_redirect: Option<u32>,
     /// Whether `--no-check-certificate` disabled TLS verification.
     pub no_check_certificate: bool,
+    /// Findings produced during argv translation (spec §39.9). Callers must
+    /// surface these so dangerous flags cannot be silently dropped.
+    pub findings: Vec<Finding>,
 }
 
 /// Translates wget CLI arguments into an Arbitraitor fetch request.
@@ -101,7 +121,8 @@ impl<'a> WgetParser<'a> {
                 self.set_url(token);
             }
         }
-        let url = self.url.ok_or(WrapperError::MissingUrl)?;
+        let url = self.url.clone().ok_or(WrapperError::MissingUrl)?;
+        let findings = build_findings(&self);
         Ok(WgetRequest {
             url,
             output_path: self.output_path,
@@ -110,6 +131,7 @@ impl<'a> WgetParser<'a> {
             timeout_secs: self.timeout_secs,
             max_redirect: self.max_redirect,
             no_check_certificate: self.no_check_certificate,
+            findings,
         })
     }
 
@@ -256,11 +278,62 @@ fn reject_inline_value(flag: &str, inline: Option<&str>) -> Result<(), WrapperEr
     Ok(())
 }
 
+/// Builds the list of [`Finding`]s reported for a parsed invocation.
+///
+/// Per spec §39.9 the wrapper must surface dangerous transport-affecting flags
+/// instead of silently dropping them. The artifact digest is a zero placeholder
+/// because translation happens before any bytes are retrieved.
+fn build_findings(parser: &WgetParser<'_>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if parser.no_check_certificate {
+        findings.push(no_check_certificate_finding());
+    }
+    findings
+}
+
+/// Builds the [`Finding`] emitted when `--no-check-certificate` disables TLS
+/// certificate verification.
+fn no_check_certificate_finding() -> Finding {
+    Finding {
+        id: WGET_NO_CHECK_CERTIFICATE_FINDING_ID.to_owned(),
+        detector: WGET_WRAPPER_DETECTOR.to_owned(),
+        category: FindingCategory::Transport,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "TLS certificate verification disabled via --no-check-certificate".to_owned(),
+        description:
+            "The wget wrapper detected --no-check-certificate which disables TLS certificate \
+             verification. This removes transport encryption guarantees and may allow \
+             man-in-the-middle attacks."
+                .to_owned(),
+        evidence: vec![Evidence {
+            kind: EvidenceKind::Command,
+            description: "wget flag observed in argv".to_owned(),
+            content: Some("--no-check-certificate".to_owned()),
+        }],
+        artifact_sha256: Sha256Digest::new([0; 32]),
+        location: None,
+        remediation: Some(
+            "Remove --no-check-certificate so wget validates the server certificate against \
+             the system trust store before transferring bytes."
+                .to_owned(),
+        ),
+        references: Vec::new(),
+        tags: vec!["wrapper".to_owned(), "tls-disable".to_owned()],
+        taxonomies: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::{WgetRequest, WrapperError, to_fetch_request, translate_wget_args};
+    use arbitraitor_model::{
+        finding::FindingCategory,
+        ids::Sha256Digest,
+        verdict::{Confidence, Severity},
+    };
 
     fn parse(args: &[&str]) -> Result<WgetRequest, WrapperError> {
         translate_wget_args(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
@@ -276,6 +349,7 @@ mod tests {
         assert_eq!(result.timeout_secs, None);
         assert_eq!(result.max_redirect, None);
         assert!(!result.no_check_certificate);
+        assert!(result.findings.is_empty());
         Ok(())
     }
 
@@ -384,6 +458,56 @@ mod tests {
     }
 
     #[test]
+    fn no_check_certificate_produces_transport_finding() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "--no-check-certificate", "https://example.com/file"])?;
+        assert_eq!(result.findings.len(), 1);
+        let finding = &result.findings[0];
+        assert_eq!(finding.detector, "arbitraitor-wrapper");
+        assert_eq!(finding.category, FindingCategory::Transport);
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.confidence, Confidence::High);
+        assert!(finding.title.contains("--no-check-certificate"));
+        assert!(finding.description.contains("TLS"));
+        assert!(
+            finding
+                .tags
+                .iter()
+                .any(|tag| tag == "wrapper" || tag == "tls-disable"),
+            "finding must carry wrapper/tls-disable tags: {:?}",
+            finding.tags,
+        );
+        assert_eq!(finding.artifact_sha256, Sha256Digest::new([0; 32]));
+        Ok(())
+    }
+
+    #[test]
+    fn plain_invocation_produces_no_findings() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "https://example.com/file"])?;
+        assert!(result.findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn no_check_certificate_produces_finding_alongside_other_flags() -> Result<(), WrapperError> {
+        let result = parse(&[
+            "wget",
+            "-q",
+            "--no-check-certificate",
+            "--timeout=30",
+            "-O",
+            "/tmp/out",
+            "https://example.com/file",
+        ])?;
+        assert!(result.no_check_certificate);
+        assert_eq!(result.timeout_secs, Some(30));
+        assert_eq!(result.output_path.as_deref(), Some(Path::new("/tmp/out")));
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].category, FindingCategory::Transport);
+        assert_eq!(result.findings[0].severity, Severity::High);
+        Ok(())
+    }
+
+    #[test]
     fn to_fetch_request_produces_correct_output() {
         let request = WgetRequest {
             url: "https://example.com/file".to_owned(),
@@ -393,6 +517,7 @@ mod tests {
             timeout_secs: Some(30),
             max_redirect: Some(5),
             no_check_certificate: true,
+            findings: Vec::new(),
         };
         let (url, headers) = to_fetch_request(&request);
         assert_eq!(url, "https://example.com/file");
