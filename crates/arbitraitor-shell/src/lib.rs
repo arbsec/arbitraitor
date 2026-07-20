@@ -42,7 +42,8 @@ pub use process_sub::{
     RiskLevel, RiskPattern, SubstitutionDirection,
 };
 pub use shellcheck::{
-    ShellCheckComment, ShellCheckFix, ShellCheckReplacement, ShellCheckReport, to_shellcheck_json,
+    ShellCheckComment, ShellCheckError, ShellCheckFinding, ShellCheckFix, ShellCheckReplacement,
+    ShellCheckReport, run_shellcheck, to_shellcheck_json,
 };
 
 /// Compatibility alias for the shell normalization output consumed by detectors.
