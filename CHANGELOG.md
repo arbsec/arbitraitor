@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Exec
+
+- `arbitraitor-exec::emit_artifact_to_stdout` — new release mode that
+  emits verified CAS bytes to stdout (spec §26.1). Used by
+  `scan --emit-on-pass` and wrapper pipe semantics. Bytes are verified
+  against the scanned digest before and after emission, preserving
+  invariant 2 (immutable identity).
+- `ReleaseMethod::StdoutEmit` — new enum variant for the stdout release
+  method recorded in receipts.
+
 #### Daemon
 
 - `Arbitraitor::builder()` and `ArbitraitorBuilder` provide the spec §40.1
