@@ -83,6 +83,65 @@ impl Receipt {
         unsigned.signature = None;
         unsigned.canonical_bytes()
     }
+
+    /// Exports the receipt as an in-toto Statement envelope (spec §31.3.1,
+    /// ADR-0023). The canonical on-disk receipt format (RFC 8785 JCS) is
+    /// NOT changed. This is a derived, optional export format for
+    /// interoperability with supply-chain tools like GUAC, Sigstore, and
+    /// in-toto verifylib (spec §21.9).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization of the Statement or its predicate
+    /// fails.
+    pub fn to_intoto_statement(&self) -> Result<InTotoStatement, ReceiptError> {
+        let predicate = serde_json::to_value(self).map_err(ReceiptError::Canonicalize)?;
+        Ok(InTotoStatement {
+            statement_type: "https://in-toto.io/Statement/v1".to_owned(),
+            subject: vec![InTotoSubject {
+                name: format!("sha256:{}", self.artifact_sha256),
+                digest: InTotoDigest {
+                    sha256: self.artifact_sha256.clone(),
+                },
+            }],
+            predicate_type: "https://arbitraitor.dev/verdict/v1".to_owned(),
+            predicate,
+        })
+    }
+}
+
+/// in-toto Statement v1 envelope (spec §31.3.1, ADR-0023).
+///
+/// Derived from the canonical RFC 8785 JCS receipt. The Statement is
+/// signed with the same key/capability as the canonical receipt and the
+/// signature envelope is DSSE per in-toto conventions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InTotoStatement {
+    /// Fixed: `https://in-toto.io/Statement/v1`.
+    #[serde(rename = "_type")]
+    pub statement_type: String,
+    /// Artifact subjects the statement attests.
+    pub subject: Vec<InTotoSubject>,
+    /// Fixed: `https://arbitraitor.dev/verdict/v1`.
+    pub predicate_type: String,
+    /// Full Arbitraitor receipt object, verbatim.
+    pub predicate: serde_json::Value,
+}
+
+/// A subject entry inside an in-toto Statement.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InTotoSubject {
+    /// Subject name, e.g. `sha256:<hex>`.
+    pub name: String,
+    /// Digest map keyed by algorithm.
+    pub digest: InTotoDigest,
+}
+
+/// SHA-256 digest map for in-toto subject.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InTotoDigest {
+    /// SHA-256 hex digest.
+    pub sha256: String,
 }
 
 /// Redacted transport metadata for artifact retrieval.
@@ -825,5 +884,27 @@ mod tests {
         fn canonical_form_is_deterministic_for_random_receipts(receipt in receipt_strategy()) {
             prop_assert_eq!(receipt.canonical_bytes()?, receipt.canonical_bytes()?);
         }
+    }
+
+    #[test]
+    fn intoto_statement_has_correct_predicate_type() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let stmt = receipt.to_intoto_statement()?;
+        assert_eq!(stmt.statement_type, "https://in-toto.io/Statement/v1");
+        assert_eq!(stmt.predicate_type, "https://arbitraitor.dev/verdict/v1");
+        assert!(!stmt.subject.is_empty());
+        assert_eq!(stmt.subject[0].digest.sha256, receipt.artifact_sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn intoto_statement_round_trips_json() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let stmt = receipt.to_intoto_statement()?;
+        let json = serde_json::to_string(&stmt)?;
+        let parsed: InTotoStatement = serde_json::from_str(&json)?;
+        assert_eq!(parsed.predicate_type, stmt.predicate_type);
+        assert_eq!(parsed.subject.len(), stmt.subject.len());
+        Ok(())
     }
 }
