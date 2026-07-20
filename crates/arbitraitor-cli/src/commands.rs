@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use arbitraitor_artifact::{ArtifactType, classify};
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::{HealthChecker, HealthStatus};
 use arbitraitor_mcp::sanitize_for_agent;
@@ -1111,6 +1112,29 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut handle.read(), &mut bytes).into_diagnostic()?;
 
+    // ADR-0031 / issue #612 (Blocker 4 from the round-1 adversarial review,
+    // extended to the `arbitraitor execute` command in round 2 of the
+    // review): gate the approved artifact by classified ArtifactType before
+    // piping bytes to bash. The approval file pins the interpreter to bash,
+    // but a user (or automation) could approve an HTML / JSON / XML /
+    // archive / Unknown artifact via `arbitraitor approve` and execute it
+    // via `arbitraitor execute`, bypassing the content-type gate at the
+    // `run` pipeline layer. Piping such bytes to bash is unsafe (HTML etc.
+    // can incidentally contain bash-parseable `$(...)`, redirections, pipes)
+    // — the same rationale as ADR-0031 applies here. Only
+    // `ArtifactType::ShellScript(_)` is runnable through this execute
+    // path; everything else fails closed. (Native executables are gated
+    // out as well because the approval flow always binds to the bash
+    // interpreter; native execution uses a separate release path.)
+    let classification = classify(&bytes);
+    if !matches!(classification.artifact_type, ArtifactType::ShellScript(_)) {
+        miette::bail!(
+            "artifact type {:?} is not executable via the approved execute path; \
+             only shell scripts are runnable (ADR-0031, issue #612)",
+            classification.artifact_type
+        );
+    }
+
     let execution = arbitraitor_exec::script::ScriptExecution::bash()
         .map_err(|e| miette::miette!("exec setup failed: {e}"))?
         .with_network_isolated(!command.network);
@@ -1233,4 +1257,177 @@ fn parse_duration_to_seconds(raw: &str) -> Result<u64, String> {
     value
         .checked_mul(multiplier)
         .ok_or_else(|| format!("duration '{raw}' overflows u64 seconds"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::ExecutionPlanInputs;
+    use arbitraitor_model::ids::Sha256Digest;
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const APPROVER: &str = "round-2-test";
+    const VERDICT: &str = "pass";
+    const TTL_SECONDS: u64 = 3600;
+
+    /// Build an `ApprovalFile` for the bash-execution path with the given
+    /// artifact digest, pinned to network-isolated. Far-future timestamps
+    /// so the expiry check always passes.
+    fn build_approval(
+        sha256: Sha256Digest,
+    ) -> Result<crate::approval::ApprovalFile, Box<dyn std::error::Error>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let inputs = ExecutionPlanInputs {
+            artifact_sha256: sha256,
+            network_isolated: true,
+            policy_snapshot_digest: String::new(),
+            detector_snapshot_digest: String::new(),
+        };
+        Ok(crate::approval::ApprovalFile::for_bash_execution(
+            &inputs,
+            APPROVER,
+            now,
+            now + TTL_SECONDS,
+            VERDICT,
+        )?)
+    }
+
+    /// Store the given bytes under a fresh CAS root and return the digest.
+    fn store_bytes_under_cas(
+        cas_root: &Path,
+        bytes: &[u8],
+    ) -> Result<Sha256Digest, Box<dyn std::error::Error>> {
+        let sha256 = Sha256Digest::new(Sha256::digest(bytes).into());
+        let store = ContentStore::open(cas_root)?;
+        let mut sink = store.sink(Some(&sha256))?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(sink.write_chunk(bytes))?;
+        runtime.block_on(sink.finish())?;
+        Ok(sha256)
+    }
+
+    /// Regression test for the round-2 adversarial review of PR #615
+    /// (Blocker 4 extended scope): `arbitraitor execute` must gate the
+    /// approved artifact by classified `ArtifactType` before piping bytes
+    /// to bash. An HTML artifact (verifiably `ArtifactType::HtmlDocument`)
+    /// is approved via the bash-execution approval flow and then passed
+    /// through `execute(&command, &config)`. Without the gate the bytes
+    /// would be piped to `/bin/bash` (unsafe per ADR-0031: HTML can
+    /// incidentally contain bash-parseable `$(...)`, redirections, pipes).
+    /// With the gate, the function must bail with "is not executable via
+    /// the approved execute path" and name the artifact type.
+    #[test]
+    fn execute_command_rejects_html_artifact_via_content_type_gate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = b"<!DOCTYPE html>\n<html><body>not bash</body></html>\n".to_vec();
+        let cas_root =
+            std::env::temp_dir().join(format!("arb-execute-gate-html-{}", std::process::id()));
+        std::fs::remove_dir_all(&cas_root).ok();
+        let sha256 = store_bytes_under_cas(&cas_root, &bytes)?;
+        let approval = build_approval(sha256.clone())?;
+        let approval_path = std::env::temp_dir().join(format!(
+            "arb-execute-gate-approval-html-{}-{sha256}.json",
+            std::process::id()
+        ));
+        std::fs::write(&approval_path, serde_json::to_vec_pretty(&approval)?)?;
+
+        let mut config = Config::default();
+        config.store.cas_dir = Some(cas_root.clone());
+
+        let command = ExecuteCommand {
+            approval: approval_path.clone(),
+            network: false,
+        };
+
+        let result = execute(&command, &config);
+
+        std::fs::remove_dir_all(&cas_root).ok();
+        std::fs::remove_file(&approval_path).ok();
+
+        let Err(err) = result else {
+            return Err(
+                "execute() should have rejected HTML artifact via the gate, but it succeeded"
+                    .into(),
+            );
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("is not executable via the approved execute path"),
+            "expected is-not-executable error; got: {msg}"
+        );
+        assert!(
+            msg.contains("HtmlDocument"),
+            "expected the artifact type name in the error; got: {msg}"
+        );
+        Ok(())
+    }
+
+    /// Positive control for the round-2 review (Blocker 4 extended scope):
+    /// a shebang-tagged shell script artifact must pass through the
+    /// `arbitraitor execute` content-type gate and reach
+    /// `ScriptExecution::bash().execute()`. Verifies the gate does not
+    /// over-tighten on legitimate script artifacts (i.e. it permits
+    /// `ArtifactType::ShellScript(Posix)` through).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn execute_command_accepts_shell_script_artifact_through_gate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = b"#!/bin/sh\necho 'posix shell through execute gate'\n".to_vec();
+        let cas_root =
+            std::env::temp_dir().join(format!("arb-execute-gate-script-{}", std::process::id()));
+        std::fs::remove_dir_all(&cas_root).ok();
+        let sha256 = store_bytes_under_cas(&cas_root, &bytes)?;
+        let approval = build_approval(sha256.clone())?;
+        let approval_path = std::env::temp_dir().join(format!(
+            "arb-execute-gate-approval-script-{}-{sha256}.json",
+            std::process::id()
+        ));
+        std::fs::write(&approval_path, serde_json::to_vec_pretty(&approval)?)?;
+
+        let mut config = Config::default();
+        config.store.cas_dir = Some(cas_root.clone());
+
+        let command = ExecuteCommand {
+            approval: approval_path.clone(),
+            network: false,
+        };
+
+        let result = execute(&command, &config);
+
+        std::fs::remove_dir_all(&cas_root).ok();
+        std::fs::remove_file(&approval_path).ok();
+
+        // We don't assert exit-code because the bash sandbox may reject the
+        // script via unshare/Landlock/network policy independent of the
+        // content-type gate. What we DO assert is that the gate did NOT
+        // bail with "is not executable" — i.e. it permitted the
+        // ShellScript artifact to proceed to ScriptExecution::execute().
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let msg = format!("{err}");
+                assert!(
+                    !msg.contains("is not executable via the approved execute path"),
+                    "execute() must NOT reject a shell script artifact via the gate; got: {msg}"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn parse_duration_to_seconds_handles_basic_units() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_duration_to_seconds("60s")?, 60);
+        assert_eq!(parse_duration_to_seconds("30m")?, 1800);
+        assert_eq!(parse_duration_to_seconds("24h")?, 86_400);
+        assert_eq!(parse_duration_to_seconds("7d")?, 604_800);
+        assert!(parse_duration_to_seconds("").is_err());
+        assert!(parse_duration_to_seconds("0s").is_err());
+        assert!(parse_duration_to_seconds("12x").is_err());
+        Ok(())
+    }
 }

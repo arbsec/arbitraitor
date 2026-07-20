@@ -557,7 +557,7 @@ fn run_approved_artifact_executes_with_valid_token() {
     let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
     let store = Arc::new(InMemoryArtifactStore::new());
     // Shebang-tagged shell script so the artifact classifier returns
-    // `ArtifactType::ShellScript(Posix)` and the ADR-0028 content-type gate
+    // `ArtifactType::ShellScript(Posix)` and the ADR-0031 content-type gate
     // passes the bytes through to ScriptExecution.
     let digest = store
         .record(b"#!/bin/sh\nprintf 'approved output'\n".to_vec())
@@ -673,7 +673,7 @@ fn run_approved_artifact_rejects_unapproved_args() {
     );
 }
 
-/// Regression test for the review of #615 (Blocker 4, ADR-0028, issue #612):
+/// Regression test for the review of #615 (Blocker 4, ADR-0031, issue #612):
 /// the MCP `run_approved_artifact` tool gates execution by classified
 /// `ArtifactType`. An agent that approves an HTML / JSON / XML / archive /
 /// `GenericText` / `GenericBinary` / `PowerShellScript` / `PythonScript` /

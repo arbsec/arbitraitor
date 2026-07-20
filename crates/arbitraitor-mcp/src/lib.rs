@@ -1429,7 +1429,7 @@ impl RunApprovedArtifactTool {
             .lookup_artifact(&digest)
             .ok_or(RunApprovedArtifactError::ArtifactNotFound)?;
         verify_bytes_digest(&bytes, &digest)?;
-        // ADR-0028 / issue #612 (Blocker 4 from adversarial review): gate
+        // ADR-0031 / issue #612 (Blocker 4 from adversarial review): gate
         // the approved artifact by classified ArtifactType before piping bytes
         // to bash. The approval token binds the interpreter to bash, but an
         // agent (or a confused human operator driving the agent) could
@@ -1900,7 +1900,7 @@ enum RunApprovedArtifactError {
     UnapprovedArguments,
     /// Artifact bytes were classified as a non-executable content type. The
     /// MCP-approved execution path gates the same way the CLI `run` pipeline
-    /// does (ADR-0028, issue #612): only `ArtifactType::ShellScript(_)` and
+    /// does (ADR-0031, issue #612): only `ArtifactType::ShellScript(_)` and
     /// the native executable types can be approved for bash execution.
     /// Everything else — HTML, JSON, XML, archives, `GenericText`,
     /// `GenericBinary`, `PowerShellScript`, `PythonScript`, `JavaScript`,

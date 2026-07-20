@@ -56,7 +56,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_approved_artifact` — only `ArtifactType::ShellScript(_)` is
   runnable through the MCP approved-execution path. CLI `run` and MCP
   `run_approved_artifact` now enforce the same content-type gate
-  (ADR-0028, issue #612).
+  (ADR-0031, issue #612).
+
+#### CLI
+
+- `arbitraitor execute` (the approved-artifact execution command,
+  separate from `arbitraitor run`) now gates execution by classified
+  `ArtifactType` before piping bytes to `/bin/bash`. Round 2 of the
+  adversarial review of #615 found that the round-1 fix only gated the
+  `run` and MCP `run_approved_artifact` paths; the `execute` command
+  (invoked as `arbitraitor execute --approval <file>`) accepted the
+  same bash-execution approval file and piped artifact bytes without
+  classifying them. The gate mirrors the round-1 fix: only
+  `ArtifactType::ShellScript(_)` is permitted; everything else
+  (HTML / JSON / XML / archives / `GenericText/Binary` /
+  `PowerShellScript` / `PythonScript` / `JavaScript` / `Unknown`) fails
+  closed with `miette::bail!("... is not executable via the approved
+  execute path; only shell scripts are runnable (ADR-0031, issue #612)")`.
+  Native executables are gated out as well because the approval flow
+  always binds to the bash interpreter (native execution uses a separate
+  release path).
 
 ### Changed
 
