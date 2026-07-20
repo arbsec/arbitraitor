@@ -11,6 +11,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arbitraitor_model::ids::{ArtifactId, Sha256Digest};
@@ -103,6 +105,40 @@ impl FetchScheme {
     }
 }
 
+/// Shareable, single-shot cancellation flag (spec §41.4.6).
+///
+/// The flag is observed cooperatively by the fetcher at each redirect hop
+/// and before starting any new network operation. Flipping it after the
+/// fetch has already reached a terminal state is a no-op.
+///
+/// The wrapper exists so callers can plumb a single token across retrieval
+/// and analysis without coupling those layers to the daemon's own token
+/// type. All clones share the same atomic flag.
+#[derive(Clone, Debug, Default)]
+pub struct FetchCancellation {
+    flag: Arc<AtomicBool>,
+}
+
+impl FetchCancellation {
+    /// Creates a fresh, uncancelled token.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks the token as cancelled. All observers see the change on the
+    /// next load.
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns whether cancellation has been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
 /// Artifact input source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FetchSource {
@@ -135,6 +171,8 @@ pub struct FetchRequest {
     pub policy: FetchPolicy,
     /// Expected SHA-256 digest of the fetched artifact bytes.
     pub expected_sha256: Option<Sha256Digest>,
+    /// Cancellation flag observed between redirect hops and before network I/O.
+    pub cancellation: FetchCancellation,
 }
 
 impl FetchRequest {
@@ -145,6 +183,7 @@ impl FetchRequest {
             source: FetchSource::Url(url),
             policy,
             expected_sha256: None,
+            cancellation: FetchCancellation::new(),
         }
     }
 
@@ -155,16 +194,18 @@ impl FetchRequest {
             source: FetchSource::File(path),
             policy,
             expected_sha256: None,
+            cancellation: FetchCancellation::new(),
         }
     }
 
     /// Builds a standard input fetch request.
     #[must_use]
-    pub const fn stdin(policy: FetchPolicy) -> Self {
+    pub fn stdin(policy: FetchPolicy) -> Self {
         Self {
             source: FetchSource::Stdin,
             policy,
             expected_sha256: None,
+            cancellation: FetchCancellation::new(),
         }
     }
 
@@ -172,6 +213,13 @@ impl FetchRequest {
     #[must_use]
     pub fn with_expected_sha256(mut self, digest: Sha256Digest) -> Self {
         self.expected_sha256 = Some(digest);
+        self
+    }
+
+    /// Replaces the cancellation token with `cancellation`.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: FetchCancellation) -> Self {
+        self.cancellation = cancellation;
         self
     }
 }
@@ -192,6 +240,12 @@ pub struct FetchPolicy {
     pub connect_timeout: Duration,
     /// Per-read idle timeout.
     pub read_timeout: Duration,
+    /// Deadline from request send until the first response byte arrives
+    /// (spec §41.4.6). Distinct from `connect_timeout` (TCP/TLS handshake),
+    /// `read_timeout` (per-chunk idle), and `total_timeout` (whole
+    /// operation). `None` disables the first-byte deadline; the whole
+    /// operation timeout still applies.
+    pub first_byte_timeout: Option<Duration>,
     /// Whole-operation timeout.
     pub total_timeout: Duration,
     /// Maximum encoded representation bytes accepted from transport.
@@ -248,6 +302,7 @@ impl Default for FetchPolicy {
         Self {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             read_timeout: DEFAULT_READ_TIMEOUT,
+            first_byte_timeout: None,
             total_timeout: DEFAULT_TOTAL_TIMEOUT,
             max_compressed_size: DEFAULT_MAX_BYTES,
             max_uncompressed_size: DEFAULT_MAX_BYTES,
@@ -469,6 +524,9 @@ pub enum FetchError {
         /// Actual byte count received.
         actual: u64,
     },
+    /// Caller cancelled the fetch via [`FetchCancellation`] (spec §41.4.6).
+    #[error("fetch cancelled by caller")]
+    Cancelled,
 }
 
 /// Size limit category.
@@ -550,7 +608,13 @@ impl Fetcher for HttpFetcher {
         };
 
         ensure_required_digest(request.expected_sha256.as_ref(), &request.policy)?;
-        let future = self.fetch_inner(url, &request.policy, request.expected_sha256.as_ref(), sink);
+        let future = self.fetch_inner(
+            url,
+            &request.policy,
+            request.expected_sha256.as_ref(),
+            &request.cancellation,
+            sink,
+        );
         tokio::time::timeout(request.policy.total_timeout, future)
             .await
             .map_err(|_| FetchError::Timeout { stage: "total" })?
@@ -563,6 +627,7 @@ impl HttpFetcher {
         url: FetchUrl,
         policy: &FetchPolicy,
         expected_sha256: Option<&Sha256Digest>,
+        cancellation: &FetchCancellation,
         sink: &mut dyn ArtifactSink,
     ) -> Result<FetchReceipt, FetchError> {
         ensure_scheme_allowed(
@@ -575,6 +640,9 @@ impl HttpFetcher {
         let mut redirect_chain = Vec::new();
 
         for redirect_count in 0..=policy.max_redirects {
+            if cancellation.is_cancelled() {
+                return Err(FetchError::Cancelled);
+            }
             if !visited.insert(current.clone()) {
                 return Err(FetchError::RedirectLoop);
             }
@@ -582,7 +650,8 @@ impl HttpFetcher {
             let resolved_ips = unique_ips(&resolved_addrs);
             debug!(url = %redact_parsed_url(&current), resolved_count = resolved_ips.len(), "resolved fetch host");
             let client = build_http_client(policy, &current, &resolved_addrs)?;
-            let response = execute_request(&client, current.clone()).await?;
+            let response =
+                execute_request(&client, current.clone(), policy.first_byte_timeout).await?;
             let status = response.status();
 
             if status.is_redirection() {
@@ -738,6 +807,7 @@ fn build_http_client(
 async fn execute_request(
     client: &reqwest::Client,
     url: Url,
+    first_byte_timeout: Option<Duration>,
 ) -> Result<reqwest::Response, FetchError> {
     // Exact-byte semantics: Arbitraitor stores and hashes the HTTP representation
     // bytes after HTTP transfer framing is removed by the HTTP stack. It does
@@ -745,12 +815,19 @@ async fn execute_request(
     // `Accept-Encoding: identity` and disabling all reqwest auto-decoders keeps
     // `Content-Encoding` bytes intact for CAS storage and later explicit wrapper
     // decoding into a separate child artifact.
-    client
+    let send_fut = client
         .get(url)
         .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
-        .send()
-        .await
-        .map_err(|error| classify_reqwest_error("request", error))
+        .send();
+    let response = match first_byte_timeout {
+        Some(deadline) => tokio::time::timeout(deadline, send_fut)
+            .await
+            .map_err(|_| FetchError::Timeout {
+                stage: "first_byte",
+            })?,
+        None => send_fut.await,
+    };
+    response.map_err(|error| classify_reqwest_error("request", error))
 }
 
 async fn stream_response(
@@ -1302,12 +1379,14 @@ fn is_sensitive_path_segment(segment: &str) -> bool {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::{
-        FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_cross_origin_allowed,
+        FetchCancellation, FetchError, FetchPolicy, FetchRequest, FetchScheme, Fetcher,
+        HttpFetcher, VecSink, build_http_client, ensure_cross_origin_allowed,
         ensure_no_insecure_downgrade, execute_request, strip_credentials_on_cross_origin,
         verify_connected_peer,
     };
@@ -1345,7 +1424,7 @@ mod tests {
         };
         let client = build_http_client(&policy, &url, &[addr])?;
 
-        let response = execute_request(&client, url).await?;
+        let response = execute_request(&client, url, None).await?;
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let request = server.await??;
@@ -1636,5 +1715,178 @@ mod tests {
             headers.get(reqwest::header::AUTHORIZATION).is_some(),
             "Authorization MUST be preserved when policy opts in to cross-origin forwarding"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // FetchCancellation (spec §41.4.6)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fetch_cancellation_starts_uncancelled_and_is_shareable() {
+        let token = FetchCancellation::new();
+        assert!(
+            !token.is_cancelled(),
+            "fresh token must report not cancelled"
+        );
+
+        let clone = token.clone();
+        token.cancel();
+        assert!(
+            clone.is_cancelled(),
+            "clones must observe the same atomic flag"
+        );
+        assert!(
+            token.is_cancelled(),
+            "original handle must observe its own cancel()"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_cancelled_when_token_is_set_before_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let url: Url = "http://127.0.0.1:9/artifact".parse()?;
+        let mut policy = FetchPolicy {
+            allow_loopback_addresses: true,
+            allowed_schemes: vec![FetchScheme::Http],
+            max_redirects: 2,
+            ..FetchPolicy::default()
+        };
+        policy.total_timeout = Duration::from_secs(2);
+
+        let token = FetchCancellation::new();
+        token.cancel();
+
+        let request = FetchRequest::url(super::FetchUrl::parse(url.as_str())?, policy)
+            .with_cancellation(token);
+
+        let mut sink = VecSink::new();
+        let result = HttpFetcher::new().fetch(request, &mut sink).await;
+        assert!(
+            matches!(result, Err(FetchError::Cancelled)),
+            "cancelled token before request must yield FetchError::Cancelled, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_cancelled_between_redirect_hops_returns_cancelled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Two listeners: hop-1 returns a 302 redirect to hop-2, hop-2 would
+        // return 200 OK. The cancellation token fires before hop-2 executes
+        // so the second redirect-hop check returns Cancelled.
+        let hop1 = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let hop1_addr = hop1.local_addr()?;
+        let hop2 = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let hop2_addr = hop2.local_addr()?;
+        let token = FetchCancellation::new();
+        let token_for_hop1 = token.clone();
+
+        let hop1_handle = tokio::spawn(async move {
+            let (mut stream, _) = hop1.accept().await?;
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/artifact\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                hop2_addr.port()
+            );
+            stream.write_all(body.as_bytes()).await?;
+            token_for_hop1.cancel();
+            stream.shutdown().await?;
+            Ok::<(), std::io::Error>(())
+        });
+
+        let hop2_handle = tokio::spawn(async move {
+            // If cancellation is ignored, this would accept and return 200.
+            // With cancellation honoured, the client should never connect here.
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_millis(500), hop2.accept()).await
+            {
+                let body = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = stream.write_all(body).await;
+            }
+            Ok::<(), std::io::Error>(())
+        });
+
+        let url: Url = format!("http://127.0.0.1:{}/artifact", hop1_addr.port()).parse()?;
+        let policy = FetchPolicy {
+            allow_loopback_addresses: true,
+            allowed_schemes: vec![FetchScheme::Http],
+            max_redirects: 2,
+            ..FetchPolicy::default()
+        };
+
+        // Spawn the fetch; hop-1 cancels the token after serving the redirect.
+        let token_for_cancel = token.clone();
+        let fetcher = HttpFetcher::new();
+        let url_for_fetch = super::FetchUrl::parse(url.as_str())?;
+        let fetch_task = tokio::spawn(async move {
+            let request =
+                FetchRequest::url(url_for_fetch, policy).with_cancellation(token_for_cancel);
+            let mut sink = VecSink::new();
+            fetcher.fetch(request, &mut sink).await
+        });
+        let result = fetch_task.await?;
+        let _ = hop1_handle.await?;
+        let _ = hop2_handle.await?;
+
+        assert!(
+            matches!(result, Err(FetchError::Cancelled)),
+            "cancellation between redirect hops must yield FetchError::Cancelled, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_first_byte_timeout_returns_timeout_with_distinct_stage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Listener accepts the connection but never sends any response bytes.
+        // With a tight first_byte_timeout, the request must time out and
+        // surface as FetchError::Timeout { stage: "first_byte" } — distinct
+        // from connect/read/total.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await?;
+            std::future::pending::<()>().await;
+            Ok::<(), std::io::Error>(())
+        });
+
+        let url: Url = format!("http://127.0.0.1:{}/artifact", addr.port()).parse()?;
+        let mut policy = FetchPolicy {
+            allow_loopback_addresses: true,
+            allowed_schemes: vec![FetchScheme::Http],
+            first_byte_timeout: Some(Duration::from_millis(100)),
+            total_timeout: Duration::from_secs(5),
+            ..FetchPolicy::default()
+        };
+        policy.connect_timeout = Duration::from_secs(2);
+        policy.read_timeout = Duration::from_secs(2);
+
+        let request = FetchRequest::url(super::FetchUrl::parse(url.as_str())?, policy);
+        let mut sink = VecSink::new();
+        let result = HttpFetcher::new().fetch(request, &mut sink).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(FetchError::Timeout {
+                    stage: "first_byte"
+                })
+            ),
+            "first-byte timeout must yield FetchError::Timeout with stage \"first_byte\", got {result:?}"
+        );
+        server.abort();
+        let _ = server.await;
+        Ok(())
     }
 }

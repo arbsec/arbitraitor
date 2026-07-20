@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Fetch
+
+- `arbitraitor_fetch::FetchCancellation` — new shareable, single-shot
+  cancellation flag (spec §41.4.6). Wraps `Arc<AtomicBool>` so clones share
+  one flag; `cancel()` flips the flag and `is_cancelled()` observes it.
+  Fetcher checks the flag at the top of each redirect hop before any
+  network I/O, returning the new `FetchError::Cancelled` variant.
+- `arbitraitor_fetch::FetchPolicy::first_byte_timeout: Option<Duration>` —
+  new deadline distinct from `connect_timeout` (TCP/TLS handshake),
+  `read_timeout` (per-chunk idle), and `total_timeout` (whole operation).
+  Measured from request send until the first response byte arrives.
+  `None` (the default) leaves the whole-operation timeout in sole
+  control of the first-byte deadline.
+- `arbitraitor_fetch::FetchRequest::with_cancellation` — builder that
+  replaces the request's default `FetchCancellation::new()` token.
+
 #### Antivirus
 
 - `arbitraitor_av::SignatureFreshness` — new public struct for spec §18.3

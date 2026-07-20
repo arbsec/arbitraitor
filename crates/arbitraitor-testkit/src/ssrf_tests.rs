@@ -29,6 +29,7 @@ fn ssrf_policy() -> FetchPolicy {
         allow_cross_origin_redirect: true,
         forward_authorization_cross_origin: false,
         require_digest: false,
+        first_byte_timeout: None,
     }
 }
 
