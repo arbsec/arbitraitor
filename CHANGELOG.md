@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FindingCategory::ParserDifferential` and archive `ParserSmelting` hazard
   coverage for spec §19.1/§19.3 parser consensus failures (CWE-436).
 
+#### Intel
+
+- `ossf-malicious-packages` feed adapter for OpenSSF malicious-packages
+  `MAL-` IDs returned by OSV.dev `querybatch` responses. Adds typed
+  `OsvMalId`, `IndicatorType::OsvMal`, and
+  `FeedSourceClass::OssfMaliciousPackages` so malicious npm packages can be
+  ingested into the signed local intel store without raw string IDs.
+
 #### Receipt
 
 - `arbitraitor_model::vex` now models the VEX format matrix for receipt

@@ -52,6 +52,7 @@ supersede it.
 | [0028](0028-landlock-abi-matrix.md) | Landlock ABI probe and receipt recording | Accepted | #466 |
 | [0029](0029-vex-version-matrix.md) | VEX format support matrix | Accepted | #468 |
 | [0030](0030-sbom-vex-ingestion-profiles.md) | SBOM/VEX ingestion profiles (CISA 2025 minimum elements + SBOM-for-AI) | Accepted | #467 |
+| [0031](0031-ossf-malicious-packages-feed.md) | OpenSSF malicious-packages feed via OSV.dev | Accepted | #474 |
 | [0032](0032-tar-parser-consensus-check.md) | Tar parser consensus check | Accepted | #459 |
 | [0033](0033-fetch-cross-protocol-credential-secrecy.md) | Fetch cross-protocol credential secrecy | Accepted | #472 |
 

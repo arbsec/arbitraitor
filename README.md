@@ -202,7 +202,7 @@ arbitraitor hook init
 - **MCP integration** — `arbitraitor mcp` starts a JSON-RPC 2.0 server over stdio for AI agent inspection, scanning, and approved execution
 - **Plugin system** — Subprocess protocol, Wasmtime Component Model, plugin registry with trust tiers
 - **Package manager adapters** — cargo, npm, uv, pnpm, yarn, bun lifecycle policies and lockfile analysis
-- **Community intelligence** — Feed submission, review workflow, transparency log, URLhaus adapter
+- **Community intelligence** — Feed submission, review workflow, transparency log, URLhaus and OpenSSF malicious-packages adapters
 - **Receipts** — RFC 8785 JCS canonicalized receipts with full audit trail
 - **HTTP safety** — SSRF protection, truncation detection, redirect policy enforcement
 
@@ -272,7 +272,7 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/README.md) — 30 accepted
+- [Architecture Decision Records](docs/adr/README.md) — 33 accepted
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - Crate documentation: `cargo doc --workspace --open`
 

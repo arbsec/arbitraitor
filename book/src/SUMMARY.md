@@ -65,6 +65,7 @@
   - [ADR 0028: Landlock ABI Probe and Receipt Recording](./adr/0028-landlock-abi-matrix.md)
   - [ADR 0029: VEX format support matrix](./adr/0029-vex-version-matrix.md)
   - [ADR 0030: SBOM/VEX ingestion profiles](./adr/0030-sbom-vex-ingestion-profiles.md)
+  - [ADR 0031: OpenSSF malicious-packages feed via OSV.dev](./adr/0031-ossf-malicious-packages-feed.md)
   - [ADR 0032: Tar parser consensus check](./adr/0032-tar-parser-consensus-check.md)
   - [ADR 0033: Fetch cross-protocol credential secrecy](./adr/0033-fetch-cross-protocol-credential-secrecy.md)
 <!-- markdownlint-enable MD057 -->
