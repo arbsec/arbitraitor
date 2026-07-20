@@ -30,6 +30,25 @@ use crate::{
 
 const LINUX_ORIGIN_XATTR: &str = "user.xdg.origin.url";
 const LINUX_ORIGIN_VALUE: &[u8] = b"arbitraitor://native-execution";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MACOS_QUARANTINE_XATTR: &str = "com.apple.quarantine";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MACOS_QUARANTINE_VALUE: &[u8] = b"0081;5f123456;arbitraitor;";
+
+/// Platform provenance preservation result (spec §26.4, ADR-0010).
+///
+/// Records which platform-native provenance attributes were applied
+/// during release. On Linux this is xattr; on macOS it's quarantine;
+/// on Windows it's Mark of the Web (Zone.Identifier).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlatformProvenance {
+    /// Linux xattr was applied (Linux only).
+    pub linux_xattr_applied: bool,
+    /// macOS quarantine was applied (macOS only).
+    pub macos_quarantine_applied: bool,
+    /// Windows MOTW was applied (Windows only).
+    pub windows_motw_applied: bool,
+}
 
 /// Capability token proving the caller explicitly opted into native execution.
 #[derive(Debug, Clone)]
@@ -303,6 +322,62 @@ fn apply_platform_quarantine(binary_path: &Path) -> Result<(), ExecError> {
     .map_err(|source| ExecError::NativeQuarantine {
         stage: "set-linux-origin-xattr",
         source: rustix_to_io(source),
+    })?;
+    #[cfg(target_os = "macos")]
+    {
+        apply_macos_quarantine(binary_path)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        apply_windows_motw(binary_path)?;
+    }
+    Ok(())
+}
+
+/// Applies macOS quarantine xattr (spec §26.4, ADR-0010).
+///
+/// On macOS, downloaded files receive `com.apple.quarantine` to trigger
+/// Gatekeeper checks. Arbitraitor sets this so files released through it
+/// are treated with the same scrutiny as browser-downloaded files.
+#[cfg(target_os = "macos")]
+fn apply_macos_quarantine(binary_path: &Path) -> Result<(), ExecError> {
+    let file = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(binary_path)
+        .map_err(|source| ExecError::NativeQuarantine {
+            stage: "open-macos-quarantine",
+            source,
+        })?;
+    let name = xattr_name(MACOS_QUARANTINE_XATTR, "prepare-macos-quarantine")?;
+    fsetxattr(
+        file.as_fd(),
+        name.as_c_str(),
+        MACOS_QUARANTINE_VALUE,
+        XattrFlags::empty(),
+    )
+    .map_err(|source| ExecError::NativeQuarantine {
+        stage: "set-macos-quarantine",
+        source: rustix_to_io(source),
+    })
+}
+
+/// Applies Windows Mark of the Web (spec §26.4, ADR-0010).
+///
+/// On Windows, downloaded files receive a Zone.Identifier alternate data
+/// stream marking them as from the internet (Zone 3). This triggers
+/// SmartScreen checks. The implementation uses NTFS ADS via the Windows API.
+#[cfg(target_os = "windows")]
+fn apply_windows_motw(binary_path: &Path) -> Result<(), ExecError> {
+    // Windows MOTW is implemented via NTFS alternate data streams.
+    // The Zone.Identifier ADS contains INI-format zone data.
+    // Zone 3 = Internet (downloaded from the internet).
+    let motw_path = binary_path.join(":Zone.Identifier");
+    fs::write(&motw_path, "[ZoneTransfer]\nZoneId=3\n").map_err(|source| {
+        ExecError::NativeQuarantine {
+            stage: "set-windows-motw",
+            source,
+        }
     })
 }
 

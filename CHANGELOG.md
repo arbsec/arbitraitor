@@ -9,21 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Daemon
+#### Exec
 
-- `arbitraitor-daemon::DaemonRequest` — each variant now carries
-  `caller_origin: CallerOrigin` and `capability_token: Option<String>` so
-  callers can declare the origin class asserting the request and any opaque
-  capability token presented to the daemon (spec §40.2). The daemon
-  overrides the wire-supplied `caller_origin` to
-  `CallerOrigin::DaemonLocal` after Unix-socket peer-credential
-  authentication, so a local peer cannot impersonate a higher-trust class
-  (e.g. `HumanTty`) through the daemon. The effective origin and the
-  capability-token presence are emitted on the per-operation tracing
-  receipt. Old clients that omit the new fields are still accepted
-  (`caller_origin` defaults to `Unknown`, `capability_token` is optional).
-  New `DaemonRequest::caller_origin()` and `DaemonRequest::capability_token()`
-  accessors expose the current values for tests and callers.
+- `arbitraitor-exec::native::PlatformProvenance` — new struct recording
+  which platform-native provenance attributes were applied during release
+  per spec §26.4 and ADR-0010. On Linux this is xattr; on macOS it's
+  `com.apple.quarantine`; on Windows it's Mark of the Web (Zone.Identifier).
+  macOS quarantine function is conditional on `target_os = "macos"`.
+  Windows MOTW function is conditional on `target_os = "windows"`.
+  Constants are dead-code-allowed on non-matching platforms.
 
 #### Intel
 
@@ -70,14 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fluent library construction API with `.config(Config)`,
   `.policy(PolicyEngine)`, and `.build()`. The existing
   `ArbitraitorApi::new(Config)` constructor remains available.
-- `arbitraitor-daemon::run_crash_recovery` and `RecoveryReport` implement
-  spec §37.2 (crash recovery). On daemon startup, `run_crash_recovery` scans
-  the CAS `staging/` directory for orphaned temporary files left by
-  interrupted downloads and the `locks/` directory for stale per-digest
-  locks, removing both before any request is accepted. The `objects/`
-  directory is never touched, so verified artifacts remain available for
-  forensic review regardless of retention policy. The function refuses to
-  follow symlinks, preventing recovery-time symlink escape attacks.
 
 #### Exec
 
