@@ -28,6 +28,14 @@ pub enum SignatureSystem {
     Minisign,
     /// Sigstore/cosign bundle verification.
     Cosign,
+    /// `OpenPGP` detached signature (spec §14.2, planned via Sequoia per §41.12.4).
+    OpenPGP,
+    /// Microsoft Authenticode embedded PE signature.
+    Authenticode,
+    /// Apple code signing + notarization ticket.
+    AppleCodeSign,
+    /// Linux distribution package signature (e.g. `rpm`/`deb`/repomd).
+    LinuxPackage,
 }
 
 impl SignatureSystem {
@@ -37,6 +45,10 @@ impl SignatureSystem {
         match self {
             Self::Minisign => "minisign",
             Self::Cosign => "cosign",
+            Self::OpenPGP => "openpgp",
+            Self::Authenticode => "authenticode",
+            Self::AppleCodeSign => "apple_code_sign",
+            Self::LinuxPackage => "linux_package",
         }
     }
 }
