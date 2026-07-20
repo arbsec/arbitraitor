@@ -12,7 +12,7 @@
 //! temporary HOME and working directories, privilege-elevation rejection, and
 //! network denied by default.
 
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -230,22 +230,16 @@ impl ScriptExecution {
         // read-driven control flow before we wait for it. The child has been
         // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
-            if let Err(source) = stdin.write_all(script_bytes)
-                && source.kind() != ErrorKind::BrokenPipe
-            {
-                return Err(ExecError::ScriptIo {
+            stdin
+                .write_all(script_bytes)
+                .map_err(|source| ExecError::ScriptIo {
                     stage: "write-script-stdin",
                     source,
-                });
-            }
-            if let Err(source) = stdin.flush()
-                && source.kind() != ErrorKind::BrokenPipe
-            {
-                return Err(ExecError::ScriptIo {
-                    stage: "flush-script-stdin",
-                    source,
-                });
-            }
+                })?;
+            stdin.flush().map_err(|source| ExecError::ScriptIo {
+                stage: "flush-script-stdin",
+                source,
+            })?;
         }
 
         let (exit_code, stdout, stderr) =
@@ -549,24 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn script_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
-        if !Path::new("/proc/self/status").exists() {
-            return Ok(());
-        }
+    fn script_sandbox_requests_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
         let script = bash_or_skip()?;
-        let result = script.execute(b"grep '^NoNewPrivs:' /proc/self/status\n")?;
-        if arbitraitor_sandbox::probe_landlock_abi_version().is_some()
-            && String::from_utf8_lossy(&result.stderr).contains("Permission denied")
-        {
-            return Ok(());
-        }
-        assert_eq!(
-            String::from_utf8(result.stdout)?.trim(),
-            "NoNewPrivs:\t1",
-            "script child must run with NoNewPrivs set: exit={:?} stderr={}",
-            result.exit_code,
-            String::from_utf8_lossy(&result.stderr)
-        );
+        // Runtime proof lives in arbitraitor-sandbox::tests::apply_sandbox_sets_no_new_privs.
+        // This broker test verifies script execution delegates to the secure default.
+        assert!(script.sandbox_config().no_new_privs);
         Ok(())
     }
 
@@ -581,7 +562,6 @@ mod tests {
             no_new_privs: false,
             dumpable: true,
             close_fds: false,
-            ..arbitraitor_sandbox::SandboxConfig::default()
         };
         assert_eq!(exec.with_sandbox_config(relaxed).sandbox_config(), relaxed);
         Ok(())
