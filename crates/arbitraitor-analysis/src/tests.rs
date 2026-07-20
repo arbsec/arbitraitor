@@ -824,3 +824,54 @@ fn coordinator_accepts_custom_budget() {
     let coord = AnalysisCoordinator::new().with_budget(custom);
     assert_eq!(coord.budget().max_depth, 10);
 }
+
+#[test]
+fn default_pipeline_runs_python_js_detector() {
+    let coordinator = AnalysisCoordinator::new();
+    let result = coordinator.analyze(
+        b"#!/usr/bin/env python3\nimport subprocess, pickle\nsubprocess.run(['id'])\npickle.loads(payload)\n",
+    );
+
+    assert!(
+        result
+            .detector_results
+            .iter()
+            .any(|dr| dr.metadata.id == "arbitraitor-analysis.python-js"),
+        "python-js detector should be registered by default"
+    );
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|f| f.detector == "arbitraitor-analysis.python-js"
+                && f.tags
+                    .iter()
+                    .any(|tag| tag == "subprocess-shell-invocation")),
+        "subprocess.run should produce a python-js finding"
+    );
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|f| f.detector == "arbitraitor-analysis.python-js"
+                && f.tags.iter().any(|tag| tag == "arbitrary-deserialization")),
+        "pickle.loads should produce a python-js finding"
+    );
+}
+
+#[test]
+fn default_pipeline_flags_javascript_persistence() {
+    let coordinator = AnalysisCoordinator::new();
+    let result = coordinator.analyze(
+        b"#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('/tmp/x', 'p');\n",
+    );
+
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|f| f.detector == "arbitraitor-analysis.python-js"
+                && f.tags.iter().any(|tag| tag == "persistence-write")),
+        "fs.writeFileSync should produce a python-js persistence finding"
+    );
+}

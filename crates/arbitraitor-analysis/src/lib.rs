@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod dep_vuln;
+pub mod pyjs;
 pub mod tirith;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -270,6 +271,7 @@ impl AnalysisCoordinator {
         Self::with_detectors(vec![
             Box::new(ArchiveHazardDetector),
             Box::new(ArtifactDetector),
+            Box::new(pyjs::PythonJsDetector),
             Box::new(ShellDetector),
         ])
     }
