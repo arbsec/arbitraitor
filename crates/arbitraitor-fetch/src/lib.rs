@@ -1146,6 +1146,35 @@ fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port() == b.port()
 }
 
+/// Strips credential-bearing headers when the redirect crosses origin
+/// boundaries and the policy does not allow forwarding (spec §11.2).
+///
+/// When `forward_authorization_cross_origin` is `false`, any redirect
+/// that lands on a different origin (scheme + host + port) triggers
+/// removal of `Authorization` and `Cookie` headers from the header map.
+/// When `true`, headers are preserved unchanged.
+///
+/// Not yet called from the redirect loop because `execute_request`
+/// sends a bare GET with no user-supplied headers (tracked in #498).
+/// When #498 wires header input, this function becomes the gate that
+/// prevents credential leakage on cross-origin redirects.
+#[allow(dead_code)]
+pub(crate) fn strip_credentials_on_cross_origin(
+    headers: &mut reqwest::header::HeaderMap,
+    from: &Url,
+    to: &Url,
+    policy: &FetchPolicy,
+) {
+    if policy.forward_authorization_cross_origin {
+        return;
+    }
+    if same_origin(from, to) {
+        return;
+    }
+    headers.remove(reqwest::header::AUTHORIZATION);
+    headers.remove(reqwest::header::COOKIE);
+}
+
 fn classify_reqwest_error(stage: &'static str, error: reqwest::Error) -> FetchError {
     if error.is_timeout() {
         return FetchError::Timeout { stage };
@@ -1240,7 +1269,8 @@ mod tests {
 
     use super::{
         FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_cross_origin_allowed,
-        ensure_no_insecure_downgrade, execute_request, verify_connected_peer,
+        ensure_no_insecure_downgrade, execute_request, strip_credentials_on_cross_origin,
+        verify_connected_peer,
     };
     use url::Url;
 
@@ -1494,6 +1524,78 @@ mod tests {
         assert!(
             matches!(result, Err(FetchError::CrossOriginRedirect)),
             "scheme change is cross-origin: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Credential stripping on cross-origin redirects (spec §11.2)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn strip_credentials_removes_authorization_on_cross_origin() {
+        let policy = FetchPolicy::default();
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret123"),
+        );
+        headers.insert(
+            reqwest::header::COOKIE,
+            reqwest::header::HeaderValue::from_static("session=abc"),
+        );
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_none(),
+            "Authorization MUST be stripped on cross-origin redirect"
+        );
+        assert!(
+            headers.get(reqwest::header::COOKIE).is_none(),
+            "Cookie MUST be stripped on cross-origin redirect"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_preserves_headers_on_same_origin() {
+        let policy = FetchPolicy::default();
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://example.com/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret123"),
+        );
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_some(),
+            "Authorization MUST be preserved on same-origin redirect"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_preserves_headers_when_opted_in() {
+        let policy = FetchPolicy {
+            forward_authorization_cross_origin: true,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret123"),
+        );
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_some(),
+            "Authorization MUST be preserved when policy opts in to cross-origin forwarding"
         );
     }
 }

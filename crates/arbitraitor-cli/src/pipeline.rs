@@ -79,6 +79,8 @@ pub(crate) async fn inspect(
         max_uncompressed_size: config.fetch.max_bytes,
         max_redirects: usize::try_from(config.fetch.max_redirects).into_diagnostic()?,
         require_digest: config.integrity.require_digest,
+        allow_cross_origin_redirect: config.fetch.allow_cross_origin,
+        forward_authorization_cross_origin: config.fetch.forward_authorization_cross_origin,
         ..FetchPolicy::default()
     };
     let source = parse_fetch_source(url)?;
