@@ -49,6 +49,7 @@ mod context;
 mod engine;
 mod error;
 mod schema;
+mod trace;
 mod vex;
 
 pub use context::EvalContext;
@@ -58,6 +59,7 @@ pub use schema::{
     Condition, DefaultsConfig, FieldMatch, LimitsConfig, MatchOp, NetworkConfig, Policy,
     PolicyAction, RedirectsConfig, Rule, ScalarValue,
 };
+pub use trace::{PolicyTrace, RuleEvaluation};
 pub use vex::{VexDenyReason, VexDowngradeResult, VexPolicy, validate_vex_downgrade};
 
 #[cfg(test)]
