@@ -16,8 +16,11 @@ use arbitraitor_model::verdict::{Confidence, Severity};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
+
+/// macOS stable-facility helpers per spec §41.13.
+pub mod macos;
 
 const CLAMAV_ADAPTER_NAME: &str = "clamav";
 const CLAMD_COMMAND: &[u8] = b"zINSTREAM\0";
@@ -55,6 +58,52 @@ pub trait AntivirusAdapter: Send + Sync {
     ///
     /// Returns [`AvError`] when the adapter cannot complete the scan safely.
     fn scan(&self, data: &[u8]) -> Result<ScanResult, AvError>;
+
+    /// Returns a [`SignatureFreshness`] snapshot marking the adapter's
+    /// signatures stale when the most recent update exceeds `max_age`.
+    ///
+    /// Per spec §18.3, callers operating under `required = true` policy must
+    /// fail closed on stale signatures rather than treating the scan as
+    /// clean. The default implementation reads [`Self::engine_version`],
+    /// [`Self::signature_db_version`], and [`Self::last_update_time`]; if
+    /// the timestamp cannot be parsed or is older than `max_age`,
+    /// `is_stale` is `true`. Adapters that have a more authoritative source
+    /// (e.g. a local signature DB mtime) may override this default.
+    fn check_freshness(&self, max_age: Duration) -> SignatureFreshness {
+        let last_update = self
+            .last_update_time()
+            .as_deref()
+            .and_then(parse_rfc3339_utc);
+        let is_stale = match last_update {
+            Some(timestamp) => freshness_is_stale(timestamp, max_age),
+            None => false,
+        };
+        SignatureFreshness {
+            engine_version: self.engine_version(),
+            signature_version: self.signature_db_version(),
+            last_update,
+            is_stale,
+        }
+    }
+}
+
+/// Snapshot of an AV adapter's signature freshness state (spec §18.3).
+///
+/// When an adapter is configured as `required = true`, callers must treat
+/// `is_stale == true` as a fail-closed signal rather than silently accepting
+/// the scan as clean. The fields are independent so policy can layer on top
+/// (e.g. emit a finding when stale, refuse to release when stale).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SignatureFreshness {
+    /// Engine binary version (e.g. `"1.4.1"` for `ClamAV`) when reported by the adapter.
+    pub engine_version: Option<String>,
+    /// Signature database version (e.g. `"26721"` for the `ClamAV` daily CVD) when reported.
+    pub signature_version: Option<String>,
+    /// Parsed timestamp of the last signature update when known.
+    pub last_update: Option<SystemTime>,
+    /// `true` when `last_update` exceeds the supplied `max_age` or the timestamp
+    /// is in the future. `false` when the timestamp is missing or fresh.
+    pub is_stale: bool,
 }
 
 /// Result returned by an antivirus adapter scan.
@@ -286,6 +335,95 @@ fn clamd_io_error(error: &std::io::Error) -> AvError {
     }
 }
 
+/// Computes the stale flag for a known last-update timestamp.
+///
+/// A timestamp in the future is treated as stale because clock skew or a
+/// misconfigured engine should not silently pass `required = true` scans.
+fn freshness_is_stale(last_update: SystemTime, max_age: Duration) -> bool {
+    match SystemTime::now().duration_since(last_update) {
+        Ok(age) => age > max_age,
+        Err(_) => true,
+    }
+}
+
+/// Parses a strict RFC 3339 / ISO 8601 UTC timestamp into a [`SystemTime`].
+///
+/// Accepts `YYYY-MM-DDTHH:MM:SS[.fraction]Z` and the space-separator variant
+/// `YYYY-MM-DD HH:MM:SS[.fraction]Z`. Fractional seconds are accepted but
+/// ignored: AV engines report second precision in practice and ignoring
+/// sub-second noise avoids float math. Returns `None` for any other format
+/// so callers can treat unknown timestamps as "unknown" rather than erroring.
+///
+/// The parser deliberately avoids `chrono` / `time` to keep the AV crate
+/// dependency-light; the supported grammar is the minimum needed to read
+/// `last_update_time()` strings emitted by `ClamAV` (`freshclam.dat` style)
+/// and Microsoft Defender.
+fn parse_rfc3339_utc(input: &str) -> Option<SystemTime> {
+    let bytes = input.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    if bytes[10] != b'T' && bytes[10] != b' ' {
+        return None;
+    }
+    if bytes.last()? != &b'Z' {
+        return None;
+    }
+
+    let parse_u32 = |slice: &[u8]| -> Option<u32> { std::str::from_utf8(slice).ok()?.parse().ok() };
+
+    let year = parse_u32(&bytes[0..4])?.cast_signed();
+    let month = parse_u32(&bytes[5..7])?;
+    let day = parse_u32(&bytes[8..10])?;
+    let hour = parse_u32(&bytes[11..13])?;
+    let minute = parse_u32(&bytes[14..16])?;
+    let second = parse_u32(&bytes[17..19])?;
+
+    if !(1..=12).contains(&month) || day == 0 || day > 31 || hour > 23 || minute > 59 || second > 59
+    {
+        return None;
+    }
+
+    // The remaining bytes (bytes[19..bytes.len()-1]) are the optional
+    // fractional-second suffix and were already validated by the length
+    // check; we ignore them deliberately.
+
+    let days = days_from_civil(year, month, day)?;
+    let secs = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+    if secs < 0 {
+        return None;
+    }
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs.cast_unsigned()))
+}
+
+/// Howard Hinnant's `days_from_civil` algorithm
+/// (<http://howardhinnant.github.io/date_algorithms.html>) adapted to return
+/// the number of days since the Unix epoch for the given civil date.
+///
+/// Restricted to years 1970..=9999 because pre-1970 dates are not meaningful
+/// for AV signature timestamps and the algorithm intentionally rejects them
+/// to keep `checked_add` arithmetic tight.
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1970..=9999).contains(&year) {
+        return None;
+    }
+    let y = i64::from(if month <= 2 { year - 1 } else { year });
+    let era = y.div_euclid(400);
+    let yoe = u64::try_from(y - era * 400).ok()?;
+    let m = u64::from(if month > 2 { month - 3 } else { month + 9 });
+    let doy = (153 * m + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era.checked_mul(146_097)?
+        .checked_add(i64::try_from(doe).ok()?.checked_sub(719_468)?)
+}
+
 /// Analysis detector that wraps a local antivirus adapter.
 pub struct AvDetector {
     adapter: Box<dyn AntivirusAdapter>,
@@ -397,6 +535,56 @@ impl AvDetector {
         }
     }
 
+    /// Builds a critical fail-closed finding when the configured `required =
+    /// true` policy sees stale signatures (spec §18.3).
+    fn stale_signature_finding(
+        &self,
+        ctx: &AnalysisContext<'_>,
+        freshness: &SignatureFreshness,
+    ) -> Finding {
+        Finding {
+            id: "av.signatures-stale".to_owned(),
+            detector: DETECTOR_ID.to_owned(),
+            category: FindingCategory::PolicyViolation,
+            severity: Severity::Critical,
+            confidence: Confidence::Confirmed,
+            title: "Antivirus signatures are stale".to_owned(),
+            description: format!(
+                "Antivirus adapter '{}' has stale signatures and required scanning is enabled, so coverage cannot be trusted.",
+                self.adapter.name()
+            ),
+            evidence: vec![Evidence {
+                kind: EvidenceKind::Other,
+                description: "antivirus freshness snapshot".to_owned(),
+                content: Some(format!(
+                    "adapter={}; is_stale=true; engine_version={}; signature_version={}; last_update={}",
+                    self.adapter.name(),
+                    freshness.engine_version.as_deref().unwrap_or("unknown"),
+                    freshness.signature_version.as_deref().unwrap_or("unknown"),
+                    freshness
+                        .last_update
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map_or_else(
+                            || "unknown".to_owned(),
+                            |d| format!("{}s since epoch", d.as_secs())
+                        ),
+                )),
+            }],
+            artifact_sha256: ctx.artifact_sha256.clone(),
+            location: None,
+            remediation: Some(
+                "Refresh the AV signature database before releasing the artifact.".to_owned(),
+            ),
+            references: vec!["Arbitraitor spec section 18.3".to_owned()],
+            tags: vec![
+                "antivirus".to_owned(),
+                "fail-closed".to_owned(),
+                "stale-signatures".to_owned(),
+            ],
+            taxonomies: Vec::new(),
+        }
+    }
+
     fn adapter_evidence(&self, result_key: &str, result_value: Option<String>) -> Vec<Evidence> {
         let mut parts = vec![format!("adapter={}", self.adapter.name())];
         if let Some(version) = self.adapter.engine_version() {
@@ -446,10 +634,21 @@ impl Detector for AvDetector {
             };
         }
 
-        Ok(match self.adapter.scan(ctx.artifact_bytes) {
-            Ok(result) => self.finding_for_result(ctx, result).into_iter().collect(),
-            Err(error) => vec![self.scan_error_finding(ctx, &error.to_string())],
-        })
+        let mut findings = Vec::new();
+        if let Some(max_age_hours) = self.policy.max_signature_age_hours {
+            let freshness = self
+                .adapter
+                .check_freshness(Duration::from_secs(max_age_hours.saturating_mul(3600)));
+            if self.policy.required && freshness.is_stale {
+                findings.push(self.stale_signature_finding(ctx, &freshness));
+            }
+        }
+
+        match self.adapter.scan(ctx.artifact_bytes) {
+            Ok(result) => findings.extend(self.finding_for_result(ctx, result)),
+            Err(error) => findings.push(self.scan_error_finding(ctx, &error.to_string())),
+        }
+        Ok(findings)
     }
 }
 
@@ -710,5 +909,117 @@ mod tests {
         }
         remove_socket(&socket_path)?;
         Ok(())
+    }
+
+    /// The default trait implementation reads the mock's `last_update_time`
+    /// and reports it as fresh when `max_age` exceeds the timestamp age.
+    #[test]
+    fn check_freshness_reports_fresh_when_recent() {
+        let adapter = MockAdapter::new(true, ScanResult::Clean);
+        let freshness = adapter.check_freshness(Duration::from_hours(8_760));
+
+        assert_eq!(freshness.engine_version.as_deref(), Some("1.0.0"));
+        assert_eq!(freshness.signature_version.as_deref(), Some("sig-42"));
+        assert!(freshness.last_update.is_some());
+        assert!(!freshness.is_stale);
+    }
+
+    /// When `max_age` is tiny, even a recent-but-not-now timestamp is stale.
+    #[test]
+    fn check_freshness_reports_stale_when_max_age_zero() {
+        let adapter = MockAdapter::new(true, ScanResult::Clean);
+        let freshness = adapter.check_freshness(Duration::from_secs(0));
+
+        assert!(freshness.last_update.is_some());
+        assert!(freshness.is_stale);
+    }
+
+    /// An RFC3339 string that cannot be parsed yields `last_update = None`
+    /// and `is_stale = false` so callers can layer their own policy on top.
+    #[test]
+    fn check_freshness_handles_unparseable_timestamp() {
+        struct BadAdapter;
+        impl AntivirusAdapter for BadAdapter {
+            fn name(&self) -> &'static str {
+                "bad-av"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn engine_version(&self) -> Option<String> {
+                Some("1.0.0".to_owned())
+            }
+            fn signature_db_version(&self) -> Option<String> {
+                Some("sig-1".to_owned())
+            }
+            fn last_update_time(&self) -> Option<String> {
+                Some("not-a-timestamp".to_owned())
+            }
+            fn scan(&self, _data: &[u8]) -> Result<ScanResult, AvError> {
+                Ok(ScanResult::Clean)
+            }
+        }
+
+        let freshness = BadAdapter.check_freshness(Duration::from_mins(1));
+        assert!(freshness.last_update.is_none());
+        assert!(!freshness.is_stale);
+    }
+
+    /// When `required = true` and signatures are stale, the detector emits a
+    /// critical finding that fails closed (spec §18.3).
+    #[test]
+    fn required_policy_fails_closed_on_stale_signatures() {
+        let adapter = MockAdapter::new(true, ScanResult::Clean);
+        let mut policy = enabled_policy(true);
+        policy.max_signature_age_hours = Some(0);
+        let result = analyze(adapter, policy);
+
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].id, "av.signatures-stale");
+        assert_eq!(result.findings[0].severity, Severity::Critical);
+        assert_eq!(result.verdict, Verdict::Block);
+        assert!(
+            result.findings[0]
+                .tags
+                .iter()
+                .any(|tag| tag == "fail-closed")
+        );
+    }
+
+    /// Non-required policies skip the freshness check entirely.
+    #[test]
+    fn non_required_policy_ignores_stale_signatures() {
+        let adapter = MockAdapter::new(true, ScanResult::Clean);
+        let mut policy = enabled_policy(false);
+        policy.max_signature_age_hours = Some(0);
+        let result = analyze(adapter, policy);
+
+        assert!(result.findings.is_empty());
+        assert_eq!(result.verdict, Verdict::Pass);
+    }
+
+    /// Helper: parses a fixed timestamp and verifies the round-trip back to
+    /// the same [`SystemTime`]. Using a self-consistent check avoids hard-coding
+    /// epoch seconds that would drift if the algorithm changed.
+    #[test]
+    fn parse_rfc3339_utc_accepts_iso8601() -> Result<(), &'static str> {
+        let ts =
+            super::parse_rfc3339_utc("2026-07-20T00:00:00Z").ok_or("timestamp should parse")?;
+        // 2026-07-20T00:00:00Z is 1_784_505_600 seconds since the Unix epoch.
+        let expected = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_hours(495_696))
+            .ok_or("epoch arithmetic fits")?;
+        assert_eq!(ts, expected);
+        Ok(())
+    }
+
+    /// The parser rejects malformed timestamps without panicking.
+    #[test]
+    fn parse_rfc3339_utc_rejects_malformed() {
+        assert!(super::parse_rfc3339_utc("").is_none());
+        assert!(super::parse_rfc3339_utc("2026-07-20").is_none());
+        assert!(super::parse_rfc3339_utc("2026-07-20T00:00:00").is_none()); // missing Z
+        assert!(super::parse_rfc3339_utc("2026-13-01T00:00:00Z").is_none()); // bad month
+        assert!(super::parse_rfc3339_utc("2026-07-32T00:00:00Z").is_none()); // bad day
     }
 }

@@ -9,17 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Fetch
+#### Antivirus
 
-- `FetchMetadata` now includes 5 additional fields per spec §11.5:
-  `response_status: Option<u16>`, `selected_headers: Vec<(String, String)>`,
-  `transfer_encoding: Option<String>`, `final_origin: Option<String>`,
-  `retriever_version: String`. The `selected_headers` field captures
-  safe-to-record response headers (Content-Type, Content-Length,
-  Content-Encoding, Cache-Control, ETag, Last-Modified, Server,
-  X-Content-Type-Options, X-Frame-Options, Strict-Transport-Security)
-  while excluding credential-bearing headers (Authorization, Cookie,
-  Set-Cookie).
+- `arbitraitor_av::SignatureFreshness` — new public struct for spec §18.3
+  signature freshness snapshots. Carries `engine_version`, `signature_version`,
+  parsed `last_update: Option<SystemTime>`, and `is_stale: bool` so callers can
+  layer policy on top without parsing RFC 3339 themselves.
+- `arbitraitor_av::AntivirusAdapter::check_freshness(&self, max_age: Duration)`
+  — new trait method with a default implementation that reads the adapter's
+  version fields and parses `last_update_time()` as RFC 3339, marking the
+  signatures stale when the timestamp exceeds `max_age` or lies in the future.
+- `arbitraitor_av::macos::{read_quarantine_xattr, read_spotlight_metadata}` —
+  new module per spec §41.13 wrapping the stable macOS facilities `xattr(1)`
+  and `mdfind(1)`. The helpers are `cfg(target_os = "macos")` gated and return
+  `None` on any other host. `xattr` returns the trimmed
+  `com.apple.quarantine` value when present; `mdfind` returns the first
+  indexed path line. Endpoint Security is documented but not wrapped because
+  it requires a signed system extension.
+- `arbitraitor_av::AvDetector` — fail-closed integration of signature
+  freshness. When `AvPolicy::required` is `true` and
+  `max_signature_age_hours` is set, a stale snapshot emits a critical
+  `av.signatures-stale` finding that blocks release per spec §18.3 rather
+  than silently treating the scan as clean.
 
 #### Plugin Host
 

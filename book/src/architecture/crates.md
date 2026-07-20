@@ -119,7 +119,7 @@ Content classification and magic byte detection.
 
 Antivirus adapter trait and implementations.
 
-**Owns:** ClamAV (`clamd` streaming), Microsoft Defender CLI adapter
+**Owns:** ClamAV (`clamd` streaming), Microsoft Defender CLI adapter, signature-freshness snapshots (§18.3), macOS stable-facility helpers (`xattr`, `mdfind` per §41.13)
 **Must not:** Policy decisions, trust verdicts
 
 ### `arbitraitor-package-manager`
