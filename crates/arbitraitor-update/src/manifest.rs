@@ -61,6 +61,11 @@ pub struct UpdateTarget {
     pub path: TargetPath,
     /// Expected SHA-256 digest encoded as 64 lowercase hex characters.
     pub sha256: Sha256Digest,
+    /// Optional binary release provenance (spec §34.3). Only present on
+    /// the `BinaryRelease` channel — carries SBOM reference, Sigstore
+    /// bundle path, and reproducible-build info.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_provenance: Option<ReleaseProvenance>,
     /// Expected byte count.
     pub size: u64,
     /// Semantic version of the target payload.
@@ -231,6 +236,25 @@ pub enum UpdateChannel {
     TrustRoot,
     /// Plugin registry metadata.
     PluginRegistry,
+    /// Binary release channel for Arbitraitor itself (spec §34.3).
+    /// Carries SHA-256 digests, Sigstore bundles, SBOMs, and
+    /// reproducible-build information for release artifacts.
+    BinaryRelease,
+}
+
+/// Binary release provenance (spec §34.3).
+///
+/// Carries SBOM reference, Sigstore bundle path, and reproducible-build
+/// information for release artifacts on the `BinaryRelease` channel.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseProvenance {
+    /// Path to the `CycloneDX` SBOM artifact relative to the target.
+    pub sbom_path: Option<String>,
+    /// Path to the Sigstore bundle artifact relative to the target.
+    pub sigstore_bundle_path: Option<String>,
+    /// Whether the build was verified as reproducible (spec §34.3).
+    pub reproducible: bool,
 }
 
 fn validate_bounded_non_empty(name: &str, value: &str, max_len: usize) -> Result<(), UpdateError> {
@@ -417,6 +441,7 @@ mod tests {
                 )?,
                 size: 12,
                 target_version: "1.2.3".to_owned(),
+                release_provenance: None,
             }],
             published_at: "2026-06-16T00:00:00Z".to_owned(),
             expires_at: "2026-12-31T23:59:59Z".to_owned(),

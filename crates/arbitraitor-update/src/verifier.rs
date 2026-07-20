@@ -378,6 +378,7 @@ mod tests {
             )?,
             size: 12,
             target_version: "1.2.3".to_owned(),
+            release_provenance: None,
         };
         verifier.verify_target(&target, b"rule-content")?;
         Ok(())

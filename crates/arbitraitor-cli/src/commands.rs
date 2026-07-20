@@ -672,6 +672,7 @@ pub(crate) fn update(command: &UpdateCommand) -> Result<()> {
                 arbitraitor_update::manifest::UpdateChannel::IntelFeeds => "intel_feeds",
                 arbitraitor_update::manifest::UpdateChannel::TrustRoot => "trust_root",
                 arbitraitor_update::manifest::UpdateChannel::PluginRegistry => "plugin_registry",
+                arbitraitor_update::manifest::UpdateChannel::BinaryRelease => "binary_release",
             };
 
             let mut stdout = std::io::stdout().lock();

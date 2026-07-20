@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Update
+
+- `arbitraitor_update::manifest::UpdateChannel::BinaryRelease` — new
+  channel variant for binary releases per spec §34.3. Carries SHA-256
+  digests, Sigstore bundles, SBOMs, and reproducible-build info.
+- `arbitraitor_update::manifest::ReleaseProvenance` — new struct
+  with optional SBOM path, optional Sigstore bundle path, and
+  reproducible-build flag. Attached to `UpdateTarget` on the
+  `BinaryRelease` channel.
+
 #### Exec
 
 - `arbitraitor-exec::native::PlatformProvenance` — new struct recording
