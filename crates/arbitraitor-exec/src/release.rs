@@ -123,6 +123,10 @@ pub enum ReleaseMethod {
     AtomicRename,
     /// Atomic publication was unavailable and policy approved a non-atomic copy.
     NonAtomicCopy,
+    /// Artifact bytes were emitted to stdout (spec §26.1) — used by
+    /// `scan --emit-on-pass` and wrapper pipe semantics. The bytes are
+    /// still verified against the scanned digest before emission.
+    StdoutEmit,
 }
 
 /// Warning recorded for exceptional release paths.
@@ -243,6 +247,78 @@ pub fn release_artifact_with_provenance(
         provenance,
         ReleaseFsMode::Normal,
     )
+}
+
+/// Emits the exact CAS bytes to stdout (spec §26.1).
+///
+/// Used by `scan --emit-on-pass` and wrapper pipe semantics. The bytes
+/// are verified against `scanned_digest` before emission, preserving
+/// invariant 2 (immutable identity). No destination file is written.
+///
+/// # Errors
+///
+/// Returns [`ReleaseError`] if CAS verification or digest verification
+/// fails.
+pub fn emit_artifact_to_stdout(
+    store: &ContentStore,
+    scanned_digest: &Sha256Digest,
+    writer: &mut dyn Write,
+) -> Result<ReleaseReceipt, ReleaseError> {
+    let handle = store.get(scanned_digest)?;
+    let mut reader = handle
+        .read()
+        .try_clone()
+        .map_err(|source| ReleaseError::Io {
+            stage: "clone-cas-object",
+            source,
+        })?;
+    verify_reader_digest(&mut reader, scanned_digest, "verify-cas-before-emit")?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| ReleaseError::Io {
+            stage: "seek-after-verify",
+            source,
+        })?;
+
+    let mut hasher = Sha256::new();
+    let mut bytes_written: u64 = 0;
+    let mut buffer = [0u8; COPY_BUFFER_BYTES];
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|source| ReleaseError::Io {
+                stage: "read-cas-for-emit",
+                source,
+            })?;
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..n])
+            .map_err(|source| ReleaseError::Io {
+                stage: "write-stdout-emit",
+                source,
+            })?;
+        hasher.update(&buffer[..n]);
+        bytes_written += n as u64;
+    }
+
+    let actual = Sha256Digest::new(hasher.finalize().into());
+    if actual != *scanned_digest {
+        return Err(ReleaseError::DigestMismatch {
+            stage: "verify-after-emit",
+            expected: scanned_digest.clone(),
+            actual,
+        });
+    }
+
+    Ok(ReleaseReceipt {
+        digest: scanned_digest.clone(),
+        destination: PathBuf::from("-"),
+        bytes_written,
+        method: ReleaseMethod::StdoutEmit,
+        warnings: Vec::new(),
+    })
 }
 
 /// Verifies the verdict is fresh enough to safely release (spec §26.2 step 4).
@@ -1316,6 +1392,7 @@ impl fmt::Display for ReleaseMethod {
             Self::AtomicNoReplaceLink => formatter.write_str("atomic-no-replace-link"),
             Self::AtomicRename => formatter.write_str("atomic-rename"),
             Self::NonAtomicCopy => formatter.write_str("non-atomic-copy"),
+            Self::StdoutEmit => formatter.write_str("stdout-emit"),
         }
     }
 }
@@ -2062,6 +2139,40 @@ mod tests {
             result.is_ok(),
             "when verdict_max_age is None, release must proceed: {result:?}"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stdout_emit_verifies_digest_and_writes_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("stdout-emit")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let data = b"hello stdout release";
+        let digest = runtime.block_on(store_bytes(&store, data))?;
+
+        let mut output = Vec::new();
+        let receipt = emit_artifact_to_stdout(&store, &digest, &mut output)?;
+
+        assert_eq!(output.as_slice(), data);
+        assert_eq!(receipt.method, ReleaseMethod::StdoutEmit);
+        assert_eq!(receipt.bytes_written, data.len() as u64);
+        assert_eq!(receipt.digest, digest);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stdout_emit_rejects_digest_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("stdout-mismatch")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let _digest = runtime.block_on(store_bytes(&store, b"actual data"))?;
+        let wrong_digest = Sha256Digest::new([0xff; 32]);
+
+        let mut output = Vec::new();
+        let result = emit_artifact_to_stdout(&store, &wrong_digest, &mut output);
+        assert!(result.is_err(), "mismatched digest must fail");
         fs::remove_dir_all(root)?;
         Ok(())
     }
