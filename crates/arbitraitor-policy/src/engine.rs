@@ -626,11 +626,12 @@ fn category_info(cat: FindingCategory) -> (String, u8) {
         FindingCategory::NetworkBehavior => ("network-behavior", 11),
         FindingCategory::DynamicCodeExecution => ("dynamic-code-execution", 12),
         FindingCategory::ArchiveHazard => ("archive-hazard", 13),
-        FindingCategory::PackageRisk => ("package-risk", 14),
-        FindingCategory::PolicyViolation => ("policy-violation", 15),
-        FindingCategory::ParserError => ("parser-error", 16),
-        FindingCategory::ResourceLimitEvent => ("resource-limit-event", 17),
-        FindingCategory::SupplyChain => ("supply-chain", 18),
+        FindingCategory::ParserDifferential => ("parser-differential", 14),
+        FindingCategory::PackageRisk => ("package-risk", 15),
+        FindingCategory::PolicyViolation => ("policy-violation", 16),
+        FindingCategory::ParserError => ("parser-error", 17),
+        FindingCategory::ResourceLimitEvent => ("resource-limit-event", 18),
+        FindingCategory::SupplyChain => ("supply-chain", 19),
     };
     (name.to_owned(), rank)
 }

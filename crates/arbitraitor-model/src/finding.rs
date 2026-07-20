@@ -43,6 +43,8 @@ pub enum FindingCategory {
     DynamicCodeExecution,
     /// Archive hazard.
     ArchiveHazard,
+    /// Independent parsers disagree about artifact structure.
+    ParserDifferential,
     /// Package ecosystem risk.
     PackageRisk,
     /// Policy violation.
@@ -371,7 +373,7 @@ mod tests {
 
     #[test]
     fn finding_category_round_trips_edge_variant() -> Result<(), Box<dyn std::error::Error>> {
-        let value = FindingCategory::ResourceLimitEvent;
+        let value = FindingCategory::ParserDifferential;
         assert_eq!(
             serde_json::from_str::<FindingCategory>(&serde_json::to_string(&value)?)?,
             value
