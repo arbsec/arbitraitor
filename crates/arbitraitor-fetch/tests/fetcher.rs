@@ -339,7 +339,12 @@ async fn credential_cross_protocol_redirect_fails_closed() -> Result<(), Box<dyn
 
 proptest! {
     #[test]
-    fn credential_redirect_error_does_not_render_secret(token in "[A-Za-z0-9]{1,64}") {
+    fn credential_redirect_error_does_not_render_secret(token in "[A-Za-z0-9!@#$%^&*]{8,64}") {
+        // Construct an error that should never include the secret token.
+        // The token must be long enough and contain characters outside the
+        // canonical Display output of FetchError variants so we are actually
+        // testing leakage of the literal secret value, not substring
+        // collisions with enum variant names.
         let error = FetchError::CrossProtocolCredentialRedirect {
             secrecy: RedirectCredentialSecrecy::BearerLeaked,
         };
