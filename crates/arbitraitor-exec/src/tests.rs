@@ -160,6 +160,60 @@ fn shell_injection_vars_blocked_even_in_allowlist() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn custom_allow_environment_config_produces_different_environment()
+-> Result<(), Box<dyn std::error::Error>> {
+    use arbitraitor_core::config::ExecutionConfig;
+
+    let cfg = ExecutionConfig {
+        allow_environment: vec!["ARBITRAITOR_TEST_VAR".to_owned()],
+        ..ExecutionConfig::default()
+    };
+
+    let context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .environment_from_config(&cfg)?
+        .source_environment([
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C"),
+            ("TERM", "xterm-256color"),
+            ("ARBITRAITOR_TEST_VAR", "hello"),
+        ])
+        .build()?;
+
+    assert_eq!(
+        context.environment().get("ARBITRAITOR_TEST_VAR"),
+        Some(&OsString::from("hello"))
+    );
+    assert!(!context.environment().contains_key("LANG"));
+    assert!(!context.environment().contains_key("LC_ALL"));
+    assert!(!context.environment().contains_key("TERM"));
+    // PATH is inserted unconditionally downstream of the controlled PATH
+    // builder and is independent of the allowlist.
+    assert!(context.environment().contains_key("PATH"));
+    assert!(context.environment().contains_key("HOME"));
+
+    let default_context = ExecutionContextBuilder::new(plan(), grants())
+        .policy(policy_without_root_check())
+        .source_environment([
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C"),
+            ("TERM", "xterm-256color"),
+            ("ARBITRAITOR_TEST_VAR", "hello"),
+        ])
+        .build()?;
+    assert_eq!(
+        default_context.environment().get("LANG"),
+        Some(&OsString::from("C.UTF-8"))
+    );
+    assert!(
+        !default_context
+            .environment()
+            .contains_key("ARBITRAITOR_TEST_VAR")
+    );
+    Ok(())
+}
+
+#[test]
 fn temp_directories_are_fresh_empty_and_cleaned_on_drop() -> Result<(), Box<dyn std::error::Error>>
 {
     use std::os::unix::fs::MetadataExt;

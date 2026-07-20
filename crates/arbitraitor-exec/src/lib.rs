@@ -19,6 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use arbitraitor_core::config::ExecutionConfig;
 use arbitraitor_model::operation::{GrantedCapabilities, OperationPlan};
 use arbitraitor_model::verdict::AssuranceLevel;
 use serde::{Deserialize, Serialize};
@@ -551,6 +552,41 @@ pub struct ExecutionPolicy {
     pub resource_limits: ResourceLimits,
 }
 
+/// Builds an [`EnvAllowlist`] from an execution configuration's
+/// `allow_environment` list (spec §26.5).
+///
+/// Each entry is matched as an exact variable name. Pre-existing
+/// [`EnvAllowlist::default_names`] behavior is preserved when the
+/// configuration is built from its serde defaults.
+///
+/// # Errors
+///
+/// Returns [`ExecError::InvalidEnvironmentName`] when any configured name
+/// is malformed.
+pub fn env_allowlist_from_config(cfg: &ExecutionConfig) -> Result<EnvAllowlist, ExecError> {
+    EnvAllowlist::new(cfg.allow_environment.iter().cloned())
+}
+
+/// Builds an [`EnvDenyList`] from an execution configuration's
+/// `deny_environment_patterns` list (spec §26.5).
+///
+/// Each entry is treated as a prefix that matches any variable name
+/// starting with that string. Defaults are the union of the historic
+/// exact-match denylist and the historic prefix denylist; treating the
+/// exact-match entries as prefixes is strictly tighter than exact match
+/// and is the safe direction.
+///
+/// # Errors
+///
+/// Returns [`ExecError::InvalidEnvironmentName`] when any configured
+/// pattern is malformed.
+pub fn env_denylist_from_config(cfg: &ExecutionConfig) -> Result<EnvDenyList, ExecError> {
+    EnvDenyList::new(
+        std::iter::empty::<String>(),
+        cfg.deny_environment_patterns.iter().cloned(),
+    )
+}
+
 impl ExecutionPolicy {
     /// Returns the controlled PATH string for this policy.
     ///
@@ -975,6 +1011,26 @@ impl ExecutionContextBuilder {
     pub fn control_proofs(mut self, proofs: ControlProofs) -> Self {
         self.control_proofs = proofs;
         self
+    }
+
+    /// Replaces the environment allowlist and denylist with values derived
+    /// from the supplied execution configuration (spec §26.5).
+    ///
+    /// `cfg.allow_environment` entries are matched as exact variable names.
+    /// `cfg.deny_environment_patterns` entries are matched as prefixes
+    /// (any variable name starting with the pattern is denied). When the
+    /// configuration is built from its serde defaults, the resulting lists
+    /// match the historical `EnvAllowlist::default_names()` and
+    /// `EnvDenyList::mandatory()` constants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError::InvalidEnvironmentName`] when any configured
+    /// name or pattern is malformed.
+    pub fn environment_from_config(mut self, cfg: &ExecutionConfig) -> Result<Self, ExecError> {
+        self.policy.environment_allowlist = env_allowlist_from_config(cfg)?;
+        self.policy.environment_denylist = env_denylist_from_config(cfg)?;
+        Ok(self)
     }
 
     /// Builds the execution context without spawning any child process.
