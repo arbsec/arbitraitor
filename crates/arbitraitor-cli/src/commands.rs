@@ -36,7 +36,10 @@ pub struct ScanCommand {
 
 #[derive(Args)]
 pub struct ExplainCommand {
-    pub receipt_path: PathBuf,
+    /// Receipt file path or `sha256:<hex>` to look up the most recent
+    /// receipt for an artifact from the Arbitraitor receipts directory
+    /// (spec §28.6).
+    pub target: String,
 }
 
 #[derive(Args)]
@@ -244,7 +247,11 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
 }
 
 pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
-    let receipt_bytes = std::fs::read(&command.receipt_path).into_diagnostic()?;
+    let receipt_bytes = if let Some(hash) = command.target.strip_prefix("sha256:") {
+        resolve_receipt_by_hash(hash)?
+    } else {
+        std::fs::read(&command.target).into_diagnostic()?
+    };
     let receipt: Receipt = serde_json::from_slice(&receipt_bytes)
         .map_err(|e| miette::miette!("invalid receipt file: {e}"))?;
 
@@ -283,6 +290,42 @@ pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Locates the most recent receipt for an artifact by its SHA-256 hash
+/// (spec §28.6). Receipts are stored as `~/.arbitraitor/receipts/*-<prefix>.json`
+/// where `<prefix>` is the first 12 chars of the artifact's sha256 hex.
+/// Returns the newest matching file's bytes.
+fn resolve_receipt_by_hash(hash_hex: &str) -> Result<Vec<u8>> {
+    let hash_lower = hash_hex.to_lowercase();
+    if hash_lower.len() != 64 || !hash_lower.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(miette::miette!(
+            "invalid sha256 hash: expected 64 hex characters, got '{}'",
+            hash_hex
+        ));
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".arbitraitor").join("receipts"))
+        .ok_or_else(|| miette::miette!("HOME environment variable is not set"))?;
+    let prefix: String = hash_lower.chars().take(12).collect();
+    let mut entries: Vec<_> = std::fs::read_dir(&home)
+        .into_diagnostic()?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(&format!("-{prefix}.json")) {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+        .collect();
+    entries.sort_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()));
+    let newest = entries
+        .last()
+        .ok_or_else(|| miette::miette!("no receipt found for sha256:{hash_hex}"))?;
+    std::fs::read(newest.path()).into_diagnostic()
 }
 
 pub(crate) fn store(command: &StoreCommand, config: &Config) -> Result<()> {
