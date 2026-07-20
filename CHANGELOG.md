@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Analysis
+
+- `arbitraitor_analysis::AnalysisBudget` — new struct bounding recursive
+  graph expansion across bytes (1 GiB default), nodes (10,000 default),
+  and depth (5 default) per spec §41.16. Includes `deterministic_mode`
+  flag (default true) that fixes detector ordering for reproducible
+  receipts. `AnalysisCoordinator` now accepts a budget via `.with_budget()`
+  and exposes it via `.budget()`. 10 new tests.
+
 #### Exec
 
 - `arbitraitor-core::config::ExecutionConfig::allow_environment` and
