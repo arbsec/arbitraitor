@@ -10,6 +10,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::ids::Sha256Digest;
+use serde::de::{self, Error as DeError, Visitor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -92,13 +94,121 @@ string_newtype!(
     VexHashAlgorithm
 );
 string_newtype!(
-    /// Hash digest text for algorithms not modeled as SHA-256 newtypes.
-    VexHashDigest
-);
-string_newtype!(
     /// CVSS 4.0 vector string carried by CSAF 2.1 VEX documents.
     CvssV4Vector
 );
+
+/// Hash digest value from a VEX component hash map.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VexHashDigest {
+    /// SHA-256 digest parsed into the workspace digest newtype.
+    KnownSha256(Sha256Digest),
+    /// Digest for an algorithm Arbitraitor does not bind to artifact identity.
+    Other(String),
+}
+
+impl VexHashDigest {
+    /// Parses a hash-map entry value with access to its algorithm label.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VexParseError`] when a SHA-256 entry is not valid lowercase or
+    /// uppercase hexadecimal SHA-256 text.
+    pub fn parse_for_algorithm(
+        algorithm: &VexHashAlgorithm,
+        digest: &str,
+    ) -> Result<Self, VexParseError> {
+        if matches_sha256_algorithm(algorithm.as_str()) {
+            digest
+                .parse::<Sha256Digest>()
+                .map(Self::KnownSha256)
+                .map_err(|_| VexParseError::InvalidSha256Digest)
+        } else {
+            Ok(Self::Other(digest.to_owned()))
+        }
+    }
+}
+
+impl Serialize for VexHashDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::KnownSha256(digest) => serializer.serialize_str(&digest.to_string()),
+            Self::Other(digest) => serializer.serialize_str(digest),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VexHashDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct VexHashDigestVisitor;
+
+        impl Visitor<'_> for VexHashDigestVisitor {
+            type Value = VexHashDigest;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("hash digest text")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(VexHashDigest::Other(value.to_owned()))
+            }
+        }
+
+        deserializer.deserialize_str(VexHashDigestVisitor)
+    }
+}
+
+fn matches_sha256_algorithm(algorithm: &str) -> bool {
+    algorithm.eq_ignore_ascii_case("sha-256") || algorithm.eq_ignore_ascii_case("sha256")
+}
+
+/// Resource limits applied to untrusted VEX companion artifact parsing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VexLimits {
+    /// Maximum raw JSON input size in bytes.
+    pub max_bytes: usize,
+    /// Maximum `OpenVEX` statements.
+    pub max_statements: usize,
+    /// Maximum CSAF vulnerabilities.
+    pub max_vulnerabilities: usize,
+    /// Maximum products in any product list.
+    pub max_products: usize,
+    /// Maximum CSAF scores.
+    pub max_scores: usize,
+    /// Maximum CSAF involvement statements.
+    pub max_involvements: usize,
+    /// Maximum CSAF tracking revisions.
+    pub max_revisions: usize,
+    /// Maximum entries in any modeled map field.
+    pub max_map_entries: usize,
+    /// Maximum bytes in modeled string fields.
+    pub max_string_len: usize,
+}
+
+impl Default for VexLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 2 * 1024 * 1024,
+            max_statements: 10_000,
+            max_vulnerabilities: 10_000,
+            max_products: 10_000,
+            max_scores: 10_000,
+            max_involvements: 10_000,
+            max_revisions: 10_000,
+            max_map_entries: 10_000,
+            max_string_len: 64 * 1024,
+        }
+    }
+}
 
 /// VEX format and version detected for a parsed document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -318,7 +428,11 @@ pub struct OpenVexProduct {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub identifiers: BTreeMap<String, VexProductId>,
     /// Component hashes keyed by IANA hash algorithm label.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vex_hashes",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub hashes: BTreeMap<VexHashAlgorithm, VexHashDigest>,
     /// Nested subcomponents relevant to this statement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -336,7 +450,11 @@ pub struct OpenVexComponent {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub identifiers: BTreeMap<String, VexProductId>,
     /// Component hashes keyed by IANA hash algorithm label.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vex_hashes",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub hashes: BTreeMap<VexHashAlgorithm, VexHashDigest>,
 }
 
@@ -526,7 +644,7 @@ pub enum CsafInvolvementStatus {
 #[derive(Debug, Error)]
 pub enum VexParseError {
     /// JSON could not be parsed into the requested VEX schema.
-    #[error("invalid JSON for {stage}: {source}")]
+    #[error("invalid JSON for {stage}")]
     Json {
         /// Parser stage.
         stage: &'static str,
@@ -534,13 +652,13 @@ pub enum VexParseError {
         source: serde_json::Error,
     },
     /// `OpenVEX` context was unsupported.
-    #[error("unsupported OpenVEX context {context}; supported context is {OPENVEX_CONTEXT_V0_2_0}")]
+    #[error("unsupported OpenVEX context; supported context is {OPENVEX_CONTEXT_V0_2_0}")]
     UnsupportedOpenVexContext {
         /// Context observed in the document.
         context: VexContext,
     },
     /// No statement matched the expected product subject.
-    #[error("no statement found matching subject {subject}")]
+    #[error("no statement found matching requested subject")]
     NoMatchingSubject {
         /// Expected subject.
         subject: VexProductId,
@@ -549,23 +667,34 @@ pub enum VexParseError {
     #[error("OpenVEX statement does not contain product identifiers")]
     MissingOpenVexProduct,
     /// Timestamp text could not be parsed.
-    #[error("invalid timestamp format: {timestamp}")]
+    #[error("invalid timestamp format")]
     InvalidTimestamp {
         /// Invalid timestamp text.
         timestamp: VexTimestamp,
     },
     /// CSAF version is unsupported.
-    #[error("unsupported CSAF version {version}; supported versions are 2.0 and 2.1")]
+    #[error("unsupported CSAF version; supported versions are 2.0 and 2.1")]
     UnsupportedCsafVersion {
         /// CSAF version observed in the document.
         version: String,
     },
     /// CSAF VEX profile metadata was missing.
-    #[error("CSAF document category {category} is not a VEX profile")]
+    #[error("CSAF document category is not a VEX profile")]
     UnsupportedCsafCategory {
         /// CSAF category observed in the document.
         category: String,
     },
+    /// Input exceeded parser resource limits.
+    #[error("VEX parser limit exceeded for {field}; limit is {limit}")]
+    LimitExceeded {
+        /// Field or collection that exceeded a limit.
+        field: &'static str,
+        /// Configured limit.
+        limit: usize,
+    },
+    /// SHA-256 hash text was invalid.
+    #[error("invalid SHA-256 digest in VEX hash map")]
+    InvalidSha256Digest,
 }
 
 /// Parses an `OpenVEX` 0.2.0 JSON document into a normalized [`VexStatement`].
@@ -580,12 +709,28 @@ pub enum VexParseError {
 /// unsupported `OpenVEX` context, required fields are missing, or no statement
 /// matches `expected_subject`.
 pub fn parse_openvex(json: &[u8], expected_subject: &str) -> Result<VexStatement, VexParseError> {
+    parse_openvex_with_limits(json, expected_subject, &VexLimits::default())
+}
+
+/// Parses an `OpenVEX` 0.2.0 JSON document with caller-supplied limits.
+///
+/// # Errors
+///
+/// Returns [`VexParseError`] when JSON is invalid, unsupported, unmatched, or
+/// exceeds any configured [`VexLimits`] boundary.
+pub fn parse_openvex_with_limits(
+    json: &[u8],
+    expected_subject: &str,
+    limits: &VexLimits,
+) -> Result<VexStatement, VexParseError> {
+    ensure_len("openvex.bytes", json.len(), limits.max_bytes)?;
     let document: OpenVexDocument =
         serde_json::from_slice(json).map_err(|source| VexParseError::Json {
             stage: "parse OpenVEX",
             source,
         })?;
     document.ensure_supported_context()?;
+    document.validate_limits(limits)?;
 
     let expected = VexProductId::from(expected_subject);
     let statement = document
@@ -626,12 +771,27 @@ pub fn parse_openvex(json: &[u8], expected_subject: &str) -> Result<VexStatement
 /// Returns [`VexParseError`] if JSON is invalid, the CSAF version is not 2.0 or
 /// 2.1, or the document category is not a CSAF VEX profile.
 pub fn parse_csaf_vex(json: &[u8]) -> Result<CsafVexDocument, VexParseError> {
+    parse_csaf_vex_with_limits(json, &VexLimits::default())
+}
+
+/// Parses a CSAF VEX profile document with caller-supplied limits.
+///
+/// # Errors
+///
+/// Returns [`VexParseError`] when JSON is invalid, unsupported, or exceeds any
+/// configured [`VexLimits`] boundary.
+pub fn parse_csaf_vex_with_limits(
+    json: &[u8],
+    limits: &VexLimits,
+) -> Result<CsafVexDocument, VexParseError> {
+    ensure_len("csaf.bytes", json.len(), limits.max_bytes)?;
     let document: CsafVexDocument =
         serde_json::from_slice(json).map_err(|source| VexParseError::Json {
             stage: "parse CSAF VEX",
             source,
         })?;
     document.format_version()?;
+    document.validate_limits(limits)?;
     Ok(document)
 }
 
@@ -645,6 +805,25 @@ impl OpenVexDocument {
             })
         }
     }
+
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_string("openvex.context", self.context.as_str(), limits)?;
+        ensure_string("openvex.id", self.id.as_str(), limits)?;
+        ensure_string("openvex.author", self.author.as_str(), limits)?;
+        ensure_option_string("openvex.role", self.role.as_deref(), limits)?;
+        ensure_timestamp("openvex.timestamp", &self.timestamp, limits)?;
+        ensure_option_timestamp("openvex.last_updated", self.last_updated.as_ref(), limits)?;
+        ensure_option_string("openvex.tooling", self.tooling.as_deref(), limits)?;
+        ensure_len(
+            "openvex.statements",
+            self.statements.len(),
+            limits.max_statements,
+        )?;
+        for statement in &self.statements {
+            statement.validate_limits(limits)?;
+        }
+        Ok(())
+    }
 }
 
 impl OpenVexStatement {
@@ -653,13 +832,108 @@ impl OpenVexStatement {
             .iter()
             .any(|product| product.matches(expected))
     }
+
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_option_newtype("openvex.statement.id", self.id.as_ref(), limits)?;
+        ensure_option_timestamp(
+            "openvex.statement.timestamp",
+            self.timestamp.as_ref(),
+            limits,
+        )?;
+        ensure_option_timestamp(
+            "openvex.statement.last_updated",
+            self.last_updated.as_ref(),
+            limits,
+        )?;
+        self.vulnerability.validate_limits(limits)?;
+        ensure_len(
+            "openvex.statement.products",
+            self.products.len(),
+            limits.max_products,
+        )?;
+        for product in &self.products {
+            product.validate_limits(limits)?;
+        }
+        ensure_option_string(
+            "openvex.statement.supplier",
+            self.supplier.as_deref(),
+            limits,
+        )?;
+        ensure_option_string(
+            "openvex.statement.status_notes",
+            self.status_notes.as_deref(),
+            limits,
+        )?;
+        ensure_option_string(
+            "openvex.statement.impact_statement",
+            self.impact_statement.as_deref(),
+            limits,
+        )?;
+        ensure_option_string(
+            "openvex.statement.action_statement",
+            self.action_statement.as_deref(),
+            limits,
+        )?;
+        ensure_option_timestamp(
+            "openvex.statement.action_statement_timestamp",
+            self.action_statement_timestamp.as_ref(),
+            limits,
+        )?;
+        Ok(())
+    }
 }
 
 impl OpenVexProduct {
     fn matches(&self, expected: &VexProductId) -> bool {
         self.id.as_ref() == Some(expected) || self.identifiers.values().any(|id| id == expected)
     }
+
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_option_newtype("openvex.product.id", self.id.as_ref(), limits)?;
+        validate_string_map("openvex.product.identifiers", &self.identifiers, limits)?;
+        validate_hash_map("openvex.product.hashes", &self.hashes, limits)?;
+        ensure_len(
+            "openvex.product.subcomponents",
+            self.subcomponents.len(),
+            limits.max_products,
+        )?;
+        for component in &self.subcomponents {
+            component.validate_limits(limits)?;
+        }
+        Ok(())
+    }
 }
+
+impl OpenVexComponent {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_option_newtype("openvex.component.id", self.id.as_ref(), limits)?;
+        validate_string_map("openvex.component.identifiers", &self.identifiers, limits)?;
+        validate_hash_map("openvex.component.hashes", &self.hashes, limits)
+    }
+}
+
+impl OpenVexVulnerability {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_option_newtype("openvex.vulnerability.id", self.id.as_ref(), limits)?;
+        ensure_string("openvex.vulnerability.name", self.name.as_str(), limits)?;
+        ensure_option_string(
+            "openvex.vulnerability.description",
+            self.description.as_deref(),
+            limits,
+        )?;
+        ensure_len(
+            "openvex.vulnerability.aliases",
+            self.aliases.len(),
+            limits.max_map_entries,
+        )?;
+        for alias in &self.aliases {
+            ensure_string("openvex.vulnerability.alias", alias.as_str(), limits)?;
+        }
+        Ok(())
+    }
+}
+
+const CSAF_VEX_CATEGORIES: &[&str] = &["csaf_vex"];
 
 impl CsafVexDocument {
     /// Returns the CSAF format version after validating VEX profile support.
@@ -668,7 +942,7 @@ impl CsafVexDocument {
     ///
     /// Returns [`VexParseError`] if the document is not CSAF 2.0/2.1 VEX.
     pub fn format_version(&self) -> Result<VexFormatVersion, VexParseError> {
-        if !self.document.category.to_ascii_lowercase().contains("vex") {
+        if !CSAF_VEX_CATEGORIES.contains(&self.document.category.as_str()) {
             return Err(VexParseError::UnsupportedCsafCategory {
                 category: self.document.category.clone(),
             });
@@ -681,22 +955,343 @@ impl CsafVexDocument {
             }),
         }
     }
+
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        self.document.validate_limits(limits)?;
+        if let Some(product_tree) = &self.product_tree {
+            product_tree.validate_limits(limits)?;
+        }
+        ensure_len(
+            "csaf.vulnerabilities",
+            self.vulnerabilities.len(),
+            limits.max_vulnerabilities,
+        )?;
+        for vulnerability in &self.vulnerabilities {
+            vulnerability.validate_limits(limits)?;
+        }
+        Ok(())
+    }
+}
+
+impl CsafDocumentMetadata {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_string("csaf.document.category", &self.category, limits)?;
+        ensure_string("csaf.document.csaf_version", &self.csaf_version, limits)?;
+        self.publisher.validate_limits(limits)?;
+        self.tracking.validate_limits(limits)?;
+        ensure_option_string("csaf.document.title", self.title.as_deref(), limits)
+    }
+}
+
+impl CsafPublisher {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_string("csaf.publisher.category", &self.category, limits)?;
+        ensure_string("csaf.publisher.name", &self.name, limits)?;
+        ensure_string("csaf.publisher.namespace", self.namespace.as_str(), limits)
+    }
+}
+
+impl CsafTracking {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_string("csaf.tracking.id", self.id.as_str(), limits)?;
+        ensure_timestamp(
+            "csaf.tracking.initial_release_date",
+            &self.initial_release_date,
+            limits,
+        )?;
+        ensure_timestamp(
+            "csaf.tracking.current_release_date",
+            &self.current_release_date,
+            limits,
+        )?;
+        ensure_len(
+            "csaf.tracking.revision_history",
+            self.revision_history.len(),
+            limits.max_revisions,
+        )?;
+        for revision in &self.revision_history {
+            revision.validate_limits(limits)?;
+        }
+        ensure_string("csaf.tracking.status", &self.status, limits)?;
+        ensure_string("csaf.tracking.version", &self.version, limits)
+    }
+}
+
+impl CsafRevision {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_timestamp("csaf.revision.date", &self.date, limits)?;
+        ensure_string("csaf.revision.number", &self.number, limits)?;
+        ensure_string("csaf.revision.summary", &self.summary, limits)
+    }
+}
+
+impl CsafProductTree {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_len(
+            "csaf.product_tree.full_product_names",
+            self.full_product_names.len(),
+            limits.max_products,
+        )?;
+        for product in &self.full_product_names {
+            product.validate_limits(limits)?;
+        }
+        Ok(())
+    }
+}
+
+impl CsafFullProductName {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_string("csaf.product.name", &self.name, limits)?;
+        ensure_string("csaf.product.product_id", self.product_id.as_str(), limits)
+    }
+}
+
+impl CsafVulnerability {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_option_newtype("csaf.vulnerability.cve", self.cve.as_ref(), limits)?;
+        self.product_status.validate_limits(limits)?;
+        ensure_len(
+            "csaf.vulnerability.scores",
+            self.scores.len(),
+            limits.max_scores,
+        )?;
+        for score in &self.scores {
+            score.validate_limits(limits)?;
+        }
+        ensure_len(
+            "csaf.vulnerability.involvements",
+            self.involvements.len(),
+            limits.max_involvements,
+        )?;
+        for involvement in &self.involvements {
+            involvement.validate_limits(limits)?;
+        }
+        Ok(())
+    }
+}
+
+impl CsafProductStatus {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        validate_product_ids(
+            "csaf.product_status.known_affected",
+            &self.known_affected,
+            limits,
+        )?;
+        validate_product_ids(
+            "csaf.product_status.known_not_affected",
+            &self.known_not_affected,
+            limits,
+        )?;
+        validate_product_ids("csaf.product_status.fixed", &self.fixed, limits)?;
+        validate_product_ids(
+            "csaf.product_status.under_investigation",
+            &self.under_investigation,
+            limits,
+        )
+    }
+}
+
+impl CsafScore {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        validate_product_ids("csaf.score.products", &self.products, limits)?;
+        ensure_option_newtype("csaf.score.cvss_v4", self.cvss_v4.as_ref(), limits)
+    }
+}
+
+impl CsafInvolvement {
+    fn validate_limits(&self, limits: &VexLimits) -> Result<(), VexParseError> {
+        ensure_string("csaf.involvement.party", &self.party, limits)?;
+        ensure_option_string("csaf.involvement.summary", self.summary.as_deref(), limits)
+    }
+}
+
+fn ensure_len(field: &'static str, len: usize, limit: usize) -> Result<(), VexParseError> {
+    if len <= limit {
+        Ok(())
+    } else {
+        Err(VexParseError::LimitExceeded { field, limit })
+    }
+}
+
+fn ensure_string(
+    field: &'static str,
+    value: &str,
+    limits: &VexLimits,
+) -> Result<(), VexParseError> {
+    ensure_len(field, value.len(), limits.max_string_len)
+}
+
+fn ensure_option_string(
+    field: &'static str,
+    value: Option<&str>,
+    limits: &VexLimits,
+) -> Result<(), VexParseError> {
+    if let Some(value) = value {
+        ensure_string(field, value, limits)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_option_newtype<T>(
+    field: &'static str,
+    value: Option<&T>,
+    limits: &VexLimits,
+) -> Result<(), VexParseError>
+where
+    T: AsRef<str>,
+{
+    ensure_option_string(field, value.map(AsRef::as_ref), limits)
+}
+
+fn ensure_timestamp(
+    field: &'static str,
+    value: &VexTimestamp,
+    limits: &VexLimits,
+) -> Result<(), VexParseError> {
+    ensure_string(field, value.as_str(), limits)?;
+    parse_iso8601(value.as_str())
+        .map(|_| ())
+        .ok_or_else(|| VexParseError::InvalidTimestamp {
+            timestamp: value.clone(),
+        })
+}
+
+fn ensure_option_timestamp(
+    field: &'static str,
+    value: Option<&VexTimestamp>,
+    limits: &VexLimits,
+) -> Result<(), VexParseError> {
+    if let Some(value) = value {
+        ensure_timestamp(field, value, limits)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_product_ids(
+    field: &'static str,
+    products: &[VexProductId],
+    limits: &VexLimits,
+) -> Result<(), VexParseError> {
+    ensure_len(field, products.len(), limits.max_products)?;
+    for product in products {
+        ensure_string(field, product.as_str(), limits)?;
+    }
+    Ok(())
+}
+
+fn validate_string_map<T>(
+    field: &'static str,
+    map: &BTreeMap<String, T>,
+    limits: &VexLimits,
+) -> Result<(), VexParseError>
+where
+    T: AsRef<str>,
+{
+    ensure_len(field, map.len(), limits.max_map_entries)?;
+    for (key, value) in map {
+        ensure_string(field, key, limits)?;
+        ensure_string(field, value.as_ref(), limits)?;
+    }
+    Ok(())
+}
+
+fn validate_hash_map(
+    field: &'static str,
+    map: &BTreeMap<VexHashAlgorithm, VexHashDigest>,
+    limits: &VexLimits,
+) -> Result<(), VexParseError> {
+    ensure_len(field, map.len(), limits.max_map_entries)?;
+    for (algorithm, digest) in map {
+        ensure_string(field, algorithm.as_str(), limits)?;
+        match digest {
+            VexHashDigest::KnownSha256(value) => ensure_string(field, &value.to_string(), limits)?,
+            VexHashDigest::Other(value) => ensure_string(field, value, limits)?,
+        }
+    }
+    Ok(())
+}
+
+fn deserialize_vex_hashes<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<VexHashAlgorithm, VexHashDigest>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<VexHashAlgorithm, String>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(algorithm, digest)| {
+            VexHashDigest::parse_for_algorithm(&algorithm, &digest)
+                .map(|parsed| (algorithm, parsed))
+                .map_err(D::Error::custom)
+        })
+        .collect()
 }
 
 fn parse_iso8601(value: &str) -> Option<i64> {
-    let s = value.get(..19).unwrap_or(value);
-    let s = s.replacen(['T', 't'], " ", 1);
-    if s.len() < 19 {
+    let (date, remainder) = value.split_once(['T', 't'])?;
+    let (time, timezone) = split_time_zone(remainder)?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() || !valid_date(year, month, day) {
         return None;
     }
-    let year: i64 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
-    let hour: u32 = s.get(11..13)?.parse().ok()?;
-    let min: u32 = s.get(14..16)?.parse().ok()?;
-    let sec: u32 = s.get(17..19)?.parse().ok()?;
+
+    let mut time_parts = time.split(':');
+    let hour: u32 = time_parts.next()?.parse().ok()?;
+    let min: u32 = time_parts.next()?.parse().ok()?;
+    let sec_fraction = time_parts.next()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+    let sec_text = sec_fraction
+        .split_once('.')
+        .map_or(sec_fraction, |(seconds, _)| seconds);
+    let sec: u32 = sec_text.parse().ok()?;
+    if hour > 23 || min > 59 || sec > 60 || !valid_timezone(timezone) {
+        return None;
+    }
     let days = days_from_civil(year, month, day);
     Some(days * 86_400 + i64::from(hour * 3_600 + min * 60 + sec))
+}
+
+fn split_time_zone(value: &str) -> Option<(&str, &str)> {
+    if let Some(time) = value.strip_suffix(['Z', 'z']) {
+        return Some((time, "Z"));
+    }
+    let index = value.rfind(['+', '-'])?;
+    Some(value.split_at(index))
+}
+
+fn valid_timezone(value: &str) -> bool {
+    value == "Z"
+        || value == "z"
+        || (value.len() == 6
+            && matches!(value.as_bytes()[0], b'+' | b'-')
+            && value.as_bytes()[3] == b':'
+            && value[1..3].parse::<u32>().is_ok_and(|hour| hour <= 23)
+            && value[4..6].parse::<u32>().is_ok_and(|minute| minute <= 59))
+}
+
+fn valid_date(year: i64, month: u32, day: u32) -> bool {
+    (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day)
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
@@ -916,6 +1511,180 @@ mod tests {
             parse_csaf_vex(&bytes),
             Err(VexParseError::UnsupportedCsafVersion { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_openvex_rejects_input_above_byte_limit() {
+        let limits = VexLimits {
+            max_bytes: OPENVEX_0_2.len() - 1,
+            ..VexLimits::default()
+        };
+
+        let error = parse_openvex_with_limits(
+            OPENVEX_0_2,
+            "pkg:apk/wolfi/git@2.39.0-r1?arch=x86_64",
+            &limits,
+        );
+
+        assert!(matches!(
+            error,
+            Err(VexParseError::LimitExceeded {
+                field: "openvex.bytes",
+                limit: _
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_openvex_rejects_too_many_statements() {
+        let limits = VexLimits {
+            max_statements: 0,
+            ..VexLimits::default()
+        };
+
+        let error = parse_openvex_with_limits(
+            OPENVEX_0_2,
+            "pkg:apk/wolfi/git@2.39.0-r1?arch=x86_64",
+            &limits,
+        );
+
+        assert!(matches!(
+            error,
+            Err(VexParseError::LimitExceeded {
+                field: "openvex.statements",
+                limit: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_openvex_rejects_oversized_statement_text() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = VexLimits {
+            max_string_len: OPENVEX_CONTEXT_V0_2_0.len(),
+            ..VexLimits::default()
+        };
+        let json = json!({
+            "@context": OPENVEX_CONTEXT_V0_2_0,
+            "@id": "vex-doc",
+            "author": "issuer",
+            "timestamp": "2023-01-08T18:02:03Z",
+            "version": 1,
+            "statements": [{
+                "vulnerability": {"name": "CVE-1"},
+                "products": [{"@id": "pkg:foo"}],
+                "status": "fixed",
+                "status_notes": "this status note is intentionally longer than the OpenVEX context URI"
+            }]
+        });
+        let bytes = serde_json::to_vec(&json)?;
+
+        let error = parse_openvex_with_limits(&bytes, "pkg:foo", &limits);
+
+        assert!(matches!(
+            error,
+            Err(VexParseError::LimitExceeded {
+                field: "openvex.statement.status_notes",
+                limit: _
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_openvex_parses_sha256_hashes_into_digest_newtype()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let json = json!({
+            "@context": OPENVEX_CONTEXT_V0_2_0,
+            "@id": "https://openvex.dev/docs/example/vex",
+            "author": "pkg:github/owner/repo",
+            "timestamp": "2023-01-08T18:02:03Z",
+            "version": 1,
+            "statements": [{
+                "vulnerability": {"name": "CVE-2023-12345"},
+                "products": [{
+                    "@id": "pkg:foo@1.0",
+                    "hashes": {"sha-256": digest, "blake3": "not-bound-to-artifact-id"}
+                }],
+                "status": "fixed"
+            }]
+        });
+
+        let document: OpenVexDocument = serde_json::from_value(json)?;
+        let hashes = &document.statements[0].products[0].hashes;
+
+        assert!(matches!(
+            hashes.get(&VexHashAlgorithm::from("sha-256")),
+            Some(VexHashDigest::KnownSha256(value)) if value.to_string() == digest
+        ));
+        assert!(matches!(
+            hashes.get(&VexHashAlgorithm::from("blake3")),
+            Some(VexHashDigest::Other(value)) if value == "not-bound-to-artifact-id"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_openvex_rejects_invalid_sha256_hash_text() {
+        let json = br#"{
+            "@context": "https://openvex.dev/ns/v0.2.0",
+            "@id": "https://openvex.dev/docs/example/vex",
+            "author": "pkg:github/owner/repo",
+            "timestamp": "2023-01-08T18:02:03Z",
+            "version": 1,
+            "statements": [{
+                "vulnerability": {"name": "CVE-2023-12345"},
+                "products": [{"@id": "pkg:foo@1.0", "hashes": {"sha256": "not-a-digest"}}],
+                "status": "fixed"
+            }]
+        }"#;
+
+        let error = parse_openvex(json, "pkg:foo@1.0");
+
+        assert!(matches!(error, Err(VexParseError::Json { .. })));
+        assert!(
+            !error
+                .err()
+                .is_some_and(|err| err.to_string().contains("not-a-digest"))
+        );
+    }
+
+    #[test]
+    fn parse_csaf_rejects_category_that_only_contains_vex() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut value: serde_json::Value = serde_json::from_slice(CSAF_2_1)?;
+        value["document"]["category"] = json!("security_vex_advisory");
+        let bytes = serde_json::to_vec(&value)?;
+
+        let error = parse_csaf_vex(&bytes);
+
+        assert!(matches!(
+            error,
+            Err(VexParseError::UnsupportedCsafCategory { .. })
+        ));
+        assert!(
+            !error
+                .err()
+                .is_some_and(|err| err.to_string().contains("security_vex_advisory"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_csaf_rejects_timestamp_without_timezone() -> Result<(), Box<dyn std::error::Error>> {
+        let mut value: serde_json::Value = serde_json::from_slice(CSAF_2_1)?;
+        value["document"]["tracking"]["initial_release_date"] = json!("2026-01-01T00:00:00");
+        let bytes = serde_json::to_vec(&value)?;
+
+        let error = parse_csaf_vex(&bytes);
+
+        assert!(matches!(error, Err(VexParseError::InvalidTimestamp { .. })));
+        assert!(
+            !error
+                .err()
+                .is_some_and(|err| err.to_string().contains("2026-01-01"))
+        );
         Ok(())
     }
 
