@@ -40,6 +40,92 @@ const RECURSIVE_PAYLOAD_DETECTOR_ID: &str = "arbitraitor-analysis.recursive-payl
 const PAYLOAD_ORIGIN_ROOT_TAG: &str = "payload-origin:root";
 const PAYLOAD_ORIGIN_ENTRY_TAG: &str = "payload-origin:archive-entry";
 
+/// Global resource budget for analysis operations (spec §41.16).
+///
+/// Bounds recursive graph expansion across bytes, nodes, and depth to
+/// prevent resource exhaustion through hostile archives or deep
+/// containment trees. When any limit is exceeded, the affected operation
+/// returns `Verdict::Incomplete` rather than silently truncating results.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnalysisBudget {
+    /// Maximum total bytes processed across all artifacts in the payload graph.
+    pub max_total_bytes: u64,
+    /// Maximum number of nodes (artifacts) in the payload graph.
+    pub max_nodes: u32,
+    /// Maximum recursion depth in the payload graph.
+    pub max_depth: u32,
+    /// When true, fixes detector ordering and disables nondeterministic
+    /// concurrency so the same input produces the same receipt bytes
+    /// (spec §41.16).
+    pub deterministic_mode: bool,
+}
+
+impl Default for AnalysisBudget {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 1_073_741_824,
+            max_nodes: 10_000,
+            max_depth: 5,
+            deterministic_mode: true,
+        }
+    }
+}
+
+impl AnalysisBudget {
+    /// Creates a budget with conservative defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the maximum total bytes budget.
+    #[must_use]
+    pub const fn with_max_bytes(mut self, bytes: u64) -> Self {
+        self.max_total_bytes = bytes;
+        self
+    }
+
+    /// Sets the maximum node count.
+    #[must_use]
+    pub const fn with_max_nodes(mut self, nodes: u32) -> Self {
+        self.max_nodes = nodes;
+        self
+    }
+
+    /// Sets the maximum recursion depth.
+    #[must_use]
+    pub const fn with_max_depth(mut self, depth: u32) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    /// Enables or disables deterministic mode.
+    #[must_use]
+    pub const fn with_deterministic(mut self, deterministic: bool) -> Self {
+        self.deterministic_mode = deterministic;
+        self
+    }
+
+    /// Returns `true` if the budget allows processing `bytes` more bytes
+    /// given the `current_total` already processed.
+    #[must_use]
+    pub const fn allows_bytes(&self, current_total: u64, bytes: u64) -> bool {
+        current_total.saturating_add(bytes) <= self.max_total_bytes
+    }
+
+    /// Returns `true` if the budget allows `current_count` + 1 nodes.
+    #[must_use]
+    pub const fn allows_node(&self, current_count: u32) -> bool {
+        current_count.saturating_add(1) <= self.max_nodes
+    }
+
+    /// Returns `true` if the budget allows recursing at `current_depth`.
+    #[must_use]
+    pub const fn allows_depth(&self, current_depth: u32) -> bool {
+        current_depth < self.max_depth
+    }
+}
+
 /// Error returned by a detector when analysis cannot be completed.
 ///
 /// Distinguishes "no findings found" — the detector completed successfully and
@@ -174,6 +260,7 @@ pub enum DetectorStatus {
 pub struct AnalysisCoordinator {
     detectors: Vec<Arc<dyn Detector>>,
     metrics_enabled: bool,
+    budget: AnalysisBudget,
 }
 
 impl AnalysisCoordinator {
@@ -195,6 +282,7 @@ impl AnalysisCoordinator {
         Self {
             detectors,
             metrics_enabled: true,
+            budget: AnalysisBudget::default(),
         }
     }
 
@@ -203,6 +291,19 @@ impl AnalysisCoordinator {
     pub const fn with_metrics_enabled(mut self, enabled: bool) -> Self {
         self.metrics_enabled = enabled;
         self
+    }
+
+    /// Sets the global analysis budget (spec §41.16).
+    #[must_use]
+    pub const fn with_budget(mut self, budget: AnalysisBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Returns the current analysis budget.
+    #[must_use]
+    pub const fn budget(&self) -> &AnalysisBudget {
+        &self.budget
     }
 
     /// Analyze artifact bytes without retrieval metadata.

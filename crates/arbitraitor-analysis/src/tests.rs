@@ -1,5 +1,5 @@
 use super::{
-    AnalysisContext, AnalysisCoordinator, Detector, DetectorError, DetectorStatus,
+    AnalysisBudget, AnalysisContext, AnalysisCoordinator, Detector, DetectorError, DetectorStatus,
     ReputationDetector, RetrievalInfo, analyze_recursive, digest, issue_to_finding,
 };
 use arbitraitor_archive::{ArchiveError, ArtifactOrigin, PayloadIssue};
@@ -744,4 +744,82 @@ fn entry(indicator_type: IndicatorType, value: &str, source_class: FeedSourceCla
             reviewers: vec!["test".to_owned()],
         },
     }
+}
+
+// ---- AnalysisBudget tests (spec §41.16) ----
+
+#[test]
+fn budget_defaults_are_conservative() {
+    let b = AnalysisBudget::default();
+    assert_eq!(b.max_total_bytes, 1_073_741_824);
+    assert_eq!(b.max_nodes, 10_000);
+    assert_eq!(b.max_depth, 5);
+    assert!(b.deterministic_mode);
+}
+
+#[test]
+fn budget_allows_bytes_within_limit() {
+    let b = AnalysisBudget::default();
+    assert!(b.allows_bytes(0, 1024));
+    assert!(b.allows_bytes(1_073_741_824 - 100, 100));
+}
+
+#[test]
+fn budget_rejects_bytes_over_limit() {
+    let b = AnalysisBudget::default();
+    assert!(!b.allows_bytes(1_073_741_824, 1));
+}
+
+#[test]
+fn budget_allows_node_within_count() {
+    let b = AnalysisBudget::default();
+    assert!(b.allows_node(0));
+    assert!(b.allows_node(9_999));
+}
+
+#[test]
+fn budget_rejects_node_over_count() {
+    let b = AnalysisBudget::default();
+    assert!(!b.allows_node(10_000));
+}
+
+#[test]
+fn budget_allows_depth_within_limit() {
+    let b = AnalysisBudget::default();
+    assert!(b.allows_depth(0));
+    assert!(b.allows_depth(4));
+}
+
+#[test]
+fn budget_rejects_depth_at_limit() {
+    let b = AnalysisBudget::default();
+    assert!(!b.allows_depth(5));
+}
+
+#[test]
+fn budget_builder_methods_work() {
+    let b = AnalysisBudget::new()
+        .with_max_bytes(1024)
+        .with_max_nodes(10)
+        .with_max_depth(3)
+        .with_deterministic(false);
+    assert_eq!(b.max_total_bytes, 1024);
+    assert_eq!(b.max_nodes, 10);
+    assert_eq!(b.max_depth, 3);
+    assert!(!b.deterministic_mode);
+}
+
+#[test]
+fn coordinator_exposes_budget() {
+    let coord = AnalysisCoordinator::new();
+    let budget = coord.budget();
+    assert!(budget.deterministic_mode);
+    assert_eq!(budget.max_depth, 5);
+}
+
+#[test]
+fn coordinator_accepts_custom_budget() {
+    let custom = AnalysisBudget::new().with_max_depth(10);
+    let coord = AnalysisCoordinator::new().with_budget(custom);
+    assert_eq!(coord.budget().max_depth, 10);
 }
