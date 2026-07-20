@@ -10,6 +10,7 @@ pub mod finding;
 pub mod ids;
 pub mod operation;
 pub mod origin;
+pub mod osv;
 pub mod taxonomy;
 pub mod transport;
 pub mod verdict;
