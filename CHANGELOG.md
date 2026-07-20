@@ -98,6 +98,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and receipt metadata records that connected-peer verification observes
   the proxy peer, not the actual target.
 
+#### Documentation
+
+- [ADR 0034](docs/adr/0034-apple-containerization-ga-strategy.md) —
+  Apple Containerization GA strategy for macOS 26+. Documents the
+  Containerization framework (open-sourced at WWDC 2025-06-09) as the
+  preferred `contained` assurance path on macOS 26+ Apple silicon, with
+  per-container lightweight VMs, isolated IP, EXT4 block devices, and
+  sub-second cold starts. The Endpoint Security framework remains the
+  observation-only path on macOS 13–15, Intel macOS, and any host where
+  the `container` CLI is unavailable. Supersedes the GA-replacement
+  deferral in [ADR 0024](docs/adr/0024-macos-containment-strategy.md);
+  ADR 0024 stays Accepted for the macOS 13–15 / Intel surface until the
+  ContainerizationAdapter lands.
+
 #### Antivirus
 
 - `arbitraitor_av::SignatureFreshness` — new public struct for spec §18.3
