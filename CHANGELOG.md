@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Receipt
+
+- `arbitraitor-receipt::Receipt::to_sarif()` — converts findings to a
+  SARIF 2.1.0 report per spec §31.4. Includes rule definitions with
+  multi-taxonomy mappings (CWE, CAPEC, OWASP, ATT&CK) per SARIF §3.59.
+  Results include artifact hashes in locations for findings inside
+  extracted or decoded child artifacts. 12 new public types:
+  SarifReport, SarifRun, SarifTool, SarifDriver, SarifRule,
+  SarifTaxonomyEntry, SarifMessage, SarifResult, SarifLocation,
+  SarifPhysicalLocation, SarifArtifactLocation, SarifRegion.
+
 #### Sandbox
 
 - `arbitraitor-sandbox::windows_adapters` — new public module with five
