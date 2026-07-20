@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### YARA-X
+
+- `arbitraitor_yarax::RulePackManager::compile_all_cached` — new method
+  that caches compiled `Rules` keyed by a snapshot digest computed from
+  all loaded rule pack namespaces, versions, and rule text (spec §17).
+  If the packs haven't changed since the last compile, the cached `Rules`
+  are returned without recompilation. Also adds `snapshot_digest()` method
+  for receipt-recording and a `CompiledRulesCache` internal struct.
+
 #### Update
 
 - `arbitraitor_update::manifest::UpdateChannel::BinaryRelease` — new
