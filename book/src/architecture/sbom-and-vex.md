@@ -9,9 +9,9 @@ Arbitraitor consumes SBOM and VEX documents from upstream producers but never pr
 | Format | Version | Profile | Notes |
 |---|---|---|---|
 | CycloneDX | 1.6+ | Application, CBOM, CDXA | Extensions parsed when tagged |
-| SPDX | 2.2.1 | Full only (SPDX Lite rejected) | ISO/IEC 5962:2024 |
+| SPDX | 2.2.1 | Full only (SPDX Lite rejected) | ISO/IEC 5962:2021 |
 | OpenVEX | 0.2.0 | VEX-only | Status semantics tracked under ADR-0029 (forward reference) |
-| CSAF | 2.1 | VEX + security advisory | ISO/IEC 20153:2025; signed CSAF accepted when publisher signature verifies |
+| CSAF | 2.0 and 2.1 | VEX + security advisory | CSAF 2.0 = ISO/IEC 20153:2025; CSAF 2.1 = OASIS CSD02 (Feb 2026, not yet ISO). Signed CSAF accepted when publisher signature verifies |
 
 Documents claiming two formats (e.g., SPDX-tagged CycloneDX) are rejected. Unknown formats are rejected with a typed error and no SBOM metadata is recorded in the receipt.
 
@@ -28,24 +28,26 @@ The August 2025 CISA *SBOM Minimum Elements* revision adds four fields and renam
 | Dependency Relationship | Unchanged | `dependencies[]` keyed by bom-ref | `relationships[]` (dependsOn, buildDependsOn) |
 | Author of SBOM Data | Unchanged | `metadata.authors[]` | `creationInfo.creators[]` |
 | Timestamp | Unchanged | `metadata.timestamp` | `creationInfo.created` |
-| Coverage | Renamed from Depth | `dependencies[]` graph breadth | `packages[].annotations[]` (coverage) and/or relationship breadth |
+| Coverage | Renamed from Depth | `dependencies[]` graph breadth; `metadata.lifecycles[].phase` | `packages[].annotations[]` (`spdx.org:coverage`) |
 | **Component Hash** | **New** | `components[].hashes[]` | `packages[].checksums[]` |
 | **License (declared)** | **New** | `components[].licenses[]` (license name or expression) | `packages[].licenseDeclared` |
 | **License (concluded)** | **New** | (single-mode license in CycloneDX) | `packages[].licenseConcluded` |
-| **Tool Name** | **New** | `metadata.tools[].name`, `metadata.tools[].version` | `creationInfo.creators[]` filtered by SPDX `Tool:` prefix |
-| **Generation Context** | **New** | `components[].evidence.identity[].field` (build/source/deployed) | `packages[].annotations[]` (generationContext) |
+| **Tool Name** | **New** | `metadata.tools[]` (name + version) | `creationInfo.creators[]` filtered by SPDX `Tool:` prefix |
+| **Generation Context** | **New** | `metadata.lifecycles[]` (build/source/deployed) | Non-standard for SPDX; mapped via `packages[].annotations[]` (`spdx.org:generationContext`) — Arbitraitor convention |
 
 ## SBOM-for-AI clusters (May 2026)
 
-When a CycloneDX SBOM declares the CDXA extension or an SPDX document uses the AI extension (`Annotations` with the `spdx.org:AI` namespace), the five SBOM-for-AI clusters are surfaced into the receipt under `sbom.ai_clusters`:
+When a CycloneDX SBOM declares the CDXA extension or an SPDX document uses the AI extension (`Annotations` with the `spdx.org:AI` namespace), the seven SBOM-for-AI clusters are surfaced into the receipt under `sbom.ai_clusters`:
 
 | Cluster | CycloneDX CDXA | SPDX AI extension |
 |---|---|---|
-| System-Level Properties | `components[].properties[]` (`system:type`, `system:name`) | `packages[].annotations[]` (`spdx.org:AI` system) |
-| Data Properties | `components[].modelCard.trainingData[]`, `components[].modelCard.dataset` | `packages[].annotations[]` (data) |
-| Model Properties | `components[].modelCard.task`, `components[].modelParameters`, `components[].evaluationData` | `packages[].annotations[]` (model) |
+| Metadata | `metadata.*` (document version, lifecycle, IDs) | `creationInfo.*`, `SPDXID` |
+| System Level Properties | `components[].properties[]` (`system:type`, `system:name`) | `packages[].annotations[]` (`spdx.org:AI` system) |
+| Models | `components[].modelCard.task`, `components[].modelParameters`, `components[].evaluationData` | `packages[].annotations[]` (model) |
+| Dataset Properties | `components[].modelCard.trainingData[]`, `components[].modelCard.dataset` | `packages[].annotations[]` (data) |
 | Infrastructure | `components[].properties[]` (`infrastructure:accelerator`, `infrastructure:memory`) | `packages[].annotations[]` (infrastructure) |
 | Security Properties | `components[].properties[]` (`security:modelSigning`, `security:adversarialRobustness`) | `packages[].annotations[]` (security) |
+| KPI | `components[].properties[]` (`metric:*`), `components[].evaluationData` | `packages[].annotations[]` (kpi) |
 
 AI clusters are advisory signals (invariant 22) and never authorize release.
 

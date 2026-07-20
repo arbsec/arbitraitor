@@ -36,7 +36,7 @@ profile Arbitraitor expects when ingesting one.
 
 ### May 2026 SBOM-for-AI (CISA + G7)
 
-The May 2026 SBOM-for-AI guidance introduces five AI-specific clusters on
+The May 2026 SBOM-for-AI guidance introduces seven AI-specific clusters on
 top of the 2025 minimum elements:
 
 | Cluster | Examples |
@@ -62,14 +62,18 @@ will receive from upstream producers and need to ingest.
 
 ### Adjacent standards
 
-- **CSAF 2.1** (OASIS, ISO/IEC 20153, published May 2025) carries VEX and
+- **CSAF 2.0** (OASIS Standard, ISO/IEC 20153:2025) carries VEX and
   security advisory content keyed by PURL/CPE; the same identifiers SBOMs
   use.
-- **OpenVEX 0.2.0** (OpenSSF VEX WG, experimental) is a minimal VEX
+- **CSAF 2.1** (OASIS CSD02, Feb 2026; not yet ISO) is the candidate
+  successor. Arbitraitor accepts both; CSAF 2.1 features (`cvss v4`,
+  `involvements` statuses) are recognized when present.
+- **OpenVEX 0.2.0** (OpenSSF VEX WG) is a minimal VEX
   format that links an advisory to a product/version and a status. ADR-0029
   is reserved for OpenVEX ingestion specifics once that work opens.
-- **SPDX 2.2.1** (Linux Foundation) is the ISO/IEC 5962:2024 standard. Its
-  field model differs from CycloneDX; a per-field mapping is required.
+- **SPDX 2.2.1** (Linux Foundation, ISO/IEC 5962:2021) is the SPDX
+  standard. Its field model differs from CycloneDX; a per-field mapping
+  is required.
 - **CycloneDX 1.6+** (OWASP) supports the application profile, the
   Cryptographic Bill of Materials (CBOM), and the ML/AI Bill of Materials
   (CDXA).
@@ -169,11 +173,12 @@ elements require.
 
 #### OpenVEX 0.2.0
 
-Required: `@context` (OpenVEX 0.2.0), `@id` (per statement), `timestamp`,
-`tooling`, `statements[]` with `vulnerability.id` (CVE or GHSA),
-`products[]` keyed by PURL, and `status` (`not_affected`,
-`fixed`, `affected`, `under_investigation`, `false_positive`,
-`resolved`, `exploitable`, `in_triage`).
+Required: `@context` (OpenVEX 0.2.0 namespace), `@id` (per document),
+`author`, `version`, `timestamp`, `statements[]` with `vulnerability.name`
+(CVE or GHSA), `products[]` keyed by identifier. The `tooling` field is
+**optional**. Valid `status` values per the OpenVEX 0.2.0 spec are only:
+`not_affected`, `affected`, `fixed`, `under_investigation`. Any other
+status value is rejected as fail-closed per Invariant 6.
 
 OpenVEX is VEX-only and carries no SBOM fields. It is accepted alongside
 the SBOM and indexed by PURL. Detailed VEX semantics (status projection
@@ -181,7 +186,7 @@ into detector findings, status revocation handling) are reserved for
 ADR-0029 (forward reference; that ADR opens when OpenVEX ingestion is
 implemented).
 
-#### CSAF 2.1 (ISO/IEC 20153, May 2025)
+#### CSAF 2.0 (ISO/IEC 20153:2025) and CSAF 2.1 (OASIS CSD02)
 
 Required: document type `csaf_vex` (or `csaf_security_advisory` when
 no VEX payload is present), `/document/tracking/id` (UUID),
@@ -200,17 +205,20 @@ unsigned CSAF is accepted with a `incomplete` provenance flag.
 
 When a CycloneDX SBOM is tagged with the CDXA extension or the SPDX
 document declares the AI extension (`Annotations` with
-`spdx.org:AI` namespace), Arbitraitor surfaces the five SBOM-for-AI
-clusters into the receipt under a structured
+`spdx.org:AI` namespace), Arbitraitor surfaces the seven SBOM-for-AI
+clusters (Metadata, System Level Properties, Models, Dataset Properties,
+Infrastructure, Security Properties, KPI) into the receipt under a structured
 `sbom.ai_clusters` envelope:
 
 ```text
 sbom.ai_clusters:
-  system_level:        [...]   # System-Level Properties cluster
-  data:                [...]   # Data Properties cluster
-  model:               [...]   # Model Properties cluster
+  system_level:        [...]   # System Level Properties cluster
+  models:              [...]   # Models cluster
+  dataset:             [...]   # Dataset Properties cluster
   infrastructure:      [...]   # Infrastructure cluster
   security:            [...]   # Security Properties cluster
+  kpi:                 [...]   # KPI cluster
+  metadata:            [...]   # Metadata cluster
 ```
 
 Receipt consumers (GUAC ingest via ADR-0025, downstream CVE matchers)
@@ -271,7 +279,9 @@ invariant 4.
   digest, AI clusters, and dropped-extension reasons. The envelope is
   signed via the existing JCS pipeline (ADR-0014, ADR-0023).
 - GUAC ingest (ADR-0025) gains a richer projection: each SBOM node
-  carries CISA 2025 minimum elements and SBOM-for-AI cluster metadata.
+  carries CISA 2025 minimum elements and SBOM-for-AI cluster metadata
+  (all seven clusters: Metadata, System Level Properties, Models, Dataset
+  Properties, Infrastructure, Security Properties, KPI).
 - The format profiles are versioned. A new format major version
   (CycloneDX 2.0, SPDX 3.0, CSAF 3.0) requires a superseding ADR.
 - EU CRA compliance is informational only. ADR-0026 remains the
@@ -296,15 +306,23 @@ invariant 4.
 
 ## References
 
-- CISA SBOM Minimum Elements (August 2025 update): <https://www.cisa.gov/resources-tools/resources/minimum-elements-software-bill-materials-sbom>
-- CISA + G7 SBOM for AI Minimum Elements (May 2026): <https://www.cisa.gov/resources-tools/resources/sbom-ai-minimum-elements>
+- CISA SBOM Minimum Elements (August 2025 public-comment draft):
+  <https://www.cisa.gov/resources-tools/resources/minimum-elements-software-bill-materials-sbom>
+  (subject to change during public-comment period)
+- CISA + G7 SBOM for AI Minimum Elements (May 2026):
+  <https://www.cisa.gov/resources-tools/resources/software-bill-materials-ai-minimum-elements>
 - EU Cyber Resilience Act Reg 2024/2847, Annex I Part II: <https://eur-lex.europa.eu/eli/reg/2024/2847/oj/eng>
 - CycloneDX 1.6 specification: <https://cyclonedx.org/specification/cyclonedx-1.6/>
 - CycloneDX ML/AI Bill of Materials (CDXA): <https://cyclonedx.org/specification/overview/#machine-learning-bom-ml-bom>
 - CycloneDX Cryptography Bill of Materials (CBOM): <https://cyclonedx.org/specification/overview/#cryptography-bom-cbom>
-- SPDX 2.2.1 (ISO/IEC 5962:2024): <https://spdx.github.io/spdx-spec/v2.2.1/>
+- SPDX 2.2.1 (ISO/IEC 5962:2021):
+  <https://www.iso.org/standard/82791.html> (ISO catalogue)
 - OpenVEX 0.2.0: <https://github.com/openvex/spec>
-- OASIS CSAF 2.1 (ISO/IEC 20153): <https://docs.oasis-open.org/csaf/csaf/v2.1/csaf-v2.1.html>
+- OASIS CSAF 2.0 (ISO/IEC 20153:2025):
+  <https://docs.oasis-open.org/csaf/csaf/v2.0/csaf-v2.0.html>
+- OASIS CSAF 2.1 (Committee Specification Draft 02, Feb 2026;
+  not yet ISO-published):
+  <https://docs.oasis-open.org/csaf/csaf/v2.1/csaf-v2.1.html>
 - ADR-0023 in-toto Statement receipt envelope
 - ADR-0025 OpenSSF Scorecard, deps.dev, and GUAC as optional integrations
 - ADR-0026 EU CRA / NIST SSDF informational compliance mapping

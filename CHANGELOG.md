@@ -424,6 +424,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ADR-0030 (SBOM/VEX ingestion profiles) factual corrections from Oracle
+  adversarial review: corrected the SBOM-for-AI cluster count from 5 to 7
+  (Metadata, System Level Properties, Models, Dataset Properties,
+  Infrastructure, Security Properties, KPI) per the G7/CISA source;
+  corrected OpenVEX 0.2.0 status mapping to the four spec-defined values
+  (`not_affected`, `affected`, `fixed`, `under_investigation`) and marked
+  `tooling` as optional with `author`/`version` required; corrected SPDX
+  ISO year from `5962:2024` to `5962:2021` with a resolvable ISO
+  catalogue URL; corrected CSAF standard status (2.0 = ISO/IEC 20153:2025,
+  2.1 = OASIS CSD02 Feb 2026, not yet ISO); corrected SPDX/CycloneDX
+  field mappings (SPDX annotations only have `REVIEW`/`OTHER`; CycloneDX
+  generation context lives in `metadata.lifecycles[].phase`); replaced
+  dead CISA URLs with canonical routes and marked the CISA 2025 SBOM
+  page as a public-comment draft; fixed broken book link from
+  `book/src/architecture/security.md` (`../sbom-and-vex.md` →
+  `./sbom-and-vex.md`); bumped ADR count from 27 to 28 in `AGENTS.md`
+  and `README.md`.
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
 - `shim install npm` now generates a working shim that invokes `arb pm run --tool npm`, replacing the previous stub that errored with "package-manager shims are not yet implemented".
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
