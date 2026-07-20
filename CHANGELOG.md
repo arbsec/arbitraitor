@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Fetch
+
+- `FetchMetadata` now includes 5 additional fields per spec §11.5:
+  `response_status: Option<u16>`, `selected_headers: Vec<(String, String)>`,
+  `transfer_encoding: Option<String>`, `final_origin: Option<String>`,
+  `retriever_version: String`. The `selected_headers` field captures
+  safe-to-record response headers (Content-Type, Content-Length,
+  Content-Encoding, Cache-Control, ETag, Last-Modified, Server,
+  X-Content-Type-Options, X-Frame-Options, Strict-Transport-Security)
+  while excluding credential-bearing headers (Authorization, Cookie,
+  Set-Cookie).
+
 #### Plugin Host
 
 - `arbitraitor_plugin_host::registry::{RegistryMetadata,
