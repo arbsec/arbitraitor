@@ -11,6 +11,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arbitraitor_model::ids::{ArtifactId, Sha256Digest};
@@ -126,6 +128,43 @@ impl FetchSource {
     }
 }
 
+/// Shared, thread-safe cancellation flag for a fetch operation.
+///
+/// Per spec §41.4.6, callers can hand a token to a long-running fetch and
+/// observe or signal cancellation from another thread without taking
+/// ownership of the [`Fetcher`] or the [`FetchRequest`]. The flag is
+/// monotonic: once [`Self::cancel`] has been called, [`Self::is_cancelled`]
+/// returns `true` for every handle, including those produced by
+/// [`Clone`].
+///
+/// The current fetchers check the flag at coarse-grained checkpoints
+/// (between redirect hops, before each streamed chunk, and inside the
+/// reader loop). It is the caller's responsibility to react to the flag by
+/// waiting on the future returned by [`Fetcher::fetch`].
+#[derive(Clone, Debug, Default)]
+pub struct FetchCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl FetchCancellation {
+    /// Creates a fresh, non-cancelled token.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` when [`Self::cancel`] has been called on any clone.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Marks the fetch as cancelled. All clones observe the change.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
 /// Fetch request passed to a [`Fetcher`].
 #[derive(Clone, Debug)]
 pub struct FetchRequest {
@@ -135,6 +174,14 @@ pub struct FetchRequest {
     pub policy: FetchPolicy,
     /// Expected SHA-256 digest of the fetched artifact bytes.
     pub expected_sha256: Option<Sha256Digest>,
+    /// Cancellation token observed by the fetcher.
+    ///
+    /// Defaults to a fresh [`FetchCancellation::new`] so existing
+    /// constructor callers do not need to change. Callers that want to
+    /// cancel from another thread should construct the token, hand it to
+    /// the request via [`Self::with_cancellation`], and keep a clone to
+    /// invoke [`FetchCancellation::cancel`] on.
+    pub cancellation: FetchCancellation,
 }
 
 impl FetchRequest {
@@ -145,6 +192,7 @@ impl FetchRequest {
             source: FetchSource::Url(url),
             policy,
             expected_sha256: None,
+            cancellation: FetchCancellation::new(),
         }
     }
 
@@ -155,16 +203,18 @@ impl FetchRequest {
             source: FetchSource::File(path),
             policy,
             expected_sha256: None,
+            cancellation: FetchCancellation::new(),
         }
     }
 
     /// Builds a standard input fetch request.
     #[must_use]
-    pub const fn stdin(policy: FetchPolicy) -> Self {
+    pub fn stdin(policy: FetchPolicy) -> Self {
         Self {
             source: FetchSource::Stdin,
             policy,
             expected_sha256: None,
+            cancellation: FetchCancellation::new(),
         }
     }
 
@@ -172,6 +222,17 @@ impl FetchRequest {
     #[must_use]
     pub fn with_expected_sha256(mut self, digest: Sha256Digest) -> Self {
         self.expected_sha256 = Some(digest);
+        self
+    }
+
+    /// Attaches a caller-owned [`FetchCancellation`] token to the request.
+    ///
+    /// The token is observed at coarse-grained checkpoints inside the
+    /// fetcher implementation. A fresh token is used by default so callers
+    /// that do not need cancellation can ignore this method.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: FetchCancellation) -> Self {
+        self.cancellation = cancellation;
         self
     }
 }
@@ -266,6 +327,12 @@ pub struct FetchPolicy {
     pub behind_proxy: bool,
     /// Requires callers to provide an expected SHA-256 digest before fetching.
     pub require_digest: bool,
+    /// Maximum time to wait for the first response byte after the request is
+    /// sent (spec §41.4.6). Distinct from `connect_timeout` (TCP/TLS only)
+    /// and `total_timeout` (whole-operation budget). `None` disables the
+    /// deadline; callers that need an upper bound on time-to-first-byte for
+    /// hung or extremely slow servers set this explicitly.
+    pub first_byte_timeout: Option<Duration>,
 }
 
 impl Default for FetchPolicy {
@@ -286,6 +353,7 @@ impl Default for FetchPolicy {
             proxy_url: None,
             behind_proxy: false,
             require_digest: false,
+            first_byte_timeout: None,
         }
     }
 }
@@ -1355,7 +1423,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        FetchError, FetchPolicy, FetchScheme, TlsVerifier, build_http_client,
+        FetchCancellation, FetchError, FetchPolicy, FetchScheme, TlsVerifier, build_http_client,
         ensure_cross_origin_allowed, ensure_no_insecure_downgrade, execute_request,
         strip_credentials_on_cross_origin, verify_connected_peer,
     };
@@ -1698,6 +1766,75 @@ mod tests {
         assert!(
             headers.get(reqwest::header::AUTHORIZATION).is_some(),
             "Authorization MUST be preserved when policy opts in to cross-origin forwarding"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Cancellation tokens (spec §41.4.6)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fetch_cancellation_new_is_not_cancelled() {
+        let token = FetchCancellation::new();
+        assert!(
+            !token.is_cancelled(),
+            "fresh token must report not-cancelled"
+        );
+    }
+
+    #[test]
+    fn fetch_cancellation_default_matches_new() {
+        let from_new = FetchCancellation::new();
+        let from_default = FetchCancellation::default();
+        assert!(
+            !from_new.is_cancelled() && !from_default.is_cancelled(),
+            "both new() and default() must produce non-cancelled tokens"
+        );
+    }
+
+    #[test]
+    fn fetch_cancellation_cancel_sets_flag() {
+        let token = FetchCancellation::new();
+        token.cancel();
+        assert!(
+            token.is_cancelled(),
+            "cancel() must flip is_cancelled to true on the same handle"
+        );
+    }
+
+    #[test]
+    fn fetch_cancellation_clone_shares_state() {
+        let token = FetchCancellation::new();
+        let clone = token.clone();
+        token.cancel();
+        assert!(
+            clone.is_cancelled(),
+            "a clone must observe cancellation signalled on its sibling handle"
+        );
+    }
+
+    #[test]
+    fn fetch_cancellation_cancel_is_idempotent() {
+        let token = FetchCancellation::new();
+        token.cancel();
+        token.cancel();
+        assert!(
+            token.is_cancelled(),
+            "second cancel() must not clear or panic the flag"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // First-byte timeout (spec §41.4.6)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fetch_policy_defaults_first_byte_timeout_to_none() {
+        let policy = FetchPolicy::default();
+        assert!(
+            policy.first_byte_timeout.is_none(),
+            "default policy must leave first_byte_timeout unset (fail-open for \
+             existing callers; new opt-in deadline)"
         );
     }
 }

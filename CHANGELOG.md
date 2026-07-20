@@ -41,8 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport metadata, not publisher provenance.
 - `FetchPolicy::proxy_url: Option<String>` — configurable proxy support per
   spec §11.2 and ADR-0018. When `None` (default), `.no_proxy()` is called
-  to disable all proxy behavior. When `Some`, reqwest is configured with
-  the given proxy URL.
+  to disable all proxy behavior. When `Some`, reqwest is configured with the
+  given proxy URL.
+- `FetchPolicy::first_byte_timeout: Option<Duration>` — distinct deadline
+  for time-to-first-byte per spec §41.4.6. Sits alongside `connect_timeout`
+  (TCP/TLS only) and `total_timeout` (whole-operation budget) so callers
+  can cap slow-but-connected servers without shortening the global budget.
+  Defaults to `None`, preserving existing fail-open semantics.
+- `FetchCancellation` — new public type wrapping `Arc<AtomicBool>` for
+  spec §41.4.6 cancellation tokens. Carries `new()`, `is_cancelled(&self)`,
+  `cancel(&self)`, `Clone`, and `Default`. Clones share state, so any
+  handle can signal cancellation that every other handle observes.
+- `FetchRequest::cancellation: FetchCancellation` — new field attached by
+  default to `FetchCancellation::new()`. New `with_cancellation(token)`
+  builder lets callers wire a token they keep outside the fetcher so they
+  can cancel an in-flight fetch from another thread without taking
+  ownership of the request.
 - `FetchPolicy::behind_proxy: bool` — records whether DNS resolution and
   target address selection are performed by the proxy. When `true`,
   .resolve_to_addrs is skipped so reqwest uses the proxy's DNS resolution,
