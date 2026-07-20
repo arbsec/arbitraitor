@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Fetch
+
+- `FetchPolicy::proxy_url: Option<String>` — configurable proxy support per
+  spec §11.2 and ADR-0018. When `None` (default), `.no_proxy()` is called
+  to disable all proxy behavior. When `Some`, reqwest is configured with
+  the given proxy URL.
+- `FetchPolicy::behind_proxy: bool` — records whether DNS resolution and
+  target address selection are performed by the proxy. When `true`,
+  .resolve_to_addrs is skipped so reqwest uses the proxy's DNS resolution,
+  and receipt metadata records that connected-peer verification observes
+  the proxy peer, not the actual target.
+
 #### Antivirus
 
 - `arbitraitor_av::SignatureFreshness` — new public struct for spec §18.3
