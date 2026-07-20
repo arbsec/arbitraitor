@@ -514,7 +514,33 @@ pub(crate) fn version() -> Result<()> {
     writeln!(stdout, "arbitraitor {}", env!("CARGO_PKG_VERSION")).into_diagnostic()?;
     writeln!(stdout, "license: {}", env!("CARGO_PKG_LICENSE")).into_diagnostic()?;
     writeln!(stdout, "repository: {}", env!("CARGO_PKG_REPOSITORY")).into_diagnostic()?;
+    writeln!(stdout, "target: {}", std::env::consts::ARCH).into_diagnostic()?;
+    writeln!(
+        stdout,
+        "min-rust-version: {}",
+        env!("CARGO_PKG_RUST_VERSION")
+    )
+    .into_diagnostic()?;
+    if let Some(commit) = option_env!("ARBITRAITOR_BUILD_COMMIT")
+        && !commit.is_empty()
+    {
+        writeln!(stdout, "commit: {commit}").into_diagnostic()?;
+    }
+    if let Some(date) = option_env!("ARBITRAITOR_BUILD_DATE")
+        && !date.is_empty()
+    {
+        writeln!(stdout, "build-date: {date}").into_diagnostic()?;
+    }
+    writeln!(stdout, "profile: {}", profile_name()).into_diagnostic()?;
     Ok(())
+}
+
+fn profile_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
 }
 
 pub(crate) fn rules(command: &RulesCommand) -> Result<()> {
