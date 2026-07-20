@@ -24,8 +24,9 @@ use arbitraitor_sandbox::{
 use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
 use tracing::debug;
 
-use crate::release::ReleasePolicy;
-use crate::{ExecError, ExecutionContext, ExecutionContextBuilder, ResourceLimits};
+use crate::{
+    ExecError, ExecutionContext, ExecutionContextBuilder, ExecutionPolicy, ResourceLimits,
+};
 
 const LINUX_ORIGIN_XATTR: &str = "user.xdg.origin.url";
 const LINUX_ORIGIN_VALUE: &[u8] = b"arbitraitor://native-execution";
@@ -166,25 +167,47 @@ impl NativeExecution {
     }
 }
 
-/// Explicit native opt-in helper for released binaries.
-///
-/// Call this only when the CLI/user supplied the explicit native execution gate
-/// (for example `--native`). The function verifies executable host
-/// compatibility, applies and verifies quarantine/provenance attributes, and
-/// runs the binary with controlled environment, sandbox hardening, and resource
-/// limits.
+/// Enforces explicit approval before native execution.
 ///
 /// # Errors
 ///
-/// Returns [`ExecError::IncompatibleNativeExecutable`] when `exec_info` is not
-/// compatible with the current host, or another [`ExecError`] from context
-/// construction or execution.
+/// Returns [`ExecError::NativeExecutionNotApproved`] unless either the caller
+/// supplies verified native approval or trusted policy allows native execution.
+pub fn require_native_approval(
+    native_approved: bool,
+    policy: &ExecutionPolicy,
+) -> Result<(), ExecError> {
+    if native_approved || policy.allow_native_execution {
+        Ok(())
+    } else {
+        Err(ExecError::NativeExecutionNotApproved)
+    }
+}
+
+/// Explicit native opt-in helper for released binaries.
+///
+/// The caller must supply verified native approval (for example, from the
+/// `--native` flag or a plan-bound approval capability), or trusted execution
+/// policy must explicitly allow native execution. The function then verifies
+/// executable host compatibility, applies and verifies quarantine/provenance
+/// attributes, and runs the binary with controlled environment, sandbox
+/// hardening, and resource limits.
+///
+/// # Errors
+///
+/// Returns [`ExecError::NativeExecutionNotApproved`] when neither the caller nor
+/// trusted policy approves native execution,
+/// [`ExecError::IncompatibleNativeExecutable`] when `exec_info` is not compatible
+/// with the current host, or another [`ExecError`] from context construction or
+/// execution.
 pub fn execute_native(
     binary_path: &Path,
     args: &[String],
     exec_info: &ExecutableInfo,
-    _policy: &ReleasePolicy,
+    native_approved: bool,
+    policy: &ExecutionPolicy,
 ) -> Result<crate::ExecutionResult, ExecError> {
+    require_native_approval(native_approved, policy)?;
     if !is_compatible(exec_info) {
         return Err(ExecError::IncompatibleNativeExecutable);
     }
@@ -593,6 +616,37 @@ mod tests {
     }
 
     #[test]
+    fn native_execution_without_approval_is_refused() {
+        let info = ExecutableInfo {
+            format: ExecutableFormat::Pe,
+            architecture: Architecture::X86_64,
+            bits: Bitness::Bits64,
+            linking: Linking::Dynamic,
+            interpreter: None,
+            dependencies: Vec::new(),
+            signed: false,
+        };
+        let result = execute_native(
+            Path::new("/no/such/binary"),
+            &[],
+            &info,
+            false,
+            &crate::ExecutionPolicy::default(),
+        );
+        assert!(matches!(result, Err(ExecError::NativeExecutionNotApproved)));
+    }
+
+    #[test]
+    fn trusted_policy_native_approval_is_accepted() {
+        let policy = crate::ExecutionPolicy {
+            allow_native_execution: true,
+            ..crate::ExecutionPolicy::default()
+        };
+
+        assert!(require_native_approval(false, &policy).is_ok());
+    }
+
+    #[test]
     fn incompatible_architecture_is_refused() {
         let info = ExecutableInfo {
             format: ExecutableFormat::Pe,
@@ -607,7 +661,8 @@ mod tests {
             Path::new("/no/such/binary"),
             &[],
             &info,
-            &ReleasePolicy::default(),
+            true,
+            &crate::ExecutionPolicy::default(),
         );
         assert!(matches!(
             result,

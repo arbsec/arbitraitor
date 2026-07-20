@@ -9,21 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Core
+#### Exec
 
-- `arbitraitor_core::TimeoutConfig` — new config section for stage-specific
-  timeouts per spec §37.3: detector (30s), archive_expansion (60s),
-  recursive_graph (120s), sandbox_execution (30s), external_scanner (60s).
-- `FetchConfig` now includes DNS (5s), connect (10s), TLS (10s),
-  response_header (10s), and idle_read (30s) timeout fields per spec §37.3.
-  Config wired into the Config struct as `timeouts: TimeoutConfig`.
-
-#### MCP
-
-- Approval token payloads now carry an optional `human_approver_identity`
-  field (spec §33.4). At issuance the MCP server populates it from the
-  TTY user via `$USER`; older tokens without the field continue to
-  validate unchanged via `#[serde(default)]`.
+- Native execution now fails closed with
+  `ExecError::NativeExecutionNotApproved` unless `execute_native` receives
+  explicit approval (such as `--native`) or
+  `ExecutionPolicy::allow_native_execution` is enabled by trusted policy
+  (spec §26.4).
+- `arbitraitor-exec::emit_artifact_to_stdout` — new release mode that
+  emits verified CAS bytes to stdout (spec §26.1). Used by
+  `scan --emit-on-pass` and wrapper pipe semantics. Bytes are verified
+  against the scanned digest before and after emission, preserving
+  invariant 2 (immutable identity).
+- `ReleaseMethod::StdoutEmit` — new enum variant for the stdout release
+  method recorded in receipts.
 
 #### Daemon
 
