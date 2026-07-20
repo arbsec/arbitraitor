@@ -111,11 +111,11 @@ pub fn validate_vex_downgrade(
         return VexDowngradeResult::Deny(VexDenyReason::NonSuppressibleCategory);
     }
 
-    if !policy.trusted_issuers.contains(&vex.issuer) {
+    if !policy.trusted_issuers.contains(vex.issuer.as_str()) {
         return VexDowngradeResult::Deny(VexDenyReason::UntrustedIssuer);
     }
 
-    if vex.subject != finding_subject {
+    if vex.subject.as_str() != finding_subject {
         return VexDowngradeResult::Deny(VexDenyReason::SubjectMismatch);
     }
 
@@ -138,11 +138,14 @@ pub fn validate_vex_downgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitraitor_model::vex::{VexFormatVersion, VexIssuer, VexProductId, VexVulnerabilityId};
 
     fn trusted_vex() -> VexStatement {
         VexStatement {
-            issuer: "pkg:github/owner/repo".to_owned(),
-            subject: "pkg:foo@1.0".to_owned(),
+            format_version: VexFormatVersion::OpenVex0_2_0,
+            issuer: VexIssuer::from("pkg:github/owner/repo"),
+            subject: VexProductId::from("pkg:foo@1.0"),
+            vulnerability: VexVulnerabilityId::from("CVE-2026-0001"),
             status: VexStatus::NotAffected,
             justification: None,
             statement: None,
@@ -184,7 +187,7 @@ mod tests {
     #[test]
     fn deny_untrusted_issuer() {
         let vex = VexStatement {
-            issuer: "untrusted".to_owned(),
+            issuer: VexIssuer::from("untrusted"),
             ..trusted_vex()
         };
         let result = validate_vex_downgrade(
