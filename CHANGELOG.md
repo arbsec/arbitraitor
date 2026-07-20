@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Provenance
+
+- `arbitraitor_provenance::VerificationPolicy` — new struct defining the
+  requirements for an artifact to be considered properly verified per
+  spec §14.3. Fields: required_signer_identities,
+  required_certificate_issuers, trusted_minisign_keys,
+  accepted_openpgp_fingerprints, require_transparency_log,
+  max_signature_age_secs, min_signatures, prevent_downgrade. Includes
+  `is_satisfied_by()` method that checks a `SignatureVerification` against
+  the policy.
+
 #### YARA-X
 
 - `arbitraitor_yarax::RulePackManager::compile_all_cached` — new method

@@ -1034,6 +1034,73 @@ fn key_id(public_key: &minisign::PublicKey) -> String {
     output
 }
 
+/// Provenance verification policy (spec §14.3).
+///
+/// Defines the requirements that must be met for an artifact to be
+/// considered properly verified. Each field corresponds to one of the
+/// policy fields listed in spec §14.3 (lines 899-912).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct VerificationPolicy {
+    /// Required signer identities (spec §14.3 line 904). If non-empty,
+    /// at least one of the listed identities must match the verified
+    /// signature.
+    pub required_signer_identities: Vec<String>,
+    /// Required Sigstore certificate issuers (spec §14.3 line 905).
+    /// Fulcio OIDC issuer URLs that are accepted.
+    pub required_certificate_issuers: Vec<String>,
+    /// Trusted minisign public key IDs (spec §14.3 line 906).
+    pub trusted_minisign_keys: Vec<String>,
+    /// Accepted `OpenPGP` key fingerprints (spec §14.3 line 907).
+    pub accepted_openpgp_fingerprints: Vec<String>,
+    /// Whether transparency-log inclusion is required (spec §14.3 line 908).
+    pub require_transparency_log: bool,
+    /// Maximum age of a signature in seconds before it's considered stale
+    /// (spec §14.3 line 909). `None` means no age limit.
+    pub max_signature_age_secs: Option<u64>,
+    /// Required number of independent signatures (spec §14.3 line 912).
+    /// Default 1.
+    pub min_signatures: u32,
+    /// Whether downgrade prevention is enabled (spec §14.3 line 913).
+    /// When true, a previously signed source becoming unsigned produces
+    /// a finding.
+    pub prevent_downgrade: bool,
+}
+
+impl VerificationPolicy {
+    /// Creates a policy with secure defaults: require at least 1 signature,
+    /// prevent downgrade, no transparency log requirement by default.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            min_signatures: 1,
+            prevent_downgrade: true,
+            ..Self::default()
+        }
+    }
+
+    /// Checks whether a `SignatureVerification` satisfies this policy.
+    #[must_use]
+    pub fn is_satisfied_by(&self, verification: &SignatureVerification) -> bool {
+        if !verification.verified {
+            return false;
+        }
+        if !self.required_signer_identities.is_empty() {
+            let identity_matches = verification
+                .identity
+                .as_ref()
+                .is_some_and(|id| self.required_signer_identities.iter().any(|req| req == id));
+            if !identity_matches {
+                return false;
+            }
+        }
+        if self.min_signatures > 1 {
+            return false;
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
