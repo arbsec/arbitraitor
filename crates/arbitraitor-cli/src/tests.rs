@@ -441,6 +441,8 @@ fn intel_update_parses_urlhaus_flag() -> Result<(), Box<dyn std::error::Error>> 
             assert!(update.urlhaus);
             assert_eq!(update.intel_store, Some(PathBuf::from("/tmp/intel.json")));
             assert!(update.urlhaus_url.is_none());
+            assert!(!update.ossf_malicious_packages);
+            assert!(update.ossf_malicious_packages_url.is_none());
         }
         _ => return Err("parsed wrong command".into()),
     }
@@ -465,6 +467,32 @@ fn intel_update_parses_custom_urlhaus_url() -> Result<(), Box<dyn std::error::Er
             assert_eq!(
                 update.urlhaus_url.as_deref(),
                 Some("https://mirror.example/urlhaus.csv")
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn intel_update_parses_ossf_malicious_packages_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "intel",
+        "update",
+        "--ossf-malicious-packages",
+        "--ossf-malicious-packages-url",
+        "https://mirror.example/osv-querybatch.json",
+    ])?;
+
+    match cli.command {
+        Command::Intel(super::IntelCommand {
+            subcommand: super::IntelSubcommand::Update(update),
+        }) => {
+            assert!(update.ossf_malicious_packages);
+            assert_eq!(
+                update.ossf_malicious_packages_url.as_deref(),
+                Some("https://mirror.example/osv-querybatch.json")
             );
         }
         _ => return Err("parsed wrong command".into()),

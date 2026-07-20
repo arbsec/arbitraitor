@@ -11,6 +11,7 @@
 pub mod adapters;
 pub mod feed;
 pub mod governance;
+pub mod ossf_malicious;
 pub mod review;
 pub mod submission;
 pub mod transparency;
@@ -28,8 +29,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-pub use adapters::{AllowDenyListAdapter, OSVAdapter, OpenSSFMaliciousAdapter, ThreatFoxAdapter};
+pub use adapters::{AllowDenyListAdapter, OSVAdapter, ThreatFoxAdapter};
 pub use feed::{FeedAdapter, IngestionReport, ingest_entries, ingest_feed};
+pub use ossf_malicious::OssfMaliciousPackagesAdapter;
 pub use urlhaus::UrlhausAdapter;
 
 /// Advisory security-posture signals resolved for a source repository.
@@ -115,6 +117,8 @@ pub enum IndicatorType {
     /// Behavioral signature pattern (spec §21.1). Matches observed
     /// runtime behavior rather than static content.
     BehavioralSignature,
+    /// `OpenSSF` malicious-packages OSV `MAL-` advisory identifier.
+    OsvMal,
 }
 
 /// Intelligence indicator value paired with its type.
@@ -328,6 +332,8 @@ pub enum FeedSourceClass {
     CorroboratedCommunity,
     /// Single unreviewed source.
     SingleUnreviewed,
+    /// `OpenSSF` malicious-packages feed mirrored from OSV.dev.
+    OssfMaliciousPackages,
 }
 
 /// Local threat-intelligence store backed by a JSON file.
@@ -489,7 +495,7 @@ fn match_rank(entry: &FeedEntry, queried: &Indicator) -> Option<u8> {
         {
             Some(1)
         }
-        IndicatorType::PackageCoordinate if stored == queried => Some(2),
+        IndicatorType::PackageCoordinate | IndicatorType::OsvMal if stored == queried => Some(2),
         IndicatorType::SignerIdentity if stored == queried => Some(3),
         IndicatorType::UrlPrefix
             if is_url_indicator(queried) && queried.value.starts_with(&stored.value) =>
@@ -617,6 +623,12 @@ fn enforcement_for_source_class(source_class: FeedSourceClass) -> EnforcementRes
                 deciding_source_class: source_class,
             }
         }
+        FeedSourceClass::OssfMaliciousPackages => EnforcementResult {
+            disposition: Disposition::Block,
+            severity: Severity::High,
+            confidence: Confidence::Confirmed,
+            deciding_source_class: source_class,
+        },
         FeedSourceClass::CorroboratedCommunity => EnforcementResult {
             disposition: Disposition::Warn,
             severity: Severity::Medium,

@@ -35,6 +35,18 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 
 > **Note:** `arbitraitor fetch` is a hidden command used internally by wrappers. It retrieves an artifact to CAS without analysis.
 
+### `arbitraitor intel update`
+
+Updates local threat-intelligence feed snapshots on demand.
+
+| Flag | Description |
+|------|-------------|
+| `--urlhaus` | Ingest the URLhaus malicious-URL feed |
+| `--urlhaus-url <URL>` | Override the URLhaus CSV or JSON endpoint |
+| `--ossf-malicious-packages` | Ingest OpenSSF malicious-packages `MAL-` IDs from an OSV querybatch response |
+| `--ossf-malicious-packages-url <URL>` | Override the OSV querybatch endpoint or use a signed mirror response |
+| `--intel-store <PATH>` | Override the local intel store path |
+
 ## Global flags
 
 These flags apply to all commands:

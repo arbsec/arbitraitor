@@ -190,6 +190,7 @@ impl<'de> Deserialize<'de> for OperationId {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PluginId(pub String);
+
 #[cfg(test)]
 mod tests {
     use super::{ArtifactId, OperationId, PluginId, Sha256Digest};

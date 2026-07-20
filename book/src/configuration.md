@@ -149,6 +149,13 @@ api_key = "secret://env/URLHAUS_API_KEY"  # optional
 refresh_interval = "1h"
 cache_ttl = "24h"
 
+# OpenSSF malicious-packages OSV querybatch response or signed mirror
+[intel.feeds.ossf-malicious-packages]
+enabled = true
+url = "https://api.osv.dev/v1/querybatch"
+refresh_interval = "24h"
+cache_ttl = "24h"
+
 # Community submissions feed
 [intel.feeds.community]
 enabled = true
