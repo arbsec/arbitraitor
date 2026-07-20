@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Daemon
+
+- `arbitraitor-daemon::DaemonRequest` — each variant now carries
+  `caller_origin: CallerOrigin` and `capability_token: Option<String>` so
+  callers can declare the origin class asserting the request and any opaque
+  capability token presented to the daemon (spec §40.2). The daemon
+  overrides the wire-supplied `caller_origin` to
+  `CallerOrigin::DaemonLocal` after Unix-socket peer-credential
+  authentication, so a local peer cannot impersonate a higher-trust class
+  (e.g. `HumanTty`) through the daemon. The effective origin and the
+  capability-token presence are emitted on the per-operation tracing
+  receipt. Old clients that omit the new fields are still accepted
+  (`caller_origin` defaults to `Unknown`, `capability_token` is optional).
+  New `DaemonRequest::caller_origin()` and `DaemonRequest::capability_token()`
+  accessors expose the current values for tests and callers.
+
 #### Intel
 
 - `arbitraitor-intel::redact_url`, `redact_path`, and `redact_env_var` —

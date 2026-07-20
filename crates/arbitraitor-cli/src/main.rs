@@ -21,6 +21,7 @@ use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
 use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::origin::CallerOrigin;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_provenance::SignatureVerification;
 use arbitraitor_wrapper::init as shell_init;
@@ -633,9 +634,15 @@ async fn daemon(command: DaemonCommand) -> Result<()> {
             Daemon::new(socket).run().await.into_diagnostic()?;
         }
         DaemonSubcommand::Stop => {
-            let response = request_once(socket, &DaemonRequest::Shutdown)
-                .await
-                .into_diagnostic()?;
+            let response = request_once(
+                socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                },
+            )
+            .await
+            .into_diagnostic()?;
             write_daemon_response(&mut std::io::stdout().lock(), &response)?;
             if !response.success {
                 miette::bail!(
@@ -650,6 +657,8 @@ async fn daemon(command: DaemonCommand) -> Result<()> {
                 socket,
                 &DaemonRequest::Scan {
                     path: String::new(),
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
                 },
             )
             .await;
