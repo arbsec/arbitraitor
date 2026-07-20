@@ -193,10 +193,11 @@ impl PartialEq for TrustedRulePackKey {
 impl Eq for TrustedRulePackKey {}
 
 /// Ordered collection of YARA-X rule packs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct RulePackManager {
     packs: Vec<RulePack>,
     trusted_keys: Vec<TrustedRulePackKey>,
+    compiled_cache: Option<CompiledRulesCache>,
 }
 
 impl RulePackManager {
@@ -206,6 +207,7 @@ impl RulePackManager {
         Self {
             packs: Vec::new(),
             trusted_keys: Vec::new(),
+            compiled_cache: None,
         }
     }
 
@@ -356,6 +358,46 @@ impl RulePackManager {
         Ok(YaraScanner::from_rule_packs(self.packs.clone(), rules))
     }
 
+    /// Compiles all packs with a compiled-rule cache (spec §17).
+    ///
+    /// The cache is keyed by a snapshot digest computed from all loaded
+    /// rule pack namespaces, versions, and rule text. If the packs haven't
+    /// changed since the last compile, the cached `Rules` are returned
+    /// without recompilation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`YaraError::Compile`] when combined rule compilation fails.
+    pub fn compile_all_cached(&mut self) -> Result<YaraScanner, YaraError> {
+        let snapshot_digest = compute_snapshot_digest(&self.packs);
+        if let Some(ref cached) = self.compiled_cache
+            && cached.snapshot_digest == snapshot_digest
+        {
+            return Ok(YaraScanner::from_rule_packs_arc(
+                self.packs.clone(),
+                Arc::clone(&cached.rules),
+            ));
+        }
+        let rules = compile_packs(&self.packs)?;
+        let rules_arc = Arc::new(rules);
+        let scanner = YaraScanner::from_rule_packs_arc(self.packs.clone(), Arc::clone(&rules_arc));
+        self.compiled_cache = Some(CompiledRulesCache {
+            snapshot_digest,
+            rules: rules_arc,
+        });
+        Ok(scanner)
+    }
+
+    /// Returns the snapshot digest of the currently loaded rule packs, or
+    /// `None` if no packs are loaded.
+    #[must_use]
+    pub fn snapshot_digest(&self) -> Option<String> {
+        if self.packs.is_empty() {
+            return None;
+        }
+        Some(compute_snapshot_digest(&self.packs))
+    }
+
     /// Returns receipt detector-version entries for loaded rule packs.
     #[must_use]
     pub fn pack_versions(&self) -> Vec<DetectorVersion> {
@@ -448,6 +490,17 @@ impl YaraScanner {
         }
     }
 
+    fn from_rule_packs_arc(rule_packs: Vec<RulePack>, rules: Arc<Rules>) -> Self {
+        Self {
+            compiler: Compiler::new(),
+            rules,
+            rule_packs,
+            timeout: DEFAULT_SCAN_TIMEOUT,
+            max_scan_bytes: DEFAULT_MAX_SCAN_BYTES,
+            max_matches_per_pattern: DEFAULT_MAX_MATCHES_PER_PATTERN,
+        }
+    }
+
     /// Sets scan timeout and byte limits for subsequent scans.
     #[must_use]
     pub fn with_limits(mut self, timeout: Duration, max_scan_bytes: usize) -> Self {
@@ -483,6 +536,7 @@ impl YaraScanner {
         RulePackManager {
             packs: self.rule_packs.clone(),
             trusted_keys: Vec::new(),
+            compiled_cache: None,
         }
         .pack_versions()
     }
@@ -734,6 +788,29 @@ fn compile_packs(packs: &[RulePack]) -> Result<Rules, YaraError> {
             .map_err(|error| YaraError::Compile(error.to_string()))?;
     }
     Ok(compiler.build())
+}
+
+#[derive(Clone, Debug)]
+struct CompiledRulesCache {
+    snapshot_digest: String,
+    rules: Arc<Rules>,
+}
+
+fn compute_snapshot_digest(packs: &[RulePack]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for pack in packs {
+        hasher.update(pack.namespace.as_bytes());
+        hasher.update(pack.version.as_bytes());
+        hasher.update(pack.rules_text.as_bytes());
+    }
+    let result = hasher.finalize();
+    let mut hex = String::with_capacity(result.len() * 2);
+    for b in &result {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 fn validate_pack(pack: &RulePack) -> Result<(), YaraError> {
