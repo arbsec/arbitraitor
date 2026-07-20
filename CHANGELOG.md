@@ -125,6 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TOFU pins now record and compare the final redirect destination and
   certificate identity, reporting field-level drift for either value per
   spec §14.4.
+- `SignatureSystem` now enumerates the spec §14.2 platform-native signing
+  families: `OpenPGP` (planned via Sequoia per §41.12.4), `Authenticode`,
+  `AppleCodeSign`, and `LinuxPackage`. Each new variant carries a stable
+  lower-case `as_str()` label (`openpgp`, `authenticode`, `apple_code_sign`,
+  `linux_package`) for receipts and diagnostics; verification logic for
+  these families is tracked in follow-up issues.
 
 #### Exec
 

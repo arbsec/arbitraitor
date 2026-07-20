@@ -18,8 +18,7 @@ use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use arbitraitor_provenance::{
-    SignatureSystem, SignatureVerification, parse_minisign_public_key, verify_cosign,
-    verify_minisign,
+    SignatureVerification, parse_minisign_public_key, verify_cosign, verify_minisign,
 };
 use arbitraitor_receipt::{
     DetectorVersion, FindingSummary, ReceiptBuilder, ReceiptTimestamps,
@@ -393,10 +392,7 @@ pub(crate) fn signature_finding(
 
 /// Generate a human-readable receipt title for a signature verification.
 pub(crate) fn signature_title(verification: &SignatureVerification) -> String {
-    let system = match verification.system {
-        SignatureSystem::Minisign => "minisign",
-        SignatureSystem::Cosign => "cosign",
-    };
+    let system = verification.system.as_str();
     match verification.identity.as_deref() {
         Some(identity) => format!("{system} signature verified for {identity}"),
         None => format!("{system} signature verified"),

@@ -521,3 +521,29 @@ fn determine_material_form_defaults_to_chain() {
         VerificationMaterialForm::X509CertificateChain
     );
 }
+
+#[test]
+fn signature_system_as_str_returns_stable_labels() {
+    assert_eq!(SignatureSystem::Minisign.as_str(), "minisign");
+    assert_eq!(SignatureSystem::Cosign.as_str(), "cosign");
+    assert_eq!(SignatureSystem::OpenPGP.as_str(), "openpgp");
+    assert_eq!(SignatureSystem::Authenticode.as_str(), "authenticode");
+    assert_eq!(SignatureSystem::AppleCodeSign.as_str(), "apple_code_sign");
+    assert_eq!(SignatureSystem::LinuxPackage.as_str(), "linux_package");
+}
+
+#[test]
+fn signature_system_as_str_is_distinct_per_variant() {
+    let labels = [
+        SignatureSystem::Minisign.as_str(),
+        SignatureSystem::Cosign.as_str(),
+        SignatureSystem::OpenPGP.as_str(),
+        SignatureSystem::Authenticode.as_str(),
+        SignatureSystem::AppleCodeSign.as_str(),
+        SignatureSystem::LinuxPackage.as_str(),
+    ];
+    let mut unique = labels.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), labels.len(), "as_str labels must be unique");
+}
