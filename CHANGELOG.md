@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fetch
 
+- `RedirectCredentialSecrecy` records whether a credential-bearing redirect
+  remained secret or would have leaked a bearer token, cookie, or default
+  `.netrc` token across a non-HTTP protocol boundary. Fetch now fails closed
+  before following `http(s)` redirects into IMAP, LDAP, POP3, SMTP, FTP, file,
+  gopher, or SMB destinations when Authorization, Cookie, or caller-declared
+  netrc credentials are configured; receipts expose the outcome in retrieval
+  metadata.
 - `TlsVerifier::{PlatformVerifier, PinnedWebPki}` and
   `FetchPolicy::tls_verifier` add a policy-selectable TLS verifier type for
   spec §41.4.3. The default is `PlatformVerifier`; transport behavior is
