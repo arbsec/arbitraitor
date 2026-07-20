@@ -191,6 +191,35 @@ impl From<Verdict> for ExitCode {
     }
 }
 
+/// Canonical verdict-to-exit-code mapping point per spec §23.2 + §29.
+///
+/// This is the named entry point the daemon and CLI use to convert a
+/// [`Verdict`] into the stable [`ExitCode`] they hand back to the operating
+/// system. It is a thin wrapper around [`ExitCode::from`] (the
+/// [`From<Verdict>`] implementation provides the conservative default
+/// mapping per variant) and exists so call sites read as
+/// `verdict_to_exit_code(v)` rather than `ExitCode::from(v)` — making the
+/// spec-citation explicit and giving reviewers a single function to point
+/// at when the mapping rule changes.
+///
+/// Callers with richer context (finding confidence, transport error class,
+/// integrity failure) should still construct the more specific [`ExitCode`]
+/// directly; this function returns the conservative default only.
+///
+/// # Example
+///
+/// ```
+/// use arbitraitor_model::exit_code::{verdict_to_exit_code, ExitCode};
+/// use arbitraitor_model::verdict::Verdict;
+///
+/// assert_eq!(verdict_to_exit_code(Verdict::Pass), ExitCode::Success);
+/// assert_eq!(verdict_to_exit_code(Verdict::Block), ExitCode::BlockedByPolicy);
+/// ```
+#[must_use]
+pub fn verdict_to_exit_code(verdict: Verdict) -> ExitCode {
+    ExitCode::from(verdict)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +266,38 @@ mod tests {
         assert_eq!(
             ExitCode::from(Verdict::Incomplete),
             ExitCode::AnalysisIncomplete
+        );
+    }
+
+    /// Guards the canonical mapping function (`verdict_to_exit_code`)
+    /// against drift: it must agree with `From<Verdict>` for every variant
+    /// because that is the documented contract. If either side changes,
+    /// this test forces a synchronous update on both call sites.
+    #[test]
+    fn verdict_to_exit_code_matches_from_verdict_for_all_variants() {
+        assert_eq!(
+            verdict_to_exit_code(Verdict::Pass),
+            ExitCode::from(Verdict::Pass)
+        );
+        assert_eq!(
+            verdict_to_exit_code(Verdict::Warn),
+            ExitCode::from(Verdict::Warn)
+        );
+        assert_eq!(
+            verdict_to_exit_code(Verdict::Prompt),
+            ExitCode::from(Verdict::Prompt)
+        );
+        assert_eq!(
+            verdict_to_exit_code(Verdict::Block),
+            ExitCode::from(Verdict::Block)
+        );
+        assert_eq!(
+            verdict_to_exit_code(Verdict::Error),
+            ExitCode::from(Verdict::Error)
+        );
+        assert_eq!(
+            verdict_to_exit_code(Verdict::Incomplete),
+            ExitCode::from(Verdict::Incomplete)
         );
     }
 
