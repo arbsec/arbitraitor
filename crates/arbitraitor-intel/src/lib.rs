@@ -64,6 +64,12 @@ pub enum IndicatorType {
     YaraRule,
     /// Campaign label indicator.
     Campaign,
+    /// Fuzzy hash of file content (spec §21.1). Used with TLSH, SSDEEP,
+    /// or similar algorithms for similarity-based detection.
+    FuzzyHash,
+    /// Behavioral signature pattern (spec §21.1). Matches observed
+    /// runtime behavior rather than static content.
+    BehavioralSignature,
 }
 
 /// Intelligence indicator value paired with its type.
@@ -435,6 +441,8 @@ fn match_rank(entry: &FeedEntry, queried: &Indicator) -> Option<u8> {
         }
         IndicatorType::IpAddress if ip_matches_indicator(&stored.value, queried) => Some(7),
         IndicatorType::CidrRange if cidr_matches_indicator(&stored.value, queried) => Some(7),
+        IndicatorType::FuzzyHash if stored == queried => Some(8),
+        IndicatorType::BehavioralSignature if stored == queried => Some(9),
         _ => None,
     }
 }
