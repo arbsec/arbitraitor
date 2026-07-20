@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Intel
+
+- `IndicatorType::FuzzyHash` and `IndicatorType::BehavioralSignature` —
+  new indicator type variants per spec §21.1. FuzzyHash covers TLSH,
+  SSDEEP, or similar similarity-based detection. BehavioralSignature
+  matches observed runtime behavior. Both are matched at specificity
+  rank 8 and 9 respectively in the match-specificity ordering.
+
 #### Update
 
 - `arbitraitor_update::manifest::UpdateChannel::BinaryRelease` — new
