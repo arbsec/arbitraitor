@@ -26,6 +26,7 @@
   - [Security Model](./architecture/security.md)
   - [Pipeline](./architecture/pipeline.md)
   - [Crates](./architecture/crates.md)
+  - [SBOM and VEX Ingestion](./architecture/sbom-and-vex.md)
 - [Plugins](./plugins/overview.md)
   - [Subprocess Protocol](./plugins/protocol.md)
   - [WIT Interfaces](./plugins/wit.md)
