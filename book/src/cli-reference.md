@@ -14,7 +14,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor unpack` | Unpack an archive to a directory for inspection |
 | `arbitraitor intel` | Manage local threat-intelligence feeds (update) |
 | `arbitraitor status` | Show system health and configured detectors |
-| `arbitraitor wrappers` | Manage curl/wget wrapper shims |
+| `arbitraitor wrappers` | Install curl/wget shims + render shell-integration snippet |
 | `arbitraitor env` | Hidden alias of `wrappers init` (shell env setup) |
 | `arbitraitor store` | Manage CAS artifacts (list, inspect, gc) |
 | `arbitraitor policy` | Validate a policy TOML file |
@@ -22,7 +22,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor rules` | Manage YARA-X rule packs (list, validate) |
 | `arbitraitor update` | Verify signed update manifests |
 | `arbitraitor plugin` | Manage plugin registry (list, info, discover, remove) |
-| `arbitraitor hook` | Print shell integration hooks |
+| `arbitraitor hook` | Deprecated bash DEBUG trap (prefer `wrappers init --install`) |
 | `arbitraitor shim` | Manage package manager compatibility shims |
 | `arbitraitor graph` | Render payload containment tree for archives |
 | `arbitraitor approve` | Approve execution from a receipt file |
@@ -147,45 +147,105 @@ arbitraitor run https://example.com/install.sh --policy ./my-policy.toml
 ## Wrappers command
 
 ```sh
-arbitraitor wrappers <subcommand>
+arbitraitor wrappers <subcommand> [flags]
 ```
+
+Installs `curl` and `wget` shims that route downloads through Arbitraitor,
+and renders the shell-integration snippet that puts the shim directory on
+`PATH`. See [wrappers](./cli/wrappers.md) for the full reference.
 
 ### Subcommands
 
 #### `install`
 
-Install curl and wget shims to `~/.local/bin`:
+Install curl and/or wget shims (default: both) to the shim directory
+(default: `~/.arbitraitor/shims`):
 
 ```sh
 arbitraitor wrappers install
+arbitraitor wrappers install curl        # install only the curl shim
 ```
 
-The wrappers route downloads through Arbitraitor automatically. Original binaries are preserved and called with `exec`.
+Flags inherited by all wrappers subcommands:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--shim-dir <PATH>` | `~/.arbitraitor/shims` | Override the shim installation directory |
+| `--use-scripts` | `false` | Install shell scripts instead of symlinks |
+
+#### `uninstall`
+
+Remove installed shims (default: all):
+
+```sh
+arbitraitor wrappers uninstall
+```
 
 #### `status`
 
-Show installed wrappers and what they are routing:
+Show installed shims and their state:
 
 ```sh
 arbitraitor wrappers status
 ```
 
+States: `installed (script)`, `installed (symlink)`, `not installed`,
+`foreign file`.
+
+#### `init`
+
+Render or install the shell-integration snippet that puts the shim
+directory on `PATH`. This is the primary surface for wiring Arbitraitor
+into an interactive shell.
+
+```sh
+# Print mode (default) — emit snippet to stdout
+arbitraitor wrappers init
+eval "$(arbitraitor wrappers init)"
+
+# Auto-install mode — write a marked block to the detected shell's rcfile
+arbitraitor wrappers init --install
+
+# Detect which shell you're running and which rcfile is targeted
+arbitraitor wrappers init --detect-shell
+
+# Remove the PATH block from your rcfile
+arbitraitor wrappers init --uninstall
+
+# Specify a shell explicitly (default: auto-detected from $SHELL)
+arbitraitor wrappers init zsh
+arbitraitor wrappers init fish --install
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `[shell]` (positional) | Target shell. Auto-detected from `$SHELL` if omitted. |
+| `--install` | Write the snippet to the rcfile (instead of stdout). |
+| `--uninstall` | Remove a previously installed block from the rcfile. |
+| `--detect-shell` | Print detected shell and target rcfile, then exit. |
+| `--dry-run` | Show what would change without writing. Requires `--install`. |
+| `--no-backup` | Skip `<rcfile>.arbitraitor.bak` creation. Requires `--install`. |
+
+Supported shells: `bash`, `zsh`, `sh`, `fish`, `nu`, `xonsh`,
+`powershell`, `elvish`, `posix`, `tcsh`, `oil` (also `osh` / `ysh`).
+
+The rcfile block is wrapped in marker lines
+(`# >>> arbitraitor wrappers >>>` / `# <<< arbitraitor wrappers <<<`)
+so re-runs replace in place rather than appending. The corresponding
+in-shell snippet is idempotent: re-`eval`ing does not duplicate `PATH`
+entries.
+
 #### `init-script`
 
-Print the shell initialization snippet to source:
+Print the shell-init script for the default shell. Equivalent to
+`wrappers init` with no flags:
 
 ```sh
 arbitraitor wrappers init-script
 # Add to .bashrc or .zshrc:
 # eval "$(arbitraitor wrappers init-script)"
-```
-
-#### `uninstall`
-
-Remove installed wrappers:
-
-```sh
-arbitraitor wrappers uninstall
 ```
 
 ## Status command
@@ -426,13 +486,18 @@ arbitraitor plugin remove <id>
 arbitraitor hook <subcommand>
 ```
 
-Shell integration hooks.
+> **Deprecated.** The bash DEBUG trap runs on every command, has
+> measurable overhead in interactive sessions, and only supports bash.
+> Replace with `arbitraitor wrappers install && arbitraitor wrappers init --install`,
+> which works across every supported shell and wires the shim directory
+> onto `PATH` via a marked rcfile block. See [wrappers](./cli/wrappers.md).
 
 ### Subcommands
 
 #### `init [--binary <PATH>]`
 
-Print a bash hook that intercepts `curl|sh` patterns and suggests `arbitraitor run`:
+Print a bash hook that intercepts `curl|sh` patterns and suggests
+`arbitraitor run`. Emits a deprecation warning to stderr on use.
 
 ```sh
 arbitraitor hook init

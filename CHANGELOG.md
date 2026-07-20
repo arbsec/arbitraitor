@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### Documentation
+
+- `book/src/cli/wrappers.md` — full rewrite. Previous page documented a
+  fictional CLI (claims shims install to `~/.local/bin` with `--path`,
+  `--wrappers`, `--mode` flags that do not exist, omits the `init` and
+  `init-script` subcommands). New page matches the actual
+  implementations in `arbitraitor-cli/src/main.rs` and
+  `arbitraitor-wrapper/src/shim.rs`: documents all five `wrappers`
+  subcommands (`install`, `uninstall`, `status`, `init`, `init-script`),
+  the `--shim-dir` / `--use-scripts` parent flags, every `init` flag
+  (`--install`, `--uninstall`, `--detect-shell`, `--dry-run`,
+  `--no-backup`), all 11 supported shells (bash, zsh, sh, fish, nu,
+  xonsh, powershell, elvish, posix, tcsh, oil), the marker-block
+  idempotency pattern, the default-distro `~/.local/bin` PATH matrix, the
+  `arbitraitor env` hidden alias, the deprecated `hook init` migration
+  path, and the per-verdict output behaviour table. Verified against
+  commit `7cb6906`.
+- `book/src/getting-started/wrappers.md` — expanded shell-integration
+  section. Adds the two-step install pattern (`wrappers install` then
+  `wrappers init --install`), lists all 11 supported shells (previously
+  missing `oil`), documents the `# >>> arbitraitor wrappers >>>` marker
+  convention, explains the `--shim-dir ~/.local/bin` override, and adds
+  the Debian/Ubuntu/Fedora `~/.local/bin` default-PATH matrix (with the
+  Arch/RHEL/NixOS/Alpine caveat).
+- `book/src/cli-reference.md` — `Wrappers command` section now documents
+  `init`, `init-script`, `--shim-dir`, `--use-scripts`, and the full
+  `init` flag set. `Hook command` section marked deprecated with the
+  `wrappers init --install` replacement path. Command overview table
+  updated: `wrappers` row now reflects "Install curl/wget shims + render
+  shell-integration snippet"; `hook` row marked "Deprecated bash DEBUG
+  trap (prefer `wrappers init --install`)".
+- `README.md` — "Use wrappers" section now shows the two-step install
+  pattern (`wrappers install` + `wrappers init --install`) instead of
+  only `wrappers install`. "Shell integration hooks" section renamed to
+  "Shell integration" and now documents `wrappers init` /
+  `wrappers init --install` with the deprecated `hook init` clearly
+  marked.
+
 ### Added
 
 #### Receipt

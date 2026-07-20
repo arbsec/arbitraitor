@@ -109,9 +109,26 @@ arbitraitor run https://example.com/binary --native
 Install shell shims so `curl` and `wget` route through Arbitraitor automatically:
 
 ```sh
+# 1. Install curl/wget shims (default dir: ~/.arbitraitor/shims)
 arbitraitor wrappers install
+
+# 2. Wire the shim directory onto PATH (one-time, idempotent)
+arbitraitor wrappers init --install
+
+# 3. Verify the setup
 arbitraitor wrappers status
 ```
+
+After step 2, restart your shell (or `eval "$(arbitraitor wrappers init)"`)
+and `curl https://example.com/install.sh | sh` is transparently
+intercepted and inspected before any bytes reach the shell.
+
+For users who prefer `~/.local/bin`, override the default:
+`arbitraitor wrappers install --shim-dir ~/.local/bin`.
+Supported shells: bash, zsh, sh, fish, nushell, powershell, elvish,
+posix, tcsh, oil.
+See [wrappers CLI reference](book/src/cli/wrappers.md) for the full
+surface including the deprecated `hook init` migration path.
 
 ### Scan a local file or stdin
 
@@ -184,12 +201,17 @@ arbitraitor plugin discover
 arbitraitor plugin info <id>
 ```
 
-### Shell integration hooks
+### Shell integration
 
 ```sh
-# Print a bash hook that intercepts curl|sh patterns
-arbitraitor hook init
+# Shell-integration snippet for current shell (default: auto-detected from $SHELL)
+# Eval inline, or auto-install to rcfile with --install
+eval "$(arbitraitor wrappers init)"
+arbitraitor wrappers init --install
 ```
+
+The deprecated `arbitraitor hook init` (bash DEBUG trap) is retained for
+backward compatibility; new users should use `wrappers init --install`.
 
 ## Features
 
