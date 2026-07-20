@@ -29,6 +29,8 @@ fn ssrf_policy() -> FetchPolicy {
         allow_cross_origin_redirect: true,
         forward_authorization_cross_origin: false,
         require_digest: false,
+        proxy_url: None,
+        behind_proxy: false,
     }
 }
 

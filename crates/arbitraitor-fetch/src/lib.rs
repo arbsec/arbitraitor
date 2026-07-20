@@ -239,6 +239,15 @@ pub struct FetchPolicy {
     /// when #498 wires header input, this policy is the gate that prevents
     /// credential leakage.
     pub forward_authorization_cross_origin: bool,
+    /// Optional proxy URL (spec §11.2, ADR-0018). When `None` (default),
+    /// all proxy behavior is disabled via `.no_proxy()`. When `Some`,
+    /// reqwest is configured with the given proxy URL.
+    pub proxy_url: Option<String>,
+    /// Whether DNS resolution and target address selection are performed
+    /// by the proxy rather than locally (spec §11.2, ADR-0018). When
+    /// `true`, the receipt records that connected-peer verification
+    /// observes the proxy, not the actual target.
+    pub behind_proxy: bool,
     /// Requires callers to provide an expected SHA-256 digest before fetching.
     pub require_digest: bool,
 }
@@ -257,6 +266,8 @@ impl Default for FetchPolicy {
             allow_https_to_http_redirect: false,
             allow_cross_origin_redirect: true,
             forward_authorization_cross_origin: false,
+            proxy_url: None,
+            behind_proxy: false,
             require_digest: false,
         }
     }
@@ -717,20 +728,37 @@ fn build_http_client(
             message: "URL must include a host".to_owned(),
         });
     };
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .connect_timeout(policy.connect_timeout)
         .read_timeout(policy.read_timeout)
         .timeout(policy.total_timeout)
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
         .no_gzip()
         .no_brotli()
         .no_deflate()
         .no_zstd()
         .tls_info(true)
-        .user_agent(format!("{USER_AGENT_PREFIX}{}", env!("CARGO_PKG_VERSION")))
-        .resolve_to_addrs(host, resolved_addrs)
+        .user_agent(format!("{USER_AGENT_PREFIX}{}", env!("CARGO_PKG_VERSION")));
+
+    if let Some(ref proxy_url) = policy.proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|error| FetchError::InvalidUrl {
+            message: format!("invalid proxy URL: {error}"),
+        })?;
+        builder = builder.proxy(proxy);
+    } else {
+        builder = builder.no_proxy();
+    }
+
+    if policy.behind_proxy {
+        // When behind a proxy, we cannot verify the connected peer address
+        // against resolved addresses because the proxy is the peer. Skip
+        // resolve_to_addrs so reqwest uses the proxy's DNS resolution.
+    } else {
+        builder = builder.resolve_to_addrs(host, resolved_addrs);
+    }
+
+    builder
         .build()
         .map_err(|error| classify_reqwest_error("client build", error))
 }
