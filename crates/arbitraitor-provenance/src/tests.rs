@@ -175,6 +175,64 @@ fn tofu_change_produces_field_diff() -> std::result::Result<(), Box<dyn std::err
 }
 
 #[test]
+fn tofu_redirect_destination_change_produces_field_diff()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let (_temp_dir, path) = temp_store_path("redirect-changed")?;
+    let url = "https://example.test/tool";
+    let mut pinned = tofu_pin(url, 0x33, Some("signer@example.test"), Some(100));
+    pinned.redirect_destination = Some("https://old.example.test/tool".to_owned());
+    let mut actual = pinned.clone();
+    actual.redirect_destination = Some("https://new.example.test/tool".to_owned());
+    let mut store = TofuStore::open(&path)?;
+    store.pin(url, pinned)?;
+
+    // When
+    let verification = store.verify_against_pin(url, &actual)?;
+
+    // Then
+    assert_eq!(
+        verification,
+        TofuVerification::Changed {
+            changes: vec![TofuChange::RedirectDestinationChanged {
+                old: "https://old.example.test/tool".to_owned(),
+                new: "https://new.example.test/tool".to_owned(),
+            }],
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn tofu_certificate_identity_change_produces_field_diff()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let (_temp_dir, path) = temp_store_path("certificate-changed")?;
+    let url = "https://example.test/tool";
+    let mut pinned = tofu_pin(url, 0x33, Some("signer@example.test"), Some(100));
+    pinned.certificate_identity = Some("old@example.test".to_owned());
+    let mut actual = pinned.clone();
+    actual.certificate_identity = Some("new@example.test".to_owned());
+    let mut store = TofuStore::open(&path)?;
+    store.pin(url, pinned)?;
+
+    // When
+    let verification = store.verify_against_pin(url, &actual)?;
+
+    // Then
+    assert_eq!(
+        verification,
+        TofuVerification::Changed {
+            changes: vec![TofuChange::CertificateIdentityChanged {
+                old: "old@example.test".to_owned(),
+                new: "new@example.test".to_owned(),
+            }],
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn tuf_version_validation_rejects_rollback() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
     let mut versions = TufVersionStore::new();
@@ -312,6 +370,8 @@ fn tofu_pin(url: &str, byte: u8, signer_identity: Option<&str>, size: Option<u64
         url: url.to_owned(),
         sha256: digest(byte),
         signer_identity: signer_identity.map(str::to_owned),
+        certificate_identity: None,
+        redirect_destination: None,
         content_type: Some("application/octet-stream".to_owned()),
         size,
         first_seen: "2026-06-18T00:00:00Z".to_owned(),

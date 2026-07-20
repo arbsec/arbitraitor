@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproducible-build flag. Attached to `UpdateTarget` on the
   `BinaryRelease` channel.
 
+#### Provenance
+
+- TOFU pins now record and compare the final redirect destination and
+  certificate identity, reporting field-level drift for either value per
+  spec §14.4.
+
 #### Exec
 
 - `arbitraitor-exec::native::PlatformProvenance` — new struct recording

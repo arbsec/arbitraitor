@@ -213,6 +213,10 @@ pub struct TofuPin {
     pub sha256: Sha256Digest,
     /// Optional signer identity observed by independent signature verification.
     pub signer_identity: Option<String>,
+    /// Optional certificate identity observed by independent certificate verification.
+    pub certificate_identity: Option<String>,
+    /// Optional final redirect destination observed at retrieval time.
+    pub redirect_destination: Option<String>,
     /// Optional HTTP content type observed at retrieval time.
     pub content_type: Option<String>,
     /// Optional content size in bytes.
@@ -250,6 +254,20 @@ pub enum TofuChange {
         /// Pinned signer identity.
         old: String,
         /// Observed signer identity.
+        new: String,
+    },
+    /// The certificate identity changed.
+    CertificateIdentityChanged {
+        /// Pinned certificate identity.
+        old: String,
+        /// Observed certificate identity.
+        new: String,
+    },
+    /// The final redirect destination changed.
+    RedirectDestinationChanged {
+        /// Pinned redirect destination.
+        old: String,
+        /// Observed redirect destination.
         new: String,
     },
     /// The artifact size changed.
@@ -338,6 +356,18 @@ impl TofuStore {
             changes.push(TofuChange::SignerChanged {
                 old: stored.signer_identity.clone().unwrap_or_default(),
                 new: actual.signer_identity.clone().unwrap_or_default(),
+            });
+        }
+        if stored.certificate_identity != actual.certificate_identity {
+            changes.push(TofuChange::CertificateIdentityChanged {
+                old: stored.certificate_identity.clone().unwrap_or_default(),
+                new: actual.certificate_identity.clone().unwrap_or_default(),
+            });
+        }
+        if stored.redirect_destination != actual.redirect_destination {
+            changes.push(TofuChange::RedirectDestinationChanged {
+                old: stored.redirect_destination.clone().unwrap_or_default(),
+                new: actual.redirect_destination.clone().unwrap_or_default(),
             });
         }
         if let (Some(old), Some(new)) = (stored.size, actual.size)
