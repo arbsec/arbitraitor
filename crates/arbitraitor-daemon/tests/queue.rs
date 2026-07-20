@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use arbitraitor_daemon::api::{ArbitraitorApi, Config};
 use arbitraitor_daemon::queue::{OperationId, OperationQueue, OperationStatus};
-use arbitraitor_fetch::{FetchPolicy, FetchScheme};
+use arbitraitor_fetch::{FetchPolicy, FetchScheme, TlsVerifier};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -38,6 +38,7 @@ fn test_config(root: &Path) -> Config {
         store_path: root.join("cas"),
         receipts_path: root.join("receipts"),
         fetch_policy: FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
             allowed_schemes: vec![FetchScheme::Http],
             allow_loopback_addresses: true,
             ..FetchPolicy::default()

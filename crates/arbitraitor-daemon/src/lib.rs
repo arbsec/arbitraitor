@@ -953,7 +953,7 @@ fn prepare_socket_path(socket_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitraitor_fetch::FetchScheme;
+    use arbitraitor_fetch::{FetchScheme, TlsVerifier};
     use tokio::net::TcpListener;
 
     #[cfg(target_os = "linux")]
@@ -979,6 +979,7 @@ mod tests {
             DaemonOptions {
                 store_path: root.join("cas"),
                 fetch_policy: FetchPolicy {
+                    tls_verifier: TlsVerifier::PlatformVerifier,
                     allowed_schemes: vec![FetchScheme::Http],
                     allow_loopback_addresses: true,
                     ..FetchPolicy::default()

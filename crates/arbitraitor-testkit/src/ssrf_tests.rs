@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use arbitraitor_fetch::{
-    FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, HttpFetcher, VecSink,
+    FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, HttpFetcher,
+    TlsVerifier, VecSink,
 };
 
 use crate::network;
@@ -17,6 +18,7 @@ use crate::network;
 /// Policy that allows HTTP but blocks loopback addresses.
 fn ssrf_policy() -> FetchPolicy {
     FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         connect_timeout: Duration::from_secs(5),
         read_timeout: Duration::from_secs(5),
         total_timeout: Duration::from_secs(30),
@@ -37,6 +39,7 @@ fn ssrf_policy() -> FetchPolicy {
 /// Policy that allows HTTP and explicitly permits loopback addresses.
 fn loopback_policy() -> FetchPolicy {
     FetchPolicy {
+        tls_verifier: TlsVerifier::PlatformVerifier,
         allow_loopback_addresses: true,
         ..ssrf_policy()
     }
