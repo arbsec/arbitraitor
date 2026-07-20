@@ -157,3 +157,10 @@ Receipts are signed using RFC 8785 JCS canonical JSON. The signature covers:
 - Capability matrix (for contained execution)
 
 Receipts can be verified independently and used as audit evidence.
+
+## SBOM and VEX ingestion
+
+Arbitraitor consumes SBOM and VEX documents at the policy and provenance boundary but never produces, signs, or republishes them. Ingestion covers four formats: CycloneDX 1.6+ (with the CDXA ML/AI and CBOM cryptography extensions), SPDX 2.2.1, OpenVEX 0.2.0, and CSAF 2.1 (ISO/IEC 20153, May 2025). The expected shape is the CISA 2025 *SBOM Minimum Elements* revision (the four new fields Component Hash, License, Tool Name, Generation Context, plus the Software Producer and Coverage renames) and, when an SBOM declares AI content, the five SBOM-for-AI clusters (System-Level Properties, Data Properties, Model Properties, Infrastructure, Security Properties). Documents missing required fields are rejected with a typed error; AI clusters are surfaced into receipt metadata and treated as advisory signals (never verdict inputs). EU CRA Annex I Part II becomes effective for products placed on the EU market from 11 December 2027; the CycloneDX and SPDX profiles here consume CRA-shaped SBOMs unmodified.
+
+<!-- markdownlint-disable-next-line MD057 -->
+See [ADR 0030](./adr/0030-sbom-vex-ingestion-profiles.md) for the per-format field mapping and [SBOM and VEX ingestion](./sbom-and-vex.md) for the user-facing reference.

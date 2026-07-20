@@ -26,6 +26,7 @@
   - [Security Model](./architecture/security.md)
   - [Pipeline](./architecture/pipeline.md)
   - [Crates](./architecture/crates.md)
+  - [SBOM and VEX Ingestion](./architecture/sbom-and-vex.md)
 - [Plugins](./plugins/overview.md)
   - [Subprocess Protocol](./plugins/protocol.md)
   - [WIT Interfaces](./plugins/wit.md)
@@ -62,6 +63,7 @@
   - [ADR 0025: OpenSSF Scorecard, deps.dev, and GUAC as optional integrations](./adr/0025-ossf-scorecard-depsdev-guac-integration.md)
   - [ADR 0026: EU CRA / NIST SSDF informational compliance mapping](./adr/0026-eu-cra-nist-ssdf-compliance-mapping.md)
   - [ADR 0027: CLI inspect pipeline boundary](./adr/0027-cli-pipeline-boundary.md)
+  - [ADR 0030: SBOM/VEX ingestion profiles](./adr/0030-sbom-vex-ingestion-profiles.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)

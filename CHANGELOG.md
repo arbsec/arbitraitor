@@ -342,6 +342,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ADRs 0022–0026 accepted: SLSA Build L3 target (0022), in-toto Statement receipt envelope (0023), macOS containment strategy (0024), OpenSSF Scorecard/deps.dev/GUAC integration (0025), EU CRA/NIST SSDF compliance mapping (0026). All 26 ADRs are now Accepted.
 
+#### Documentation
+
+- ADR-0030 (`docs/adr/0030-sbom-vex-ingestion-profiles.md`) accepted:
+  SBOM/VEX ingestion profiles aligned with the CISA August 2025 *SBOM
+  Minimum Elements* update (Component Hash, License, Tool Name,
+  Generation Context additions; Software Producer and Coverage renames)
+  and the May 2026 CISA+G7 *SBOM for AI: Minimum Elements* guidance
+  (System-Level Properties, Data Properties, Model Properties,
+  Infrastructure, Security Properties clusters). CycloneDX 1.6+ profile
+  supports the CDXA ML/AI and CBOM cryptography extensions; SPDX 2.2.1
+  profile uses a per-field mapping to the CISA 2025 minimum elements
+  (SPDX Lite is rejected); OpenVEX 0.2.0 is accepted alongside the SBOM
+  and indexed by PURL (semantics deferred to ADR-0029); CSAF 2.1
+  (ISO/IEC 20153, May 2025) carries signed VEX and security advisory
+  content. Decision: Arbitraitor ingests but does not generate SBOM/VEX
+  artifacts. EU CRA Annex I Part II mandate effective 11 December 2027
+  is informational; CycloneDX and SPDX profiles consume CRA-shaped
+  documents unmodified. New user-facing book page
+  `book/src/architecture/sbom-and-vex.md` lists the per-format field
+  mapping and the AI-cluster ingestion envelope.
+
 #### CLI
 
 - `arbitraitor doctor --json` — machine-readable output (human-readable is now the default)
@@ -403,6 +424,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ADR-0030 (SBOM/VEX ingestion profiles) factual corrections from Oracle
+  adversarial review: corrected the SBOM-for-AI cluster count from 5 to 7
+  (Metadata, System Level Properties, Models, Dataset Properties,
+  Infrastructure, Security Properties, KPI) per the G7/CISA source;
+  corrected OpenVEX 0.2.0 status mapping to the four spec-defined values
+  (`not_affected`, `affected`, `fixed`, `under_investigation`) and marked
+  `tooling` as optional with `author`/`version` required; corrected SPDX
+  ISO year from `5962:2024` to `5962:2021` with a resolvable ISO
+  catalogue URL; corrected CSAF standard status (2.0 = ISO/IEC 20153:2025,
+  2.1 = OASIS CSD02 Feb 2026, not yet ISO); corrected SPDX/CycloneDX
+  field mappings (SPDX annotations only have `REVIEW`/`OTHER`; CycloneDX
+  generation context lives in `metadata.lifecycles[].phase`); replaced
+  dead CISA URLs with canonical routes and marked the CISA 2025 SBOM
+  page as a public-comment draft; fixed broken book link from
+  `book/src/architecture/security.md` (`../sbom-and-vex.md` →
+  `./sbom-and-vex.md`); bumped ADR count from 27 to 28 in `AGENTS.md`
+  and `README.md`.
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
 - `shim install npm` now generates a working shim that invokes `arb pm run --tool npm`, replacing the previous stub that errored with "package-manager shims are not yet implemented".
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
