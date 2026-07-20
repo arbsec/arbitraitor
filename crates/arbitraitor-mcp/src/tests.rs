@@ -67,6 +67,7 @@ fn capability_separation_exposes_approval_and_execute_tools() {
     let mut server = McpServer::new();
     let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
     server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
+    server.register(Box::new(FetchArtifactTool::new()));
     server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
     server.register(Box::new(QueryReceiptTool::new(Arc::new(
         InMemoryReceiptStore::new(),
@@ -95,6 +96,7 @@ fn capability_separation_exposes_approval_and_execute_tools() {
         server.list_capabilities(),
         vec![
             ("inspect_url".to_owned(), McpCapability::Inspect),
+            ("fetch_artifact".to_owned(), McpCapability::Inspect),
             ("scan_artifact".to_owned(), McpCapability::Inspect),
             ("query_receipt".to_owned(), McpCapability::Inspect),
             ("explain_verdict".to_owned(), McpCapability::Inspect),
@@ -130,6 +132,84 @@ fn inspect_url_returns_findings_without_execution() {
             .is_some_and(|findings| !findings.is_empty())
     );
     assert!(json["agent_identity"].is_object());
+}
+
+#[test]
+fn fetch_artifact_returns_cas_identity_without_execution() {
+    let body = b"#!/bin/sh\necho hello\n";
+    let url = serve_once(body);
+    let policy = FetchPolicy {
+        allowed_schemes: vec![FetchScheme::Http],
+        allow_loopback_addresses: true,
+        ..FetchPolicy::default()
+    };
+    let tool = FetchArtifactTool::with_fetch_policy(policy);
+
+    let response = tool.handle(json!({"url": url}), &agent());
+
+    assert!(!response.is_error, "response was {response:?}");
+    let McpContent::Json { json } = &response.content[0] else {
+        panic!("expected json content");
+    };
+    assert_eq!(json["capability"], "inspect");
+    assert_eq!(json["execution_performed"], false);
+    assert_eq!(json["release_performed"], false);
+    assert!(json["agent_identity"].is_object());
+
+    let artifact = &json["artifact"];
+    let sha256 = artifact["sha256"]
+        .as_str()
+        .unwrap_or_else(|| panic!("sha256"));
+    assert_eq!(sha256.len(), 64, "expected hex sha256, got {sha256}");
+    assert_eq!(
+        artifact["byte_count"].as_u64(),
+        Some(u64::try_from(body.len()).unwrap_or(0))
+    );
+    let content_type = artifact["content_type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("content_type"));
+    assert!(
+        content_type.contains(UNTRUSTED_START) && content_type.contains(UNTRUSTED_END),
+        "content_type should be wrapped in agent markers: {content_type}"
+    );
+}
+
+#[test]
+fn fetch_artifact_rejects_invalid_parameters() {
+    let tool = FetchArtifactTool::new();
+
+    let response = tool.handle(json!({}), &agent());
+
+    assert!(
+        response.is_error,
+        "missing url must error, got {response:?}"
+    );
+    assert_error_contains(&response, "invalid fetch_artifact parameters");
+}
+
+#[test]
+fn fetch_artifact_rejects_digest_mismatch_when_pinned() {
+    let body = b"#!/bin/sh\necho hello\n";
+    let url = serve_once(body);
+    let policy = FetchPolicy {
+        allowed_schemes: vec![FetchScheme::Http],
+        allow_loopback_addresses: true,
+        require_digest: true,
+        ..FetchPolicy::default()
+    };
+    let tool = FetchArtifactTool::with_fetch_policy(policy);
+
+    // Pin a digest that cannot match the served bytes: this is a security
+    // invariant check that the fetcher rejects digest mismatches before any
+    // release/execution path can run.
+    let wrong_sha256 = "0".repeat(64);
+    let response = tool.handle(json!({"url": url, "sha256": wrong_sha256}), &agent());
+
+    assert!(
+        response.is_error,
+        "digest mismatch must error, got {response:?}"
+    );
+    assert_error_contains(&response, "fetch failed");
 }
 
 #[test]

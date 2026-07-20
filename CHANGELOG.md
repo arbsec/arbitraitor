@@ -75,6 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call sites a single, named function to point at when the mapping rule
   changes.
 
+#### MCP
+
+- `fetch_artifact` MCP tool — retrieves a URL once via
+  `arbitraitor_fetch::HttpFetcher` and returns the CAS identity
+  (SHA-256, byte count, content type, final URL) without releasing or
+  executing the artifact (spec §33.1). The tool is registered with
+  capability class `Inspect` and accepts an optional `sha256` digest
+  pin for callers that want provenance verification at retrieval
+  time. No scan/analysis is performed — callers can chain
+  `inspect_url` or `scan_artifact` against the returned digest for
+  classification.
+
 #### Fetch
 
 - `arbitraitor-fetch::FetchPolicy::allow_cross_origin_redirect` and
