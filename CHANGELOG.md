@@ -473,6 +473,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `arbitraitor fetch` promoted from hidden wrapper alias to first-class
+  subcommand per spec §28.2. Removed `#[command(hide = true)]` and
+  `disable_help_flag`; added the full spec-defined flag surface:
+  `-o/--output`, `--sha256`, `--signature`, `--cosign-bundle`, `--identity`,
+  `--issuer`, `--expected-type`, `--expected-content-type`, `--max-bytes`,
+  `--header`, `--policy`, `--recursive`, `--sandbox`, `--non-interactive`,
+  `--json`, `--sarif`, `--receipt`, `--no-cache`. Wrapper symlink invocations
+  (`curl`/`wget`) continue to work via `--tool` and passthrough args (#477).
 - ADR-0030 (SBOM/VEX ingestion profiles) factual corrections from Oracle
   adversarial review: corrected the SBOM-for-AI cluster count from 5 to 7
   (Metadata, System Level Properties, Models, Dataset Properties,

@@ -7,6 +7,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | Command | Description |
 |---------|-------------|
 | `arbitraitor inspect` | Retrieve and analyze an artifact without executing it |
+| `arbitraitor fetch` | Fetch an artifact with provenance verification (spec §28.2) |
 | `arbitraitor run` | Execute the full pipeline with approval flow |
 | `arbitraitor scan` | Scan a local file or stdin without retrieval |
 | `arbitraitor explain` | Explain a verdict from a receipt file |
@@ -32,8 +33,6 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor pm` | Run a package manager through advisory scan (npm) |
 | `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
 | `arbitraitor version` | Print version, license, and repository |
-
-> **Note:** `arbitraitor fetch` is a hidden command used internally by wrappers. It retrieves an artifact to CAS without analysis.
 
 ### `arbitraitor intel update`
 
@@ -123,6 +122,63 @@ arbitraitor inspect https://example.com/install.sh --sha256 abc123... --minisign
 
 # Inspect a local file
 arbitraitor inspect ./downloads/script.sh
+```
+
+## Fetch command
+
+```sh
+arbitraitor fetch <URL> [flags]
+```
+
+Fetches an artifact from a URL with provenance verification, content-addressed
+storage, and optional receipt emission. When invoked via a wrapper symlink
+(`curl`/`wget`), the `--tool` flag is set automatically and passthrough
+arguments are captured after `--`.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output <PATH>` | Write the fetched artifact to this path instead of stdout |
+| `--sha256 <HEX>` | Expected SHA-256 digest for provenance verification |
+| `--signature <PATH>` | minisign signature file (repeatable; requires key via config) |
+| `--cosign-bundle <PATH>` | cosign bundle file (repeatable) |
+| `--identity <IDENTITY>` | cosign identity (repeatable) |
+| `--issuer <ISSUER>` | cosign certificate issuer (repeatable) |
+| `--expected-type <TYPE>` | Expected artifact type (e.g., `shell`, `elf`, `archive`) |
+| `--expected-content-type <TYPE>` | Expected content type (e.g., `application/x-sh`) |
+| `--max-bytes <BYTES>` | Maximum bytes to fetch |
+| `--header <HEADER>` | HTTP header to send (repeatable, format: `Key: Value`) |
+| `--policy <PATH>` | Policy file path |
+| `--recursive` | Recursively fetch and inspect referenced payloads |
+| `--sandbox` | Sandbox execution after fetch |
+| `--non-interactive` | Skip interactive approval prompts |
+| `--json` | Output results as JSON |
+| `--sarif` | Output results as SARIF |
+| `--receipt <PATH>` | Write a JSON receipt to this path |
+| `--no-cache` | Skip cache and force a fresh fetch |
+
+### Examples
+
+```sh
+# Basic fetch
+arbitraitor fetch https://example.com/install.sh
+
+# Fetch with output file and SHA-256 pinning
+arbitraitor fetch --output install.sh --sha256 abc123... https://example.com/install.sh
+
+# Fetch with cosign provenance verification
+arbitraitor fetch \
+  --cosign-bundle artifact.bundle \
+  --identity builder@example.test \
+  --issuer https://issuer.example.test \
+  https://example.com/artifact
+
+# Fetch with receipt output
+arbitraitor fetch --receipt receipt.json https://example.com/install.sh
+
+# Non-interactive JSON output
+arbitraitor fetch --non-interactive --json https://example.com/install.sh
 ```
 
 ## Run command

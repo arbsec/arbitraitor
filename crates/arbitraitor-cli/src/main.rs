@@ -65,8 +65,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Inspect(Box<InspectCommand>),
-    #[command(hide = true)]
-    Fetch(FetchCommand),
+    /// Fetch an artifact with provenance verification (spec §28.2).
+    Fetch(Box<FetchCommand>),
     Run(Box<run::RunCommand>),
     Daemon(DaemonCommand),
     Unpack(UnpackCommand),
@@ -142,13 +142,75 @@ struct InspectCommand {
     format: Option<ExplainFormat>,
 }
 
+/// Fetch an artifact from a URL with provenance verification (spec §28.2).
+///
+/// When invoked via a wrapper symlink (`curl`/`wget`), `--tool` is set
+/// automatically and `args` carries the passthrough arguments. In
+/// first-class mode the URL is the first positional argument and the
+/// spec-defined flags are parsed normally.
 #[derive(Args)]
-#[command(disable_help_flag = true)]
+#[allow(clippy::struct_excessive_bools)] // spec §28.2 mandates these boolean flags
 struct FetchCommand {
+    /// Wrapper tool name (set automatically by symlink invocation).
     #[arg(long, value_name = "curl|wget")]
     tool: Option<String>,
+    /// URL to fetch, or passthrough args when invoked via wrapper symlink.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+    /// Write the fetched artifact to this path instead of stdout.
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    /// Expected SHA-256 digest for provenance verification.
+    #[arg(long, value_name = "HEX")]
+    sha256: Option<Sha256Digest>,
+    /// minisign signature file path (repeatable; requires key via config).
+    #[arg(long, value_name = "PATH")]
+    signature: Vec<PathBuf>,
+    /// cosign bundle file path (repeatable).
+    #[arg(long, value_name = "PATH")]
+    cosign_bundle: Vec<PathBuf>,
+    /// cosign identity (repeatable).
+    #[arg(long, value_name = "IDENTITY")]
+    identity: Vec<String>,
+    /// cosign certificate issuer (repeatable).
+    #[arg(long, value_name = "ISSUER")]
+    issuer: Vec<String>,
+    /// Expected artifact type (e.g., `shell`, `elf`, `archive`).
+    #[arg(long, value_name = "TYPE")]
+    expected_type: Option<String>,
+    /// Expected content type (e.g., `application/x-sh`).
+    #[arg(long, value_name = "TYPE")]
+    expected_content_type: Option<String>,
+    /// Maximum bytes to fetch.
+    #[arg(long, value_name = "BYTES")]
+    max_bytes: Option<u64>,
+    /// HTTP header to send (repeatable, format: `Key: Value`).
+    #[arg(long, value_name = "HEADER")]
+    header: Vec<String>,
+    /// Policy file path.
+    #[arg(long, value_name = "PATH")]
+    policy: Option<PathBuf>,
+    /// Recursively fetch and inspect referenced payloads.
+    #[arg(long)]
+    recursive: bool,
+    /// Sandbox execution after fetch.
+    #[arg(long)]
+    sandbox: bool,
+    /// Skip interactive approval prompts.
+    #[arg(long)]
+    non_interactive: bool,
+    /// Output results as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Output results as SARIF.
+    #[arg(long)]
+    sarif: bool,
+    /// Write a JSON receipt to this path.
+    #[arg(long, value_name = "PATH")]
+    receipt: Option<PathBuf>,
+    /// Skip cache and force a fresh fetch.
+    #[arg(long)]
+    no_cache: bool,
 }
 
 /// Output format for the `--explain` report.
@@ -530,41 +592,58 @@ where
 }
 
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
-    let target = wrapper_fetch_target(command.tool.as_deref())?;
-    let url = wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
-        miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
-    })?;
-
-    let (output_path, remote_name) =
-        wrapper_output_destination(command.tool.as_deref(), &command.args);
-
-    if matches!(target, Some(WrapperTarget::Curl)) {
-        let parsed = parse_curl_args(&command.args).into_diagnostic()?;
-        if !parsed.unsupported_options.is_empty() {
-            miette::bail!(
-                "unsupported curl wrapper option: {}",
-                parsed.unsupported_options.join(", ")
-            );
+    let (url, output_path, remote_name) = if command.tool.is_some() {
+        let target = wrapper_fetch_target(command.tool.as_deref())?;
+        let url =
+            wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
+                miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
+            })?;
+        let (output_path, remote_name) =
+            wrapper_output_destination(command.tool.as_deref(), &command.args);
+        if matches!(target, Some(WrapperTarget::Curl)) {
+            let parsed = parse_curl_args(&command.args).into_diagnostic()?;
+            if !parsed.unsupported_options.is_empty() {
+                miette::bail!(
+                    "unsupported curl wrapper option: {}",
+                    parsed.unsupported_options.join(", ")
+                );
+            }
         }
-    }
+        (url.to_string(), output_path, remote_name)
+    } else {
+        let url = command
+            .args
+            .first()
+            .ok_or_else(|| miette::miette!("fetch requires a URL argument"))?;
+        let output_path = command
+            .output
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        (url.clone(), output_path, false)
+    };
+
+    let signatures = pipeline::signature_inputs(
+        command.signature.clone(),
+        Vec::new(),
+        command.cosign_bundle.clone(),
+        command.identity.clone(),
+        command.issuer.clone(),
+    )?;
 
     let outcome = pipeline::inspect(
-        url,
+        &url,
+        command.receipt.as_deref(),
         None,
+        command.sha256.clone(),
         None,
-        None,
-        None,
-        pipeline::SignatureInputs::default(),
+        signatures,
         config,
         None,
     )
     .await?;
 
     if outcome.verdict != Verdict::Pass {
-        miette::bail!(
-            "wrapper rejected artifact with verdict {:?}",
-            outcome.verdict
-        );
+        miette::bail!("fetch rejected artifact with verdict {:?}", outcome.verdict);
     }
 
     let recomputed = Sha256Digest::new(Sha256::digest(&outcome.bytes).into());
@@ -576,7 +655,7 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         );
     }
 
-    emit_wrapper_output(&outcome.bytes, output_path.as_deref(), remote_name, url)?;
+    emit_wrapper_output(&outcome.bytes, output_path.as_deref(), remote_name, &url)?;
     Ok(())
 }
 
