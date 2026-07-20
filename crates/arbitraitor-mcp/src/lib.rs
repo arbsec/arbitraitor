@@ -409,6 +409,112 @@ impl McpToolHandler for ScanArtifactTool {
     }
 }
 
+/// Tool that retrieves a URL into the CAS without releasing or executing it.
+///
+/// Unlike [`InspectUrlTool`], this tool does not invoke the analysis pipeline:
+/// it returns the identity (SHA-256, byte count, content type, final URL) of
+/// the bytes recorded against the CAS. Callers can subsequently inspect the
+/// artifact with [`ScanArtifactTool`] or scan with `inspect_url`. The tool
+/// never writes bytes outside the CAS quarantine and never executes them,
+/// so its capability class is [`McpCapability::Inspect`].
+pub struct FetchArtifactTool {
+    fetch_policy: FetchPolicy,
+}
+
+impl FetchArtifactTool {
+    /// Creates a `fetch_artifact` tool with the default fetch policy.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            fetch_policy: FetchPolicy::default(),
+        }
+    }
+
+    /// Creates a `fetch_artifact` tool with an explicit fetch policy.
+    #[must_use]
+    pub const fn with_fetch_policy(fetch_policy: FetchPolicy) -> Self {
+        Self { fetch_policy }
+    }
+}
+
+impl Default for FetchArtifactTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl McpToolHandler for FetchArtifactTool {
+    fn metadata(&self) -> McpTool {
+        McpTool {
+            name: "fetch_artifact".to_owned(),
+            description: "Fetch a URL once and record its CAS identity (SHA-256, byte count, content type) without releasing or executing the artifact.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["url"],
+                "properties": {
+                    "url": { "type": "string" },
+                    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+                }
+            }),
+        }
+    }
+
+    fn handle(&self, params: Value, agent: &AgentIdentity) -> McpToolResponse {
+        match self.fetch(params, agent) {
+            Ok(json) => json_response(json),
+            Err(error) => error_response(&error.to_string(), agent),
+        }
+    }
+
+    fn capability(&self) -> McpCapability {
+        McpCapability::Inspect
+    }
+}
+
+impl FetchArtifactTool {
+    fn fetch(&self, params: Value, agent: &AgentIdentity) -> Result<Value, FetchArtifactError> {
+        let params: FetchArtifactParams = serde_json::from_value(params)?;
+        let fetch_url =
+            FetchUrl::parse(&params.url).map_err(|error| FetchArtifactError::Fetch {
+                message: error.to_string(),
+            })?;
+        let mut request = FetchRequest::url(fetch_url, self.fetch_policy.clone());
+        if let Some(sha256) = params.sha256 {
+            let digest = sha256.parse::<Sha256Digest>().map_err(|error| {
+                FetchArtifactError::InvalidSha256 {
+                    message: error.to_string(),
+                }
+            })?;
+            request = request.with_expected_sha256(digest);
+        }
+
+        let fetched = fetch_url_once(request).map_err(|error| FetchArtifactError::Fetch {
+            message: error.to_string(),
+        })?;
+        let content_type = fetched.receipt.metadata.content_type.clone();
+        let final_url = fetched
+            .receipt
+            .metadata
+            .final_url
+            .as_ref()
+            .map(ToString::to_string)
+            .map(|url| redact_url(&url));
+        Ok(json!({
+            "capability": McpCapability::Inspect,
+            "execution_performed": false,
+            "release_performed": false,
+            "agent_identity": sanitized_agent(agent),
+            "artifact": {
+                "sha256": fetched.receipt.sha256.to_string(),
+                "byte_count": fetched.receipt.bytes_written,
+                "content_type": sanitize_option(content_type.as_deref())
+            },
+            "final_url": final_url.map(|url| sanitize_for_agent(&url))
+        }))
+    }
+}
+
 /// Read-only receipt lookup by artifact SHA-256.
 ///
 /// Implementations are injected into [`QueryReceiptTool`]. The trait is
@@ -1654,6 +1760,13 @@ struct InspectUrlParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FetchArtifactParams {
+    url: String,
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScanArtifactParams {
     path: String,
 }
@@ -1682,6 +1795,16 @@ struct RunApprovedArtifactParams {
 #[derive(Debug, Error)]
 enum InspectUrlError {
     #[error("invalid inspect_url parameters: {0}")]
+    Params(#[from] serde_json::Error),
+    #[error("invalid sha256: {message}")]
+    InvalidSha256 { message: String },
+    #[error("fetch failed: {message}")]
+    Fetch { message: String },
+}
+
+#[derive(Debug, Error)]
+enum FetchArtifactError {
+    #[error("invalid fetch_artifact parameters: {0}")]
     Params(#[from] serde_json::Error),
     #[error("invalid sha256: {message}")]
     InvalidSha256 { message: String },
@@ -1823,6 +1946,7 @@ fn build_default_server() -> McpServer {
 
     let mut server = McpServer::new();
     server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
+    server.register(Box::new(FetchArtifactTool::new()));
     server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
     server.register(Box::new(QueryReceiptTool::new(receipts)));
     server.register(Box::new(ExplainVerdictTool));
