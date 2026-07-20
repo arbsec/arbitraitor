@@ -177,6 +177,15 @@ impl FetchRequest {
 }
 
 /// Transport policy applied by fetchers.
+///
+/// Each bool field is a documented security policy axis with an explicit
+/// fail-closed or fail-open default tied to a spec section. Clippy's
+/// `struct_excessive_bools` lint is allowed here because converting these
+/// to two-variant enums would obscure the TOML deserialization surface
+/// (a TOML bool is the natural authoring shape for a security policy)
+/// and make the relationship between a policy field and its spec
+/// citation harder to audit.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct FetchPolicy {
     /// TCP/TLS connection timeout.
@@ -209,6 +218,27 @@ pub struct FetchPolicy {
     /// from HTTPS to HTTP strips transport encryption and is blocked unless a
     /// caller explicitly opts in here.
     pub allow_https_to_http_redirect: bool,
+    /// Allows redirect chains that cross origin boundaries (scheme/host/port).
+    ///
+    /// Defaults to `true` per spec §11.4 — the common case (release artifact
+    /// hosted on a different CDN) legitimately crosses origins. When `false`,
+    /// any redirect to a different origin is rejected with
+    /// [`FetchError::CrossOriginRedirect`].
+    pub allow_cross_origin_redirect: bool,
+    /// Allows `Authorization` and `Cookie` headers to be forwarded across
+    /// origins during a redirect chain.
+    ///
+    /// Fail-closed by default (`false`) per spec §11.2. When `false`, any
+    /// redirect that lands on a different origin triggers a forced strip of
+    /// credential-bearing headers from subsequent requests in the chain.
+    /// When `true`, the original headers are preserved.
+    ///
+    /// Note: as of the current MVP, [`execute_request`] sends a bare GET
+    /// with no Authorization header (user-supplied headers are tracked in
+    /// issue #498). The strip logic below is therefore forward-compatible —
+    /// when #498 wires header input, this policy is the gate that prevents
+    /// credential leakage.
+    pub forward_authorization_cross_origin: bool,
     /// Requires callers to provide an expected SHA-256 digest before fetching.
     pub require_digest: bool,
 }
@@ -225,6 +255,8 @@ impl Default for FetchPolicy {
             allowed_schemes: vec![FetchScheme::Https, FetchScheme::File, FetchScheme::Stdin],
             allow_loopback_addresses: false,
             allow_https_to_http_redirect: false,
+            allow_cross_origin_redirect: true,
+            forward_authorization_cross_origin: false,
             require_digest: false,
         }
     }
@@ -377,6 +409,15 @@ pub enum FetchError {
     /// Redirect downgraded from HTTPS to HTTP without explicit opt-in.
     #[error("redirect downgrades from HTTPS to HTTP, which is blocked by policy")]
     InsecureRedirectDowngrade,
+    /// Redirect crossed origin boundaries (scheme/host/port) without explicit opt-in.
+    ///
+    /// Returned when [`FetchPolicy::allow_cross_origin_redirect`] is `false`
+    /// and a redirect target has a different scheme, host, or port than the
+    /// current request URL. The error message does not include the redirect
+    /// URLs themselves; those are recorded in the receipt's redacted redirect
+    /// chain rather than bypassed to a diagnostic channel.
+    #[error("redirect crosses origin boundaries, which is blocked by policy")]
+    CrossOriginRedirect,
     /// DNS resolution reached a prohibited address range.
     #[error("resolved address is prohibited by fetch policy: {address}")]
     ProhibitedAddress {
@@ -546,6 +587,7 @@ impl HttpFetcher {
                 let next = redirect_target(&current, response.headers())?;
                 ensure_scheme_allowed(FetchScheme::from_str(next.scheme()), next.scheme(), policy)?;
                 ensure_no_insecure_downgrade(current.scheme(), next.scheme(), policy)?;
+                ensure_cross_origin_allowed(&current, &next, policy)?;
                 trace!(from = %redact_parsed_url(&current), to = %redact_parsed_url(&next), "following policy-approved redirect");
                 redirect_chain.push(FetchUrl(current));
                 current = next;
@@ -1060,6 +1102,79 @@ pub(crate) fn ensure_no_insecure_downgrade(
     Ok(())
 }
 
+/// Enforces cross-origin redirect policy (spec §11.2 lines 608-612, §11.4
+/// lines 644-653).
+///
+/// Two URLs are same-origin when scheme, host, and port all match. When
+/// [`FetchPolicy::allow_cross_origin_redirect`] is `false`, any redirect to
+/// a different origin returns [`FetchError::CrossOriginRedirect`]. When
+/// `true` (the default), cross-origin redirects are permitted, but
+/// [`FetchPolicy::forward_authorization_cross_origin`] gates whether
+/// credential-bearing headers survive across the boundary.
+///
+/// The same-origin comparison is deliberately strict: a redirect from
+/// `https://example.com` to `https://example.com:443` is treated as
+/// cross-origin because the explicit port differs from the implicit one.
+/// This is more conservative than the web-origin model but safer for a
+/// download gate that has no `SameSite` cookie semantics to worry about.
+///
+/// # Errors
+///
+/// Returns [`FetchError::CrossOriginRedirect`] when the redirect crosses
+/// an origin boundary and the policy does not allow it.
+pub(crate) fn ensure_cross_origin_allowed(
+    from: &Url,
+    to: &Url,
+    policy: &FetchPolicy,
+) -> Result<(), FetchError> {
+    if policy.allow_cross_origin_redirect {
+        return Ok(());
+    }
+    if same_origin(from, to) {
+        return Ok(());
+    }
+    Err(FetchError::CrossOriginRedirect)
+}
+
+/// Reports whether two URLs share the same origin (scheme + host + port).
+///
+/// Port comparison is explicit rather than scheme-defaulting —
+/// `https://h` and `https://h:443` are treated as different origins
+/// because the textual port differs. This is conservative but
+/// predictable.
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port() == b.port()
+}
+
+/// Strips credential-bearing headers when the redirect crosses origin
+/// boundaries and the policy does not allow forwarding (spec §11.2).
+///
+/// When `forward_authorization_cross_origin` is `false`, any redirect
+/// that lands on a different origin (scheme + host + port) triggers
+/// removal of `Authorization` and `Cookie` headers from the header map.
+/// When `true`, headers are preserved unchanged.
+///
+/// Not yet called from the redirect loop because `execute_request`
+/// sends a bare GET with no user-supplied headers (tracked in #498).
+/// When #498 wires header input, this function becomes the gate that
+/// prevents credential leakage on cross-origin redirects.
+#[allow(dead_code)]
+pub(crate) fn strip_credentials_on_cross_origin(
+    headers: &mut reqwest::header::HeaderMap,
+    from: &Url,
+    to: &Url,
+    policy: &FetchPolicy,
+) {
+    if policy.forward_authorization_cross_origin {
+        return;
+    }
+    if same_origin(from, to) {
+        return;
+    }
+    headers.remove(reqwest::header::AUTHORIZATION);
+    headers.remove(reqwest::header::COOKIE);
+}
+
 fn classify_reqwest_error(stage: &'static str, error: reqwest::Error) -> FetchError {
     if error.is_timeout() {
         return FetchError::Timeout { stage };
@@ -1146,15 +1261,18 @@ fn is_sensitive_path_segment(segment: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::net::{IpAddr, Ipv4Addr};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::{
-        FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_no_insecure_downgrade,
-        execute_request, verify_connected_peer,
+        FetchError, FetchPolicy, FetchScheme, build_http_client, ensure_cross_origin_allowed,
+        ensure_no_insecure_downgrade, execute_request, strip_credentials_on_cross_origin,
+        verify_connected_peer,
     };
+    use url::Url;
 
     #[tokio::test]
     async fn client_pins_validated_address_for_request() -> Result<(), Box<dyn std::error::Error>> {
@@ -1305,6 +1423,179 @@ mod tests {
         assert!(
             !policy.allow_https_to_http_redirect,
             "default policy must block HTTPS→HTTP downgrade (fail-closed)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-origin redirect policy (spec §11.2, §11.4)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fetch_policy_defaults_allow_cross_origin_redirects() {
+        let policy = FetchPolicy::default();
+        assert!(
+            policy.allow_cross_origin_redirect,
+            "default policy must allow cross-origin redirects (spec §11.4 default = true; \
+             GitHub release → CDN is the common case)"
+        );
+    }
+
+    #[test]
+    fn fetch_policy_defaults_block_cross_origin_authorization_forwarding() {
+        let policy = FetchPolicy::default();
+        assert!(
+            !policy.forward_authorization_cross_origin,
+            "default policy must block cross-origin Authorization forwarding (spec §11.2; \
+             fail-closed credential-leak defence)"
+        );
+    }
+
+    #[test]
+    fn cross_origin_redirect_blocked_when_disallowed() {
+        let policy = FetchPolicy {
+            allow_cross_origin_redirect: false,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let result = ensure_cross_origin_allowed(&from, &to, &policy);
+        assert!(
+            matches!(result, Err(FetchError::CrossOriginRedirect)),
+            "cross-origin redirect must be blocked when policy disallows it: {result:?}"
+        );
+    }
+
+    #[test]
+    fn same_origin_redirect_allowed_when_cross_origin_disallowed() {
+        let policy = FetchPolicy {
+            allow_cross_origin_redirect: false,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://example.com/b").unwrap();
+        let result = ensure_cross_origin_allowed(&from, &to, &policy);
+        assert!(
+            result.is_ok(),
+            "same-origin redirect must always be allowed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cross_origin_redirect_allowed_when_policy_permits() {
+        let policy = FetchPolicy {
+            allow_cross_origin_redirect: true,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let result = ensure_cross_origin_allowed(&from, &to, &policy);
+        assert!(
+            result.is_ok(),
+            "cross-origin redirect must be allowed when policy opts in: {result:?}"
+        );
+    }
+
+    #[test]
+    fn different_port_is_treated_as_cross_origin() {
+        let policy = FetchPolicy {
+            allow_cross_origin_redirect: false,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://example.com:8443/b").unwrap();
+        let result = ensure_cross_origin_allowed(&from, &to, &policy);
+        assert!(
+            matches!(result, Err(FetchError::CrossOriginRedirect)),
+            "explicit different port must be treated as cross-origin (conservative; \
+             web-origin would normalize ports but a download gate cannot rely on \
+             SameSite cookie semantics): {result:?}"
+        );
+    }
+
+    #[test]
+    fn different_scheme_is_treated_as_cross_origin() {
+        let policy = FetchPolicy {
+            allow_cross_origin_redirect: false,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("http://example.com/b").unwrap();
+        let result = ensure_cross_origin_allowed(&from, &to, &policy);
+        assert!(
+            matches!(result, Err(FetchError::CrossOriginRedirect)),
+            "scheme change is cross-origin: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Credential stripping on cross-origin redirects (spec §11.2)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn strip_credentials_removes_authorization_on_cross_origin() {
+        let policy = FetchPolicy::default();
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret123"),
+        );
+        headers.insert(
+            reqwest::header::COOKIE,
+            reqwest::header::HeaderValue::from_static("session=abc"),
+        );
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_none(),
+            "Authorization MUST be stripped on cross-origin redirect"
+        );
+        assert!(
+            headers.get(reqwest::header::COOKIE).is_none(),
+            "Cookie MUST be stripped on cross-origin redirect"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_preserves_headers_on_same_origin() {
+        let policy = FetchPolicy::default();
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://example.com/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret123"),
+        );
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_some(),
+            "Authorization MUST be preserved on same-origin redirect"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_preserves_headers_when_opted_in() {
+        let policy = FetchPolicy {
+            forward_authorization_cross_origin: true,
+            ..FetchPolicy::default()
+        };
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer secret123"),
+        );
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_some(),
+            "Authorization MUST be preserved when policy opts in to cross-origin forwarding"
         );
     }
 }

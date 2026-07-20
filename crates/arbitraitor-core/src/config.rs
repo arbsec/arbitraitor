@@ -129,6 +129,15 @@ pub struct FetchConfig {
     pub total_timeout_secs: u64,
     /// Maximum bytes accepted from transport.
     pub max_bytes: u64,
+    /// Whether cross-origin redirects are permitted. Defaults to `true`
+    /// (spec §11.4). When `false`, any redirect to a different scheme,
+    /// host, or port is blocked.
+    pub allow_cross_origin: bool,
+    /// Whether credential-bearing headers (`Authorization`, `Cookie`) may
+    /// be forwarded across origins during a redirect chain. Defaults to
+    /// `false` (spec §11.2). When `false`, cross-origin redirects trigger
+    /// a forced strip of credential-bearing headers.
+    pub forward_authorization_cross_origin: bool,
 }
 
 /// Content store configuration.
@@ -283,6 +292,8 @@ impl Default for FetchConfig {
             max_redirects: 10,
             total_timeout_secs: 120,
             max_bytes: DEFAULT_MAX_BYTES,
+            allow_cross_origin: true,
+            forward_authorization_cross_origin: false,
         }
     }
 }
@@ -854,6 +865,8 @@ impl FetchConfig {
                 .total_timeout_secs
                 .unwrap_or(self.total_timeout_secs),
             max_bytes: overlay.max_bytes.unwrap_or(self.max_bytes),
+            allow_cross_origin: self.allow_cross_origin,
+            forward_authorization_cross_origin: self.forward_authorization_cross_origin,
         }
     }
 }
