@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Archive limits
+
+- `arbitraitor-archive::ArchiveLimits::max_symlinks` — new field
+  enforcing spec §19.2's `max_symlinks = 0` default. Any symlink entry
+  now triggers `ArchiveError::LimitExceeded { limit: "max_symlinks" }`
+  at the extraction gate, hardening spec invariant 15 (no archive path
+  escape via symlinks). Per-entry `symlink_target_escapes` detection
+  remains as defense-in-depth. Callers needing to inspect archives that
+  legitimately contain symlinks must override `max_symlinks` explicitly.
+
 #### Model
 
 - `arbitraitor_model::exit_code::ExitCode` — typed enum for the 16 stable
@@ -56,6 +66,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the inaccurate 0/1/2 codes.
 
 ### Changed
+
+#### Archive
+
+- `arbitraitor-archive::ArchiveLimits` defaults now match spec §19.2
+  exactly (previously diverged on four fields):
+  - `max_depth`: 32 → **5**
+  - `max_single_file_bytes`: 512 MiB → **256 MiB**
+  - `max_compression_ratio`: 100 → **200**
+  - `max_processing_time`: 30 s → **60 s**
+  - `max_files`: 10 000 (unchanged)
+  - `max_total_unpacked_bytes`: 1 GiB (unchanged)
+
+  The tighter defaults may reject archives that previously inspected
+  successfully; enterprise-internal scans of trusted release bundles
+  that legitimately need deeper recursion or larger single-file limits
+  must override `ArchiveLimits` fields explicitly via the
+  `open_archive_with_limits` constructor.
 
 #### ADRs
 
@@ -121,6 +148,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Archive
+
+- `arbitraitor-archive::ArchiveLimits` defaults now match spec §19.2
+  exactly (previously diverged on four fields):
+  - `max_depth`: 32 → **5**
+  - `max_single_file_bytes`: 512 MiB → **256 MiB**
+  - `max_compression_ratio`: 100 → **200**
+  - `max_processing_time`: 30 s → **60 s**
+  - `max_files`: 10 000 (unchanged)
+  - `max_total_unpacked_bytes`: 1 GiB (unchanged)
+
+  The tighter defaults may reject archives that previously inspected
+  successfully; enterprise-internal scans of trusted release bundles
+  that legitimately need deeper recursion or larger single-file limits
+  must override `ArchiveLimits` fields explicitly via the
+  `open_archive_with_limits` constructor.
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
 - `shim install npm` now generates a working shim that invokes `arb pm run --tool npm`, replacing the previous stub that errored with "package-manager shims are not yet implemented".
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
