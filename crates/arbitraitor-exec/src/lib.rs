@@ -691,6 +691,7 @@ pub struct EffectiveControls {
     /// Resource limits (CPU, memory, FDs, processes).
     pub resource_limits: Option<EffectiveControl>,
     /// Effective Landlock ABI version observed when filesystem isolation uses Landlock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 

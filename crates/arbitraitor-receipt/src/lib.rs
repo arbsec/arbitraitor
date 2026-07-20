@@ -837,6 +837,33 @@ mod tests {
     }
 
     #[test]
+    fn effective_controls_accepts_legacy_json_without_landlock_abi()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let json = r#"{"filesystem_isolation":{"requested":true,"applied":"enforced","proof":"landlock"},"network_isolation":{"requested":true,"applied":"enforced","proof":"network-namespace"},"process_tree_control":{"requested":true,"applied":"enforced","proof":"pid-namespace"},"privilege_suppression":{"requested":true,"applied":"enforced","proof":"no-new-privs"},"syscall_filtering":{"requested":true,"applied":"enforced","proof":"seccomp-bpf"},"resource_limits":{"requested":true,"applied":"enforced","proof":"setrlimit"}}"#;
+        let controls: EffectiveControls = serde_json::from_str(json)?;
+        assert_eq!(controls.landlock_abi_version, None);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_controls_omits_absent_landlock_abi() -> Result<(), Box<dyn std::error::Error>> {
+        use arbitraitor_exec::{ControlStatus, EffectiveControl};
+
+        let controls = EffectiveControls {
+            filesystem_isolation: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("landlock".to_owned()),
+            }),
+            landlock_abi_version: None,
+            ..EffectiveControls::default()
+        };
+        let json = serde_json::to_string(&controls)?;
+        assert!(!json.contains("landlock_abi_version"));
+        Ok(())
+    }
+
+    #[test]
     fn signs_and_verifies_receipt() -> Result<(), Box<dyn std::error::Error>> {
         let key = minisign::KeyPair::generate_unencrypted_keypair()?;
         let receipt = sample_receipt();
