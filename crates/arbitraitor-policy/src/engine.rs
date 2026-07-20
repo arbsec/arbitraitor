@@ -8,6 +8,11 @@ use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use crate::context::EvalContext;
 use crate::error::PolicyError;
 use crate::schema::{Condition, FieldMatch, MatchOp, Policy, PolicyAction, Rule, ScalarValue};
+use crate::trace::{PolicyTrace, RuleEvaluation};
+
+/// Synthetic rule identifier used in [`RuleEvaluation::rule_id`] when a hard
+/// network constraint produced the final block.
+const NETWORK_CONSTRAINT_ID: &str = "__network__";
 
 // ---------------------------------------------------------------------------
 // PolicyEngine
@@ -74,45 +79,174 @@ impl PolicyEngine {
     /// configured `non_interactive_prompt_action` (default: `Block`).
     #[must_use]
     pub fn evaluate(&self, findings: &[Finding], context: &EvalContext) -> Verdict {
+        self.evaluate_with_trace(findings, context).0
+    }
+
+    /// Evaluates findings and context against the policy, producing both a
+    /// verdict and a [`PolicyTrace`] explaining which rules were considered
+    /// and why each matched or did not (spec §41.14).
+    ///
+    /// The trace records every rule in source order plus a synthetic
+    /// `__network__` entry whenever a hard network constraint produced the
+    /// final block. `final_decision` reflects the action *after* the
+    /// non-interactive prompt upgrade, matching the [`Verdict`] returned
+    /// here.
+    #[must_use]
+    pub fn evaluate_with_trace(
+        &self,
+        findings: &[Finding],
+        context: &EvalContext,
+    ) -> (Verdict, PolicyTrace) {
+        let default_action = self.policy.defaults.action;
+        let mut evaluations: Vec<RuleEvaluation> = Vec::new();
+
         // --- Hard network constraints (checked first, fail-closed) ---
         let net = &self.policy.network;
         if net.require_https && !context.is_https {
-            return Verdict::Block;
+            evaluations.push(RuleEvaluation {
+                rule_id: NETWORK_CONSTRAINT_ID.to_owned(),
+                matched: true,
+                reason: "network constraint failed: HTTPS required but request is not HTTPS"
+                    .to_owned(),
+            });
+            return (
+                Verdict::Block,
+                finalize_trace(evaluations, PolicyAction::Block, default_action),
+            );
         }
         if net.block_private_networks && context.is_private_network {
-            return Verdict::Block;
+            evaluations.push(RuleEvaluation {
+                rule_id: NETWORK_CONSTRAINT_ID.to_owned(),
+                matched: true,
+                reason: "network constraint failed: private/loopback network is blocked".to_owned(),
+            });
+            return (
+                Verdict::Block,
+                finalize_trace(evaluations, PolicyAction::Block, default_action),
+            );
         }
 
         let fail_closed_on_unavailable = self.policy.defaults.fail_closed_on_unavailable;
         let mut saw_unavailable = false;
-        let mut best_non_block = None;
+        let mut best_non_block: Option<(Verdict, PolicyAction)> = None;
+
         for rule in &self.policy.rules {
             match rule_matches(&rule.when, findings, context) {
                 TriState::Matched => {
                     let verdict = resolve_action(rule.action, context, &self.policy.defaults);
+                    let resolved_action = resolved_policy_action(
+                        rule.action,
+                        verdict,
+                        context,
+                        &self.policy.defaults,
+                    );
+                    let reason = match_reason_for_match(rule, resolved_action);
+                    evaluations.push(RuleEvaluation {
+                        rule_id: rule.id.clone(),
+                        matched: true,
+                        reason,
+                    });
+
                     if verdict == Verdict::Block {
-                        return verdict;
+                        return (
+                            verdict,
+                            finalize_trace(evaluations, resolved_action, default_action),
+                        );
                     }
                     if !saw_unavailable || !fail_closed_on_unavailable {
-                        return verdict;
+                        return (
+                            verdict,
+                            finalize_trace(evaluations, resolved_action, default_action),
+                        );
                     }
-                    best_non_block = Some(verdict);
+                    best_non_block = Some((verdict, resolved_action));
                 }
-                TriState::Unavailable => saw_unavailable = true,
-                TriState::NotMatched => {}
+                TriState::Unavailable => {
+                    saw_unavailable = true;
+                    evaluations.push(RuleEvaluation {
+                        rule_id: rule.id.clone(),
+                        matched: false,
+                        reason: "skipped: required evidence unavailable".to_owned(),
+                    });
+                }
+                TriState::NotMatched => {
+                    evaluations.push(RuleEvaluation {
+                        rule_id: rule.id.clone(),
+                        matched: false,
+                        reason: "condition not satisfied".to_owned(),
+                    });
+                }
             }
         }
 
         if saw_unavailable && fail_closed_on_unavailable {
-            return Verdict::Block;
+            return (
+                Verdict::Block,
+                finalize_trace(evaluations, PolicyAction::Block, default_action),
+            );
         }
 
-        if let Some(verdict) = best_non_block {
-            return verdict;
+        if let Some((verdict, action)) = best_non_block {
+            return (verdict, finalize_trace(evaluations, action, default_action));
         }
 
         // --- Default action ---
-        resolve_action(self.policy.defaults.action, context, &self.policy.defaults)
+        let verdict = resolve_action(self.policy.defaults.action, context, &self.policy.defaults);
+        let resolved_action = resolved_policy_action(
+            self.policy.defaults.action,
+            verdict,
+            context,
+            &self.policy.defaults,
+        );
+        (
+            verdict,
+            finalize_trace(evaluations, resolved_action, default_action),
+        )
+    }
+}
+
+/// Builds the final [`PolicyTrace`] from the collected rule evaluations.
+fn finalize_trace(
+    rules_evaluated: Vec<RuleEvaluation>,
+    final_decision: PolicyAction,
+    default_action: PolicyAction,
+) -> PolicyTrace {
+    PolicyTrace {
+        rules_evaluated,
+        final_decision,
+        default_action,
+    }
+}
+
+/// Returns the [`PolicyAction`] that actually produced the verdict, after
+/// applying the non-interactive prompt upgrade.
+fn resolved_policy_action(
+    declared: PolicyAction,
+    verdict: Verdict,
+    context: &EvalContext,
+    defaults: &crate::schema::DefaultsConfig,
+) -> PolicyAction {
+    if verdict == Verdict::Prompt && !context.is_interactive {
+        match defaults.non_interactive_prompt_action {
+            // Prompt cannot survive in non-interactive mode — the engine
+            // would loop. resolve_action upgrades it to Block here.
+            PolicyAction::Prompt => PolicyAction::Block,
+            other => other,
+        }
+    } else {
+        declared
+    }
+}
+
+/// Builds the human-readable reason string for a rule whose condition matched.
+fn match_reason_for_match(rule: &Rule, resolved_action: PolicyAction) -> String {
+    if resolved_action == rule.action {
+        format!("matched; action={:?}", rule.action)
+    } else {
+        format!(
+            "matched; declared action={:?}, upgraded to {:?} in non-interactive context",
+            rule.action, resolved_action
+        )
     }
 }
 
