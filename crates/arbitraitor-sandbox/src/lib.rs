@@ -9,7 +9,10 @@ mod landlock;
 mod resource_limits;
 mod seccomp;
 
-pub use landlock::{PathRule, access_fs, configure_filesystem_isolation};
+pub use landlock::{
+    LandlockAbiVersion, PathRule, access_fs, configure_filesystem_isolation,
+    probe_landlock_abi_version,
+};
 pub use observed::{FileOperation, OBSERVED_EVENT_SCHEMA_VERSION, ObservedEvent, ObservedEventLog};
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
 pub use seccomp::configure_network_isolation;
@@ -224,6 +227,8 @@ pub struct EffectiveControls {
     /// `RLIMIT_*` resource caps (CPU, memory, file size, fds, …) are
     /// enforced for the child.
     pub resource_limits: ControlState,
+    /// Effective Landlock ABI version observed for Linux filesystem isolation.
+    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 impl EffectiveControls {
@@ -240,6 +245,7 @@ impl EffectiveControls {
             syscall_filtering: ControlState::Unavailable,
             platform_settings_isolation: ControlState::Unavailable,
             resource_limits: ControlState::Unavailable,
+            landlock_abi_version: None,
         }
     }
 
@@ -256,6 +262,7 @@ impl EffectiveControls {
             syscall_filtering: ControlState::Available,
             platform_settings_isolation: ControlState::Available,
             resource_limits: ControlState::Available,
+            landlock_abi_version: None,
         }
     }
 
@@ -372,7 +379,9 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
         // seccomp-BPF (syscall + network + platform-settings via filter),
         // pid/user namespaces (process tree + privilege suppression),
         // `no_new_privs`, and `RLIMIT_*` for both Restricted and Disposable.
-        EffectiveControls::all_available()
+        let mut controls = EffectiveControls::all_available();
+        controls.landlock_abi_version = probe_landlock_abi_version();
+        controls
     } else if platform.eq_ignore_ascii_case("macos") || platform.eq_ignore_ascii_case("darwin") {
         // ADR-0024: macOS containment ADR deferred — no primitive wired up.
         EffectiveControls::all_unavailable()
@@ -393,6 +402,8 @@ pub struct SandboxConfig {
     pub dumpable: bool,
     /// Close all inherited file descriptors other than standard input, output, and error.
     pub close_fds: bool,
+    /// Landlock ABI version observed for this host, when Landlock is available.
+    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 impl Default for SandboxConfig {
@@ -401,6 +412,7 @@ impl Default for SandboxConfig {
             no_new_privs: true,
             dumpable: false,
             close_fds: true,
+            landlock_abi_version: probe_landlock_abi_version(),
         }
     }
 }
@@ -583,6 +595,32 @@ mod tests {
         );
         let status = command.status()?;
         assert!(status.success());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_sandbox_sets_no_new_privs() -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("grep '^NoNewPrivs:' /proc/self/status");
+        configure_command(
+            &mut command,
+            SandboxConfig {
+                close_fds: false,
+                ..SandboxConfig::default()
+            },
+        );
+
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "NoNewPrivs probe failed: status={:?} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout)?.trim(), "NoNewPrivs:\t1");
         Ok(())
     }
 
@@ -806,20 +844,28 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn compute_effective_controls_for_restricted_on_linux_is_all_available() {
         let controls = compute_effective_controls(SandboxMode::Restricted, "linux");
-        assert_eq!(controls, EffectiveControls::all_available());
         assert!(controls.is_fully_contained());
         assert!(!controls.has_unavailable());
         assert!(!controls.has_degraded());
+        assert!(
+            controls
+                .landlock_abi_version
+                .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
+        );
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn compute_effective_controls_for_disposable_on_linux_is_all_available() {
         let controls = compute_effective_controls(SandboxMode::Disposable, "linux");
-        assert_eq!(controls, EffectiveControls::all_available());
         assert!(controls.is_fully_contained());
         assert!(!controls.has_unavailable());
         assert!(!controls.has_degraded());
+        assert!(
+            controls
+                .landlock_abi_version
+                .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
+        );
     }
 
     #[test]
@@ -876,10 +922,16 @@ mod tests {
         // to ASCII, which is sufficient for these inputs.
         for platform in ["linux", "Linux", "LINUX", "liNuX", "lInUx"] {
             let controls = compute_effective_controls(SandboxMode::Restricted, platform);
-            assert_eq!(
-                controls,
-                EffectiveControls::all_available(),
+            assert!(
+                controls.is_fully_contained(),
                 "platform {platform:?} must match linux case-insensitively"
+            );
+            assert!(!controls.has_unavailable());
+            assert!(!controls.has_degraded());
+            assert!(
+                controls
+                    .landlock_abi_version
+                    .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
             );
         }
         for platform in ["macos", "Macos", "MACOS", "Darwin", "DARWIN"] {
