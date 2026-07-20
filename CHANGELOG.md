@@ -31,6 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapses `$HOME`-prefixed and `/home/<user>/` paths to `~/`.
   `redact_env_var` returns `None` for names ending in `_KEY`, `_TOKEN`,
   `_SECRET`, or `_PASSWORD` (case-insensitive) and `Some(value)` otherwise.
+- `arbitraitor-intel::duplicate_collapse` — new function that merges feed
+  entries describing the same indicator (spec §22 anti-abuse control).
+  Two entries are duplicates when their `Indicator` (type and value)
+  matches; collapse preserves the earliest `first_seen`, the latest
+  `last_seen`, the highest `Confidence`, the latest non-`None`
+  `expires_at`, the union of `FeedSource` records (de-duplicated by
+  `source_type` + `reference`), and the first non-`None` `malware_family`
+  and `notes` in evidence. Order of the output matches the order of
+  first appearance in the input.
+- `arbitraitor-intel::SignedModerationAction` and
+  `arbitraitor_intel::ModerationAction` — new types for moderator-driven
+  add/remove/revoke actions over the feed, with a detached
+  `FeedSignature` binding the action to the moderator and timestamp
+  (spec §22 signed moderation actions).
+- `arbitraitor-intel::RevocationEntry` — new public record of an
+  indicator revoked from the feed, paired with a `FeedSignature` so the
+  public revocation history is tamper-evident (spec §22 revocation
+  history).
 
 #### Exec
 
