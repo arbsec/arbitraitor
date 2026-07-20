@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set via `ARBITRAITOR_BUILD_DATE` env at compile time), and build
   profile (`debug`/`release`). Per spec §28.1.
 
+#### Model
+
+- `arbitraitor_model::exit_code::verdict_to_exit_code` — canonical named
+  mapping point from `Verdict` to `ExitCode` per spec §23.2 + §29 (#553).
+  Thin wrapper over the existing `From<Verdict>` impl; gives daemon/CLI
+  call sites a single, named function to point at when the mapping rule
+  changes.
+
 #### Fetch
 
 - `arbitraitor-fetch::FetchPolicy::allow_cross_origin_redirect` and
