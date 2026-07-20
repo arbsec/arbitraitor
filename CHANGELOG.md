@@ -9,14 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Intel
-
-- `IndicatorType::FuzzyHash` and `IndicatorType::BehavioralSignature` —
-  new indicator type variants per spec §21.1. FuzzyHash covers TLSH,
-  SSDEEP, or similar similarity-based detection. BehavioralSignature
-  matches observed runtime behavior. Both are matched at specificity
-  rank 8 and 9 respectively in the match-specificity ordering.
-
 #### Update
 
 - `arbitraitor_update::manifest::UpdateChannel::BinaryRelease` — new
@@ -39,10 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Intel
 
-- `arbitraitor-intel::ProjectPosture`, `PostureProvider`, and
-  `NoOpPostureProvider` — advisory OpenSSF Scorecard and deps.dev project-posture
-  signal API per spec §21.8. The offline-first no-op provider reports posture as
-  unavailable, never passing, and posture signals never override malware findings.
+- `arbitraitor-intel::FeedAdapter` now exposes the spec §21.5 `name`,
+  `fetch_indicators`, and `source_class` surface. Offline stubs are available
+  for ThreatFox, OpenSSF malicious packages, and OSV with CISA KEV; the new
+  `AllowDenyListAdapter` reads non-empty, non-comment indicator lines from a
+  local file without network access.
 - `arbitraitor-intel::redact_url`, `redact_path`, and `redact_env_var` —
   new public helpers that strip credentials, sensitive query parameters,
   home-directory paths, and sensitive environment-variable values from

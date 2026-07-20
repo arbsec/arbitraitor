@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod adapters;
 pub mod feed;
 pub mod governance;
 pub mod review;
@@ -27,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+pub use adapters::{AllowDenyListAdapter, OSVAdapter, OpenSSFMaliciousAdapter, ThreatFoxAdapter};
 pub use feed::{FeedAdapter, IngestionReport, ingest_entries, ingest_feed};
 pub use urlhaus::UrlhausAdapter;
 
