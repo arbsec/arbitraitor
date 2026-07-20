@@ -9,15 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Exec
+#### Sandbox
 
-- `arbitraitor-exec::emit_artifact_to_stdout` — new release mode that
-  emits verified CAS bytes to stdout (spec §26.1). Used by
-  `scan --emit-on-pass` and wrapper pipe semantics. Bytes are verified
-  against the scanned digest before and after emission, preserving
-  invariant 2 (immutable identity).
-- `ReleaseMethod::StdoutEmit` — new enum variant for the stdout release
-  method recorded in receipts.
+- `arbitraitor-sandbox::EffectiveControls` — per-control matrix recording
+  which containment controls are actually in effect at runtime per spec
+  §27.7. Seven independent fields (`filesystem_isolation`,
+  `network_isolation`, `process_tree_containment`, `privilege_suppression`,
+  `syscall_filtering`, `platform_settings_isolation`, `resource_limits`)
+  with three states each (`Available` / `Degraded` / `Unavailable`) — never
+  collapsed into a single `sandboxed: bool` (ADR-0007). Receipt consumers
+  drive fail-closed decisions via `is_fully_contained` and `has_unavailable`.
+- `arbitraitor-sandbox::ControlState` — enum (`Available` / `Degraded` /
+  `Unavailable`) backing the effective-controls matrix.
+- `arbitraitor_sandbox::compute_effective_controls(mode, platform)` —
+  maps a requested [`SandboxMode`] and the runtime platform string into
+  the effective matrix. Linux returns all-`Available` for `Restricted`/
+  `Disposable`; macOS returns all-`Unavailable` pending the deferred
+  containment ADR (ADR-0024); Windows returns all-`Unavailable` until a
+  Windows sandbox ADR ships; unknown platforms fail closed. Case-insensitive
+  platform matching (`linux` / `Linux` / `LINUX`, `macos` / `darwin`,
+  `windows`).
 
 #### Daemon
 
