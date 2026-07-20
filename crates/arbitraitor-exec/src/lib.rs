@@ -32,7 +32,7 @@ pub mod release;
 pub mod script;
 mod spawn;
 #[cfg(target_os = "linux")]
-pub use native::{NativeExecution, NativeExecutionGate, execute_native};
+pub use native::{NativeExecution, NativeExecutionGate, execute_native, require_native_approval};
 #[cfg(target_os = "linux")]
 pub use powershell::{PowerShellError, PowerShellExecution, PowerShellPolicy};
 #[cfg(target_os = "linux")]
@@ -143,6 +143,9 @@ pub enum ExecError {
         #[source]
         source: io::Error,
     },
+    /// Native execution lacks both explicit CLI approval and trusted policy approval.
+    #[error("native execution requires explicit --native or trusted policy approval")]
+    NativeExecutionNotApproved,
     /// Native execution is not supported for this executable on the current host.
     #[error("native executable is incompatible with the current host")]
     IncompatibleNativeExecutable,
@@ -542,6 +545,8 @@ pub struct ExecutionPolicy {
     pub deny_privilege_elevation: bool,
     /// Whether running Arbitraitor as root is blocked.
     pub deny_running_as_root: bool,
+    /// Whether trusted policy explicitly approves native binary execution.
+    pub allow_native_execution: bool,
     /// Resource limits to be enforced by downstream spawn/sandbox code.
     pub resource_limits: ResourceLimits,
 }
@@ -599,6 +604,7 @@ impl Default for ExecutionPolicy {
             working_directory: TempDirectoryPolicy::default(),
             deny_privilege_elevation: true,
             deny_running_as_root: true,
+            allow_native_execution: false,
             resource_limits: ResourceLimits::default(),
         }
     }
