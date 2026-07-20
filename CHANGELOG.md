@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Shell
+
+- `arbitraitor_shell::{run_shellcheck, ShellCheckFinding, ShellCheckError}` —
+  optional spec §16.1 ShellCheck subprocess adapter. It sends shell source to
+  `shellcheck --format=json --shell=<shell>` over stdin, normalizes advisory
+  diagnostics to stable `SCnnnn` codes with source positions, and bounds both
+  execution time and JSON output. Hosts without ShellCheck receive `NotFound`
+  rather than a panic or hard installation requirement.
+
 #### Plugin Host
 
 - `arbitraitor_plugin_host::registry::{RegistryMetadata,
