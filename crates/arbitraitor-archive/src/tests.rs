@@ -1,12 +1,14 @@
 use super::{
     ArchiveEntry, ArchiveEntryType, ArchiveError, ArchiveLimits, detect_archive_hazards,
-    extract_to_inspection_dir, open_archive, open_archive_with_limits,
+    detect_tar_parser_differentials, extract_to_inspection_dir, open_archive,
+    open_archive_with_limits, parser_differential_findings,
 };
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::verdict::Severity;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use proptest::prelude::*;
 use std::error::Error;
 use std::fs;
 use std::io::{Cursor, Write};
@@ -323,6 +325,56 @@ fn hazard_detection_allows_clean_archive_metadata() {
     assert!(findings.is_empty());
 }
 
+#[test]
+fn tar_consensus_flags_pax_size_desync_pattern() -> Result<(), Box<dyn Error>> {
+    let data = pax_size_desync_tar()?;
+    let mut reader = open_archive(&data, ArtifactType::TarArchive)?;
+    let primary_entries = reader.entries().unwrap_or_default();
+
+    let findings = detect_tar_parser_differentials(&data, &primary_entries, &test_limits());
+
+    assert_parser_differential(&findings);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.tags.iter().any(|tag| tag == "parser-smelting"))
+    );
+    Ok(())
+}
+
+#[test]
+fn tar_consensus_allows_clean_tar_members() -> Result<(), Box<dyn Error>> {
+    let data = tar_bytes()?;
+    let mut reader = open_archive(&data, ArtifactType::TarArchive)?;
+    let primary_entries = reader.entries()?;
+
+    let findings = detect_tar_parser_differentials(&data, &primary_entries, &test_limits());
+
+    assert!(findings.is_empty());
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn parser_disagreement_produces_finding(
+        primary_name in "[a-z]{1,8}",
+        consensus_name in "[i-z]{1,8}"
+    ) {
+        prop_assume!(primary_name != consensus_name);
+        let findings = parser_differential_findings(
+            &[entry(&primary_name)],
+            &[consensus_name],
+            Vec::new(),
+        );
+        let has_parser_differential = findings.iter().any(|finding| {
+            finding.category == FindingCategory::ParserDifferential
+                && finding.severity == Severity::Medium
+        });
+
+        prop_assert!(has_parser_differential);
+    }
+}
+
 fn zip_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn Error>> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
@@ -356,6 +408,39 @@ fn tar_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
     )?;
 
     Ok(builder.into_inner()?)
+}
+
+fn pax_size_desync_tar() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut data = Vec::new();
+    append_raw_tar_entry(&mut data, EntryType::XHeader, "pax", b"13 size=2048\n")?;
+    append_raw_tar_entry(
+        &mut data,
+        EntryType::GNULongName,
+        "././@LongLink",
+        b"longname.txt\0",
+    )?;
+    append_raw_tar_entry(&mut data, EntryType::Regular, "file_b", &vec![b'A'; 2048])?;
+    data.extend_from_slice(&[0_u8; 1024]);
+    Ok(data)
+}
+
+fn append_raw_tar_entry(
+    data: &mut Vec<u8>,
+    entry_type: EntryType,
+    path: &str,
+    content: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let mut header = Header::new_gnu();
+    header.set_entry_type(entry_type);
+    header.set_mode(0o644);
+    header.set_size(content.len() as u64);
+    header.set_path(path)?;
+    header.set_cksum();
+    data.extend_from_slice(header.as_bytes());
+    data.extend_from_slice(content);
+    let padding = (512 - content.len() % 512) % 512;
+    data.extend(std::iter::repeat_n(0_u8, padding));
+    Ok(())
 }
 
 fn gzip_bytes(data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -423,5 +508,16 @@ fn assert_hazard(findings: &[arbitraitor_model::finding::Finding], tag: &str, se
         finding.category == FindingCategory::ArchiveHazard
             && finding.severity == severity
             && finding.tags.iter().any(|finding_tag| finding_tag == tag)
+    }));
+}
+
+fn assert_parser_differential(findings: &[arbitraitor_model::finding::Finding]) {
+    assert!(findings.iter().any(|finding| {
+        finding.category == FindingCategory::ParserDifferential
+            && finding.severity == Severity::Medium
+            && finding
+                .taxonomies
+                .iter()
+                .any(|taxonomy| taxonomy.id == "CWE-436")
     }));
 }
