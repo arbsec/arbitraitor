@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
+- `arbitraitor explain` now accepts `sha256:<hash>` form in addition to
+  receipt file paths (spec §28.6). When a `sha256:` prefix is detected,
+  the command looks up the most recent receipt for that artifact from
+  the `~/.arbitraitor/receipts/` directory.
+
+#### CLI (prior)
+
 - `arbitraitor version` now reports build provenance: target architecture
   (`x86_64`/`aarch64`), Rust toolchain version, build commit (when set
   via `ARBITRAITOR_BUILD_COMMIT` env at compile time), build date (when
