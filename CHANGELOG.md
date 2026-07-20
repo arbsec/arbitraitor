@@ -344,6 +344,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Detection
 
+- Python + JavaScript script detector (`arbitraitor_analysis::pyjs::PythonJsDetector`, spec §16.3, #506) — narrow initial coverage for the two dominant scripting ecosystems in untrusted artifact payloads. The detector scans `PythonScript` and `JavaScript` artifact kinds for risky construction patterns (subprocess/shell invocation, eval/exec, arbitrary deserialization, dynamic / native module loading, credential / environment exfiltration, persistence writes, obfuscated / encoded payloads) and emits one finding per match with category, severity, evidence snippet, and a stable tag. Pattern matching uses simple substring scans to keep the crate dependency-free; a future revision may swap in a tokenizer / AST walker once the stub proves out coverage.
 - Tirith subprocess detector (external script analysis via bounded subprocess)
 - Dependency vulnerability detector framework
 - CWE taxonomy mapping for shell findings: only `DynamicCodeExecution → CWE-94` is emitted; the other behavioral categories (destructive, credential access, persistence, network, obfuscation, transport, etc.) are intentionally left unmapped because no defensible CWE root-cause mapping exists for them. ATT&CK/CAPEC may be added as separate taxonomies in a future release.
