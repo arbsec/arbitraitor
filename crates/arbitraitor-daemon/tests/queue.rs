@@ -43,6 +43,7 @@ fn test_config(root: &Path) -> Config {
             ..FetchPolicy::default()
         },
         policy_toml: String::new(),
+        emit_partial_receipt_on_cancel: false,
     }
 }
 
@@ -268,6 +269,103 @@ async fn cancel_queued_operation() {
     assert!(queue.cancel(&id2).await);
     assert_eq!(queue.status(&id2).await, Some(OperationStatus::Cancelled));
     assert!(!queue.cancel(&id2).await);
+}
+
+#[tokio::test]
+async fn cancel_operation_by_string_id() {
+    let root = unique_dir("cancel-string");
+    let queue = OperationQueue::new(make_api(&root), 1);
+    let server = blocking_server(b"blocker").await;
+
+    let id1 = queue.enqueue_inspect(server.url().to_owned()).await;
+    wait_for_running(&queue, &id1).await;
+
+    let id2 = queue.enqueue_inspect(server.url().to_owned()).await;
+    assert_eq!(queue.status(&id2).await, Some(OperationStatus::Queued));
+    assert!(!queue.is_cancelled(id2.as_str()).await);
+
+    assert!(queue.cancel_operation(id2.as_str()).await);
+    assert!(queue.is_cancelled(id2.as_str()).await);
+    assert_eq!(queue.status(&id2).await, Some(OperationStatus::Cancelled));
+}
+
+#[tokio::test]
+async fn cancel_operation_unknown_id_returns_false() {
+    let root = unique_dir("cancel-unknown");
+    let queue = OperationQueue::new(make_api(&root), 1);
+
+    assert!(!queue.cancel_operation("does-not-exist").await);
+    assert!(!queue.is_cancelled("does-not-exist").await);
+}
+
+#[tokio::test]
+async fn cancel_running_operation_flips_token_immediately() {
+    let root = unique_dir("cancel-running");
+    let queue = OperationQueue::new(make_api(&root), 1);
+    let server = blocking_server(b"slow").await;
+
+    let id = queue.enqueue_inspect(server.url().to_owned()).await;
+    wait_for_running(&queue, &id).await;
+
+    assert!(!queue.is_cancelled(id.as_str()).await);
+    assert!(queue.cancel_operation(id.as_str()).await);
+    assert!(queue.is_cancelled(id.as_str()).await);
+
+    server.release_all();
+    let _ = wait_for_terminal(&queue, &id).await;
+}
+
+#[tokio::test]
+async fn cancel_writes_partial_receipt_when_configured() {
+    let root = unique_dir("cancel-receipt");
+    let mut config = test_config(&root);
+    config.emit_partial_receipt_on_cancel = true;
+    let api = Arc::new(ArbitraitorApi::new(config).unwrap());
+    let queue = OperationQueue::new(Arc::clone(&api), 1);
+    let server = blocking_server(b"slow").await;
+
+    let id1 = queue.enqueue_inspect(server.url().to_owned()).await;
+    wait_for_running(&queue, &id1).await;
+
+    let id2 = queue.enqueue_inspect(server.url().to_owned()).await;
+    assert_eq!(queue.status(&id2).await, Some(OperationStatus::Queued));
+
+    assert!(queue.cancel_operation(id2.as_str()).await);
+
+    let receipt_path = root
+        .join("receipts")
+        .join(format!("{}.cancelled.json", id2.as_str()));
+    assert!(
+        receipt_path.exists(),
+        "partial receipt not written at {}",
+        receipt_path.display()
+    );
+    let body = std::fs::read_to_string(&receipt_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["schema"], "arbitraitor-partial-receipt/v1");
+    assert_eq!(parsed["status"], "cancelled");
+    assert_eq!(parsed["operation_id"], id2.as_str());
+    assert!(parsed["cancelled_at"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn cancel_does_not_write_partial_receipt_when_disabled() {
+    let root = unique_dir("cancel-no-receipt");
+    let queue = OperationQueue::new(make_api(&root), 1);
+    let server = blocking_server(b"slow").await;
+
+    let id1 = queue.enqueue_inspect(server.url().to_owned()).await;
+    wait_for_running(&queue, &id1).await;
+
+    let id2 = queue.enqueue_inspect(server.url().to_owned()).await;
+    assert!(queue.cancel_operation(id2.as_str()).await);
+
+    let receipts_dir = root.join("receipts");
+    let stray = receipts_dir.join(format!("{}.cancelled.json", id2.as_str()));
+    assert!(
+        !stray.exists(),
+        "partial receipt must not be written when emit_partial_receipt_on_cancel is false"
+    );
 }
 
 #[tokio::test]

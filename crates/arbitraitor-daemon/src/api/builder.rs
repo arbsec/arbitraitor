@@ -56,6 +56,7 @@ impl ArbitraitorBuilder {
             receipts_path,
             fetch_policy,
             policy_toml,
+            emit_partial_receipt_on_cancel,
         } = self.config;
         let store = ContentStore::open(&store_path)?;
         let policy = if let Some(policy) = self.policy {
@@ -76,6 +77,7 @@ impl ArbitraitorBuilder {
             coordinator: AnalysisCoordinator::new(),
             fetch_policy,
             receipts_dir: receipts_path,
+            emit_partial_receipt_on_cancel,
         })
     }
 }

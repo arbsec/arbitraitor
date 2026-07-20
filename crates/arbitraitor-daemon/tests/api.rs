@@ -42,6 +42,7 @@ fn test_config(root: &std::path::Path) -> Config {
             ..FetchPolicy::default()
         },
         policy_toml: String::new(),
+        emit_partial_receipt_on_cancel: false,
     }
 }
 

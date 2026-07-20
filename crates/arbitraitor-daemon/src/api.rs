@@ -57,6 +57,7 @@ pub struct ArbitraitorApi {
     coordinator: AnalysisCoordinator,
     fetch_policy: FetchPolicy,
     receipts_dir: PathBuf,
+    emit_partial_receipt_on_cancel: bool,
 }
 
 /// Tunable construction options for [`ArbitraitorApi`].
@@ -71,6 +72,11 @@ pub struct Config {
     /// Policy TOML for verdict evaluation. An empty string selects a
     /// safe default that prompts on every artifact.
     pub policy_toml: String,
+    /// When `true`, the operation queue writes a partial receipt file
+    /// for cancelled operations (spec §37.1). Defaults to `false` so
+    /// deployments that do not need cancellation forensics are
+    /// unaffected.
+    pub emit_partial_receipt_on_cancel: bool,
 }
 
 /// Outcome of an [`ArbitraitorApi::inspect`] or [`ArbitraitorApi::scan`] call.
@@ -213,6 +219,19 @@ impl ArbitraitorApi {
     /// or [`ApiError::Config`] if the policy TOML is invalid.
     pub fn new(config: Config) -> Result<Self, ApiError> {
         Arbitraitor::builder().config(config).build()
+    }
+
+    /// Returns the directory where inspection receipts are persisted.
+    #[must_use]
+    pub fn receipts_dir(&self) -> &Path {
+        &self.receipts_dir
+    }
+
+    /// Returns whether the API is configured to emit partial receipts for
+    /// cancelled operations (spec §37.1).
+    #[must_use]
+    pub fn emit_partial_receipt_on_cancel(&self) -> bool {
+        self.emit_partial_receipt_on_cancel
     }
 
     /// Fetches a URL, stores the artifact in CAS, runs detectors, evaluates
@@ -508,6 +527,7 @@ impl Default for Config {
             receipts_path: PathBuf::from(".arbitraitor").join("receipts"),
             fetch_policy: FetchPolicy::default(),
             policy_toml: String::new(),
+            emit_partial_receipt_on_cancel: false,
         }
     }
 }

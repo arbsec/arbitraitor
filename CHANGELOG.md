@@ -60,6 +60,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Daemon
 
+- `arbitraitor_daemon::queue::CancellationToken` — shareable,
+  single-shot cancellation flag backed by `Arc<AtomicBool>` (spec §37.1).
+  One token is created per `OperationEntry` and cloned into the executing
+  task so an external cancellation request becomes observable
+  cooperatively. `CancellationToken::cancel()` is idempotent;
+  `is_cancelled()` is wait-free.
+- `OperationQueue::cancel_operation(&str) -> bool` and
+  `OperationQueue::is_cancelled(&str) -> bool` — string-ID variants of
+  the cancellation API per spec §37.1. `cancel_operation` flips the
+  per-operation token and, for queued operations, immediately transitions
+  the entry to `OperationStatus::Cancelled` and writes a partial receipt
+  when `Config::emit_partial_receipt_on_cancel = true`.
+- `Config::emit_partial_receipt_on_cancel` — new boolean field (default
+  `false`) implementing spec §37.1. When `true`, the operation queue
+  writes a `<operation-id>.cancelled.json` partial receipt to the
+  configured receipts directory for every cancelled operation. The
+  schema (`arbitraitor-partial-receipt/v1`) is intentionally distinct
+  from the full-receipt schema so consumers can detect partial state.
+- `ArbitraitorApi::receipts_dir()` and `emit_partial_receipt_on_cancel()`
+  — accessors that allow the operation queue to read the configured
+  receipts directory and the partial-receipt flag without taking a
+  mutable borrow on the API.
 - `Arbitraitor::builder()` and `ArbitraitorBuilder` provide the spec §40.1
   fluent library construction API with `.config(Config)`,
   `.policy(PolicyEngine)`, and `.build()`. The existing
