@@ -19,6 +19,7 @@ use std::time::Duration;
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::origin::CallerOrigin;
 use arbitraitor_store::ContentStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,12 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 const PRIVATE_SOCKET_MODE: u32 = 0o600;
 
 /// Request accepted by the local daemon protocol.
+///
+/// Each variant carries caller-origin classification and an optional
+/// capability token (spec §40.2). The daemon overrides the wire-supplied
+/// `caller_origin` to [`CallerOrigin::DaemonLocal`] after authenticating the
+/// Unix-socket peer; the wire value is preserved for diagnostics so callers
+/// cannot impersonate a higher-trust origin class through the daemon.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum DaemonRequest {
@@ -45,21 +52,100 @@ pub enum DaemonRequest {
         url: String,
         /// Optional expected SHA-256 digest in hexadecimal form.
         expected_sha256: Option<String>,
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
     },
     /// Analyze an existing local file path.
     Scan {
         /// Path to read and analyze.
         path: String,
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
     },
     /// Check whether an artifact digest exists and verifies in the CAS.
     QueryReceipt {
         /// SHA-256 digest in hexadecimal form.
         sha256: String,
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
     },
     /// Report component health (store, detectors, version).
-    Health,
+    Health {
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
+    },
     /// Ask the daemon to stop accepting work and shut down.
-    Shutdown,
+    Shutdown {
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
+    },
+}
+
+impl DaemonRequest {
+    /// Returns the caller-origin class currently carried by this request,
+    /// before any daemon-side stamping.
+    #[must_use]
+    pub fn caller_origin(&self) -> CallerOrigin {
+        match self {
+            Self::Inspect { caller_origin, .. }
+            | Self::Scan { caller_origin, .. }
+            | Self::QueryReceipt { caller_origin, .. }
+            | Self::Health { caller_origin, .. }
+            | Self::Shutdown { caller_origin, .. } => caller_origin.clone(),
+        }
+    }
+
+    /// Returns the capability token currently carried by this request, if any.
+    #[must_use]
+    pub fn capability_token(&self) -> Option<&str> {
+        match self {
+            Self::Inspect {
+                capability_token, ..
+            }
+            | Self::Scan {
+                capability_token, ..
+            }
+            | Self::QueryReceipt {
+                capability_token, ..
+            }
+            | Self::Health {
+                capability_token, ..
+            }
+            | Self::Shutdown {
+                capability_token, ..
+            } => capability_token.as_deref(),
+        }
+    }
 }
 
 /// Response returned by the local daemon protocol.
@@ -292,8 +378,70 @@ async fn handle_connection(mut stream: UnixStream, state: DaemonState) -> Result
             return Ok(());
         }
     };
+    tracing::debug!(
+        asserted_caller_origin = request.caller_origin().as_str(),
+        capability_token_present = request.capability_token().is_some(),
+        "daemon request received"
+    );
+    let request = stamp_caller_origin(request);
     let response = handle_request_with_state(request, &state).await;
     write_response(&mut stream, &response).await
+}
+
+/// Overrides the caller-origin class on a request to
+/// [`CallerOrigin::DaemonLocal`] while preserving the client's wire-supplied
+/// value for diagnostics and the capability token.
+///
+/// The daemon's Unix-socket peer-credential check has already authenticated
+/// the caller as a local user process by the time this runs, so any
+/// higher-trust class (e.g. [`CallerOrigin::HumanTty`]) asserted by the
+/// client cannot be honoured.
+fn stamp_caller_origin(request: DaemonRequest) -> DaemonRequest {
+    match request {
+        DaemonRequest::Inspect {
+            url,
+            expected_sha256,
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::Inspect {
+            url,
+            expected_sha256,
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
+        DaemonRequest::Scan {
+            path,
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::Scan {
+            path,
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
+        DaemonRequest::QueryReceipt {
+            sha256,
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::QueryReceipt {
+            sha256,
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
+        DaemonRequest::Health {
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::Health {
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
+        DaemonRequest::Shutdown {
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::Shutdown {
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
+    }
 }
 
 impl DaemonState {
@@ -317,15 +465,40 @@ impl DaemonState {
 }
 
 async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) -> DaemonResponse {
+    let operation_label = operation_label(&request);
+    let effective_origin = request.caller_origin();
+    let capability_token = request.capability_token();
+    tracing::info!(
+        operation = operation_label,
+        caller_origin = effective_origin.as_str(),
+        capability_token_present = capability_token.is_some(),
+        "daemon operation receipt"
+    );
     match request {
         DaemonRequest::Inspect {
             url,
             expected_sha256,
+            caller_origin: _,
+            capability_token: _,
         } => inspect_url(&url, expected_sha256.as_deref(), state).await,
-        DaemonRequest::Scan { path } => scan_path(&path, state).await,
-        DaemonRequest::QueryReceipt { sha256 } => query_receipt(&sha256, state),
-        DaemonRequest::Health => health_response(state),
-        DaemonRequest::Shutdown => {
+        DaemonRequest::Scan {
+            path,
+            caller_origin: _,
+            capability_token: _,
+        } => scan_path(&path, state).await,
+        DaemonRequest::QueryReceipt {
+            sha256,
+            caller_origin: _,
+            capability_token: _,
+        } => query_receipt(&sha256, state),
+        DaemonRequest::Health {
+            caller_origin: _,
+            capability_token: _,
+        } => health_response(state),
+        DaemonRequest::Shutdown {
+            caller_origin: _,
+            capability_token: _,
+        } => {
             state.shutdown.store(true, Ordering::SeqCst);
             state.notify_shutdown.notify_waiters();
             DaemonResponse {
@@ -337,6 +510,17 @@ async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) 
                 health_report: None,
             }
         }
+    }
+}
+
+/// Returns a stable label identifying the operation variant, used in receipts.
+fn operation_label(request: &DaemonRequest) -> &'static str {
+    match request {
+        DaemonRequest::Inspect { .. } => "inspect",
+        DaemonRequest::Scan { .. } => "scan",
+        DaemonRequest::QueryReceipt { .. } => "query_receipt",
+        DaemonRequest::Health { .. } => "health",
+        DaemonRequest::Shutdown { .. } => "shutdown",
     }
 }
 
@@ -670,6 +854,8 @@ mod tests {
             &DaemonRequest::Inspect {
                 url: format!("http://127.0.0.1:{}/artifact", addr.port()),
                 expected_sha256: None,
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: Some("test-token".to_owned()),
             },
         )
         .await?;
@@ -679,9 +865,15 @@ mod tests {
             Some(Sha256Digest::new(Sha256::digest(b"plain text").into()).to_string())
         );
         assert!(
-            request_once(&socket, &DaemonRequest::Shutdown)
-                .await?
-                .success
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
         );
         handle.await??;
         server.await??;
@@ -706,9 +898,15 @@ mod tests {
         assert!(!response.success);
         assert!(response.error.is_some());
         assert!(
-            request_once(&socket, &DaemonRequest::Shutdown)
-                .await?
-                .success
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
         );
         handle.await??;
         remove_dir_all_if_exists(root)?;
@@ -724,13 +922,155 @@ mod tests {
         let handle = tokio::spawn(async move { daemon.run().await });
         wait_for_socket(&socket).await?;
 
-        let response = request_once(&socket, &DaemonRequest::Shutdown).await?;
+        let response = request_once(
+            &socket,
+            &DaemonRequest::Shutdown {
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
 
         assert!(response.success);
         handle.await??;
         assert!(!socket.exists());
         remove_dir_all_if_exists(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn daemon_request_inspect_round_trips_with_metadata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let request = DaemonRequest::Inspect {
+            url: "https://example.com/install.sh".to_owned(),
+            expected_sha256: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+            caller_origin: CallerOrigin::HumanTty,
+            capability_token: Some("cap-123".to_owned()),
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"caller_origin\":\"human_tty\""));
+        assert!(json.contains("\"capability_token\":\"cap-123\""));
+        let decoded: DaemonRequest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_request_scan_round_trips_with_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let request = DaemonRequest::Scan {
+            path: "/tmp/script.sh".to_owned(),
+            caller_origin: CallerOrigin::McpServer,
+            capability_token: None,
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"caller_origin\":\"mcp_server\""));
+        assert!(!json.contains("capability_token"));
+        let decoded: DaemonRequest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_request_query_receipt_round_trips_with_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = DaemonRequest::QueryReceipt {
+            sha256: "abcdef".to_owned(),
+            caller_origin: CallerOrigin::Ci,
+            capability_token: Some("ci-token".to_owned()),
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"caller_origin\":\"ci\""));
+        let decoded: DaemonRequest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_request_health_round_trips_with_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let request = DaemonRequest::Health {
+            caller_origin: CallerOrigin::HumanIpc,
+            capability_token: None,
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"caller_origin\":\"human_ipc\""));
+        let decoded: DaemonRequest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_request_shutdown_round_trips_with_metadata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let request = DaemonRequest::Shutdown {
+            caller_origin: CallerOrigin::AgentSession,
+            capability_token: None,
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"caller_origin\":\"agent_session\""));
+        let decoded: DaemonRequest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_request_deserializes_when_metadata_omitted() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Backwards-compat: callers built before the §40.2 metadata existed
+        // send payloads without caller_origin/capability_token. The daemon
+        // must still parse them (caller_origin defaults to Unknown) so the
+        // peer can be upgraded in place.
+        let json = r#"{"inspect":{"url":"https://example.com","expected_sha256":null}}"#;
+        let request: DaemonRequest = serde_json::from_str(json)?;
+        assert_eq!(
+            request,
+            DaemonRequest::Inspect {
+                url: "https://example.com".to_owned(),
+                expected_sha256: None,
+                caller_origin: CallerOrigin::Unknown,
+                capability_token: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stamp_caller_origin_overrides_to_daemon_local_for_every_variant() {
+        let inspect = stamp_caller_origin(DaemonRequest::Inspect {
+            url: "https://example.com".to_owned(),
+            expected_sha256: None,
+            caller_origin: CallerOrigin::HumanTty,
+            capability_token: Some("cap".to_owned()),
+        });
+        assert_eq!(inspect.caller_origin(), CallerOrigin::DaemonLocal);
+        assert_eq!(inspect.capability_token(), Some("cap"));
+
+        let scan = stamp_caller_origin(DaemonRequest::Scan {
+            path: "/x".to_owned(),
+            caller_origin: CallerOrigin::McpServer,
+            capability_token: None,
+        });
+        assert_eq!(scan.caller_origin(), CallerOrigin::DaemonLocal);
+
+        let query = stamp_caller_origin(DaemonRequest::QueryReceipt {
+            sha256: "abc".to_owned(),
+            caller_origin: CallerOrigin::Ci,
+            capability_token: None,
+        });
+        assert_eq!(query.caller_origin(), CallerOrigin::DaemonLocal);
+
+        let health = stamp_caller_origin(DaemonRequest::Health {
+            caller_origin: CallerOrigin::HumanTty,
+            capability_token: None,
+        });
+        assert_eq!(health.caller_origin(), CallerOrigin::DaemonLocal);
+
+        let shutdown = stamp_caller_origin(DaemonRequest::Shutdown {
+            caller_origin: CallerOrigin::HumanTty,
+            capability_token: None,
+        });
+        assert_eq!(shutdown.caller_origin(), CallerOrigin::DaemonLocal);
     }
 
     async fn wait_for_socket(path: &Path) -> io::Result<()> {
