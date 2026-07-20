@@ -11,6 +11,7 @@ pub mod config;
 pub mod health;
 pub mod metrics;
 pub mod privilege;
+pub mod renderer;
 pub mod secret;
 
 use arbitraitor_model::finding::Finding;
