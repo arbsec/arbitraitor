@@ -27,6 +27,8 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor graph` | Render payload containment tree for archives |
 | `arbitraitor approve` | Approve execution from a receipt file |
 | `arbitraitor execute` | Execute an artifact from CAS using an approval file |
+| `arbitraitor report` | Report user feedback on findings (e.g. false positive, spec §21.7) |
+| `arbitraitor allow` | Record a scoped allow exception for an artifact digest (spec §21.7) |
 | `arbitraitor pm` | Run a package manager through advisory scan (npm) |
 | `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
 | `arbitraitor version` | Print version, license, and repository |
@@ -563,6 +565,54 @@ Executes an artifact from CAS using a previously generated approval file.
 arbitraitor execute receipt.approval.json
 # With network access:
 arbitraitor execute receipt.approval.json --network
+```
+
+## Report command
+
+```sh
+arbitraitor report <SUBCOMMAND>
+```
+
+Records user feedback on findings (spec §21.7). All reported feedback is
+scoped and auditable.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `false-positive <FINDING_ID>` | Mark a finding as a false positive so future inspections do not re-surface it |
+
+### Examples
+
+```sh
+arbitraitor report false-positive SHELL-EVAL-001
+```
+
+## Allow command
+
+```sh
+arbitraitor allow sha256:<HEX> --scope <SCOPE> --expires <DURATION> --reason <TEXT>
+```
+
+Records a scoped, time-bounded allow exception for an artifact digest
+(spec §21.7). Every exception requires a scope, an expiry, and a written
+justification for audit.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `sha256:<HEX>` (positional) | SHA-256 of the artifact in `sha256:<64-hex>` form |
+| `--scope <SCOPE>` | Exception scope: `user`, `project`, or `org` (required) |
+| `--expires <DURATION>` | Duration until expiry: `<N>s`, `<N>m`, `<N>h`, or `<N>d` (required) |
+| `--reason <TEXT>` | Free-form justification recorded for auditing (required) |
+
+### Examples
+
+```sh
+# Project-wide allow for one week
+arbitraitor allow sha256:abababababababababababababababababababababababababababababababab \
+  --scope project --expires 7d --reason "approved by sec review #482"
 ```
 
 ## MCP command

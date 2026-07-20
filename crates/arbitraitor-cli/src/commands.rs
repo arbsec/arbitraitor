@@ -161,6 +161,53 @@ pub struct GraphCommand {
 }
 
 #[derive(Args)]
+pub struct ReportCommand {
+    #[command(subcommand)]
+    pub subcommand: ReportSubcommand,
+}
+
+/// Subcommands of `arbitraitor report` (spec §21.7).
+#[derive(Subcommand)]
+pub enum ReportSubcommand {
+    /// Mark a finding as a false positive so future inspections do not
+    /// re-surface it. Scoped and auditable per spec §21.7.
+    FalsePositive {
+        /// Identifier of the finding (matches `Finding.id` from a receipt).
+        finding_id: String,
+    },
+}
+
+/// `arbitraitor allow` — record a scoped allow exception for an artifact
+/// digest (spec §21.7). All exceptions are auditable; expiry is mandatory.
+#[derive(Args)]
+pub struct AllowCommand {
+    /// Artifact SHA-256 in `sha256:<hex>` form.
+    #[arg(value_name = "sha256:<HEX>", value_parser = parse_sha256_arg)]
+    pub hash: String,
+    /// Exception scope: user, project, or org.
+    #[arg(long, value_enum)]
+    pub scope: AllowScope,
+    /// Time until the exception expires (e.g. `7d`, `24h`, `30m`).
+    #[arg(long, value_name = "DURATION")]
+    pub expires: String,
+    /// Free-form justification recorded with the exception for auditing.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+}
+
+/// Allowed scopes for an `allow` exception (spec §21.7).
+#[derive(Clone, Copy, Debug, clap::ValueEnum, Eq, PartialEq)]
+pub enum AllowScope {
+    User,
+    Project,
+    Org,
+}
+
+fn parse_sha256_arg(raw: &str) -> std::result::Result<String, String> {
+    parse_sha256_allow_target(raw).map_err(|e| e.to_string())
+}
+
+#[derive(Args)]
 pub struct ApproveCommand {
     /// Receipt file from a prior inspection.
     pub receipt: PathBuf,
@@ -1031,4 +1078,107 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     }
     writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(50)).into_diagnostic()?;
     Ok(())
+}
+
+/// Stub handler for `arbitraitor report <subcommand>` (spec §21.7).
+///
+/// The intel-store backed implementation lands in a follow-up PR. For now
+/// we validate inputs and describe what would be recorded, so users can
+/// wire the CLI surface end-to-end without it silently no-op'ing.
+pub(crate) fn report(command: &ReportCommand) -> Result<()> {
+    match &command.subcommand {
+        ReportSubcommand::FalsePositive { finding_id } => {
+            if finding_id.trim().is_empty() {
+                miette::bail!("finding_id must not be empty");
+            }
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "would_record_false_positive: true").into_diagnostic()?;
+            writeln!(stdout, "finding_id: {finding_id}").into_diagnostic()?;
+            writeln!(
+                stdout,
+                "note: intel-store persistence will be enabled in a follow-up PR"
+            )
+            .into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+/// Stub handler for `arbitraitor allow sha256:<hash> ...` (spec §21.7).
+///
+/// All exceptions must be scoped, time-bounded, and have a justification;
+/// we validate those invariants up front so a follow-up PR only needs to
+/// persist them, not change the CLI surface.
+pub(crate) fn allow(command: &AllowCommand) -> Result<()> {
+    let hash = parse_sha256_allow_target(&command.hash)?;
+    let duration = parse_duration_to_seconds(&command.expires)
+        .map_err(|e| miette::miette!("invalid --expires '{}': {e}", command.expires))?;
+    if duration == 0 {
+        miette::bail!("--expires must be greater than zero");
+    }
+    if command.reason.trim().is_empty() {
+        miette::bail!("--reason must not be empty");
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let expires_at = now.saturating_add(duration);
+    let scope = match command.scope {
+        AllowScope::User => "user",
+        AllowScope::Project => "project",
+        AllowScope::Org => "org",
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "would_record_allow_exception: true").into_diagnostic()?;
+    writeln!(stdout, "hash: {hash}").into_diagnostic()?;
+    writeln!(stdout, "scope: {scope}").into_diagnostic()?;
+    writeln!(stdout, "expires_in_seconds: {duration}").into_diagnostic()?;
+    writeln!(stdout, "expires_at_unix: {expires_at}").into_diagnostic()?;
+    writeln!(stdout, "reason: {}", command.reason).into_diagnostic()?;
+    writeln!(
+        stdout,
+        "note: intel-store persistence will be enabled in a follow-up PR"
+    )
+    .into_diagnostic()?;
+    Ok(())
+}
+
+/// Strip the `sha256:` prefix and validate the remaining 64 hex chars.
+fn parse_sha256_allow_target(raw: &str) -> Result<String> {
+    let hex = raw
+        .strip_prefix("sha256:")
+        .ok_or_else(|| miette::miette!("hash must be prefixed with 'sha256:'"))?;
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(miette::miette!(
+            "hash must be 64 hex characters after the 'sha256:' prefix"
+        ));
+    }
+    Ok(hex.to_ascii_lowercase())
+}
+
+/// Parse a compact duration like `7d`, `24h`, `30m`, `60s` into seconds.
+/// Compound forms (`1d12h`) and bare integers are not accepted in the stub
+/// to keep the surface small; the follow-up PR can extend the grammar.
+fn parse_duration_to_seconds(raw: &str) -> Result<u64, String> {
+    if raw.is_empty() {
+        return Err("empty duration".to_owned());
+    }
+    let (num_part, unit) = raw.split_at(raw.len() - 1);
+    let value: u64 = num_part
+        .parse()
+        .map_err(|_| format!("expected a non-negative integer before unit '{unit}'"))?;
+    if value == 0 {
+        return Err("duration must be greater than zero".to_owned());
+    }
+    let multiplier = match unit {
+        "s" => 1_u64,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 60 * 60 * 24,
+        other => return Err(format!("unknown duration unit '{other}'")),
+    };
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration '{raw}' overflows u64 seconds"))
 }
