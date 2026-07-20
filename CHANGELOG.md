@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Intel
 
+- `arbitraitor-intel::ProjectPosture`, `PostureProvider`, and
+  `NoOpPostureProvider` — advisory OpenSSF Scorecard and deps.dev project-posture
+  signal API per spec §21.8. The offline-first no-op provider reports posture as
+  unavailable, never passing, and posture signals never override malware findings.
 - `arbitraitor-intel::redact_url`, `redact_path`, and `redact_env_var` —
   new public helpers that strip credentials, sensitive query parameters,
   home-directory paths, and sensitive environment-variable values from
