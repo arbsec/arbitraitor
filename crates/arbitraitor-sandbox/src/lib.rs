@@ -14,6 +14,7 @@ pub use observed::{FileOperation, OBSERVED_EVENT_SCHEMA_VERSION, ObservedEvent, 
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
 pub use seccomp::configure_network_isolation;
 
+pub mod linux_adapters;
 mod observed;
 
 use std::io;

@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Sandbox
 
+- `arbitraitor-sandbox::linux_adapters` — new public module with four
+  Linux sandbox adapters per spec §27.3: `NamespaceAdapter` (user +
+  mount + IPC + PID + network namespaces via `unshare`), `BubblewrapAdapter`
+  (bwrap subprocess wrapper), `SystemdRunAdapter` (transient scope with
+  PrivateNetwork/NoNewPrivileges), and `EBpfObservationAdapter` (stub,
+  is_available returns false). 3 tests covering bwrap/systemd-run command
+  construction.
+
+#### Sandbox
+
 - `arbitraitor_sandbox::observed::{ObservedEvent, ObservedEventLog,
   FileOperation, OBSERVED_EVENT_SCHEMA_VERSION}` — new public types for
   spec §27.6 dynamic-adapter event reporting. `ObservedEvent` is a
