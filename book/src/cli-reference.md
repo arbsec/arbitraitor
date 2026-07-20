@@ -662,6 +662,21 @@ arbitraitor execute receipt.approval.json
 arbitraitor execute receipt.approval.json --network
 ```
 
+### Supported artifact types
+
+Only `ArtifactType::ShellScript(_)` artifacts are executable via the
+`execute` command. All other classified types — `HtmlDocument`,
+`JsonDocument`, `XmlDocument`, `GenericText`, `GenericBinary`, archives,
+`PowerShellScript`, `PythonScript`, `JavaScript`, and `Unknown` — fail
+closed with an error before reaching `ScriptExecution::bash`, even when
+the approval file is otherwise valid. This mirrors the content-type gate
+on `arbitraitor run` and `run_approved_artifact` (MCP) per
+[ADR-0031](../../docs/adr/0031-run-pipeline-content-type-execution-gate.md)
+and [issue #612](https://github.com/arbsec/arbitraitor/issues/612).
+Native executables are also not accepted via `execute` because the
+approval flow always binds to the bash interpreter (native execution
+uses a separate release path).
+
 ## Report command
 
 ```sh
