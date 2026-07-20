@@ -29,6 +29,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed-malicious findings, or 32 for integrity failures); Error and
   Incomplete map to 33 and 34 as before.
 
+#### Policy
+
+- `arbitraitor-policy::ProvenanceConfig` — new top-level `[provenance]`
+  policy section accepting `require_signature_for: Vec<String>` and
+  `trusted_sigstore_identities: Vec<SigstoreIdentity>` (spec §14.3, §23.3
+  example). Parsed into the policy fingerprint; semantic enforcement is
+  wired by the analysis pipeline.
+- `arbitraitor-policy::DetectorConfig` — new top-level `[detectors.<id>]`
+  policy section accepting `required`, `required_for`, `required_on`
+  fields (spec §15, §23.3 example). Parsed into the policy fingerprint;
+  semantic enforcement is wired by the analysis coordinator.
+- `arbitraitor-policy::MatchOp::NotIn` — new complement-of-OneOf
+  operator. Used by the spec §23.1.1 example policy for
+  `caller_origin.mcp_server_id not_in = ["trusted-mcp-server-1"]`.
+- `arbitraitor-policy` finding shorthand now accepts the
+  `<field>_contains = "<value>"` suffix to route through the `Contains`
+  operator against the named field. Spec §23.3 example
+  `[rules.when.finding] tags_contains = "privilege-escalation"` now
+  parses without falling back to the longer inline form.
+- Field paths under `caller_origin.*`, `execution.*`, `integrity.*`, and
+  `findings.*` are now accepted at parse time (spec §23.1, §23.1.1,
+  §23.3 example). Resolution at evaluation time depends on the caller's
+  `EvalContext` carrying the corresponding data (tracked separately in
+  #488).
+
 #### CLI
 
 - All `std::process::exit(N)` call sites in the CLI now go through the

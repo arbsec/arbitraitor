@@ -918,3 +918,127 @@ all = []
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Spec §23.3 example policy parser regression
+// ---------------------------------------------------------------------------
+
+/// Verbatim copy of the spec §23.3 example policy (lines 1828-1897 of
+/// `.spec/spec.md`). Used to assert the engine loads the documented
+/// example without parse or validation errors. Adding a new operator,
+/// field, or top-level section to the spec example requires extending
+/// this constant alongside the schema change so accidental drift is
+/// caught at test time.
+const SPEC_SECTION_23_3_EXAMPLE_POLICY: &str = r#"
+version = 1
+
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+
+[network]
+require_https = true
+block_private_networks = true
+
+[network.redirects]
+max = 5
+allow_https_to_http = false
+
+[limits]
+max_download_bytes = "1GiB"
+max_analysis_time = "120s"
+
+[provenance]
+require_signature_for = ["executable"]
+
+[[provenance.trusted_sigstore_identities]]
+issuer = "https://token.actions.githubusercontent.com"
+subject = "https://github.com/acme/*/.github/workflows/release.yml@refs/tags/*"
+
+[detectors.yara_x]
+required = true
+
+[detectors.clamav]
+required = false
+
+[detectors.script_ast]
+required_for = ["shell", "powershell"]
+
+[[rules]]
+id = "block-confirmed-malware"
+action = "block"
+
+[rules.when.finding]
+category = "malware_signature"
+confidence = "confirmed"
+
+[[rules]]
+id = "block-credential-access"
+action = "block"
+
+[rules.when]
+all = [
+  { field = "finding.category", equals = "credential_access" },
+  { field = "finding.severity", one_of = ["high", "critical"] },
+]
+
+[[rules]]
+id = "require-prompt-for-sudo"
+action = "prompt"
+
+[rules.when.finding]
+tags_contains = "privilege-escalation"
+
+[[rules]]
+id = "allow-pinned-release"
+action = "pass"
+
+[rules.when]
+all = [
+  { field = "integrity.digest_match", equals = true },
+  { field = "findings.max_severity", equals = "low" },
+]
+"#;
+
+/// Verbatim copy of the spec §23.1.1 example policy (lines 1793-1813 of
+/// `.spec/spec.md`). Exercises the `not_in` operator and `caller_origin.*`
+/// nested field access.
+const SPEC_SECTION_23_1_1_EXAMPLE_POLICY: &str = r#"
+version = 1
+
+[[rules]]
+id = "agent-network-denied"
+action = "block"
+
+[rules.when]
+all = [
+  { field = "caller_origin.class", equals = "agent_session" },
+  { field = "execution.network", equals = "allow" },
+]
+
+[[rules]]
+id = "mcp-server-requires-human-approval"
+action = "prompt"
+
+[rules.when]
+all = [
+  { field = "caller_origin.class", equals = "mcp_server" },
+  { field = "caller_origin.mcp_server_id", not_in = ["trusted-mcp-server-1"] },
+]
+"#;
+
+#[test]
+fn loads_spec_section_23_3_example_policy() {
+    let engine = PolicyEngine::load(SPEC_SECTION_23_3_EXAMPLE_POLICY)
+        .expect("spec §23.3 example policy must parse without errors");
+    let digest = engine.digest();
+    assert!(!digest.is_empty(), "policy digest must be computed");
+}
+
+#[test]
+fn loads_spec_section_23_1_1_example_policy_with_not_in_and_nested_fields() {
+    let engine = PolicyEngine::load(SPEC_SECTION_23_1_1_EXAMPLE_POLICY)
+        .expect("spec §23.1.1 example policy must parse without errors");
+    let digest = engine.digest();
+    assert!(!digest.is_empty(), "policy digest must be computed");
+}
