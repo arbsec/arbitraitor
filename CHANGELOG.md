@@ -418,6 +418,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin manifest now accepts a `[capabilities]` table declaring `network`, `filesystem`, `process`, `max_memory_bytes`, `max_cpu_ms`
 - `SubprocessExecutor::with_network_isolated(bool)` replaced with `with_network_capability(NetworkCapability)`; the capability must come from the plugin's admitted manifest
 
+#### Documentation
+
+- ADR-0022 now references the final SLSA v1.2 Build Provenance URL and
+  documents Source Track consumption, including how verified Source L2+
+  evidence strengthens Build L1 provenance without raising the Build level
+  (#461).
+
 ### Security
 
 - Plugin registry now enforces ADR-0011 trust-tier capability admission: `community-reviewed` and `community-unreviewed` plugins are rejected at registration when they declare `network`, `process = "spawn"`, or `filesystem = "read-write"` capabilities (#379)
