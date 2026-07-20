@@ -311,6 +311,7 @@ dependencies = [
  "arbitraitor-workspace-hack",
  "async-trait",
  "bytes",
+ "proptest",
  "reqwest",
  "secrecy",
  "sha2 0.11.0",
