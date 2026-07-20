@@ -274,10 +274,6 @@ impl FetchPolicy {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FetchMetadata {
     /// TLS protocol version when exposed by the transport backend.
-    ///
-    /// Reqwest currently exposes the peer certificate but not the negotiated
-    /// rustls protocol version through its stable public response API, so this
-    /// is `None` for the MVP HTTP fetcher.
     pub tls_version: Option<String>,
     /// SHA-256 fingerprint of the DER-encoded peer leaf certificate.
     pub peer_certificate_fingerprint: Option<Sha256Digest>,
@@ -293,6 +289,17 @@ pub struct FetchMetadata {
     pub final_url: Option<FetchUrl>,
     /// Redirect chain followed by Arbitraitor policy.
     pub redirect_chain: Vec<FetchUrl>,
+    /// HTTP response status code (spec §11.5). `None` for non-HTTP sources.
+    pub response_status: Option<u16>,
+    /// Selected response headers (spec §11.5). Only headers safe for
+    /// receipt recording (no Authorization, Cookie, Set-Cookie).
+    pub selected_headers: Vec<(String, String)>,
+    /// Transfer encoding as observed by the transport (spec §11.5).
+    pub transfer_encoding: Option<String>,
+    /// Final origin (scheme + host + port) after all redirects (spec §11.5).
+    pub final_origin: Option<String>,
+    /// Retriever version string (spec §11.5).
+    pub retriever_version: String,
 }
 
 /// Receipt returned after bytes have been streamed into an [`ArtifactSink`].
@@ -776,8 +783,16 @@ async fn stream_response(
         connected_ip,
         content_type,
         content_length,
-        final_url: Some(final_url),
+        final_url: Some(final_url.clone()),
         redirect_chain,
+        response_status: Some(response.status().as_u16()),
+        selected_headers: extract_safe_headers(response.headers()),
+        transfer_encoding: header_to_string(response.headers(), "transfer-encoding"),
+        final_origin: final_url
+            .as_url()
+            .host_str()
+            .map(|h| format!("{}://{}", final_url.as_url().scheme(), h)),
+        retriever_version: format!("arbitraitor-fetch/{}", env!("CARGO_PKG_VERSION")),
     };
 
     let mut state = StreamState::default();
@@ -1016,6 +1031,30 @@ fn header_to_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+/// Extracts response headers safe for receipt recording (spec §11.5).
+/// Excludes Authorization, Cookie, Set-Cookie, and other credential-bearing headers.
+fn extract_safe_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    const SAFE_HEADER_NAMES: &[&str] = &[
+        "content-type",
+        "content-length",
+        "content-encoding",
+        "cache-control",
+        "etag",
+        "last-modified",
+        "server",
+        "x-content-type-options",
+        "x-frame-options",
+        "strict-transport-security",
+    ];
+    let mut result = Vec::new();
+    for name in SAFE_HEADER_NAMES {
+        if let Some(value) = header_to_string(headers, name) {
+            result.push(((*name).to_owned(), value));
+        }
+    }
+    result
 }
 
 fn ensure_policy_allows(scheme: FetchScheme, policy: &FetchPolicy) -> Result<(), FetchError> {
