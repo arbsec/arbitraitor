@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Sandbox
+
+- `arbitraitor-sandbox::windows_adapters` — new public module with five
+  Windows sandbox adapter stubs per spec §27.5: `WindowsSandboxAdapter`,
+  `AppContainerAdapter`, `JobObjectsAdapter`, `WdacAdapter`,
+  `HyperVAdapter`. All `is_available()` methods return `false` on
+  non-Windows platforms. 4 tests verify unavailability on Linux.
+
 #### Fetch
 
 - `FetchPolicy::proxy_url: Option<String>` — configurable proxy support per
