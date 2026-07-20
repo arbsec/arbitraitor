@@ -1,9 +1,10 @@
 //! Programmatic API for Arbitraitor operations.
 //!
 //! This is the in-process equivalent of the daemon's socket protocol.
-//! Consumers using Arbitraitor as a Rust dependency call [`ArbitraitorApi`]
-//! instead of connecting to a Unix socket. All existing subsystems (fetcher,
-//! store, analysis coordinator, policy engine, receipt builder) are composed
+//! Consumers using Arbitraitor as a Rust dependency start with
+//! [`Arbitraitor::builder`] or call [`ArbitraitorApi::new`] directly instead of
+//! connecting to a Unix socket. All existing subsystems (fetcher, store,
+//! analysis coordinator, policy engine, receipt builder) are composed
 //! internally; no daemon process is required.
 
 #![forbid(unsafe_code)]
@@ -28,6 +29,10 @@ use arbitraitor_receipt::{
 };
 use arbitraitor_store::{ContentStore, MetadataEntry, RetentionMode};
 use thiserror::Error;
+
+mod builder;
+
+pub use builder::{Arbitraitor, ArbitraitorBuilder};
 
 const ARBITRAITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -207,23 +212,7 @@ impl ArbitraitorApi {
     /// Returns [`ApiError::Store`] if the content store cannot be opened,
     /// or [`ApiError::Config`] if the policy TOML is invalid.
     pub fn new(config: Config) -> Result<Self, ApiError> {
-        let store = ContentStore::open(&config.store_path)?;
-        let policy_toml = if config.policy_toml.trim().is_empty() {
-            DEFAULT_POLICY_TOML
-        } else {
-            &config.policy_toml
-        };
-        let policy =
-            PolicyEngine::load(policy_toml).map_err(|error| ApiError::Config(error.to_string()))?;
-        std::fs::create_dir_all(&config.receipts_path)?;
-        Ok(Self {
-            store,
-            fetcher: HttpFetcher::new(),
-            policy,
-            coordinator: AnalysisCoordinator::new(),
-            fetch_policy: config.fetch_policy,
-            receipts_dir: config.receipts_path,
-        })
+        Arbitraitor::builder().config(config).build()
     }
 
     /// Fetches a URL, stores the artifact in CAS, runs detectors, evaluates
