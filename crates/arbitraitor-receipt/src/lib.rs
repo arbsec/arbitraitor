@@ -908,3 +908,203 @@ mod tests {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// SARIF output (spec §31.4)
+// ---------------------------------------------------------------------------
+
+/// SARIF 2.1.0 report root (spec §31.4).
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifReport {
+    /// Fixed schema version.
+    pub version: String,
+    /// Contains the runs with results.
+    #[serde(rename = "$schema")]
+    pub schema: String,
+    /// One run per scan.
+    pub runs: Vec<SarifRun>,
+}
+
+/// A single SARIF run containing results.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifRun {
+    /// Tool that produced the results.
+    pub tool: SarifTool,
+    /// Findings as SARIF results.
+    pub results: Vec<SarifResult>,
+}
+
+/// Tool metadata in SARIF.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifTool {
+    /// Driver information.
+    pub driver: SarifDriver,
+}
+
+/// Driver metadata in SARIF.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifDriver {
+    /// Tool name.
+    pub name: String,
+    /// Tool version.
+    pub version: String,
+    /// Rule definitions.
+    pub rules: Vec<SarifRule>,
+}
+
+/// A SARIF rule definition with taxonomy (spec §3.59).
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifRule {
+    /// Rule identifier.
+    pub id: String,
+    /// Short description.
+    pub short_description: SarifMessage,
+    /// Full description.
+    pub full_description: Option<SarifMessage>,
+    /// Taxonomy mappings (CWE, CAPEC, OWASP, ATT&CK).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub taxonomy: Vec<SarifTaxonomyEntry>,
+}
+
+/// SARIF taxonomy entry per rule (spec §3.59).
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifTaxonomyEntry {
+    /// Taxonomy name (e.g. "CWE", "CAPEC").
+    pub name: String,
+    /// Taxonomy-specific ID.
+    pub id: String,
+}
+
+/// SARIF message (text + optional markdown).
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifMessage {
+    /// Plain text.
+    pub text: String,
+}
+
+/// A SARIF result (finding).
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifResult {
+    /// Rule ID that produced this result.
+    pub rule_id: String,
+    /// Severity level: "error", "warning", "info", "none".
+    pub level: String,
+    /// Result message.
+    pub message: SarifMessage,
+    /// Artifact hash for locations inside extracted/decoded artifacts.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub locations: Vec<SarifLocation>,
+}
+
+/// SARIF location with artifact hash.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifLocation {
+    /// Physical location.
+    pub physical_location: SarifPhysicalLocation,
+}
+
+/// SARIF physical location.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifPhysicalLocation {
+    /// Artifact location with hash.
+    pub artifact_location: SarifArtifactLocation,
+    /// Source region.
+    pub region: Option<SarifRegion>,
+}
+
+/// SARIF artifact location.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifArtifactLocation {
+    /// Virtual path (e.g. "sha256:abc...:install.sh:42").
+    pub uri: String,
+}
+
+/// SARIF source region.
+#[derive(Clone, Debug, Serialize)]
+pub struct SarifRegion {
+    /// Line number (1-based).
+    pub start_line: u32,
+}
+
+impl Receipt {
+    /// Converts the receipt's findings to a SARIF 2.1.0 report (spec §31.4).
+    #[must_use]
+    pub fn to_sarif(&self, tool_name: &str, tool_version: &str) -> SarifReport {
+        let rules: Vec<SarifRule> = self
+            .findings
+            .iter()
+            .map(|f| SarifRule {
+                id: f.id.clone(),
+                short_description: SarifMessage {
+                    text: f.title.clone(),
+                },
+                full_description: f
+                    .remediation
+                    .as_ref()
+                    .map(|r| SarifMessage { text: r.clone() }),
+                taxonomy: f
+                    .taxonomies
+                    .iter()
+                    .map(|t| SarifTaxonomyEntry {
+                        name: format!("{:?}", t.name),
+                        id: t.id.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        let results: Vec<SarifResult> = self
+            .findings
+            .iter()
+            .map(|f| {
+                let level = match f.severity {
+                    Severity::Critical | Severity::High => "error",
+                    Severity::Medium => "warning",
+                    Severity::Low | Severity::Informational => "info",
+                };
+                let locations = f
+                    .location
+                    .as_ref()
+                    .map(|loc| {
+                        vec![SarifLocation {
+                            physical_location: SarifPhysicalLocation {
+                                artifact_location: SarifArtifactLocation {
+                                    uri: format!(
+                                        "sha256:{}:line:{}",
+                                        self.artifact_sha256, loc.line
+                                    ),
+                                },
+                                region: Some(SarifRegion {
+                                    start_line: loc.line.get(),
+                                }),
+                            },
+                        }]
+                    })
+                    .unwrap_or_default();
+                SarifResult {
+                    rule_id: f.id.clone(),
+                    level: level.to_owned(),
+                    message: SarifMessage {
+                        text: f.title.clone(),
+                    },
+                    locations,
+                }
+            })
+            .collect();
+
+        SarifReport {
+            version: "2.1.0".to_owned(),
+            schema: "https://docs.oasis-open.org/sarif/sarif/v2.1.0/cs01/schemas/sarif-schema-2.1.0.json".to_owned(),
+            runs: vec![SarifRun {
+                tool: SarifTool {
+                    driver: SarifDriver {
+                        name: tool_name.to_owned(),
+                        version: tool_version.to_owned(),
+                        rules,
+                    },
+                },
+                results,
+            }],
+        }
+    }
+}
