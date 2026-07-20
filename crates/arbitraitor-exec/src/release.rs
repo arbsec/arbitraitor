@@ -23,6 +23,8 @@ use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
+use std::time::{Duration, SystemTime};
+
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_store::{ContentStore, StoreError};
 use cap_std::ambient_authority;
@@ -56,6 +58,13 @@ pub struct ReleasePolicy {
     /// post-release chmod reopens a TOCTOU window.
     #[cfg(unix)]
     pub final_mode: Option<u32>,
+    /// Maximum age of the verdict before release. When set, release will
+    /// fail with [`ReleaseError::StaleVerdict`] if the verdict was
+    /// computed more than this duration ago (spec §26.2 step 4).
+    pub verdict_max_age: Option<Duration>,
+    /// Timestamp when the verdict was computed. Caller populates this
+    /// from the verdict result so the release layer can check freshness.
+    pub verdict_timestamp: Option<SystemTime>,
 }
 
 #[cfg(not(unix))]
@@ -180,6 +189,14 @@ pub enum ReleaseError {
         /// Safe diagnostic reason.
         reason: String,
     },
+    /// Verdict is too old to safely release (spec §26.2 step 4).
+    #[error("verdict is stale: computed {verdict_age_secs}s ago, max allowed is {max_age_secs}s")]
+    StaleVerdict {
+        /// Age of the verdict in seconds.
+        verdict_age_secs: u64,
+        /// Maximum allowed age in seconds.
+        max_age_secs: u64,
+    },
 }
 
 /// Releases the exact CAS bytes named by `scanned_digest` to `destination`.
@@ -228,6 +245,36 @@ pub fn release_artifact_with_provenance(
     )
 }
 
+/// Verifies the verdict is fresh enough to safely release (spec §26.2 step 4).
+///
+/// When `verdict_max_age` is set on the policy and `verdict_timestamp` is
+/// provided, the function checks that the verdict was computed within the
+/// allowed age window. If the verdict is stale, release fails with
+/// [`ReleaseError::StaleVerdict`] — preventing a TOCTOU where policy or
+/// intelligence was updated between verdict and release.
+fn check_verdict_freshness(policy: &ReleasePolicy) -> Result<(), ReleaseError> {
+    let Some(max_age) = policy.verdict_max_age else {
+        return Ok(());
+    };
+    let Some(ts) = policy.verdict_timestamp else {
+        return Ok(());
+    };
+    let now = SystemTime::now();
+    let elapsed = now
+        .duration_since(ts)
+        .map_err(|_| ReleaseError::StaleVerdict {
+            verdict_age_secs: 0,
+            max_age_secs: max_age.as_secs(),
+        })?;
+    if elapsed > max_age {
+        return Err(ReleaseError::StaleVerdict {
+            verdict_age_secs: elapsed.as_secs(),
+            max_age_secs: max_age.as_secs(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReleaseFsMode {
     Normal,
@@ -247,6 +294,7 @@ fn release_artifact_inner(
     provenance: &ProvenanceConfig,
     fs_mode: ReleaseFsMode,
 ) -> Result<ReleaseReceipt, ReleaseError> {
+    check_verdict_freshness(policy)?;
     let handle = store.get(scanned_digest)?;
     let mut preflight_reader = handle
         .read()
@@ -1946,6 +1994,75 @@ mod tests {
             fs::remove_dir_all(root).map_err(|error| TestCaseError::fail(error.to_string()))?;
             Ok(())
         })?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_verdict_blocks_release() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("stale-verdict")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let digest = runtime.block_on(store_bytes(&store, b"stale-verdict-test"))?;
+        let destination = root.join("stale.bin");
+
+        let policy = ReleasePolicy {
+            verdict_max_age: Some(Duration::from_secs(1)),
+            verdict_timestamp: Some(SystemTime::now() - Duration::from_secs(10)),
+            ..ReleasePolicy::default()
+        };
+
+        let result = release_artifact(&store, &digest, &destination, &policy);
+        assert!(
+            matches!(result, Err(ReleaseError::StaleVerdict { .. })),
+            "stale verdict must block release: {result:?}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_verdict_allows_release() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("fresh-verdict")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let digest = runtime.block_on(store_bytes(&store, b"fresh-verdict-test"))?;
+        let destination = root.join("fresh.bin");
+
+        let policy = ReleasePolicy {
+            verdict_max_age: Some(Duration::from_mins(1)),
+            verdict_timestamp: Some(SystemTime::now()),
+            ..ReleasePolicy::default()
+        };
+
+        let result = release_artifact(&store, &digest, &destination, &policy);
+        assert!(
+            result.is_ok(),
+            "fresh verdict must allow release: {result:?}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn no_freshness_check_when_max_age_unset() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("no-freshness")?;
+        let store = ContentStore::open(&root.join("store"))?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let digest = runtime.block_on(store_bytes(&store, b"no-freshness-test"))?;
+        let destination = root.join("none.bin");
+
+        let policy = ReleasePolicy {
+            verdict_max_age: None,
+            verdict_timestamp: Some(SystemTime::now() - Duration::from_secs(9999)),
+            ..ReleasePolicy::default()
+        };
+
+        let result = release_artifact(&store, &digest, &destination, &policy);
+        assert!(
+            result.is_ok(),
+            "when verdict_max_age is None, release must proceed: {result:?}"
+        );
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

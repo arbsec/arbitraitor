@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Exec
+
+- `arbitraitor-exec::ReleasePolicy::verdict_max_age` and
+  `verdict_timestamp` — new fields implementing spec §26.2 step 4
+  (freshness invalidation check before release). When set, the release
+  function checks that the verdict was computed within the allowed
+  age window. If stale, release fails with `ReleaseError::StaleVerdict`
+  — preventing a TOCTOU where policy or intelligence was updated
+  between verdict and release.
+
 #### CLI
 
 - `arbitraitor version` now reports build provenance: target architecture
