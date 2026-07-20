@@ -50,6 +50,7 @@ supersede it.
 | [0026](0026-eu-cra-nist-ssdf-compliance-mapping.md) | EU CRA / NIST SSDF informational compliance mapping | Accepted | #276 |
 | [0027](0027-cli-pipeline-boundary.md) | CLI inspect pipeline boundary | Accepted | #436 |
 | [0028](0028-landlock-abi-matrix.md) | Landlock ABI probe and receipt recording | Accepted | #466 |
+| [0029](0029-vex-version-matrix.md) | VEX format support matrix | Accepted | #468 |
 | [0030](0030-sbom-vex-ingestion-profiles.md) | SBOM/VEX ingestion profiles (CISA 2025 minimum elements + SBOM-for-AI) | Accepted | #467 |
 
 ## Format
