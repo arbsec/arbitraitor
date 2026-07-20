@@ -1145,6 +1145,7 @@ fn artifact_kind(artifact_type: ArtifactType) -> ArtifactKind {
         ArtifactType::PeExecutable => ArtifactKind::PeExecutable,
         ArtifactType::ElfExecutable => ArtifactKind::ElfExecutable,
         ArtifactType::MachOExecutable => ArtifactKind::MachOExecutable,
+        ArtifactType::WindowsShortcut => ArtifactKind::WindowsShortcut,
         ArtifactType::ZipArchive => ArtifactKind::Zip,
         ArtifactType::TarArchive => ArtifactKind::Tar(TarCompression::None),
         ArtifactType::GzipCompressed => ArtifactKind::Gzip,

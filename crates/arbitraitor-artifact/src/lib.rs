@@ -13,11 +13,14 @@ use thiserror::Error;
 
 /// Native executable metadata parsing.
 pub mod executable;
+/// Windows Shortcut (.lnk) parsing and CVE-2025-9491 detection.
+pub mod lnk;
 
 const DETECTOR_ID: &str = "arbitraitor-artifact";
 const TAR_MAGIC_OFFSET: usize = 257;
 const TAR_MAGIC: &[u8] = b"ustar";
 const MAX_SHEBANG_BYTES: usize = 256;
+const LNK_HEADER_SIZE: u32 = 0x0000_004C;
 
 /// Shell interpreter family identified from a script shebang.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,6 +50,8 @@ pub enum ArtifactType {
     ElfExecutable,
     /// Mach-O binary.
     MachOExecutable,
+    /// Windows Shortcut (MS-SHLLINK `.lnk`).
+    WindowsShortcut,
     /// ZIP or ZIP-derived archive.
     ZipArchive,
     /// POSIX tar archive.
@@ -190,6 +195,17 @@ pub fn classify_with_expected(
     (classification, finding)
 }
 
+/// Inspects an MS-SHLLINK shortcut for CVE-2025-9491 whitespace padding.
+///
+/// Returns findings when the `COMMAND_LINE_ARGUMENTS` field contains a run of
+/// 260 or more consecutive whitespace characters. Returns an empty vector for
+/// clean shortcuts, shortcuts without arguments, or non-LNK input. See
+/// ADR-0034 for the detection rationale.
+#[must_use]
+pub fn inspect_lnk(data: &[u8]) -> Vec<Finding> {
+    lnk::inspect(data)
+}
+
 fn result(
     artifact_type: ArtifactType,
     confidence: Confidence,
@@ -215,6 +231,9 @@ fn detect_magic(data: &[u8]) -> Option<ArtifactType> {
     }
     if is_macho(data) {
         return Some(ArtifactType::MachOExecutable);
+    }
+    if is_lnk_header(data) {
+        return Some(ArtifactType::WindowsShortcut);
     }
     if data.starts_with(b"PK\x03\x04") {
         return Some(ArtifactType::ZipArchive);
@@ -246,6 +265,10 @@ fn is_macho(data: &[u8]) -> bool {
                 | b"\xbe\xba\xfe\xca"
         )
     )
+}
+
+fn is_lnk_header(data: &[u8]) -> bool {
+    data.len() >= 4 && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) == LNK_HEADER_SIZE
 }
 
 fn is_tar(data: &[u8]) -> bool {
@@ -394,7 +417,9 @@ fn digest(data: &[u8]) -> Sha256Digest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactType, DetectedEncoding, ShellKind, classify, classify_with_expected};
+    use super::{
+        ArtifactType, DetectedEncoding, ShellKind, classify, classify_with_expected, inspect_lnk,
+    };
     use arbitraitor_model::finding::FindingCategory;
 
     #[test]
@@ -566,6 +591,61 @@ mod tests {
             classify(&magic_64).artifact_type,
             ArtifactType::MachOExecutable
         );
+    }
+
+    #[test]
+    fn identifies_windows_shortcut() {
+        let mut data = vec![0_u8; 76];
+        data[0..4].copy_from_slice(&0x0000_004Cu32.to_le_bytes());
+        assert_eq!(classify(&data).artifact_type, ArtifactType::WindowsShortcut);
+    }
+
+    #[test]
+    fn inspect_lnk_returns_empty_for_non_lnk() {
+        assert!(inspect_lnk(b"PK\x03\x04not a lnk").is_empty());
+    }
+
+    #[test]
+    fn inspect_lnk_detects_cve_2025_9491_padding() {
+        let padding = " ".repeat(300);
+        let args = format!("{padding}malware.exe --silent");
+        let mut data = vec![0_u8; 76];
+        data[0..4].copy_from_slice(&0x0000_004Cu32.to_le_bytes());
+        let flags = 0x0000_00A0u32; // HasArguments | Unicode
+        data[0x14..0x18].copy_from_slice(&flags.to_le_bytes());
+        let units: Vec<u16> = args.encode_utf16().collect();
+        let count = u16::try_from(units.len()).unwrap_or(u16::MAX);
+        data.extend_from_slice(&count.to_le_bytes());
+        for unit in units {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let findings = inspect_lnk(&data);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "artifact.lnk-argument-padding");
+        assert!(
+            findings[0]
+                .references
+                .iter()
+                .any(|r| r.contains("CVE-2025-9491"))
+        );
+    }
+
+    #[test]
+    fn inspect_lnk_returns_empty_for_clean_lnk() {
+        let mut data = vec![0_u8; 76];
+        data[0..4].copy_from_slice(&0x0000_004Cu32.to_le_bytes());
+        let flags = 0x0000_00A0u32; // HasArguments | Unicode
+        data[0x14..0x18].copy_from_slice(&flags.to_le_bytes());
+        let args = "--help";
+        let units: Vec<u16> = args.encode_utf16().collect();
+        let count = u16::try_from(units.len()).unwrap_or(u16::MAX);
+        data.extend_from_slice(&count.to_le_bytes());
+        for unit in units {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        assert!(inspect_lnk(&data).is_empty());
     }
 
     #[test]
