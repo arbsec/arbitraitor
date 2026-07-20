@@ -12,7 +12,7 @@
 //! temporary HOME and working directories, privilege-elevation rejection, and
 //! network denied by default.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -230,16 +230,22 @@ impl ScriptExecution {
         // read-driven control flow before we wait for it. The child has been
         // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(script_bytes)
-                .map_err(|source| ExecError::ScriptIo {
+            if let Err(source) = stdin.write_all(script_bytes)
+                && source.kind() != ErrorKind::BrokenPipe
+            {
+                return Err(ExecError::ScriptIo {
                     stage: "write-script-stdin",
                     source,
-                })?;
-            stdin.flush().map_err(|source| ExecError::ScriptIo {
-                stage: "flush-script-stdin",
-                source,
-            })?;
+                });
+            }
+            if let Err(source) = stdin.flush()
+                && source.kind() != ErrorKind::BrokenPipe
+            {
+                return Err(ExecError::ScriptIo {
+                    stage: "flush-script-stdin",
+                    source,
+                });
+            }
         }
 
         let (exit_code, stdout, stderr) =
