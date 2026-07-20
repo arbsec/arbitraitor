@@ -11,11 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Exec
 
-- Native execution now fails closed with
-  `ExecError::NativeExecutionNotApproved` unless `execute_native` receives
-  explicit approval (such as `--native`) or
-  `ExecutionPolicy::allow_native_execution` is enabled by trusted policy
-  (spec §26.4).
+- `arbitraitor-core::config::ExecutionConfig::allow_environment` and
+  `deny_environment_patterns` — new fields implementing spec §26.5
+  (policy-driven environment controls). Defaults match the historical
+  hardcoded `EnvAllowlist::default_names()` allowlist and the union
+  of the historical `EnvDenyList::mandatory()` exact and prefix lists,
+  so existing configurations keep current behavior and operators can
+  override either list from `arbitraitor.toml`.
+- `arbitraitor-exec::env_allowlist_from_config` and
+  `env_denylist_from_config` — new constructors that build the
+  execution environment allow/deny structures from a
+  `ExecutionConfig`.
+- `arbitraitor-exec::ExecutionContextBuilder::environment_from_config` —
+  new builder method that replaces the policy's environment allowlist
+  and denylist with values derived from a `ExecutionConfig` (spec
+  §26.5), wireable from any orchestrator that already loads the
+  layered TOML config.
 - `arbitraitor-exec::emit_artifact_to_stdout` — new release mode that
   emits verified CAS bytes to stdout (spec §26.1). Used by
   `scan --emit-on-pass` and wrapper pipe semantics. Bytes are verified

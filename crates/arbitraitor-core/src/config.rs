@@ -323,6 +323,26 @@ pub struct ExecutionConfig {
     pub enabled: bool,
     /// Default execution timeout in seconds.
     pub timeout_secs: u64,
+    /// Environment variable names allowed to pass to a mediated child process.
+    ///
+    /// Default values are the canonical mediated-execution allowlist
+    /// (`LANG`, `LC_ALL`, `TERM`, `PATH`). Override via `arbitraitor.toml`
+    /// to tighten (subset) or loosen (superset) what may reach the child.
+    /// Each entry is matched as an exact variable name. Per spec §26.5
+    /// the existing hardcoded constants are preserved as the serde defaults.
+    #[serde(default = "default_allow_environment")]
+    pub allow_environment: Vec<String>,
+    /// Environment variable deny patterns.
+    ///
+    /// Each entry is a **prefix** that matches any variable name starting
+    /// with the pattern. Defaults to the union of the historic exact-match
+    /// denylist and the historic prefix denylist (treating every entry as
+    /// a prefix is strictly tighter than exact match and safe by default).
+    /// Override via `arbitraitor.toml` to customize what is unconditionally
+    /// stripped from the child environment. Per spec §26.5 the existing
+    /// hardcoded constants are preserved as the serde defaults.
+    #[serde(default = "default_deny_environment_patterns")]
+    pub deny_environment_patterns: Vec<String>,
 }
 
 /// Integrity configuration.
@@ -412,8 +432,62 @@ impl Default for ExecutionConfig {
         Self {
             enabled: false,
             timeout_secs: 60,
+            allow_environment: default_allow_environment(),
+            deny_environment_patterns: default_deny_environment_patterns(),
         }
     }
+}
+
+/// Returns the default mediated-execution environment allowlist (spec §26.5).
+///
+/// Mirrors the historical `EnvAllowlist::default_names()` constant in
+/// `arbitraitor-exec`. Kept duplicated here so `arbitraitor-core` does not
+/// depend on `arbitraitor-exec`.
+fn default_allow_environment() -> Vec<String> {
+    ["LANG", "LC_ALL", "TERM", "PATH"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Returns the default mediated-execution environment deny patterns
+/// (spec §26.5).
+///
+/// Mirrors the historical `EnvDenyList::mandatory()` constant in
+/// `arbitraitor-exec`. Every entry is treated as a prefix by the policy
+/// engine — strict subset of the historic exact-match list plus the
+/// historic prefix list, which is the safe direction.
+fn default_deny_environment_patterns() -> Vec<String> {
+    [
+        // Historic exact-match shell-injection vectors.
+        "BASH_ENV",
+        "ENV",
+        "ZDOTDIR",
+        "NODE_OPTIONS",
+        "SSH_AUTH_SOCK",
+        "IFS",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "CDPATH",
+        "GLOBIGNORE",
+        "POSIXLY_CORRECT",
+        "PS4",
+        "PROMPT_COMMAND",
+        // Historic prefix patterns.
+        "LD_",
+        "DYLD_",
+        "PYTHON",
+        "RUBY",
+        "PERL5",
+        "GIT_CONFIG_",
+        "AWS_",
+        "AZURE_",
+        "GOOGLE_",
+        "GITHUB_",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 impl Default for MetricsConfig {
@@ -885,6 +959,8 @@ struct DetectorOverlay {
 struct ExecutionOverlay {
     enabled: Option<bool>,
     timeout_secs: Option<u64>,
+    allow_environment: Option<Vec<String>>,
+    deny_environment_patterns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -996,6 +1072,10 @@ impl ExecutionConfig {
         Self {
             enabled: overlay.enabled.unwrap_or(self.enabled),
             timeout_secs: overlay.timeout_secs.unwrap_or(self.timeout_secs),
+            allow_environment: overlay.allow_environment.unwrap_or(self.allow_environment),
+            deny_environment_patterns: overlay
+                .deny_environment_patterns
+                .unwrap_or(self.deny_environment_patterns),
         }
     }
 }
@@ -1083,6 +1163,28 @@ mod tests {
         assert_eq!(config.detectors.max_extraction_bytes, DEFAULT_MAX_BYTES);
         assert!(!config.execution.enabled);
         assert_eq!(config.execution.timeout_secs, 60);
+        assert_eq!(
+            config.execution.allow_environment,
+            vec![
+                "LANG".to_owned(),
+                "LC_ALL".to_owned(),
+                "TERM".to_owned(),
+                "PATH".to_owned(),
+            ]
+        );
+        assert!(
+            config
+                .execution
+                .deny_environment_patterns
+                .contains(&"BASH_ENV".to_owned())
+        );
+        assert!(
+            config
+                .execution
+                .deny_environment_patterns
+                .contains(&"LD_".to_owned())
+        );
+        assert_eq!(config.execution.deny_environment_patterns.len(), 23);
         assert!(!config.integrity.require_digest);
         assert!(!config.integrity.require_provenance);
         assert!(config.metrics.enabled);
@@ -1277,6 +1379,35 @@ non_interactive_prompt_action = "block"
 
         assert_eq!(engine.policy().version, 1);
         assert!(engine.policy().rules.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn execution_env_lists_can_be_overridden_via_toml() -> TestResult {
+        let dir = temp_dir("execution_env")?;
+        let path = dir.join("config.toml");
+        write_config(
+            &path,
+            r#"
+[execution]
+allow_environment = ["ARBITRAITOR_TEST_VAR"]
+deny_environment_patterns = ["MY_SECRET_"]
+"#,
+        )?;
+
+        let config = Config::load_from_file(&path)?;
+
+        assert_eq!(config.execution.timeout_secs, 60);
+        assert_eq!(
+            config.execution.allow_environment,
+            vec!["ARBITRAITOR_TEST_VAR".to_owned()]
+        );
+        assert_eq!(
+            config.execution.deny_environment_patterns,
+            vec!["MY_SECRET_".to_owned()]
+        );
+
+        fs::remove_dir_all(dir)?;
         Ok(())
     }
 
