@@ -8,8 +8,9 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arbitraitor_daemon::api::{ApiError, ArbitraitorApi, Config};
+use arbitraitor_daemon::api::{ApiError, Arbitraitor, ArbitraitorApi, Config};
 use arbitraitor_fetch::{FetchPolicy, FetchScheme};
+use arbitraitor_policy::PolicyEngine;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -108,6 +109,54 @@ fn expected_sha256(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn builder_config_matches_new_constructor() -> Result<(), Box<dyn std::error::Error>> {
+    // Given: equivalent configurations for the legacy constructor and builder.
+    let direct_root = unique_dir("builder-direct");
+    let builder_root = unique_dir("builder-fluent");
+    let direct_api = ArbitraitorApi::new(test_config(&direct_root))?;
+    let builder_api = Arbitraitor::builder()
+        .config(test_config(&builder_root))
+        .build()?;
+    let direct_url = mock_http_server(b"builder-equivalence", "text/plain").await;
+    let builder_url = mock_http_server(b"builder-equivalence", "text/plain").await;
+
+    // When: both APIs fetch the same artifact.
+    let direct_result = direct_api.fetch(&direct_url).await?;
+    let builder_result = builder_api.fetch(&builder_url).await?;
+
+    // Then: construction paths expose equivalent behavior and configured stores.
+    assert_eq!(builder_result.sha256, direct_result.sha256);
+    assert_eq!(builder_result.size_bytes, direct_result.size_bytes);
+    assert_eq!(builder_api.list_artifacts()?.len(), 1);
+    assert_eq!(direct_api.list_artifacts()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn builder_policy_overrides_config_policy() -> Result<(), Box<dyn std::error::Error>> {
+    use arbitraitor_model::verdict::Verdict;
+
+    // Given: invalid policy TOML in Config and an explicitly compiled block policy.
+    let root = unique_dir("builder-policy");
+    let mut config = test_config(&root);
+    config.policy_toml = "not valid policy TOML".to_owned();
+    let compiled_config = block_policy_config("builder-compiled-policy");
+    let policy = PolicyEngine::load(&compiled_config.policy_toml)?;
+
+    // When: the explicit policy is supplied through the fluent builder.
+    let api = Arbitraitor::builder()
+        .config(config)
+        .policy(policy)
+        .build()?;
+    let url = mock_http_server(b"builder policy", "text/plain").await;
+    let result = api.inspect(&url).await?;
+
+    // Then: the explicit policy takes precedence over Config::policy_toml.
+    assert_eq!(result.verdict, Verdict::Block);
+    Ok(())
+}
 
 #[tokio::test]
 async fn inspect_fetches_and_analyzes() -> Result<(), Box<dyn std::error::Error>> {
