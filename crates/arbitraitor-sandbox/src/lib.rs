@@ -16,6 +16,7 @@ pub use seccomp::configure_network_isolation;
 
 pub mod linux_adapters;
 mod observed;
+pub mod windows_adapters;
 
 use std::io;
 use std::process::Command;
