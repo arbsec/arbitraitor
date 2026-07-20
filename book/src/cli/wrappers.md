@@ -16,14 +16,16 @@ arbitraitor wrappers <subcommand> [flags]
 A shim is a small file (shell script or symlink) placed in a dedicated
 directory. When that directory precedes the real tool's directory on
 `PATH`, the shell finds the shim instead of the original binary. The shim
-calls `arbitraitor fetch` with the original arguments; Arbitraitor
-retrieves, inspects, and renders a verdict before any bytes reach the
-downstream consumer.
+is a thin dispatcher: it re-invokes `arbitraitor fetch --tool <curl|wget>`
+with the original arguments. Arbitraitor performs retrieval through its
+own fetch pipeline (SSRF controls, redirect policy, TLS verifier
+selection — see spec §11, ADR-0018), inspects the artifact, and emits
+bytes only on a `Pass` verdict.
 
-The original `curl` or `wget` is not modified. Arbitraitor resolves it
-through `PATH` lookup that excludes the shim directory, so the real tool
-performs the HTTP request under Arbitraitor's SSRF, redirect, and TLS
-controls.
+The original `curl` or `wget` is not modified. `wrappers status` reports
+the shim state (`installed (script)`, `installed (symlink)`,
+`not installed`, or `foreign file` — see [Status semantics](#status)
+below).
 
 ```text
 $ curl https://example.com/install.sh | sh
@@ -32,10 +34,10 @@ $ curl https://example.com/install.sh | sh
 ~/.arbitraitor/shims/curl      ←── shim runs first
        │
        ▼
-arbitraitor fetch https://example.com/install.sh
+arbitraitor fetch --tool curl -- https://example.com/install.sh
        │
        ▼
-   [inspect + verdict]
+   [fetch pipeline + inspect + verdict]
        │
   Pass ─────────┐
   Block ───────┴── non-zero exit, no bytes emitted
@@ -128,10 +130,10 @@ States:
 
 | State | Meaning |
 |-------|---------|
-| `installed (script)` | Shim file is an Arbitraitor-managed shell script |
-| `installed (symlink)` | Shim file is an Arbitraitor-managed symlink |
+| `installed (script)` | A script file occupies the shim slot; content starts with the Arbitraitor shim marker |
+| `installed (symlink)` | A symlink occupies the shim slot (target not validated) |
 | `not installed` | No shim file present in the shim directory |
-| `foreign file` | A file with the same name exists but is not Arbitraitor-managed (manual review required) |
+| `foreign file` | A file with the same name exists but does not start with the Arbitraitor shim marker (manual review recommended; the file **will** be overwritten on next `wrappers install`) |
 
 ### init
 
@@ -188,7 +190,8 @@ falls back from `$SHELL` to parent-process inspection
 
 ### Idempotency
 
-The rcfile block is wrapped in marker lines so re-runs replace in place
+For POSIX-family shells (`bash`, `zsh`, `sh`, `posix`, `tcsh`, `oil`),
+the rcfile block is wrapped in marker lines so re-runs replace in place
 rather than appending:
 
 ```sh
@@ -199,36 +202,62 @@ export PATH="$HOME/.arbitraitor/shims:$PATH"
 
 Re-running `wrappers init --install` after a directory change (via
 `--shim-dir`) updates the block atomically. The corresponding in-shell
-snippet is also idempotent: re-`eval`ing `arbitraitor wrappers init` does
-not duplicate `PATH` entries (POSIX `case` guard for bash/zsh/sh,
-`typeset -aU path` for zsh, `fish_add_path --move --path` for fish, etc.).
+snippet is also idempotent: re-`eval`ing `arbitraitor wrappers init`
+does not duplicate `PATH` entries (POSIX `case` guard for bash/zsh/sh,
+`typeset -aU path` for zsh, `fish_add_path --move --path` for fish,
+etc.).
+
+**Exceptions:** `fish`, `nu` (Nushell), and `powershell` use a
+dedicated file rather than a marked block in an existing rcfile — fish
+writes `~/.config/fish/conf.d/arbitraitor.fish`; nushell writes
+`~/.config/nushell/vendor/autoload/arbitraitor.nu`; powershell writes
+its `$PROFILE`. `--install` overwrites these files atomically on each
+run (with `.arbitraitor.bak` backup by default); `--uninstall` removes
+them. The runtime snippets remain idempotent for these shells.
 
 ### Backups
 
-`--install` writes `<rcfile>.arbitraitor.bak` before editing. Pass
-`--no-backup` to skip. The backup is overwritten on each subsequent
-`--install`.
+`--install` writes a backup before mutating the rcfile (or dedicated
+shell file for fish/nu/powershell) using `Path::with_extension`
+— for files without a conventional extension (e.g. `.bashrc`) this
+appends `.arbitraitor.bak`; for files with an extension (e.g. PowerShell
+`profile.ps1`) it replaces the extension to give
+`profile.arbitraitor.bak`. The backup is overwritten on each subsequent
+`--install`. Pass `--no-backup` to skip.
 
 ### init-script
 
-Print the shell-init script for all `WrapperTarget`s (currently `curl`
-and `wget`). Primarily intended for environment-specific automation that
-needs the ambient shell wiring rather than per-tool invocation:
+Hidden legacy command that prints a generic POSIX shell-init snippet
+that prepends `~/.arbitraitor/shims` to `PATH`. Retained from an earlier
+version that did not have per-shell snippet generation. Prefer
+`arbitraitor wrappers init` which auto-detects the target shell and
+emits a shell-specific, runtime-idempotent snippet (POSIX `case` guard
+for `bash`/`zsh`/`sh`, `typeset -aU path` for `zsh`,
+`fish_add_path --move --path` for `fish`, etc.). Retained for backwards
+compatibility with automation that pipes the legacy snippet into rcfiles.
 
 ```sh
-arbitraitor wrappers init-script
+arbitraitor wrappers init-script    # hidden, legacy
+# Prefer:
+arbitraitor wrappers init           # auto-detect shell, print snippet
+eval "$(arbitraitor wrappers init)"
 ```
-
-Equivalent to `arbitraitor wrappers init` with no flags for the default
-shell. Prefer `wrappers init` in interactive contexts.
 
 ## Hidden alias: `arbitraitor env`
 
-`arbitraitor env` is a hidden alias of `arbitraitor wrappers init`. Same
-flags and behaviour. Hidden because the dominant industry convention
-(starship, zoxide, atuin) is the verb `init`; surfacing `env` as a
-top-level command would conflict with `printenv(1)` semantics. The alias
-exists as a discoverability shortcut.
+`arbitraitor env` is a hidden alias of `arbitraitor wrappers init`. It
+accepts the same `init` flags (`--install`, `--uninstall`,
+`--detect-shell`, `--dry-run`, `--no-backup`, positional `[shell]`)
+but **does not** inherit the `wrappers` parent flags (`--shim-dir`,
+`--use-scripts`) — it always uses the default shim directory
+(`~/.arbitraitor/shims`). Pass `--shim-dir` via the `wrappers` parent
+form (`arbitraitor wrappers init --install --shim-dir <PATH>`) when
+overriding the directory.
+
+Hidden because the dominant industry convention (starship, zoxide,
+atuin) is the verb `init`; surfacing `env` as a top-level command would
+conflict with `printenv(1)` semantics. The alias exists as a
+discoverability shortcut.
 
 ## Deprecated command: `arbitraitor hook init`
 
@@ -263,17 +292,27 @@ Incomplete):
 - **Nothing is written to stdout** — downstream consumers receive no bytes.
 - The wrapper exits non-zero.
 
-This means `arbitraitor wrap curl -- URL | bash` is safe by construction:
-`bash` receives input only when the artifact passed all configured checks.
+This means `curl URL | bash` (with shims active) is safe by construction:
+`bash` receives input only when the artifact received a `Pass` verdict.
+Wrappers are a strict download gate; they do not perform interactive
+approval. To require human approval before execution, use
+`arbitraitor run <URL>` (which goes through the approval flow defined in
+ADR-0013).
 
 ## Security notes
 
-- Wrappers do not grant automatic approval. Any script requiring approval
-  still pauses for human input.
+- The shim directory (`~/.arbitraitor/shims` by default) is created with
+  the process umask; no explicit mode is set. If you require a specific
+  mode, create the directory before running `wrappers install`.
+- **`wrappers install` overwrites existing files in the shim directory.**
+  If a file named `curl` or `wget` already exists at the shim path
+  (including non-Arbitraitor-managed files), it is removed and replaced
+  with the new shim. `wrappers status` reports `foreign file` for unknown
+  files as an informational hint, but install will still clobber them.
+  Use a dedicated shim directory (the default `~/.arbitraitor/shims`) to
+  avoid collisions; if you override with `--shim-dir ~/.local/bin` or
+  another shared path, audit it first.
 - Network access during wrapper execution is controlled by the active
   policy and the fetch transport policy (spec §11, ADR-0018).
 - Every intercepted download is recorded in the Arbitraitor audit trail
   and contributes to the operation receipt.
-- The shim directory is created with `0o700` permissions. Foreign files
-  (not Arbitraitor-managed) are reported by `wrappers status` as
-  `foreign file` and are never overwritten.

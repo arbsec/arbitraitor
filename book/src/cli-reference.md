@@ -239,8 +239,10 @@ entries.
 
 #### `init-script`
 
-Print the shell-init script for the default shell. Equivalent to
-`wrappers init` with no flags:
+Hidden legacy command. Prints a generic POSIX shell-init snippet that
+prepends `~/.arbitraitor/shims` to `PATH` (no auto-detection of shell,
+no per-shell idempotency). Prefer `wrappers init`, which auto-detects
+the target shell and emits a shell-specific, runtime-idempotent snippet.
 
 ```sh
 arbitraitor wrappers init-script

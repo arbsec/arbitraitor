@@ -125,7 +125,7 @@ intercepted and inspected before any bytes reach the shell.
 
 For users who prefer `~/.local/bin`, override the default:
 `arbitraitor wrappers install --shim-dir ~/.local/bin`.
-Supported shells: bash, zsh, sh, fish, nushell, powershell, elvish,
+Supported shells: bash, zsh, sh, fish, nu (Nushell), xonsh, powershell, elvish,
 posix, tcsh, oil.
 See [wrappers CLI reference](book/src/cli/wrappers.md) for the full
 surface including the deprecated `hook init` migration path.

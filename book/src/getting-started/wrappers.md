@@ -1,5 +1,9 @@
 # Wrappers
 
+> **Stability: Unstable.** Verified against commit `7cb6906`.
+> The supported-shell list, flags, and default shim directory may change
+> before 1.0.
+
 Arbitraitor installs shell shims that intercept `curl` and `wget`,
 routing every invocation through the inspection pipeline before bytes
 reach the downstream consumer:
@@ -50,10 +54,12 @@ To remove the PATH block from your rcfile:
 arbitraitor wrappers init --uninstall
 ```
 
-The block is wrapped in marker lines (`# >>> arbitraitor wrappers >>>` /
-`# <<< arbitraitor wrappers <<<`), so re-running `--install` after an
-upgrade replaces in place rather than duplicating. The in-shell snippet is
-also idempotent: re-`eval`ing it does not duplicate `PATH` entries.
+The block is wrapped in marker lines (`# >>> arbitraitor wrappers >>>`
+/ `# <<< arbitraitor wrappers <<<`) so re-running `--install` replaces
+in place rather than appending. Exception: `fish`, `nu`, and `powershell`
+use a dedicated file (`conf.d/arbitraitor.fish`, etc.) rather than a
+marked block in an existing rcfile. The in-shell snippet is also
+idempotent: re-`eval`ing it does not duplicate `PATH` entries.
 
 See the [wrappers CLI reference](../cli/wrappers.md) for the full flag
 surface, the default shim directory rationale, and the deprecated

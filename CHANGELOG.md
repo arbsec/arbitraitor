@@ -47,6 +47,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wrappers init --install` with the deprecated `hook init` clearly
   marked.
 
+#### Documentation corrections from adversarial review (PR #613)
+
+- Removed false safety claim that the shim directory is created with
+  `0o700` (actual: standard `create_dir_all` with process umask).
+- Removed false safety claim that foreign files are never overwritten
+  (actual: `wrappers install` removes and replaces any file at the shim
+  path; `foreign file` in `wrappers status` is an informational hint,
+  not a protection). Added explicit warning that `--shim-dir ~/.local/bin`
+  and other shared paths may clobber existing files and should be audited
+  first.
+- Removed false claim that "any script requiring approval still pauses
+  for human input". Actual: wrappers are a strict download gate;
+  `Prompt`/`Warn`/`Block`/`Error`/`Incomplete` verdicts all exit
+  non-zero with no stdout. Use `arbitraitor run` for interactive approval.
+- Corrected the supported-shells list in `README.md` from `nushell` to
+  `nu (Nushell)` and added the missing `xonsh` entry, matching
+  `arbitraitor_wrapper::init::Shell::ALL` in source.
+- Documented that `init-script` is a hidden legacy command, not equivalent
+  to `wrappers init` (it prints a generic POSIX snippet with no per-shell
+  auto-detection or runtime idempotency).
+- Documented that the `arbitraitor env` hidden alias lacks the
+  `--shim-dir` and `--use-scripts` parent flags (always uses
+  `default_shim_dir()`); use the `wrappers init` form to override the
+  directory.
+- Added the `fish` / `nu` / `powershell` exception to the marker-block
+  idempotency claim — these shells use a dedicated file, not a marked
+  block in an existing rcfile.
+- Removed fictional `arbitraitor wrap curl -- URL` references (no `wrap`
+  command exists).
+- Clarified the backup-file naming behaviour: `Path::with_extension`
+  appends `.arbitraitor.bak` for files without an extension but
+  *replaces* the extension for files with one (e.g. PowerShell
+  `profile.ps1` → `profile.arbitraitor.bak`).
+- Tightened `wrappers status` state labels: `installed (symlink)` now
+  notes target is not validated; `foreign file` now warns the file will
+  be overwritten on next `wrappers install`.
+- Added the required Unstable stability block to
+  `book/src/getting-started/wrappers.md` per `docs/doc-ownership.md`.
+
 ### Added
 
 #### Receipt
