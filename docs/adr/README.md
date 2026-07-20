@@ -56,6 +56,7 @@ supersede it.
 | [0032](0032-tar-parser-consensus-check.md) | Tar parser consensus check | Accepted | #459 |
 | [0033](0033-fetch-cross-protocol-credential-secrecy.md) | Fetch cross-protocol credential secrecy | Accepted | #472 |
 | [0034](0034-apple-containerization-ga-strategy.md) | Apple Containerization GA strategy for macOS 26+ | Proposed | #475 |
+| [0035](0035-lnk-argument-padding-cve-2025-9491.md) | LNK argument padding detection (CVE-2025-9491) | Accepted | #473 |
 
 ## Format
 

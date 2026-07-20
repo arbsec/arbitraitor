@@ -52,6 +52,8 @@ pub enum ArtifactKind {
     ElfExecutable,
     /// Mach-O executable.
     MachOExecutable,
+    /// Windows Shortcut (MS-SHLLINK `.lnk`).
+    WindowsShortcut,
     /// WebAssembly module.
     WebAssembly,
     /// ZIP or ZIP-derived archive.

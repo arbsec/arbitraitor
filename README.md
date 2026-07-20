@@ -272,7 +272,7 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/README.md) — 34 accepted
+- [Architecture Decision Records](docs/adr/README.md) — 35 accepted
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - Crate documentation: `cargo doc --workspace --open`
 

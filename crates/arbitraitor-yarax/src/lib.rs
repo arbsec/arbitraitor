@@ -971,6 +971,7 @@ fn artifact_class_label(artifact_type: ArtifactType) -> &'static str {
         ArtifactType::PeExecutable => "pe_executable",
         ArtifactType::ElfExecutable => "elf_executable",
         ArtifactType::MachOExecutable => "macho_executable",
+        ArtifactType::WindowsShortcut => "windows_shortcut",
         ArtifactType::ZipArchive => "zip_archive",
         ArtifactType::TarArchive => "tar_archive",
         ArtifactType::GzipCompressed => "gzip_compressed",
