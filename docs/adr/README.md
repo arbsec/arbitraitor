@@ -49,6 +49,7 @@ supersede it.
 | [0025](0025-ossf-scorecard-depsdev-guac-integration.md) | OpenSSF Scorecard, deps.dev, and GUAC as optional integrations | Accepted | #275 |
 | [0026](0026-eu-cra-nist-ssdf-compliance-mapping.md) | EU CRA / NIST SSDF informational compliance mapping | Accepted | #276 |
 | [0027](0027-cli-pipeline-boundary.md) | CLI inspect pipeline boundary | Accepted | #436 |
+| [0028](0028-landlock-abi-matrix.md) | Landlock ABI matrix and receipt recording | Accepted | #466 |
 | [0030](0030-sbom-vex-ingestion-profiles.md) | SBOM/VEX ingestion profiles (CISA 2025 minimum elements + SBOM-for-AI) | Accepted | #467 |
 
 ## Format
