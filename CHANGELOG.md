@@ -70,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fluent library construction API with `.config(Config)`,
   `.policy(PolicyEngine)`, and `.build()`. The existing
   `ArbitraitorApi::new(Config)` constructor remains available.
+- `arbitraitor-daemon::run_crash_recovery` and `RecoveryReport` implement
+  spec §37.2 (crash recovery). On daemon startup, `run_crash_recovery` scans
+  the CAS `staging/` directory for orphaned temporary files left by
+  interrupted downloads and the `locks/` directory for stale per-digest
+  locks, removing both before any request is accepted. The `objects/`
+  directory is never touched, so verified artifacts remain available for
+  forensic review regardless of retention policy. The function refuses to
+  follow symlinks, preventing recovery-time symlink escape attacks.
 
 #### Exec
 

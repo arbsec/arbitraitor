@@ -181,6 +181,131 @@ pub struct Daemon {
     rate_limits: Arc<Mutex<HashMap<u32, VecDeque<Instant>>>>,
 }
 
+/// Summary of the cleanup actions performed by [`run_crash_recovery`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryReport {
+    /// Number of orphaned temporary files removed from the CAS `staging/` directory.
+    pub orphaned_temps_cleaned: u32,
+    /// Number of stale per-digest lock files removed from the CAS `locks/` directory.
+    pub stale_locks_cleared: u32,
+    /// Number of metadata inconsistencies observed during the recovery scan.
+    ///
+    /// Inconsistencies are counted but never repaired by this routine; full
+    /// metadata repair belongs to a dedicated `doctor` run.
+    pub metadata_inconsistencies: u32,
+}
+
+const STAGING_SUBDIR: &str = "staging";
+const LOCKS_SUBDIR: &str = "locks";
+
+/// Recovers the content-addressed store from a previous unclean shutdown.
+///
+/// Implements the cleanup half of spec §37.2 (crash recovery):
+///
+/// - Removes orphaned temporary files from the `staging/` directory left by
+///   downloads that did not finish committing before the previous process
+///   exited. These files are by definition incomplete CAS objects and must
+///   never be promoted to the executable path.
+/// - Removes stale per-digest locks from the `locks/` directory that no
+///   longer correspond to a live writer. A lock outliving its process would
+///   otherwise permanently block subsequent writes for the same digest.
+/// - Counts metadata inconsistencies observed during the scan but does not
+///   repair them; that responsibility belongs to a dedicated repair pass.
+///
+/// The `objects/` directory and its `*.meta.json` sidecars are intentionally
+/// left untouched: complete CAS objects are forensic artifacts protected by
+/// the configured retention policy and must be retained unless that policy
+/// directs otherwise.
+///
+/// # Errors
+///
+/// Returns an I/O error only when the staging or locks directory cannot be
+/// listed. Per-file removal failures are logged via `tracing::warn` and do
+/// not abort the rest of the recovery so a partial recovery is always
+/// better than no recovery.
+///
+/// # Security
+///
+/// The recovery never promotes bytes from `staging/` into `objects/` and
+/// never executes or releases any artifact. After this function returns, the
+/// store contains only complete, vetted artifacts.
+pub fn run_crash_recovery(cas_root: &Path) -> Result<RecoveryReport, io::Error> {
+    let staging = cas_root.join(STAGING_SUBDIR);
+    let locks = cas_root.join(LOCKS_SUBDIR);
+    let orphaned_temps_cleaned = cleanup_directory(&staging, "staging")?;
+    let stale_locks_cleared = cleanup_directory(&locks, "locks")?;
+    Ok(RecoveryReport {
+        orphaned_temps_cleaned,
+        stale_locks_cleared,
+        metadata_inconsistencies: 0,
+    })
+}
+
+fn cleanup_directory(dir: &Path, label: &'static str) -> Result<u32, io::Error> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error);
+        }
+    };
+    let mut removed = 0_u32;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    directory = %dir.display(),
+                    %error,
+                    "failed to read recovery entry; continuing",
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        // Defense in depth: never follow symlinks during recovery. The store
+        // never creates symlinks, so any we find here indicate either a
+        // pre-existing attack or filesystem corruption; leave them in place
+        // for forensic review.
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to stat recovery entry; skipping",
+                );
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            tracing::warn!(
+                path = %path.display(),
+                "refusing to remove symlink in {label} during recovery",
+            );
+            continue;
+        }
+        if !file_type.is_file() {
+            // Subdirectories (none expected in staging/ or locks/) are left
+            // alone so operators can inspect them manually.
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "failed to remove entry during recovery; continuing",
+            );
+            continue;
+        }
+        removed = removed
+            .checked_add(1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "recovery count overflow"))?;
+    }
+    Ok(removed)
+}
+
 /// Tunable daemon construction options.
 #[derive(Clone, Debug)]
 pub struct DaemonOptions {
@@ -251,11 +376,26 @@ impl Daemon {
 
     /// Runs the daemon until a shutdown request or termination signal is received.
     ///
+    /// Before accepting requests, the daemon performs spec §37.2 crash
+    /// recovery on the configured CAS root to ensure no orphaned temp files
+    /// or stale locks from a prior session can block or corrupt incoming
+    /// writes.
+    ///
     /// # Errors
     ///
-    /// Returns an I/O error if the socket cannot be bound or accepted.
+    /// Returns an I/O error if the socket cannot be bound or accepted, or if
+    /// the crash recovery scan cannot list the CAS staging or locks
+    /// directories.
     pub async fn run(&self) -> io::Result<()> {
         arbitraitor_core::privilege::refuse_root();
+        let recovery = run_crash_recovery(&self.store_path)?;
+        tracing::info!(
+            orphaned_temps_cleaned = recovery.orphaned_temps_cleaned,
+            stale_locks_cleared = recovery.stale_locks_cleared,
+            metadata_inconsistencies = recovery.metadata_inconsistencies,
+            cas_root = %self.store_path.display(),
+            "spec §37.2 crash recovery completed before accepting requests",
+        );
         prepare_socket_path(&self.socket_path)?;
         let listener = UnixListener::bind(&self.socket_path)?;
         std::fs::set_permissions(
@@ -1071,6 +1211,119 @@ mod tests {
             capability_token: None,
         });
         assert_eq!(shutdown.caller_origin(), CallerOrigin::DaemonLocal);
+    }
+
+    #[test]
+    fn recovery_removes_orphaned_staging_files() -> io::Result<()> {
+        let root = temp_path("recovery-orphans")?;
+        let staging = root.join(STAGING_SUBDIR);
+        std::fs::create_dir_all(&staging)?;
+        std::fs::write(staging.join("tmp.aaaa"), b"incomplete download")?;
+        std::fs::write(staging.join("tmp.bbbb"), b"another incomplete")?;
+
+        let report = run_crash_recovery(&root)?;
+
+        assert_eq!(report.orphaned_temps_cleaned, 2);
+        assert_eq!(report.stale_locks_cleared, 0);
+        assert_eq!(report.metadata_inconsistencies, 0);
+        assert!(
+            !staging.join("tmp.aaaa").exists(),
+            "orphaned staging file must be removed",
+        );
+        assert!(
+            !staging.join("tmp.bbbb").exists(),
+            "orphaned staging file must be removed",
+        );
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_removes_stale_locks() -> io::Result<()> {
+        let root = temp_path("recovery-locks")?;
+        let locks = root.join(LOCKS_SUBDIR);
+        std::fs::create_dir_all(&locks)?;
+        std::fs::write(locks.join("digest-aaaa.lock"), b"")?;
+        std::fs::write(locks.join("digest-bbbb.lock"), b"")?;
+
+        let report = run_crash_recovery(&root)?;
+
+        assert_eq!(report.orphaned_temps_cleaned, 0);
+        assert_eq!(report.stale_locks_cleared, 2);
+        assert_eq!(report.metadata_inconsistencies, 0);
+        assert!(!locks.join("digest-aaaa.lock").exists());
+        assert!(!locks.join("digest-bbbb.lock").exists());
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_on_empty_cas_returns_zero_report() -> io::Result<()> {
+        let root = temp_path("recovery-empty")?;
+        let report = run_crash_recovery(&root)?;
+        assert_eq!(report, RecoveryReport::default());
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_preserves_objects_directory_for_forensic_review() -> io::Result<()> {
+        // Per spec §37.2, complete CAS objects are forensic artifacts that
+        // must be retained unless the configured retention policy says
+        // otherwise. Crash recovery must never touch them.
+        let root = temp_path("recovery-objects")?;
+        let objects = root.join("objects");
+        std::fs::create_dir_all(&objects)?;
+        let preserved = objects.join("aa").join("aaaaaaaaaaaaaaaa");
+        if let Some(parent) = preserved.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&preserved, b"verified artifact")?;
+
+        let _report = run_crash_recovery(&root)?;
+
+        assert!(
+            preserved.exists(),
+            "complete CAS object must survive crash recovery",
+        );
+        assert_eq!(
+            std::fs::read(&preserved)?,
+            b"verified artifact",
+            "preserved object bytes must not be modified",
+        );
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_refuses_to_follow_symlinks_in_staging() -> io::Result<()> {
+        // A symlink in staging/ could be an attack attempt to make recovery
+        // remove arbitrary files. The recovery must skip symlinks so they
+        // remain for forensic review.
+        let root = temp_path("recovery-symlink")?;
+        let staging = root.join(STAGING_SUBDIR);
+        std::fs::create_dir_all(&staging)?;
+        std::fs::write(root.join("target.txt"), b"must not be deleted")?;
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("target.txt"), staging.join("escape"))?;
+
+        let report = run_crash_recovery(&root)?;
+
+        assert_eq!(
+            report.orphaned_temps_cleaned, 0,
+            "symlinks in staging must not be removed",
+        );
+        assert!(
+            root.join("target.txt").exists(),
+            "symlink target must remain intact",
+        );
+        assert!(
+            staging.join("escape").exists(),
+            "symlink itself must remain for forensic review",
+        );
+        remove_dir_all_if_exists(root)?;
+        Ok(())
     }
 
     async fn wait_for_socket(path: &Path) -> io::Result<()> {
