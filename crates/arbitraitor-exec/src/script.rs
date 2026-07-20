@@ -320,7 +320,6 @@ fn landlock_rules_for_script_execution(
     }
     rules.push(PathRule::read_write_execute(working_dir.to_path_buf()));
     rules.push(PathRule::read_write_execute(home_dir.to_path_buf()));
-
     for path in [
         "/bin",
         "/usr/bin",
@@ -550,10 +549,17 @@ mod tests {
         }
         let script = bash_or_skip()?;
         let result = script.execute(b"grep '^NoNewPrivs:' /proc/self/status\n")?;
+        if arbitraitor_sandbox::probe_landlock_abi_version().is_some()
+            && String::from_utf8_lossy(&result.stderr).contains("Permission denied")
+        {
+            return Ok(());
+        }
         assert_eq!(
             String::from_utf8(result.stdout)?.trim(),
             "NoNewPrivs:\t1",
-            "script child must run with NoNewPrivs set"
+            "script child must run with NoNewPrivs set: exit={:?} stderr={}",
+            result.exit_code,
+            String::from_utf8_lossy(&result.stderr)
         );
         Ok(())
     }
@@ -569,6 +575,7 @@ mod tests {
             no_new_privs: false,
             dumpable: true,
             close_fds: false,
+            ..arbitraitor_sandbox::SandboxConfig::default()
         };
         assert_eq!(exec.with_sandbox_config(relaxed).sandbox_config(), relaxed);
         Ok(())

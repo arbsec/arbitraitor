@@ -792,6 +792,7 @@ mod tests {
                 applied: ControlStatus::Enforced,
                 proof: Some("setrlimit".to_owned()),
             }),
+            landlock_abi_version: Some(serde_json::from_value(serde_json::json!(7))?),
         };
         let receipt = ReceiptBuilder::new(
             "0.1.0",
@@ -814,6 +815,10 @@ mod tests {
         assert!(
             json.contains("effective_controls"),
             "serialized receipt must include effective_controls"
+        );
+        assert!(
+            json.contains("landlock_abi_version"),
+            "serialized receipt must include effective Landlock ABI version"
         );
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded.effective_controls, Some(controls));

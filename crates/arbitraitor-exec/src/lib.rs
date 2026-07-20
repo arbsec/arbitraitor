@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arbitraitor_core::config::ExecutionConfig;
 use arbitraitor_model::operation::{GrantedCapabilities, OperationPlan};
 use arbitraitor_model::verdict::AssuranceLevel;
+use arbitraitor_sandbox::LandlockAbiVersion;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
@@ -689,6 +690,8 @@ pub struct EffectiveControls {
     pub syscall_filtering: Option<EffectiveControl>,
     /// Resource limits (CPU, memory, FDs, processes).
     pub resource_limits: Option<EffectiveControl>,
+    /// Effective Landlock ABI version observed when filesystem isolation uses Landlock.
+    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 /// Proofs supplied to the builder that each containment control is active.
@@ -710,6 +713,8 @@ pub struct ControlProofs {
     pub syscall_filtering: Option<String>,
     /// Proof of resource-limit enforcement.
     pub resource_limits: Option<String>,
+    /// Effective Landlock ABI version backing the filesystem-isolation proof.
+    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 impl ControlProofs {
@@ -742,6 +747,7 @@ impl ControlProofs {
             )?),
             syscall_filtering: Some(Self::require(self.syscall_filtering, "syscall filtering")?),
             resource_limits: Some(Self::require(self.resource_limits, "resource limits")?),
+            landlock_abi_version: self.landlock_abi_version,
         })
     }
 }
