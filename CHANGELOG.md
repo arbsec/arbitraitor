@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Receipt
 
+- `arbitraitor_model::vex` now models the VEX format matrix for receipt
+  companion artifacts: OpenVEX 0.2.0 parsing with the current product and
+  vulnerability structs, rejection of OpenVEX 0.0.x/0.1.x contexts, CSAF 2.0
+  and CSAF 2.1 VEX profile parsing, CSAF 2.1 CVSS v4 vector strings, CSAF
+  involvement statements, typed parser errors, and explicit
+  `VexFormatVersion` labels.
+- `arbitraitor_model::vex::VexLimits` bounds untrusted OpenVEX and CSAF VEX
+  parsing by raw bytes, modeled collection counts, map entries, and string
+  lengths. VEX hash maps now parse SHA-256 entries into `Sha256Digest`, CSAF
+  VEX category matching is exact, timestamps require RFC 3339 timezone text,
+  and parser error display avoids echoing attacker-controlled document fields.
 - `arbitraitor-receipt::Receipt::to_sarif()` — converts findings to a
   SARIF 2.1.0 report per spec §31.4. Includes rule definitions with
   multi-taxonomy mappings (CWE, CAPEC, OWASP, ATT&CK) per SARIF §3.59.

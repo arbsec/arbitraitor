@@ -316,6 +316,8 @@ pub struct SignedFeedEntry {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FeedSourceClass {
+    /// CSAF VEX advisory feed.
+    Csaf,
     /// Enterprise-controlled deny list.
     EnterpriseDeny,
     /// Entry reviewed by Arbitraitor maintainers or delegated reviewers.
@@ -595,6 +597,12 @@ fn domain_suffix_matches(host: &str, domain: &str) -> bool {
 
 fn enforcement_for_source_class(source_class: FeedSourceClass) -> EnforcementResult {
     match source_class {
+        FeedSourceClass::Csaf => EnforcementResult {
+            disposition: Disposition::Block,
+            severity: Severity::High,
+            confidence: Confidence::High,
+            deciding_source_class: source_class,
+        },
         FeedSourceClass::EnterpriseDeny => EnforcementResult {
             disposition: Disposition::Block,
             severity: Severity::Critical,
