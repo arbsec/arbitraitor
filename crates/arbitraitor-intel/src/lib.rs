@@ -22,12 +22,55 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arbitraitor_model::verdict::{Confidence, Severity};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
 pub use feed::{FeedAdapter, IngestionReport, ingest_entries, ingest_feed};
 pub use urlhaus::UrlhausAdapter;
+
+/// Advisory security-posture signals resolved for a source repository.
+///
+/// These signals supplement artifact analysis. They never override malware
+/// findings. When posture cannot be resolved, [`Self::available`] is `false`
+/// and the optional signals are absent; unavailability is never a passing
+/// posture result.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProjectPosture {
+    /// `OpenSSF` Scorecard score, when available.
+    pub scorecard_score: Option<u8>,
+    /// Whether deps.dev reports the project package as deprecated.
+    pub deps_dev_deprecated: Option<bool>,
+    /// Whether package analysis reports malicious behavior.
+    pub package_analysis_malicious: Option<bool>,
+    /// Whether posture signals were resolved for the repository.
+    pub available: bool,
+}
+
+/// Provider of advisory project-posture signals for source repositories.
+#[async_trait]
+pub trait PostureProvider: Send + Sync {
+    /// Fetches posture signals for `repo_url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider cannot complete a configured posture
+    /// lookup. Providers represent an unresolvable repository as an unavailable
+    /// [`ProjectPosture`] rather than a passing result.
+    async fn fetch_posture(&self, repo_url: &str) -> Result<ProjectPosture>;
+}
+
+/// Offline-first posture provider that reports every repository as unavailable.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoOpPostureProvider;
+
+#[async_trait]
+impl PostureProvider for NoOpPostureProvider {
+    async fn fetch_posture(&self, _repo_url: &str) -> Result<ProjectPosture> {
+        Ok(ProjectPosture::default())
+    }
+}
 
 /// Current threat-intelligence feed entry schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;

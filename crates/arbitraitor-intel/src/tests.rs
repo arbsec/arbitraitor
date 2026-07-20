@@ -411,3 +411,36 @@ fn redact_env_var_does_not_match_without_underscore_prefix() {
         Some("public-value".to_owned())
     );
 }
+
+#[test]
+fn project_posture_records_available_advisory_signals() {
+    let posture = ProjectPosture {
+        scorecard_score: Some(8),
+        deps_dev_deprecated: Some(false),
+        package_analysis_malicious: Some(true),
+        available: true,
+    };
+
+    assert_eq!(posture.scorecard_score, Some(8));
+    assert_eq!(posture.deps_dev_deprecated, Some(false));
+    assert_eq!(posture.package_analysis_malicious, Some(true));
+    assert!(posture.available);
+}
+
+#[tokio::test]
+async fn no_op_posture_provider_returns_unavailable() -> std::result::Result<(), Box<dyn Error>> {
+    let posture = NoOpPostureProvider
+        .fetch_posture("https://github.com/arbsec/arbitraitor")
+        .await?;
+
+    assert_eq!(
+        posture,
+        ProjectPosture {
+            scorecard_score: None,
+            deps_dev_deprecated: None,
+            package_analysis_malicious: None,
+            available: false,
+        }
+    );
+    Ok(())
+}
