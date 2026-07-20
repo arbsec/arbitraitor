@@ -115,6 +115,8 @@ pub struct Config {
     pub execution: ExecutionConfig,
     /// Artifact integrity requirements.
     pub integrity: IntegrityConfig,
+    /// Stage-specific timeouts (spec §37.3).
+    pub timeouts: TimeoutConfig,
     /// Metrics collection and structured operation logging settings.
     pub metrics: MetricsConfig,
 }
@@ -125,7 +127,7 @@ pub struct Config {
 pub struct FetchConfig {
     /// Maximum followed redirects.
     pub max_redirects: u32,
-    /// Whole-operation timeout in seconds.
+    /// Whole-operation timeout in seconds (spec §37.3).
     pub total_timeout_secs: u64,
     /// Maximum bytes accepted from transport.
     pub max_bytes: u64,
@@ -138,6 +140,61 @@ pub struct FetchConfig {
     /// `false` (spec §11.2). When `false`, cross-origin redirects trigger
     /// a forced strip of credential-bearing headers.
     pub forward_authorization_cross_origin: bool,
+    /// DNS resolution timeout in seconds (spec §37.3). Defaults to 5.
+    pub dns_timeout_secs: u64,
+    /// TCP connect timeout in seconds (spec §37.3). Defaults to 10.
+    pub connect_timeout_secs: u64,
+    /// TLS handshake timeout in seconds (spec §37.3). Defaults to 10.
+    pub tls_timeout_secs: u64,
+    /// Response header timeout in seconds (spec §37.3). Defaults to 10.
+    pub response_header_timeout_secs: u64,
+    /// Idle read timeout in seconds (spec §37.3). Defaults to 30.
+    pub idle_read_timeout_secs: u64,
+}
+
+impl Default for FetchConfig {
+    fn default() -> Self {
+        Self {
+            max_redirects: 10,
+            total_timeout_secs: 120,
+            max_bytes: DEFAULT_MAX_BYTES,
+            allow_cross_origin: true,
+            forward_authorization_cross_origin: false,
+            dns_timeout_secs: 5,
+            connect_timeout_secs: 10,
+            tls_timeout_secs: 10,
+            response_header_timeout_secs: 10,
+            idle_read_timeout_secs: 30,
+        }
+    }
+}
+
+/// Analysis timeout configuration (spec §37.3).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct TimeoutConfig {
+    /// Per-detector timeout in seconds (spec §37.3). Defaults to 30.
+    pub detector_timeout_secs: u64,
+    /// Archive expansion timeout in seconds (spec §37.3). Defaults to 60.
+    pub archive_expansion_timeout_secs: u64,
+    /// Recursive payload graph timeout in seconds (spec §37.3). Defaults to 120.
+    pub recursive_graph_timeout_secs: u64,
+    /// Sandbox execution timeout in seconds (spec §37.3). Defaults to 30.
+    pub sandbox_execution_timeout_secs: u64,
+    /// External scanner invocation timeout in seconds (spec §37.3). Defaults to 60.
+    pub external_scanner_timeout_secs: u64,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            detector_timeout_secs: 30,
+            archive_expansion_timeout_secs: 60,
+            recursive_graph_timeout_secs: 120,
+            sandbox_execution_timeout_secs: 30,
+            external_scanner_timeout_secs: 60,
+        }
+    }
 }
 
 /// Content store configuration.
@@ -284,18 +341,6 @@ pub struct IntegrityConfig {
 pub struct MetricsConfig {
     /// Whether operation metrics collection and completion logs are enabled.
     pub enabled: bool,
-}
-
-impl Default for FetchConfig {
-    fn default() -> Self {
-        Self {
-            max_redirects: 10,
-            total_timeout_secs: 120,
-            max_bytes: DEFAULT_MAX_BYTES,
-            allow_cross_origin: true,
-            forward_authorization_cross_origin: false,
-        }
-    }
 }
 
 impl Default for StoreConfig {
@@ -537,6 +582,7 @@ impl Config {
             detectors: self.detectors.merge(overlay.detectors),
             execution: self.execution.merge(overlay.execution),
             integrity: self.integrity.merge(overlay.integrity),
+            timeouts: self.timeouts,
             metrics: self.metrics.merge(overlay.metrics),
         }
     }
@@ -867,6 +913,11 @@ impl FetchConfig {
             max_bytes: overlay.max_bytes.unwrap_or(self.max_bytes),
             allow_cross_origin: self.allow_cross_origin,
             forward_authorization_cross_origin: self.forward_authorization_cross_origin,
+            dns_timeout_secs: self.dns_timeout_secs,
+            connect_timeout_secs: self.connect_timeout_secs,
+            tls_timeout_secs: self.tls_timeout_secs,
+            response_header_timeout_secs: self.response_header_timeout_secs,
+            idle_read_timeout_secs: self.idle_read_timeout_secs,
         }
     }
 }
