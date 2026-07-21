@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use arbitraitor_artifact::ArtifactType;
+use arbitraitor_artifact::{ArtifactType, ShellKind};
 use arbitraitor_core::config::Config;
 use arbitraitor_mcp::{PlanContext, sanitize_for_agent};
 use arbitraitor_model::exit_code::ExitCode;
@@ -280,7 +280,7 @@ fn execution_plan(mode: ExecutionMode, network_isolated: bool) -> String {
 /// rationale.
 fn execution_mode_for_type(artifact_type: ArtifactType) -> Result<ExecutionMode, String> {
     match artifact_type {
-        ArtifactType::ShellScript(_) => Ok(ExecutionMode::Script),
+        ArtifactType::ShellScript(ShellKind::Posix | ShellKind::Bash) => Ok(ExecutionMode::Script),
         ArtifactType::PeExecutable
         | ArtifactType::ElfExecutable
         | ArtifactType::MachOExecutable => Ok(ExecutionMode::Native),

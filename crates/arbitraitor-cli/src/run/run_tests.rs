@@ -181,6 +181,7 @@ async fn run_blocks_non_executable_artifact_types()
         ArtifactType::PowerShellScript,
         ArtifactType::PythonScript,
         ArtifactType::JavaScript,
+        ArtifactType::ShellScript(ShellKind::Zsh),
         ArtifactType::Unknown,
     ] {
         let command = command(false, false);
@@ -217,11 +218,13 @@ async fn run_blocks_non_executable_artifact_types()
 /// Positive control for #612 (Fix A): classified `ShellScript(Posix)` and
 /// `ShellScript(Bash)` must still pass through the gate. Guards against an
 /// over-restrictive regression that would block legitimate shell-script
-/// execution.
+/// execution. `ShellScript(Zsh)` is intentionally NOT included here
+/// because `/bin/bash` cannot safely interpret zsh syntax — see
+/// `run_blocks_zsh_shell_script` below.
 #[tokio::test]
 async fn run_executes_shell_script_artifact_types()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    for shell_kind in [ShellKind::Posix, ShellKind::Bash, ShellKind::Zsh] {
+    for shell_kind in [ShellKind::Posix, ShellKind::Bash] {
         let command = command(false, false);
         let mut services = FakeServices::with_artifact(fake_artifact_with_type(
             Verdict::Pass,

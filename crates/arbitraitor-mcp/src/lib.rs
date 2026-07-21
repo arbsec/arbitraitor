@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_analysis::{AnalysisCoordinator, DetectorStatus, RetrievalInfo};
-use arbitraitor_artifact::{ArtifactType, classify};
+use arbitraitor_artifact::{ArtifactType, ShellKind, classify};
 use arbitraitor_exec::script::ScriptExecution;
 use arbitraitor_fetch::{
     FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink, redact_url,
@@ -1441,7 +1441,10 @@ impl RunApprovedArtifactTool {
         // out as well because the MCP approval flow always binds to the
         // bash interpreter (see [`PlanContext::for_bash`]).
         let classification = classify(&bytes);
-        if !matches!(classification.artifact_type, ArtifactType::ShellScript(_)) {
+        if !matches!(
+            classification.artifact_type,
+            ArtifactType::ShellScript(ShellKind::Posix | ShellKind::Bash)
+        ) {
             return Err(RunApprovedArtifactError::NotExecutable {
                 artifact_type: classification.artifact_type,
             });

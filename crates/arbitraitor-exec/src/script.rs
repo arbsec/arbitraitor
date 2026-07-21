@@ -231,6 +231,14 @@ impl ScriptExecution {
         // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(source) = stdin.write_all(script_bytes) {
+                // Drop stdin before capturing output. If the child is still
+                // alive (write_all failed due to EPIPE on one write, not
+                // because the child exited), the child may be blocked on
+                // stdin read. Without dropping stdin, the drain threads in
+                // best_effort_capture → read_with_limit would block forever
+                // waiting for stdout/stderr EOF while the child waits for
+                // stdin EOF that never arrives = deadlock.
+                drop(stdin);
                 let (child_exit_code, _, child_stderr) =
                     crate::spawn::best_effort_capture(&mut child, self.output_limit());
                 return Err(ExecError::script_io(
@@ -241,6 +249,7 @@ impl ScriptExecution {
                 ));
             }
             if let Err(source) = stdin.flush() {
+                drop(stdin);
                 let (child_exit_code, _, child_stderr) =
                     crate::spawn::best_effort_capture(&mut child, self.output_limit());
                 return Err(ExecError::script_io(

@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use arbitraitor_artifact::{ArtifactType, classify};
+use arbitraitor_artifact::{ArtifactType, ShellKind, classify};
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::{HealthChecker, HealthStatus};
 use arbitraitor_mcp::sanitize_for_agent;
@@ -1127,7 +1127,10 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     // out as well because the approval flow always binds to the bash
     // interpreter; native execution uses a separate release path.)
     let classification = classify(&bytes);
-    if !matches!(classification.artifact_type, ArtifactType::ShellScript(_)) {
+    if !matches!(
+        classification.artifact_type,
+        ArtifactType::ShellScript(ShellKind::Posix | ShellKind::Bash)
+    ) {
         miette::bail!(
             "artifact type {:?} is not executable via the approved execute path; \
              only shell scripts are runnable (ADR-0031, issue #612)",

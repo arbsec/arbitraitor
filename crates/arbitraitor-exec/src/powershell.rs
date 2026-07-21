@@ -408,6 +408,7 @@ impl PowerShellExecution {
         // resumed by this point so it can drain the pipe without deadlock.
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(source) = stdin.write_all(script_bytes) {
+                drop(stdin);
                 let (child_exit_code, _, child_stderr) =
                     crate::spawn::best_effort_capture(&mut child, self.output_limit());
                 return Err(PowerShellError::script_io(
@@ -418,6 +419,7 @@ impl PowerShellExecution {
                 ));
             }
             if let Err(source) = stdin.flush() {
+                drop(stdin);
                 let (child_exit_code, _, child_stderr) =
                     crate::spawn::best_effort_capture(&mut child, self.output_limit());
                 return Err(PowerShellError::script_io(
