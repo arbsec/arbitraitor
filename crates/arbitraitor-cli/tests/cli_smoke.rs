@@ -77,6 +77,17 @@ fn status_help_exits_zero() -> TestResult {
 }
 
 #[test]
+fn doctor_help_exits_zero() -> TestResult {
+    Command::cargo_bin("arbitraitor")?
+        .arg("doctor")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doctor"));
+    Ok(())
+}
+
+#[test]
 fn wrappers_help_exits_zero() -> TestResult {
     Command::cargo_bin("arbitraitor")?
         .arg("wrappers")

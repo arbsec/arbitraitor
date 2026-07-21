@@ -691,6 +691,7 @@ fn status_command_outputs_text() -> Result<(), Box<dyn std::error::Error>> {
         output.contains("Daemon: not running"),
         "expected store-only fallback text, got: {output}",
     );
+    assert!(output.contains("Pass"));
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -743,6 +744,51 @@ fn status_command_outputs_json() -> Result<(), Box<dyn std::error::Error>> {
     assert!(json["checks"].get("store").is_some());
     assert!(json["checks"].get("detectors").is_some());
     assert!(json["checks"].get("version").is_some());
+    Ok(())
+}
+
+#[test]
+fn doctor_command_parses_json_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "doctor", "--json"])?;
+
+    match cli.command {
+        Command::Doctor(command) => {
+            assert!(command.json);
+            assert!(command.cas_dir.is_none());
+            assert!(command.rules.is_none());
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn doctor_health_report_json_contains_full_check_set() -> Result<(), Box<dyn std::error::Error>> {
+    let report = HealthChecker::new().check();
+    let json = serde_json::to_value(&report)?;
+
+    for name in [
+        "policy_validity",
+        "yara_rules",
+        "av_adapters",
+        "scanner_freshness",
+        "feed_signatures",
+        "update_trust_root",
+        "sandbox_adapters",
+        "plugin_manifests",
+        "plugin_protocol",
+        "wrapper_coverage",
+        "shim_path_order",
+        "clock_skew",
+        "proxy_settings",
+        "receipt_signing_key",
+    ] {
+        assert!(json["checks"].get(name).is_some(), "missing {name}");
+    }
+    assert!(matches!(
+        json["checks"]["policy_validity"]["status"].as_str(),
+        Some("skipped")
+    ));
     Ok(())
 }
 
