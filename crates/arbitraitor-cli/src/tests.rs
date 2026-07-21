@@ -3,6 +3,7 @@ use super::{
     emit_wrapper_output, parse_cli_from_args, pipeline::parse_fetch_source, query_daemon_status,
     wrapper_output_destination, wrapper_url_argument, write_status_text,
 };
+use arbitraitor_artifact::ArtifactType;
 use arbitraitor_fetch::FetchSource;
 use arbitraitor_model::origin::CallerOrigin;
 use clap::Parser;
@@ -256,6 +257,120 @@ fn inspect_accepts_signature_flags() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Wrappers(_)
         | Command::Mcp
         | Command::Scan(_)
+        | Command::Explain(_)
+        | Command::Store(_)
+        | Command::Policy(_)
+        | Command::Doctor(_)
+        | Command::Rules(_)
+        | Command::Update(_)
+        | Command::Plugin(_)
+        | Command::Hook(_)
+        | Command::Shim(_)
+        | Command::Graph(_)
+        | Command::Approve(_)
+        | Command::Execute(_)
+        | Command::Report(_)
+        | Command::Allow(_)
+        | Command::Pm(_)
+        | Command::Env(_)
+        | Command::Version => {
+            return Err("parsed wrong command".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scan_command_parses_all_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "scan",
+        "--stdin",
+        "--emit-on-pass",
+        "--recursive",
+        "--type",
+        "elf",
+        "--name",
+        "artifact",
+        "--source-url",
+        "https://example.test/artifact.sh",
+        "--json",
+        "--sarif",
+        "--rules",
+        "/tmp/rules",
+    ])?;
+
+    match cli.command {
+        Command::Scan(command) => {
+            assert!(command.stdin);
+            assert!(command.emit_on_pass);
+            assert!(command.recursive);
+            assert_eq!(command.artifact_type, Some(ArtifactType::ElfExecutable));
+            assert_eq!(command.detector_name.as_deref(), Some("artifact"));
+            assert_eq!(
+                command.source_url.as_deref(),
+                Some("https://example.test/artifact.sh")
+            );
+            assert!(command.json);
+            assert!(command.sarif);
+            assert_eq!(command.rules, Some(PathBuf::from("/tmp/rules")));
+        }
+        Command::Daemon(_)
+        | Command::Fetch(_)
+        | Command::Unpack(_)
+        | Command::Intel(_)
+        | Command::Run(_)
+        | Command::Status(_)
+        | Command::Wrappers(_)
+        | Command::Mcp
+        | Command::Inspect(_)
+        | Command::Explain(_)
+        | Command::Store(_)
+        | Command::Policy(_)
+        | Command::Doctor(_)
+        | Command::Rules(_)
+        | Command::Update(_)
+        | Command::Plugin(_)
+        | Command::Hook(_)
+        | Command::Shim(_)
+        | Command::Graph(_)
+        | Command::Approve(_)
+        | Command::Execute(_)
+        | Command::Report(_)
+        | Command::Allow(_)
+        | Command::Pm(_)
+        | Command::Env(_)
+        | Command::Version => {
+            return Err("parsed wrong command".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scan_command_defaults() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "scan", "artifact.sh"])?;
+
+    match cli.command {
+        Command::Scan(command) => {
+            assert_eq!(command.path, Some(PathBuf::from("artifact.sh")));
+            assert!(!command.emit_on_pass);
+            assert!(!command.recursive);
+            assert_eq!(command.artifact_type, None);
+            assert_eq!(command.detector_name, None);
+            assert_eq!(command.source_url, None);
+            assert!(!command.json);
+            assert!(!command.sarif);
+        }
+        Command::Daemon(_)
+        | Command::Fetch(_)
+        | Command::Unpack(_)
+        | Command::Intel(_)
+        | Command::Run(_)
+        | Command::Status(_)
+        | Command::Wrappers(_)
+        | Command::Mcp
+        | Command::Inspect(_)
         | Command::Explain(_)
         | Command::Store(_)
         | Command::Policy(_)
