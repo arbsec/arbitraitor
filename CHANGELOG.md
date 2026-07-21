@@ -159,6 +159,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Native executables are gated out as well because the approval flow
   always binds to the bash interpreter (native execution uses a separate
   release path).
+- `arbitraitor status` now reports daemon identity, uptime, last
+  operation, and the bounded recent-operations ring buffer (cap 32,
+  newest-first) when the local daemon is reachable. New daemon IPC
+  variant `DaemonRequest::Status` returns `{pid, uptime_secs,
+  last_operation, recent_operations}` and the handler falls back to a
+  store-only `HealthReport` when the daemon socket is unreachable.
+  The flag set gains `--socket <PATH>` to override the daemon socket
+  path. JSON output pairs the existing health report with a top-level
+  `daemon` field (`null` when the daemon is not running). Closes #485
+  (spec §28.1).
 
 ### Changed
 
