@@ -336,7 +336,6 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
         result
             .detector_results
             .retain(|detector_result| detector_result.metadata.id == name);
-        result.verdict = verdict_from_findings(&result.findings, result.verdict);
     }
 
     let cas_root = config.store.cas_dir.clone().unwrap_or_else(default_cas_dir);
@@ -455,8 +454,6 @@ fn verdict_from_findings(
         .any(|finding| finding.severity == Severity::High)
     {
         Verdict::Prompt
-    } else if findings.is_empty() && fallback != Verdict::Incomplete {
-        Verdict::Pass
     } else if findings.is_empty() {
         fallback
     } else {
@@ -1471,6 +1468,18 @@ mod tests {
     const APPROVER: &str = "round-2-test";
     const VERDICT: &str = "pass";
     const TTL_SECONDS: u64 = 3600;
+
+    #[test]
+    fn verdict_from_findings_preserves_fail_closed_fallback_when_filtered_empty() {
+        assert_eq!(verdict_from_findings(&[], Verdict::Block), Verdict::Block);
+        assert_eq!(verdict_from_findings(&[], Verdict::Prompt), Verdict::Prompt);
+        assert_eq!(verdict_from_findings(&[], Verdict::Warn), Verdict::Warn);
+        assert_eq!(
+            verdict_from_findings(&[], Verdict::Incomplete),
+            Verdict::Incomplete
+        );
+        assert_eq!(verdict_from_findings(&[], Verdict::Pass), Verdict::Pass);
+    }
 
     /// Build an `ApprovalFile` for the bash-execution path with the given
     /// artifact digest, pinned to network-isolated. Far-future timestamps
