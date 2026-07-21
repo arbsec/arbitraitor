@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### Documentation
+
+- `book/src/cli/wrappers.md` — full rewrite. Previous page documented a
+  fictional CLI (claims shims install to `~/.local/bin` with `--path`,
+  `--wrappers`, `--mode` flags that do not exist, omits the `init` and
+  `init-script` subcommands). New page matches the actual
+  implementations in `arbitraitor-cli/src/main.rs` and
+  `arbitraitor-wrapper/src/shim.rs`: documents all five `wrappers`
+  subcommands (`install`, `uninstall`, `status`, `init`, `init-script`),
+  the `--shim-dir` / `--use-scripts` parent flags, every `init` flag
+  (`--install`, `--uninstall`, `--detect-shell`, `--dry-run`,
+  `--no-backup`), all 11 supported shells (bash, zsh, sh, fish, nu,
+  xonsh, powershell, elvish, posix, tcsh, oil), the marker-block
+  idempotency pattern, the default-distro `~/.local/bin` PATH matrix, the
+  `arbitraitor env` hidden alias, the deprecated `hook init` migration
+  path, and the per-verdict output behaviour table. Verified against
+  commit `7cb6906`.
+- `book/src/getting-started/wrappers.md` — expanded shell-integration
+  section. Adds the two-step install pattern (`wrappers install` then
+  `wrappers init --install`), lists all 11 supported shells (previously
+  missing `oil`), documents the `# >>> arbitraitor wrappers >>>` marker
+  convention, explains the `--shim-dir ~/.local/bin` override, and adds
+  the Debian/Ubuntu/Fedora `~/.local/bin` default-PATH matrix (with the
+  Arch/RHEL/NixOS/Alpine caveat).
+- `book/src/cli-reference.md` — `Wrappers command` section now documents
+  `init`, `init-script`, `--shim-dir`, `--use-scripts`, and the full
+  `init` flag set. `Hook command` section marked deprecated with the
+  `wrappers init --install` replacement path. Command overview table
+  updated: `wrappers` row now reflects "Install curl/wget shims + render
+  shell-integration snippet"; `hook` row marked "Deprecated bash DEBUG
+  trap (prefer `wrappers init --install`)".
+- `README.md` — "Use wrappers" section now shows the two-step install
+  pattern (`wrappers install` + `wrappers init --install`) instead of
+  only `wrappers install`. "Shell integration hooks" section renamed to
+  "Shell integration" and now documents `wrappers init` /
+  `wrappers init --install` with the deprecated `hook init` clearly
+  marked.
+
+#### Documentation corrections from adversarial review (PR #613)
+
+- Removed false safety claim that the shim directory is created with
+  `0o700` (actual: standard `create_dir_all` with process umask).
+- Removed false safety claim that foreign files are never overwritten
+  (actual: `wrappers install` removes and replaces any file at the shim
+  path; `foreign file` in `wrappers status` is an informational hint,
+  not a protection). Added explicit warning that `--shim-dir ~/.local/bin`
+  and other shared paths may clobber existing files and should be audited
+  first.
+- Removed false claim that "any script requiring approval still pauses
+  for human input". Actual: wrappers are a strict download gate;
+  `Prompt`/`Warn`/`Block`/`Error`/`Incomplete` verdicts all exit
+  non-zero with no stdout. Use `arbitraitor run` for interactive approval.
+- Corrected the supported-shells list in `README.md` from `nushell` to
+  `nu (Nushell)` and added the missing `xonsh` entry, matching
+  `arbitraitor_wrapper::init::Shell::ALL` in source.
+- Documented that `init-script` is a hidden legacy command, not equivalent
+  to `wrappers init` (it prints a generic POSIX snippet with no per-shell
+  auto-detection or runtime idempotency).
+- Documented that the `arbitraitor env` hidden alias lacks the
+  `--shim-dir` and `--use-scripts` parent flags (always uses
+  `default_shim_dir()`); use the `wrappers init` form to override the
+  directory.
+- Added the `fish` / `nu` / `powershell` exception to the marker-block
+  idempotency claim — these shells use a dedicated file, not a marked
+  block in an existing rcfile.
+- Removed fictional `arbitraitor wrap curl -- URL` references (no `wrap`
+  command exists).
+- Clarified the backup-file naming behaviour: `Path::with_extension`
+  appends `.arbitraitor.bak` for files without an extension but
+  *replaces* the extension for files with one (e.g. PowerShell
+  `profile.ps1` → `profile.arbitraitor.bak`).
+- Tightened `wrappers status` state labels: `installed (symlink)` now
+  notes target is not validated; `foreign file` now warns the file will
+  be overwritten on next `wrappers install`.
+- Added the required Unstable stability block to
+  `book/src/getting-started/wrappers.md` per `docs/doc-ownership.md`.
+
 ### Added
 
 #### Archive
