@@ -36,6 +36,7 @@ pub(crate) fn cwe_for_category(category: FindingCategory) -> Option<TaxonomyRef>
         | FindingCategory::ContentMismatch
         | FindingCategory::MalwareSignature
         | FindingCategory::ArchiveHazard
+        | FindingCategory::ParserDifferential
         | FindingCategory::PackageRisk
         | FindingCategory::PolicyViolation
         | FindingCategory::ParserError

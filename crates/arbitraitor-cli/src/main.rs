@@ -12,13 +12,17 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use arbitraitor_archive::{ArchiveLimits, detect_archive_hazards, extract_to_output_dir};
+use arbitraitor_archive::{
+    ArchiveLimits, detect_archive_hazards, detect_tar_parser_differentials, extract_to_output_dir,
+};
 use arbitraitor_artifact::classify;
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
 use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
-use arbitraitor_intel::{IngestionReport, IntelStore, UrlhausAdapter, ingest_feed};
+use arbitraitor_intel::{
+    IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
+};
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::origin::CallerOrigin;
@@ -61,8 +65,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Inspect(Box<InspectCommand>),
-    #[command(hide = true)]
-    Fetch(FetchCommand),
+    /// Fetch an artifact with provenance verification (spec §28.2).
+    Fetch(Box<FetchCommand>),
     Run(Box<run::RunCommand>),
     Daemon(DaemonCommand),
     Unpack(UnpackCommand),
@@ -138,13 +142,75 @@ struct InspectCommand {
     format: Option<ExplainFormat>,
 }
 
+/// Fetch an artifact from a URL with provenance verification (spec §28.2).
+///
+/// When invoked via a wrapper symlink (`curl`/`wget`), `--tool` is set
+/// automatically and `args` carries the passthrough arguments. In
+/// first-class mode the URL is the first positional argument and the
+/// spec-defined flags are parsed normally.
 #[derive(Args)]
-#[command(disable_help_flag = true)]
+#[allow(clippy::struct_excessive_bools)] // spec §28.2 mandates these boolean flags
 struct FetchCommand {
+    /// Wrapper tool name (set automatically by symlink invocation).
     #[arg(long, value_name = "curl|wget")]
     tool: Option<String>,
+    /// URL to fetch, or passthrough args when invoked via wrapper symlink.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+    /// Write the fetched artifact to this path instead of stdout.
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    /// Expected SHA-256 digest for provenance verification.
+    #[arg(long, value_name = "HEX")]
+    sha256: Option<Sha256Digest>,
+    /// minisign signature file path (repeatable; requires key via config).
+    #[arg(long, value_name = "PATH")]
+    signature: Vec<PathBuf>,
+    /// cosign bundle file path (repeatable).
+    #[arg(long, value_name = "PATH")]
+    cosign_bundle: Vec<PathBuf>,
+    /// cosign identity (repeatable).
+    #[arg(long, value_name = "IDENTITY")]
+    identity: Vec<String>,
+    /// cosign certificate issuer (repeatable).
+    #[arg(long, value_name = "ISSUER")]
+    issuer: Vec<String>,
+    /// Expected artifact type (e.g., `shell`, `elf`, `archive`).
+    #[arg(long, value_name = "TYPE")]
+    expected_type: Option<String>,
+    /// Expected content type (e.g., `application/x-sh`).
+    #[arg(long, value_name = "TYPE")]
+    expected_content_type: Option<String>,
+    /// Maximum bytes to fetch.
+    #[arg(long, value_name = "BYTES")]
+    max_bytes: Option<u64>,
+    /// HTTP header to send (repeatable, format: `Key: Value`).
+    #[arg(long, value_name = "HEADER")]
+    header: Vec<String>,
+    /// Policy file path.
+    #[arg(long, value_name = "PATH")]
+    policy: Option<PathBuf>,
+    /// Recursively fetch and inspect referenced payloads.
+    #[arg(long)]
+    recursive: bool,
+    /// Sandbox execution after fetch.
+    #[arg(long)]
+    sandbox: bool,
+    /// Skip interactive approval prompts.
+    #[arg(long)]
+    non_interactive: bool,
+    /// Output results as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Output results as SARIF.
+    #[arg(long)]
+    sarif: bool,
+    /// Write a JSON receipt to this path.
+    #[arg(long, value_name = "PATH")]
+    receipt: Option<PathBuf>,
+    /// Skip cache and force a fresh fetch.
+    #[arg(long)]
+    no_cache: bool,
 }
 
 /// Output format for the `--explain` report.
@@ -198,6 +264,12 @@ struct UpdateCommand {
     /// Override the `URLhaus` feed URL (CSV or JSON).
     #[arg(long, value_name = "URL")]
     urlhaus_url: Option<String>,
+    /// Ingest `OpenSSF` malicious-packages `MAL-` IDs from an OSV querybatch response.
+    #[arg(long)]
+    ossf_malicious_packages: bool,
+    /// Override the `OpenSSF` malicious-packages OSV querybatch URL or signed mirror.
+    #[arg(long, value_name = "URL")]
+    ossf_malicious_packages_url: Option<String>,
     /// Override the local intel store path.
     #[arg(long, value_name = "PATH")]
     intel_store: Option<PathBuf>,
@@ -520,41 +592,58 @@ where
 }
 
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
-    let target = wrapper_fetch_target(command.tool.as_deref())?;
-    let url = wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
-        miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
-    })?;
-
-    let (output_path, remote_name) =
-        wrapper_output_destination(command.tool.as_deref(), &command.args);
-
-    if matches!(target, Some(WrapperTarget::Curl)) {
-        let parsed = parse_curl_args(&command.args).into_diagnostic()?;
-        if !parsed.unsupported_options.is_empty() {
-            miette::bail!(
-                "unsupported curl wrapper option: {}",
-                parsed.unsupported_options.join(", ")
-            );
+    let (url, output_path, remote_name) = if command.tool.is_some() {
+        let target = wrapper_fetch_target(command.tool.as_deref())?;
+        let url =
+            wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
+                miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
+            })?;
+        let (output_path, remote_name) =
+            wrapper_output_destination(command.tool.as_deref(), &command.args);
+        if matches!(target, Some(WrapperTarget::Curl)) {
+            let parsed = parse_curl_args(&command.args).into_diagnostic()?;
+            if !parsed.unsupported_options.is_empty() {
+                miette::bail!(
+                    "unsupported curl wrapper option: {}",
+                    parsed.unsupported_options.join(", ")
+                );
+            }
         }
-    }
+        (url.to_string(), output_path, remote_name)
+    } else {
+        let url = command
+            .args
+            .first()
+            .ok_or_else(|| miette::miette!("fetch requires a URL argument"))?;
+        let output_path = command
+            .output
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        (url.clone(), output_path, false)
+    };
+
+    let signatures = pipeline::signature_inputs(
+        command.signature.clone(),
+        Vec::new(),
+        command.cosign_bundle.clone(),
+        command.identity.clone(),
+        command.issuer.clone(),
+    )?;
 
     let outcome = pipeline::inspect(
-        url,
+        &url,
+        command.receipt.as_deref(),
         None,
+        command.sha256.clone(),
         None,
-        None,
-        None,
-        pipeline::SignatureInputs::default(),
+        signatures,
         config,
         None,
     )
     .await?;
 
     if outcome.verdict != Verdict::Pass {
-        miette::bail!(
-            "wrapper rejected artifact with verdict {:?}",
-            outcome.verdict
-        );
+        miette::bail!("fetch rejected artifact with verdict {:?}", outcome.verdict);
     }
 
     let recomputed = Sha256Digest::new(Sha256::digest(&outcome.bytes).into());
@@ -566,7 +655,7 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         );
     }
 
-    emit_wrapper_output(&outcome.bytes, output_path.as_deref(), remote_name, url)?;
+    emit_wrapper_output(&outcome.bytes, output_path.as_deref(), remote_name, &url)?;
     Ok(())
 }
 
@@ -708,7 +797,10 @@ fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
         arbitraitor_archive::open_archive_with_limits(&bytes, artifact_type, limits.clone())
             .into_diagnostic()?;
     let entries = reader.entries().into_diagnostic()?;
-    let hazards = detect_archive_hazards(&entries, &limits);
+    let mut hazards = detect_archive_hazards(&entries, &limits);
+    if artifact_type == arbitraitor_artifact::ArtifactType::TarArchive {
+        hazards.extend(detect_tar_parser_differentials(&bytes, &entries, &limits));
+    }
     if !hazards.is_empty() {
         write_unpack_hazards(&mut std::io::stderr().lock(), &hazards)?;
         miette::bail!("archive hazards block hardened unpack");
@@ -736,26 +828,42 @@ fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
 
 async fn intel(command: IntelCommand) -> Result<()> {
     let IntelSubcommand::Update(update) = command.subcommand;
-    if !update.urlhaus {
-        miette::bail!("no feed selected; pass --urlhaus to ingest the URLhaus feed");
+    if !update.urlhaus && !update.ossf_malicious_packages {
+        miette::bail!(
+            "no feed selected; pass --urlhaus or --ossf-malicious-packages to ingest a feed"
+        );
     }
-    let adapter = match update.urlhaus_url {
-        Some(url) => UrlhausAdapter::with_url(url),
-        None => UrlhausAdapter::new(),
-    };
     let store_path = update
         .intel_store
         .unwrap_or_else(|| PathBuf::from(".arbitraitor/intel.json"));
     let mut store = IntelStore::open(&store_path).into_diagnostic()?;
-    let report = ingest_feed(
-        &adapter,
-        &HttpFetcher::new(),
-        &mut store,
-        &FetchPolicy::default(),
-    )
-    .await
-    .into_diagnostic()?;
-    write_intel_report(&mut std::io::stderr().lock(), &report)
+    let fetcher = HttpFetcher::new();
+    let policy = FetchPolicy::default();
+    let mut writer = std::io::stderr().lock();
+
+    if update.urlhaus {
+        let adapter = match update.urlhaus_url {
+            Some(url) => UrlhausAdapter::with_url(url),
+            None => UrlhausAdapter::new(),
+        };
+        let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
+            .await
+            .into_diagnostic()?;
+        write_intel_report(&mut writer, &report)?;
+    }
+
+    if update.ossf_malicious_packages {
+        let adapter = match update.ossf_malicious_packages_url {
+            Some(url) => OssfMaliciousPackagesAdapter::with_url(url),
+            None => OssfMaliciousPackagesAdapter::new(),
+        };
+        let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
+            .await
+            .into_diagnostic()?;
+        write_intel_report(&mut writer, &report)?;
+    }
+
+    Ok(())
 }
 
 fn write_intel_report(writer: &mut impl std::io::Write, report: &IngestionReport) -> Result<()> {

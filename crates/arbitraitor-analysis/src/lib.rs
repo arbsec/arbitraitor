@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use arbitraitor_archive::{
     ArchiveError, ArchiveLimits, ArtifactNode, ArtifactOrigin, PayloadIssue, PayloadNode,
-    detect_archive_hazards, open_archive_with_limits, walk_payloads,
+    detect_archive_hazards, detect_tar_parser_differentials, open_archive_with_limits,
+    walk_payloads,
 };
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, ShellKind, classify};
 use arbitraitor_core::metrics::{OperationMetrics, log_operation};
@@ -731,10 +732,27 @@ impl Detector for ArchiveHazardDetector {
         match reader.entries() {
             Ok(entries) => {
                 let mut findings = detect_archive_hazards(&entries, &limits);
+                if ctx.classification.artifact_type == ArtifactType::TarArchive {
+                    findings.extend(detect_tar_parser_differentials(
+                        ctx.artifact_bytes,
+                        &entries,
+                        &limits,
+                    ));
+                }
                 findings.extend(discover_companion_findings(&entries, ctx));
                 Ok(rewrite_artifact_digest(findings, &ctx.artifact_sha256))
             }
-            Err(error) => Ok(vec![archive_error_finding(ctx, &error)]),
+            Err(error) => {
+                let mut findings = vec![archive_error_finding(ctx, &error)];
+                if ctx.classification.artifact_type == ArtifactType::TarArchive {
+                    findings.extend(detect_tar_parser_differentials(
+                        ctx.artifact_bytes,
+                        &[],
+                        &limits,
+                    ));
+                }
+                Ok(rewrite_artifact_digest(findings, &ctx.artifact_sha256))
+            }
         }
     }
 }
@@ -1127,6 +1145,7 @@ fn artifact_kind(artifact_type: ArtifactType) -> ArtifactKind {
         ArtifactType::PeExecutable => ArtifactKind::PeExecutable,
         ArtifactType::ElfExecutable => ArtifactKind::ElfExecutable,
         ArtifactType::MachOExecutable => ArtifactKind::MachOExecutable,
+        ArtifactType::WindowsShortcut => ArtifactKind::WindowsShortcut,
         ArtifactType::ZipArchive => ArtifactKind::Zip,
         ArtifactType::TarArchive => ArtifactKind::Tar(TarCompression::None),
         ArtifactType::GzipCompressed => ArtifactKind::Gzip,

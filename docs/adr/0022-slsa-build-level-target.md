@@ -7,9 +7,9 @@
 ## Context
 
 Spec v0.5 §14.6 commits Arbitraitor's own releases to targeting SLSA Build
-Level 3. SLSA (Supply-chain Levels for Software Artifacts) v1.2 defines four
-build levels (L1–L3 plus Source and Dependencies tracks). L3 requires a
-hardened build platform with provenance that is non-forgeable.
+Level 3. SLSA (Supply-chain Levels for Software Artifacts) v1.2 defines
+separate Build and Source tracks. Build L3 requires a hardened build platform
+with provenance that is non-forgeable.
 
 Currently Arbitraitor uses GitHub Actions hosted runners, pinned actions by
 SHA, and GitHub artifact attestations for build provenance. This meets SLSA
@@ -43,6 +43,31 @@ is L3, contingent on:
   `SOURCE_DATE_EPOCH` normalization.
 - Until all five criteria are met, releases must not claim L3.
 
+### Source Track consumption
+
+SLSA v1.2 adds a Source Track for evidence about how source revisions are
+authored, reviewed, and accepted:
+
+- **Source L1 (version controlled):** the source revision is managed by a
+  version control system and is uniquely identifiable.
+- **Source L2 (history and provenance):** continuous change history and
+  tamper-resistant source provenance record when and how a revision was
+  created, including source-contributor identity and enforced controls.
+- **Source L3 (continuous technical controls):** the source control system
+  continuously enforces declared controls on protected references, such as
+  branch-protection rules, required status checks, and review requirements.
+
+The final v1.2 specification defines mandatory two-party review at Source L4.
+Arbitraitor consumes explicit two-party-review evidence when available, but
+must not infer it from Source L3 alone.
+
+A verified Source L2+ VSA and its supporting provenance, bound to the exact
+source revision, is a stronger provenance signal than Build L1 alone: Build L1
+shows that build provenance exists, while Source L2+ also supplies
+source-authoring history, contributor identity, and control evidence. This
+signal is additive. It does not raise the artifact's Build level or replace
+verification of the build provenance, attestation issuer, or subject digest.
+
 ## Alternatives considered
 
 - **L1 only (status field):** insufficient for a security boundary tool.
@@ -51,7 +76,10 @@ is L3, contingent on:
 
 ## References
 
-- SLSA v1.2 spec: <https://slsa.dev/spec/v1.2/build-provenance>
+- SLSA v1.2 announcement: <https://slsa.dev/blog/2025/11/announce-slsa-v1.2>
+- SLSA v1.2 specification: <https://slsa.dev/spec/v1.2/>
+- SLSA v1.2 changes: <https://slsa.dev/spec/v1.2/whats-new>
+- SLSA Build Provenance: <https://slsa.dev/spec/v1.2/build-provenance>
 - SLSA Build Levels: <https://slsa.dev/spec/v1.2/levels>
 - GitHub artifact attestations: <https://docs.github.com/actions/how-tos/secure-your-work/use-artifact-attestations>
 - Spec §14.6, §44

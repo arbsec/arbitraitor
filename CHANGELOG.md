@@ -88,8 +88,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Archive
+
+- `FindingCategory::ParserDifferential` and archive `ParserSmelting` hazard
+  coverage for spec §19.1/§19.3 parser consensus failures (CWE-436).
+
+#### Intel
+
+- `ossf-malicious-packages` feed adapter for OpenSSF malicious-packages
+  `MAL-` IDs returned by OSV.dev `querybatch` responses. Adds typed
+  `OsvMalId`, `IndicatorType::OsvMal`, and
+  `FeedSourceClass::OssfMaliciousPackages` so malicious npm packages can be
+  ingested into the signed local intel store without raw string IDs.
+
+#### Exec
+
+- `ExecError::script_io(stage, source, child_exit_code, child_stderr)`
+  — new public constructor for `ExecError::ScriptIo` that pre-renders a
+  stable, bounded (≤1 KiB) `child_detail` suffix from the captured child
+  state. The `ScriptIo` variant now carries `child_exit_code:
+  Option<i32>`, `child_stderr: Vec<u8>`, and `child_detail: String` fields
+  so callers see the actual root cause (e.g. `bash: !DOCTYPE: event not
+  found`, `unshare: operation not permitted`) when the interpreter exits
+  before consuming the streamed script bytes. Fixes the diagnostic-loss
+  half of #612: when bash or `unshare` exits early, the user-visible
+  error now distinguishes "I fed bash junk" from "kernel denied the user
+  namespace" from "Landlock blocked the interpreter path".
+- `ExecError::script_io_detail(child_exit_code, child_stderr)` — shared
+  public helper that renders the `child_detail` suffix. `PowerShellError::
+  ScriptIo` mirrors the new fields and reuses this helper so PowerShell
+  execution gets the same diagnostic improvement when wired.
+- `spawn::best_effort_capture(child, limit)` — internal drain helper that
+  captures a child's exit code and piped stdout/stderr after a prior
+  operation (typically `write_all` to the child's stdin) has already
+  failed. Swallows secondary `read_with_limit` errors so the original
+  I/O error remains the primary signal.
+
+#### MCP
+
+- `RunApprovedArtifactError::NotExecutable { artifact_type }` — new
+  variant produced by `RunApprovedArtifactTool::run` when an
+  approved-but-non-shell-script artifact's bytes are about to be piped to
+  `/bin/bash`. Closes Blocker 4 from the adversarial review of #615: an
+  agent can no longer approve an HTML / JSON / XML / archive / Unknown
+  artifact via `request_approval` and execute it via
+  `run_approved_artifact` — only `ArtifactType::ShellScript(_)` is
+  runnable through the MCP approved-execution path. CLI `run` and MCP
+  `run_approved_artifact` now enforce the same content-type gate
+  (ADR-0036, issue #612).
+
+#### CLI
+
+- `arbitraitor execute` (the approved-artifact execution command,
+  separate from `arbitraitor run`) now gates execution by classified
+  `ArtifactType` before piping bytes to `/bin/bash`. Round 2 of the
+  adversarial review of #615 found that the round-1 fix only gated the
+  `run` and MCP `run_approved_artifact` paths; the `execute` command
+  (invoked as `arbitraitor execute <APPROVAL>`) accepted the
+  same bash-execution approval file and piped artifact bytes without
+  classifying them. The gate mirrors the round-1 fix: only
+  `ArtifactType::ShellScript(_)` is permitted; everything else
+  (HTML / JSON / XML / archives / `GenericText/Binary` /
+  `PowerShellScript` / `PythonScript` / `JavaScript` / `Unknown`) fails
+  closed with `miette::bail!("... is not executable via the approved
+  execute path; only shell scripts are runnable (ADR-0036, issue #612)")`.
+  Native executables are gated out as well because the approval flow
+  always binds to the bash interpreter (native execution uses a separate
+  release path).
+
+### Changed
+
+#### CLI
+
+- `arbitraitor run` now gates execution by classified `ArtifactType`.
+  Only `ShellScript(_)` (`Posix` / `Bash` / `Zsh`) and native executable
+  types (`PeExecutable`, `ElfExecutable`, `MachOExecutable`) reach
+  `ExecutionMode::Script` / `ExecutionMode::Native`. Every other type —
+  `HtmlDocument`, `JsonDocument`, `XmlDocument`, `GenericText`,
+  `GenericBinary`, archives (`ZipArchive`, `TarArchive`,
+  `*Compressed`), `PowerShellScript`, `PythonScript`, `JavaScript`, and
+  `Unknown` — fails closed with `RunFailure::Blocked` (exit code
+  `BlockedByPolicy`) before reaching the execution layer. Piping those
+  bytes to `/bin/bash` was incorrect (bash doesn't understand them) and
+  unsafe (HTML/JSON/XML can incidentally contain bash-parseable
+  `$(...)`, redirections, and pipes). Fixes the content-type-gate half
+  of #612. See ADR-0036 for the rationale.
+- `InspectedArtifact` (private to `arbitraitor-cli/src/run/`) now carries
+  `ArtifactType` directly rather than its stringified `{:?}` form, and the
+  `is_native: bool` field is dropped in favor of deriving native vs.
+  script from `artifact_type` via `execution_mode_for_type`. Receipt
+  serialization is unchanged (`format!("{:?}", artifact_type)` is passed
+  to `ReceiptBuilder::artifact_type` on demand).
+
+### Fixed
+
+#### Exec
+
+- `ExecError::script_io_detail` is now panic-safe when the captured child
+  stderr is attacker-controlled UTF-8 longer than 1 KiB. The previous
+  byte-index slice `&str[..1024]` panicked if byte 1024 fell inside a
+  multibyte codepoint; the fix truncates the BYTES first, then
+  lossy-decodes via `String::from_utf8_lossy`, which replaces any partial
+  trailing codepoint with U+FFFD. Found by 3 of the 5 adversarial
+  reviewers of #615 (Blocker 1, MEDIUM severity).
+- `ExecError::script_io_detail` now escapes Arbitraitor untrusted-data
+  markers (`<<ARBITRAITOR_UNTRUSTED_DATA_START>>` /
+  `<<ARBITRAITOR_UNTRUSTED_DATA_END>>`) inside the captured child
+  stderr, satisfying the Safe Presentation invariant (ADR-0016) that
+  untrusted text must be escaped and bounded before display. The
+  `{:?}` debug-format at the call site already neutralizes ANSI control
+  sequences; the marker escape additionally prevents prompt-injection
+  in downstream agent consumers that rely on the markers to fence
+  untrusted content. Found by 2 of the 5 adversarial reviewers of #615
+  (Blocker 2, MEDIUM severity).
+- `ScriptExecution::execute` and `PowerShellExecution::execute` now
+  `drop(stdin)` before calling `best_effort_capture` on the write/flush
+  failure path. Without this, if the child was still alive (write failed
+  due to EPIPE on one write, not because the child exited), the child
+  could be blocked on stdin read while the parent was blocked on
+  stdout/stderr drain, causing an indefinite deadlock. Found by 2 of 3
+  fresh adversarial review lanes (round 3, MAJOR severity).
+- The content-type gate in `arbitraitor run`, `arbitraitor execute`, and
+  MCP `run_approved_artifact` now restricts to `ShellScript(Posix | Bash)`
+  instead of `ShellScript(_)`. `ShellScript(Zsh)` is now blocked because
+  `/bin/bash` cannot safely interpret zsh syntax — the same wrong-
+  interpreter class that ADR-0036 rejects for Python/PowerShell/JS.
+  Found by the fresh adversarial code-quality review (round 3, MAJOR
+  severity).
+- `arbitraitor execute` now re-verifies the SHA-256 of the loaded CAS
+  bytes against the approved digest before classification and execution.
+  Closes a TOCTOU gap where a same-UID local attacker could mutate the
+  CAS object between ContentStore verification and read_to_end.
+  Found by the fresh adversarial security review (round 3, LOW severity).
+- MCP `error_response` now sanitizes error messages via
+  `sanitize_for_agent` before including them in JSON-RPC responses.
+  Attacker-controlled child stderr was reaching the `"error"` field
+  without untrusted-data fencing, a Safe Presentation (ADR-0016) gap.
+  Found by the fresh adversarial security review (round 3, MEDIUM).
+- `ExecError::script_io_detail` message for the `(None, non_empty_stderr)`
+  case changed from "child exited before reading stdin" to "child
+  produced stderr without an exit code" — the `None` exit-code also
+  covers signal termination and wait failure, not just early exit.
+
+### Added
+
 #### Receipt
 
+- `arbitraitor_model::vex` now models the VEX format matrix for receipt
+  companion artifacts: OpenVEX 0.2.0 parsing with the current product and
+  vulnerability structs, rejection of OpenVEX 0.0.x/0.1.x contexts, CSAF 2.0
+  and CSAF 2.1 VEX profile parsing, CSAF 2.1 CVSS v4 vector strings, CSAF
+  involvement statements, typed parser errors, and explicit
+  `VexFormatVersion` labels.
+- `arbitraitor_model::vex::VexLimits` bounds untrusted OpenVEX and CSAF VEX
+  parsing by raw bytes, modeled collection counts, map entries, and string
+  lengths. VEX hash maps now parse SHA-256 entries into `Sha256Digest`, CSAF
+  VEX category matching is exact, timestamps require RFC 3339 timezone text,
+  and parser error display avoids echoing attacker-controlled document fields.
 - `arbitraitor-receipt::Receipt::to_sarif()` — converts findings to a
   SARIF 2.1.0 report per spec §31.4. Includes rule definitions with
   multi-taxonomy mappings (CWE, CAPEC, OWASP, ATT&CK) per SARIF §3.59.
@@ -101,6 +256,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Sandbox
 
+- `arbitraitor_sandbox::LandlockAbiVersion` and
+  `probe_landlock_abi_version()` record the running Linux kernel's Landlock ABI
+  via `LANDLOCK_CREATE_RULESET_VERSION`, exposing the observed ABI in
+  contained-execution receipt controls without changing enforcement policy.
 - `arbitraitor-sandbox::windows_adapters` — new public module with five
   Windows sandbox adapter stubs per spec §27.5: `WindowsSandboxAdapter`,
   `AppContainerAdapter`, `JobObjectsAdapter`, `WdacAdapter`,
@@ -109,6 +268,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fetch
 
+- `RedirectCredentialSecrecy` records whether a credential-bearing redirect
+  remained secret or would have leaked a bearer token, cookie, or default
+  `.netrc` token across a non-HTTP protocol boundary. Fetch now fails closed
+  before following `http(s)` redirects into IMAP, LDAP, POP3, SMTP, FTP, file,
+  gopher, or SMB destinations when Authorization, Cookie, or caller-declared
+  netrc credentials are configured; receipts expose the outcome in retrieval
+  metadata.
 - `TlsVerifier::{PlatformVerifier, PinnedWebPki}` and
   `FetchPolicy::tls_verifier` add a policy-selectable TLS verifier type for
   spec §41.4.3. The default is `PlatformVerifier`; transport behavior is
@@ -141,6 +307,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   .resolve_to_addrs is skipped so reqwest uses the proxy's DNS resolution,
   and receipt metadata records that connected-peer verification observes
   the proxy peer, not the actual target.
+
+#### Documentation
+
+- [ADR 0034](docs/adr/0034-apple-containerization-ga-strategy.md) —
+  Apple Containerization GA strategy for macOS 26+. Documents the
+  Containerization framework (open-sourced at WWDC 2025-06-09) as the
+  preferred `contained` assurance path on macOS 26+ Apple silicon, with
+  per-container lightweight VMs, isolated IP, EXT4 block devices, and
+  sub-second cold starts. The Endpoint Security framework remains the
+  observation-only path on macOS 13–15, Intel macOS, and any host where
+  the `container` CLI is unavailable. Supersedes the GA-replacement
+  deferral in [ADR 0024](docs/adr/0024-macos-containment-strategy.md);
+  ADR 0024 stays Accepted for the macOS 13–15 / Intel surface until the
+  ContainerizationAdapter lands.
 
 #### Antivirus
 
@@ -421,6 +601,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ADRs 0022–0026 accepted: SLSA Build L3 target (0022), in-toto Statement receipt envelope (0023), macOS containment strategy (0024), OpenSSF Scorecard/deps.dev/GUAC integration (0025), EU CRA/NIST SSDF compliance mapping (0026). All 26 ADRs are now Accepted.
 
+#### Documentation
+
+- ADR-0030 (`docs/adr/0030-sbom-vex-ingestion-profiles.md`) accepted:
+  SBOM/VEX ingestion profiles aligned with the CISA August 2025 *SBOM
+  Minimum Elements* update (Component Hash, License, Tool Name,
+  Generation Context additions; Software Producer and Coverage renames)
+  and the May 2026 CISA+G7 *SBOM for AI: Minimum Elements* guidance
+  (System-Level Properties, Data Properties, Model Properties,
+  Infrastructure, Security Properties clusters). CycloneDX 1.6+ profile
+  supports the CDXA ML/AI and CBOM cryptography extensions; SPDX 2.2.1
+  profile uses a per-field mapping to the CISA 2025 minimum elements
+  (SPDX Lite is rejected); OpenVEX 0.2.0 is accepted alongside the SBOM
+  and indexed by PURL (semantics deferred to ADR-0029); CSAF 2.1
+  (ISO/IEC 20153, May 2025) carries signed VEX and security advisory
+  content. Decision: Arbitraitor ingests but does not generate SBOM/VEX
+  artifacts. EU CRA Annex I Part II mandate effective 11 December 2027
+  is informational; CycloneDX and SPDX profiles consume CRA-shaped
+  documents unmodified. New user-facing book page
+  `book/src/architecture/sbom-and-vex.md` lists the per-format field
+  mapping and the AI-cluster ingestion envelope.
+
 #### CLI
 
 - `arbitraitor doctor --json` — machine-readable output (human-readable is now the default)
@@ -482,6 +683,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `arbitraitor fetch` promoted from hidden wrapper alias to first-class
+  subcommand per spec §28.2. Removed `#[command(hide = true)]` and
+  `disable_help_flag`; added the full spec-defined flag surface:
+  `-o/--output`, `--sha256`, `--signature`, `--cosign-bundle`, `--identity`,
+  `--issuer`, `--expected-type`, `--expected-content-type`, `--max-bytes`,
+  `--header`, `--policy`, `--recursive`, `--sandbox`, `--non-interactive`,
+  `--json`, `--sarif`, `--receipt`, `--no-cache`. Wrapper symlink invocations
+  (`curl`/`wget`) continue to work via `--tool` and passthrough args (#477).
+- ADR-0030 (SBOM/VEX ingestion profiles) factual corrections from Oracle
+  adversarial review: corrected the SBOM-for-AI cluster count from 5 to 7
+  (Metadata, System Level Properties, Models, Dataset Properties,
+  Infrastructure, Security Properties, KPI) per the G7/CISA source;
+  corrected OpenVEX 0.2.0 status mapping to the four spec-defined values
+  (`not_affected`, `affected`, `fixed`, `under_investigation`) and marked
+  `tooling` as optional with `author`/`version` required; corrected SPDX
+  ISO year from `5962:2024` to `5962:2021` with a resolvable ISO
+  catalogue URL; corrected CSAF standard status (2.0 = ISO/IEC 20153:2025,
+  2.1 = OASIS CSD02 Feb 2026, not yet ISO); corrected SPDX/CycloneDX
+  field mappings (SPDX annotations only have `REVIEW`/`OTHER`; CycloneDX
+  generation context lives in `metadata.lifecycles[].phase`); replaced
+  dead CISA URLs with canonical routes and marked the CISA 2025 SBOM
+  page as a public-comment draft; fixed broken book link from
+  `book/src/architecture/security.md` (`../sbom-and-vex.md` →
+  `./sbom-and-vex.md`); bumped ADR count from 27 to 28 in `AGENTS.md`
+  and `README.md`.
 - `WasmPlugin` and `wasm_engine` modules are now feature-gated behind `experimental-wasm` (off by default). The `analyze` method logs a warning when called, rather than silently returning empty findings. ADR-0006 remains Accepted but is partially implemented — the WIT bridge is not yet wired.
 - `shim install npm` now generates a working shim that invokes `arb pm run --tool npm`, replacing the previous stub that errored with "package-manager shims are not yet implemented".
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
@@ -497,8 +723,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin manifest now accepts a `[capabilities]` table declaring `network`, `filesystem`, `process`, `max_memory_bytes`, `max_cpu_ms`
 - `SubprocessExecutor::with_network_isolated(bool)` replaced with `with_network_capability(NetworkCapability)`; the capability must come from the plugin's admitted manifest
 
+#### Documentation
+
+- ADR-0022 now references the final SLSA v1.2 Build Provenance URL and
+  documents Source Track consumption, including how verified Source L2+
+  evidence strengthens Build L1 provenance without raising the Build level
+  (#461).
+
 ### Security
 
+- Tar archive inspection now checks for parser-smelting PAX `size=` desync
+  patterns and records `parser_differential` findings that refuse release;
+  `arbitraitor doctor` verifies the locked `tar` crate is at the patched
+  0.4.46 floor for GHSA-3pv8-6f4r-ffg2 (#459).
 - Plugin registry now enforces ADR-0011 trust-tier capability admission: `community-reviewed` and `community-unreviewed` plugins are rejected at registration when they declare `network`, `process = "spawn"`, or `filesystem = "read-write"` capabilities (#379)
 - `OperationPlan::validate_for_plugin_capabilities` now has a production caller via `PluginRegistry::validate_plan`, tying wrapper-produced plans to the capabilities declared at admission
 

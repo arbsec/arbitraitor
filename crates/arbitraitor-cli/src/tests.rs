@@ -441,6 +441,8 @@ fn intel_update_parses_urlhaus_flag() -> Result<(), Box<dyn std::error::Error>> 
             assert!(update.urlhaus);
             assert_eq!(update.intel_store, Some(PathBuf::from("/tmp/intel.json")));
             assert!(update.urlhaus_url.is_none());
+            assert!(!update.ossf_malicious_packages);
+            assert!(update.ossf_malicious_packages_url.is_none());
         }
         _ => return Err("parsed wrong command".into()),
     }
@@ -465,6 +467,32 @@ fn intel_update_parses_custom_urlhaus_url() -> Result<(), Box<dyn std::error::Er
             assert_eq!(
                 update.urlhaus_url.as_deref(),
                 Some("https://mirror.example/urlhaus.csv")
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn intel_update_parses_ossf_malicious_packages_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "intel",
+        "update",
+        "--ossf-malicious-packages",
+        "--ossf-malicious-packages-url",
+        "https://mirror.example/osv-querybatch.json",
+    ])?;
+
+    match cli.command {
+        Command::Intel(super::IntelCommand {
+            subcommand: super::IntelSubcommand::Update(update),
+        }) => {
+            assert!(update.ossf_malicious_packages);
+            assert_eq!(
+                update.ossf_malicious_packages_url.as_deref(),
+                Some("https://mirror.example/osv-querybatch.json")
             );
         }
         _ => return Err("parsed wrong command".into()),
@@ -1268,4 +1296,275 @@ fn report_handler_accepts_valid_finding_id() {
         result.is_ok(),
         "valid report command must succeed: {result:?}"
     );
+}
+
+#[test]
+fn fetch_first_class_mode_parses_url_in_args() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "fetch", "https://example.com/file"])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert!(fetch.tool.is_none());
+            assert_eq!(fetch.args, ["https://example.com/file"]);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_output_long_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--output",
+        "/tmp/file",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(
+                fetch.output.as_deref(),
+                Some(std::path::Path::new("/tmp/file"))
+            );
+            assert_eq!(fetch.args, ["https://example.com/file"]);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_output_short_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "-o",
+        "/tmp/file",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(
+                fetch.output.as_deref(),
+                Some(std::path::Path::new("/tmp/file"))
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let digest = "ab".repeat(32);
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--sha256",
+        &digest,
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(
+                fetch.sha256.as_ref().ok_or("missing digest")?.to_string(),
+                digest
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_rejects_invalid_sha256_flag() {
+    let result = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--sha256",
+        "not-a-digest",
+        "https://example.com/file",
+    ]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn fetch_accepts_provenance_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--signature",
+        "artifact.minisig",
+        "--cosign-bundle",
+        "artifact.bundle",
+        "--identity",
+        "builder@example.test",
+        "--issuer",
+        "https://issuer.example.test",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(fetch.signature.len(), 1);
+            assert_eq!(fetch.cosign_bundle.len(), 1);
+            assert_eq!(fetch.identity, ["builder@example.test"]);
+            assert_eq!(fetch.issuer, ["https://issuer.example.test"]);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_receipt_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--receipt",
+        "/tmp/receipt.json",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(
+                fetch.receipt.as_deref(),
+                Some(std::path::Path::new("/tmp/receipt.json"))
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_policy_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--policy",
+        "/tmp/policy.toml",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(
+                fetch.policy.as_deref(),
+                Some(std::path::Path::new("/tmp/policy.toml"))
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_boolean_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--recursive",
+        "--sandbox",
+        "--non-interactive",
+        "--json",
+        "--sarif",
+        "--no-cache",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert!(fetch.recursive);
+            assert!(fetch.sandbox);
+            assert!(fetch.non_interactive);
+            assert!(fetch.json);
+            assert!(fetch.sarif);
+            assert!(fetch.no_cache);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_repeatable_header_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--header",
+        "Authorization: Bearer token",
+        "--header",
+        "X-Custom: value",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(fetch.header.len(), 2);
+            assert_eq!(fetch.header[0], "Authorization: Bearer token");
+            assert_eq!(fetch.header[1], "X-Custom: value");
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_max_bytes_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--max-bytes",
+        "1048576",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(fetch.max_bytes, Some(1_048_576));
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_accepts_expected_type_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--expected-type",
+        "shell",
+        "--expected-content-type",
+        "application/x-sh",
+        "https://example.com/file",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(fetch.expected_type.as_deref(), Some("shell"));
+            assert_eq!(
+                fetch.expected_content_type.as_deref(),
+                Some("application/x-sh")
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn fetch_wrapper_mode_still_parses_tool_and_args() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "fetch",
+        "--tool",
+        "curl",
+        "--",
+        "-fsSL",
+        "https://example.com/install.sh",
+    ])?;
+    match cli.command {
+        Command::Fetch(fetch) => {
+            assert_eq!(fetch.tool.as_deref(), Some("curl"));
+            assert_eq!(fetch.args, ["-fsSL", "https://example.com/install.sh"]);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
 }

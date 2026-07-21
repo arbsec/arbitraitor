@@ -144,6 +144,33 @@ When Level 3 (Contained) execution is requested, the following controls are veri
 | Capability probe | Proves controls are active |
 
 These are reported per-control in the receipt, not as a single boolean.
+Landlock ABI probing and receipt recording are documented in ADR 0028.
+
+## macOS containment (§27.4)
+
+macOS `contained` assurance has two complementary paths:
+
+- **Containerization (preferred on macOS 26+)** — Apple's [Containerization](https://github.com/apple/containerization)
+  framework (open-sourced WWDC 2025-06-09) gives each Linux container its own
+  lightweight VM: per-container EXT4 block device, isolated IP on a host-side
+  bridge, sub-second start times, and no shared kernel. The VM boundary
+  satisfies the ADR-0007 control matrix without a System Extension, Developer
+  ID signing, or end-user install consent.
+- **Endpoint Security framework (observation-only)** — still the supported
+  path on macOS 13–15, Intel macOS, and any host where `container` CLI is
+  unavailable. Provides process-tree, file-access, and network-connection
+  events but cannot enforce a complete containment profile; `contained`
+  requests downgrade to `mediated` (or `block` per policy).
+
+Receipts on macOS 26+ record `containerization_available` alongside the
+other §27.7 effective-controls so auditors can distinguish
+`contained-on-containerization` from `contained-on-other-adapter`.
+
+<!-- markdownlint-disable-next-line MD057 -->
+See [ADR 0024](../adr/0024-macos-containment-strategy.md) for the
+<!-- markdownlint-disable-next-line MD057 -->
+macOS 13–15 / Intel deferral and [ADR 0034](../adr/0034-apple-containerization-ga-strategy.md)
+for the macOS 26+ Containerization strategy.
 
 ## Receipt integrity
 
@@ -157,3 +184,10 @@ Receipts are signed using RFC 8785 JCS canonical JSON. The signature covers:
 - Capability matrix (for contained execution)
 
 Receipts can be verified independently and used as audit evidence.
+
+## SBOM and VEX ingestion
+
+Arbitraitor consumes SBOM and VEX documents at the policy and provenance boundary but never produces, signs, or republishes them. Ingestion covers four formats: CycloneDX 1.6+ (with the CDXA ML/AI and CBOM cryptography extensions), SPDX 2.2.1, OpenVEX 0.2.0, and CSAF 2.1 (ISO/IEC 20153, May 2025). The expected shape is the CISA 2025 *SBOM Minimum Elements* revision (the four new fields Component Hash, License, Tool Name, Generation Context, plus the Software Producer and Coverage renames) and, when an SBOM declares AI content, the five SBOM-for-AI clusters (System-Level Properties, Data Properties, Model Properties, Infrastructure, Security Properties). Documents missing required fields are rejected with a typed error; AI clusters are surfaced into receipt metadata and treated as advisory signals (never verdict inputs). EU CRA Annex I Part II becomes effective for products placed on the EU market from 11 December 2027; the CycloneDX and SPDX profiles here consume CRA-shaped SBOMs unmodified.
+
+<!-- markdownlint-disable-next-line MD057 -->
+See [ADR 0030](./adr/0030-sbom-vex-ingestion-profiles.md) for the per-format field mapping and [SBOM and VEX ingestion](./sbom-and-vex.md) for the user-facing reference.

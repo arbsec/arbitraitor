@@ -6,10 +6,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_fetch::{
     FetchError, FetchPolicy, FetchRequest, FetchScheme, FetchUrl, Fetcher, FileFetcher,
-    HttpFetcher, SizeLimitKind, TlsVerifier, VecSink, redact_url, validate_ip,
+    HttpFetcher, RedirectCredentialSecrecy, SizeLimitKind, TlsVerifier, VecSink, redact_url,
+    validate_ip,
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_testkit::mock_server::MockHttpServer;
+use proptest::prelude::*;
+use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -294,7 +297,63 @@ async fn redirect_policy_records_chain_when_enabled() -> Result<(), Box<dyn std:
     assert_eq!(sink.as_bytes(), b"redirect complete");
     assert_eq!(receipt.metadata.redirect_chain.len(), 2);
     assert!(receipt.metadata.final_url.is_some());
+    assert_eq!(
+        receipt.metadata.redirect_credential_secrecy,
+        RedirectCredentialSecrecy::Ok
+    );
     Ok(())
+}
+
+#[tokio::test]
+async fn credential_cross_protocol_redirect_fails_closed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = MockHttpServer::start().await;
+    let route_path = server
+        .redirect_to("imap://mail.example.invalid/inbox")
+        .await;
+    let mut policy = http_policy();
+    policy.max_redirects = 1;
+    let mut sink = VecSink::new();
+
+    let error = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&route_path)?, policy).with_authorization_header(
+                SecretString::from("Bearer super-secret-token".to_owned()),
+            ),
+            &mut sink,
+        )
+        .await
+        .err()
+        .ok_or("credential-bearing IMAP redirect must fail closed")?;
+
+    assert!(matches!(
+        error,
+        FetchError::CrossProtocolCredentialRedirect {
+            secrecy: RedirectCredentialSecrecy::BearerLeaked
+        }
+    ));
+    assert!(!format!("{error}").contains("super-secret-token"));
+    assert!(sink.as_bytes().is_empty());
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn credential_redirect_error_does_not_render_secret(token in "[A-Za-z0-9!@#$%^&*]{8,64}") {
+        // Construct an error that should never include the secret token.
+        // The token must be long enough and contain characters outside the
+        // canonical Display output of FetchError variants so we are actually
+        // testing leakage of the literal secret value, not substring
+        // collisions with enum variant names.
+        let error = FetchError::CrossProtocolCredentialRedirect {
+            secrecy: RedirectCredentialSecrecy::BearerLeaked,
+        };
+        let display = format!("{error}");
+        let debug = format!("{error:?}");
+
+        prop_assert!(!display.contains(&token));
+        prop_assert!(!debug.contains(&token));
+    }
 }
 #[tokio::test]
 async fn size_limit_stops_streaming_before_sink_write() -> Result<(), Box<dyn std::error::Error>> {

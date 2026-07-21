@@ -91,6 +91,37 @@ If URLhaus cannot be reached during a pipeline run:
 - No cache: Skip URLhaus lookup, proceed without intelligence enrichment
 - Intelligence lookup failure never blocks inspection
 
+## OpenSSF malicious packages
+
+OpenSSF malicious-packages publishes malicious package reports as OSV
+advisories with `MAL-YYYY-NNNN` identifiers. Arbitraitor ingests these as
+`osv-mal` indicators from OSV.dev `querybatch` responses or signed mirrors.
+
+### Update command
+
+```sh
+arbitraitor intel update --ossf-malicious-packages
+```
+
+Use `--ossf-malicious-packages-url` to point at a pre-fetched signed mirror or
+test fixture. Network access is explicit; package inspection does not perform
+implicit live OSV lookups.
+
+### Indicator mapping
+
+| OSV field | Arbitraitor field |
+|-----------|-------------------|
+| `id` beginning with `MAL-` | `indicator.value` with `indicator_type = "osv-mal"` |
+| `modified` / `published` | `source_update_time`, `first_seen` |
+| `affected[].package` | evidence package label |
+| `summary` / `details` / `aliases` | evidence notes |
+
+### Freshness requirements
+
+OpenSSF malicious-package snapshots are Tier-1 current when mirrored from OSV
+data updated within 24 hours. Policies that require current package-malware
+intelligence fail closed when the signed snapshot is stale or unavailable.
+
 ## Community Feed
 
 The ArbSec community feed aggregates indicators submitted by users and reviewed by the security team.

@@ -49,6 +49,15 @@ supersede it.
 | [0025](0025-ossf-scorecard-depsdev-guac-integration.md) | OpenSSF Scorecard, deps.dev, and GUAC as optional integrations | Accepted | #275 |
 | [0026](0026-eu-cra-nist-ssdf-compliance-mapping.md) | EU CRA / NIST SSDF informational compliance mapping | Accepted | #276 |
 | [0027](0027-cli-pipeline-boundary.md) | CLI inspect pipeline boundary | Accepted | #436 |
+| [0028](0028-landlock-abi-matrix.md) | Landlock ABI probe and receipt recording | Accepted | #466 |
+| [0029](0029-vex-version-matrix.md) | VEX format support matrix | Accepted | #468 |
+| [0030](0030-sbom-vex-ingestion-profiles.md) | SBOM/VEX ingestion profiles (CISA 2025 minimum elements + SBOM-for-AI) | Accepted | #467 |
+| [0031](0031-ossf-malicious-packages-feed.md) | OpenSSF malicious-packages feed via OSV.dev | Accepted | #474 |
+| [0032](0032-tar-parser-consensus-check.md) | Tar parser consensus check | Accepted | #459 |
+| [0033](0033-fetch-cross-protocol-credential-secrecy.md) | Fetch cross-protocol credential secrecy | Accepted | #472 |
+| [0034](0034-apple-containerization-ga-strategy.md) | Apple Containerization GA strategy for macOS 26+ | Proposed | #475 |
+| [0035](0035-lnk-argument-padding-cve-2025-9491.md) | LNK argument padding detection (CVE-2025-9491) | Accepted | #473 |
+| [0036](0036-run-pipeline-content-type-execution-gate.md) | `run` pipeline content-type execution gate | Accepted | #612 |
 
 ## Format
 

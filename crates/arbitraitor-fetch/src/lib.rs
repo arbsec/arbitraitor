@@ -16,8 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arbitraitor_model::ids::{ArtifactId, Sha256Digest};
+pub use arbitraitor_model::transport::RedirectCredentialSecrecy;
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue};
+use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -29,6 +31,9 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_mins(5);
 const DEFAULT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const USER_AGENT_PREFIX: &str = "Arbitraitor/";
+const CROSS_PROTOCOL_CREDENTIAL_SCHEMES: &[&str] = &[
+    "imap", "ldap", "pop3", "smtp", "ftp", "file", "gopher", "smb",
+];
 
 /// A parsed artifact URL.
 ///
@@ -182,6 +187,8 @@ pub struct FetchRequest {
     /// the request via [`Self::with_cancellation`], and keep a clone to
     /// invoke [`FetchCancellation::cancel`] on.
     pub cancellation: FetchCancellation,
+    /// Credential-bearing request headers configured by the caller.
+    pub credentials: RequestCredentials,
 }
 
 impl FetchRequest {
@@ -193,6 +200,7 @@ impl FetchRequest {
             policy,
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
+            credentials: RequestCredentials::default(),
         }
     }
 
@@ -204,6 +212,7 @@ impl FetchRequest {
             policy,
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
+            credentials: RequestCredentials::default(),
         }
     }
 
@@ -215,6 +224,7 @@ impl FetchRequest {
             policy,
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
+            credentials: RequestCredentials::default(),
         }
     }
 
@@ -235,6 +245,65 @@ impl FetchRequest {
         self.cancellation = cancellation;
         self
     }
+
+    /// Adds an `Authorization` header value for this fetch.
+    ///
+    /// The value is kept in a secrecy wrapper and is never included in errors,
+    /// logs, or receipts.
+    #[must_use]
+    pub fn with_authorization_header(mut self, value: SecretString) -> Self {
+        self.credentials.authorization = Some(value);
+        self
+    }
+
+    /// Adds a `Cookie` header value for this fetch.
+    ///
+    /// The value is kept in a secrecy wrapper and is never included in errors,
+    /// logs, or receipts.
+    #[must_use]
+    pub fn with_cookie_header(mut self, value: SecretString) -> Self {
+        self.credentials.cookie = Some(value);
+        self
+    }
+
+    /// Records that a default `.netrc` token is available to the transport.
+    ///
+    /// Arbitraitor does not read `.netrc`; callers that bridge a transport with
+    /// default netrc behavior must pass the token here so redirect secrecy can
+    /// fail closed before a cross-protocol hop.
+    #[must_use]
+    pub fn with_netrc_default_token(mut self, value: SecretString) -> Self {
+        self.credentials.netrc_default_token = Some(value);
+        self
+    }
+}
+
+/// Credential-bearing fetch inputs guarded by redirect policy.
+#[derive(Clone, Debug, Default)]
+pub struct RequestCredentials {
+    authorization: Option<SecretString>,
+    cookie: Option<SecretString>,
+    netrc_default_token: Option<SecretString>,
+}
+
+impl RequestCredentials {
+    fn header_map(&self) -> Result<HeaderMap, FetchError> {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = &self.authorization {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                secret_header(value, "authorization")?,
+            );
+        }
+        if let Some(value) = &self.cookie {
+            headers.insert(reqwest::header::COOKIE, secret_header(value, "cookie")?);
+        }
+        Ok(headers)
+    }
+}
+
+fn secret_header(value: &SecretString, name: &'static str) -> Result<HeaderValue, FetchError> {
+    HeaderValue::from_str(value.expose_secret()).map_err(|_| FetchError::InvalidHeader { name })
 }
 
 /// TLS certificate verifier selected by fetch policy.
@@ -398,6 +467,8 @@ pub struct FetchMetadata {
     pub final_origin: Option<String>,
     /// Retriever version string (spec §11.5).
     pub retriever_version: String,
+    /// Cross-protocol redirect credential-secrecy outcome.
+    pub redirect_credential_secrecy: RedirectCredentialSecrecy,
 }
 
 /// Receipt returned after bytes have been streamed into an [`ArtifactSink`].
@@ -503,6 +574,18 @@ pub enum FetchError {
     /// Redirect response was malformed.
     #[error("malformed redirect response")]
     MalformedRedirect,
+    /// A credential-bearing request tried to redirect into a non-HTTP protocol.
+    #[error("credential-bearing cross-protocol redirect blocked: {secrecy:?}")]
+    CrossProtocolCredentialRedirect {
+        /// Credential class protected by the fail-closed block.
+        secrecy: RedirectCredentialSecrecy,
+    },
+    /// A configured sensitive request header was syntactically invalid.
+    #[error("invalid sensitive request header: {name}")]
+    InvalidHeader {
+        /// Redacted header name.
+        name: &'static str,
+    },
     /// Connected peer address differs from approved resolved addresses.
     ///
     /// A DNS rebinding attack resolved to an approved IP during the policy
@@ -648,7 +731,13 @@ impl Fetcher for HttpFetcher {
         };
 
         ensure_required_digest(request.expected_sha256.as_ref(), &request.policy)?;
-        let future = self.fetch_inner(url, &request.policy, request.expected_sha256.as_ref(), sink);
+        let future = self.fetch_inner(
+            url,
+            &request.policy,
+            request.expected_sha256.as_ref(),
+            &request.credentials,
+            sink,
+        );
         tokio::time::timeout(request.policy.total_timeout, future)
             .await
             .map_err(|_| FetchError::Timeout { stage: "total" })?
@@ -661,6 +750,7 @@ impl HttpFetcher {
         url: FetchUrl,
         policy: &FetchPolicy,
         expected_sha256: Option<&Sha256Digest>,
+        credentials: &RequestCredentials,
         sink: &mut dyn ArtifactSink,
     ) -> Result<FetchReceipt, FetchError> {
         ensure_scheme_allowed(
@@ -671,6 +761,7 @@ impl HttpFetcher {
         let mut current = url.into_url();
         let mut visited = HashSet::new();
         let mut redirect_chain = Vec::new();
+        let mut headers = credentials.header_map()?;
 
         for redirect_count in 0..=policy.max_redirects {
             if !visited.insert(current.clone()) {
@@ -680,7 +771,7 @@ impl HttpFetcher {
             let resolved_ips = unique_ips(&resolved_addrs);
             debug!(url = %redact_parsed_url(&current), resolved_count = resolved_ips.len(), "resolved fetch host");
             let client = build_http_client(policy, &current, &resolved_addrs)?;
-            let response = execute_request(&client, current.clone()).await?;
+            let response = execute_request(&client, current.clone(), &headers).await?;
             let status = response.status();
 
             if status.is_redirection() {
@@ -690,9 +781,11 @@ impl HttpFetcher {
                     });
                 }
                 let next = redirect_target(&current, response.headers())?;
+                ensure_cross_protocol_credentials_secret(&current, &next, credentials)?;
                 ensure_scheme_allowed(FetchScheme::from_str(next.scheme()), next.scheme(), policy)?;
                 ensure_no_insecure_downgrade(current.scheme(), next.scheme(), policy)?;
                 ensure_cross_origin_allowed(&current, &next, policy)?;
+                strip_credentials_on_cross_origin(&mut headers, &current, &next, policy);
                 trace!(from = %redact_parsed_url(&current), to = %redact_parsed_url(&next), "following policy-approved redirect");
                 redirect_chain.push(FetchUrl(current));
                 current = next;
@@ -710,9 +803,12 @@ impl HttpFetcher {
                 policy,
                 expected_sha256,
                 sink,
-                resolved_ips,
-                FetchUrl(current),
-                redirect_chain,
+                ResponseMetadataInput {
+                    resolved_ips,
+                    final_url: FetchUrl(current),
+                    redirect_chain,
+                    redirect_credential_secrecy: RedirectCredentialSecrecy::Ok,
+                },
             )
             .await;
         }
@@ -853,6 +949,7 @@ fn build_http_client(
 async fn execute_request(
     client: &reqwest::Client,
     url: Url,
+    headers: &HeaderMap,
 ) -> Result<reqwest::Response, FetchError> {
     // Exact-byte semantics: Arbitraitor stores and hashes the HTTP representation
     // bytes after HTTP transfer framing is removed by the HTTP stack. It does
@@ -860,9 +957,13 @@ async fn execute_request(
     // `Accept-Encoding: identity` and disabling all reqwest auto-decoders keeps
     // `Content-Encoding` bytes intact for CAS storage and later explicit wrapper
     // decoding into a separate child artifact.
-    client
+    let mut request = client
         .get(url)
-        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    if !headers.is_empty() {
+        request = request.headers(headers.clone());
+    }
+    request
         .send()
         .await
         .map_err(|error| classify_reqwest_error("request", error))
@@ -873,10 +974,14 @@ async fn stream_response(
     policy: &FetchPolicy,
     expected_sha256: Option<&Sha256Digest>,
     sink: &mut dyn ArtifactSink,
-    resolved_ips: Vec<IpAddr>,
-    final_url: FetchUrl,
-    redirect_chain: Vec<FetchUrl>,
+    metadata_input: ResponseMetadataInput,
 ) -> Result<FetchReceipt, FetchError> {
+    let ResponseMetadataInput {
+        resolved_ips,
+        final_url,
+        redirect_chain,
+        redirect_credential_secrecy,
+    } = metadata_input;
     let content_type = header_to_string(response.headers(), CONTENT_TYPE.as_str());
     let content_length = response
         .headers()
@@ -909,6 +1014,7 @@ async fn stream_response(
             .host_str()
             .map(|h| format!("{}://{}", final_url.as_url().scheme(), h)),
         retriever_version: format!("arbitraitor-fetch/{}", env!("CARGO_PKG_VERSION")),
+        redirect_credential_secrecy,
     };
 
     let mut state = StreamState::default();
@@ -930,6 +1036,13 @@ async fn stream_response(
     }
 
     state.finish(metadata, expected_sha256)
+}
+
+struct ResponseMetadataInput {
+    resolved_ips: Vec<IpAddr>,
+    final_url: FetchUrl,
+    redirect_chain: Vec<FetchUrl>,
+    redirect_credential_secrecy: RedirectCredentialSecrecy,
 }
 
 async fn stream_reader<R: AsyncRead + Unpin>(
@@ -1330,6 +1443,38 @@ pub(crate) fn strip_credentials_on_cross_origin(
     headers.remove(reqwest::header::COOKIE);
 }
 
+fn ensure_cross_protocol_credentials_secret(
+    from: &Url,
+    to: &Url,
+    credentials: &RequestCredentials,
+) -> Result<(), FetchError> {
+    if !is_http_scheme(from.scheme()) || !CROSS_PROTOCOL_CREDENTIAL_SCHEMES.contains(&to.scheme()) {
+        return Ok(());
+    }
+    let secrecy = credential_secrecy(credentials);
+    if secrecy == RedirectCredentialSecrecy::Ok {
+        return Ok(());
+    }
+    Err(FetchError::CrossProtocolCredentialRedirect { secrecy })
+}
+
+fn credential_secrecy(credentials: &RequestCredentials) -> RedirectCredentialSecrecy {
+    if credentials.authorization.is_some() {
+        return RedirectCredentialSecrecy::BearerLeaked;
+    }
+    if credentials.cookie.is_some() {
+        return RedirectCredentialSecrecy::CookieLeaked;
+    }
+    if credentials.netrc_default_token.is_some() {
+        return RedirectCredentialSecrecy::NetrcDefaultLeaked;
+    }
+    RedirectCredentialSecrecy::Ok
+}
+
+fn is_http_scheme(scheme: &str) -> bool {
+    matches!(scheme, "http" | "https")
+}
+
 fn classify_reqwest_error(stage: &'static str, error: reqwest::Error) -> FetchError {
     if error.is_timeout() {
         return FetchError::Timeout { stage };
@@ -1462,7 +1607,7 @@ mod tests {
         };
         let client = build_http_client(&policy, &url, &[addr])?;
 
-        let response = execute_request(&client, url).await?;
+        let response = execute_request(&client, url, &reqwest::header::HeaderMap::new()).await?;
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let request = server.await??;

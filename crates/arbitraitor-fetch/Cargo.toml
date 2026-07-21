@@ -26,3 +26,4 @@ arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace
 
 [dev-dependencies]
 arbitraitor-testkit = { workspace = true }
+proptest = { workspace = true }

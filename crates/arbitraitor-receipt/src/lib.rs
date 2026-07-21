@@ -11,6 +11,7 @@ use std::io::Cursor;
 use arbitraitor_exec::EffectiveControls;
 use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
 use arbitraitor_model::taxonomy::TaxonomyRef;
+use arbitraitor_model::transport::RedirectCredentialSecrecy;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -156,6 +157,8 @@ pub struct RetrievalInfo {
     byte_count: Option<u64>,
     tls_version: Option<String>,
     peer_cert_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    redirect_credential_secrecy: Option<RedirectCredentialSecrecy>,
 }
 
 impl RetrievalInfo {
@@ -171,6 +174,7 @@ impl RetrievalInfo {
             byte_count: None,
             tls_version: None,
             peer_cert_fingerprint: None,
+            redirect_credential_secrecy: None,
         }
     }
 
@@ -227,6 +231,16 @@ impl RetrievalInfo {
     #[must_use]
     pub fn with_peer_cert_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
         self.peer_cert_fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    /// Set the redirect credential-secrecy outcome.
+    #[must_use]
+    pub const fn with_redirect_credential_secrecy(
+        mut self,
+        secrecy: RedirectCredentialSecrecy,
+    ) -> Self {
+        self.redirect_credential_secrecy = Some(secrecy);
         self
     }
 
@@ -687,7 +701,8 @@ mod tests {
                 .with_content_type("text/x-shellscript")
                 .with_byte_count(12)
                 .with_tls_version("TLSv1.3")
-                .with_peer_cert_fingerprint("sha256:abcd"),
+                .with_peer_cert_fingerprint("sha256:abcd")
+                .with_redirect_credential_secrecy(RedirectCredentialSecrecy::Ok),
         )
         .finding(FindingSummary {
             id: "finding-1".to_owned(),
@@ -726,6 +741,28 @@ mod tests {
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded, receipt);
         Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn retrieval_info_redacts_credential_text_in_receipts(secret in "SECRET-[A-Za-z0-9]{16,64}") {
+            let requested = format!("https://user:{secret}@example.com/artifact?api_key={secret}#{secret}");
+            let redirected = format!("https://example.com/redirect?signature={secret}#{secret}");
+            let retrieval = RetrievalInfo::new(&requested)
+                .with_final_url(&redirected)
+                .with_redirect_chain([requested.as_str(), redirected.as_str()])
+                .with_redirect_credential_secrecy(RedirectCredentialSecrecy::BearerLeaked);
+            let json = match serde_json::to_string(&retrieval) {
+                Ok(json) => json,
+                Err(error) => {
+                    prop_assert!(false, "retrieval info must serialize: {error}");
+                    String::new()
+                }
+            };
+
+            prop_assert!(!json.contains(&secret));
+            prop_assert!(json.contains("bearer_leaked"));
+        }
     }
 
     #[test]
@@ -792,6 +829,7 @@ mod tests {
                 applied: ControlStatus::Enforced,
                 proof: Some("setrlimit".to_owned()),
             }),
+            landlock_abi_version: Some(serde_json::from_value(serde_json::json!(7))?),
         };
         let receipt = ReceiptBuilder::new(
             "0.1.0",
@@ -815,6 +853,10 @@ mod tests {
             json.contains("effective_controls"),
             "serialized receipt must include effective_controls"
         );
+        assert!(
+            json.contains("landlock_abi_version"),
+            "serialized receipt must include effective Landlock ABI version"
+        );
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded.effective_controls, Some(controls));
         Ok(())
@@ -828,6 +870,33 @@ mod tests {
             !json.contains("effective_controls"),
             "effective_controls must be skipped when None"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn effective_controls_accepts_legacy_json_without_landlock_abi()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let json = r#"{"filesystem_isolation":{"requested":true,"applied":"enforced","proof":"landlock"},"network_isolation":{"requested":true,"applied":"enforced","proof":"network-namespace"},"process_tree_control":{"requested":true,"applied":"enforced","proof":"pid-namespace"},"privilege_suppression":{"requested":true,"applied":"enforced","proof":"no-new-privs"},"syscall_filtering":{"requested":true,"applied":"enforced","proof":"seccomp-bpf"},"resource_limits":{"requested":true,"applied":"enforced","proof":"setrlimit"}}"#;
+        let controls: EffectiveControls = serde_json::from_str(json)?;
+        assert_eq!(controls.landlock_abi_version, None);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_controls_omits_absent_landlock_abi() -> Result<(), Box<dyn std::error::Error>> {
+        use arbitraitor_exec::{ControlStatus, EffectiveControl};
+
+        let controls = EffectiveControls {
+            filesystem_isolation: Some(EffectiveControl {
+                requested: true,
+                applied: ControlStatus::Enforced,
+                proof: Some("landlock".to_owned()),
+            }),
+            landlock_abi_version: None,
+            ..EffectiveControls::default()
+        };
+        let json = serde_json::to_string(&controls)?;
+        assert!(!json.contains("landlock_abi_version"));
         Ok(())
     }
 

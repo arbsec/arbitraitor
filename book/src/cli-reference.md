@@ -7,6 +7,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | Command | Description |
 |---------|-------------|
 | `arbitraitor inspect` | Retrieve and analyze an artifact without executing it |
+| `arbitraitor fetch` | Fetch an artifact with provenance verification (spec §28.2) |
 | `arbitraitor run` | Execute the full pipeline with approval flow |
 | `arbitraitor scan` | Scan a local file or stdin without retrieval |
 | `arbitraitor explain` | Explain a verdict from a receipt file |
@@ -33,7 +34,17 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
 | `arbitraitor version` | Print version, license, and repository |
 
-> **Note:** `arbitraitor fetch` is a hidden command used internally by wrappers. It retrieves an artifact to CAS without analysis.
+### `arbitraitor intel update`
+
+Updates local threat-intelligence feed snapshots on demand.
+
+| Flag | Description |
+|------|-------------|
+| `--urlhaus` | Ingest the URLhaus malicious-URL feed |
+| `--urlhaus-url <URL>` | Override the URLhaus CSV or JSON endpoint |
+| `--ossf-malicious-packages` | Ingest OpenSSF malicious-packages `MAL-` IDs from an OSV querybatch response |
+| `--ossf-malicious-packages-url <URL>` | Override the OSV querybatch endpoint or use a signed mirror response |
+| `--intel-store <PATH>` | Override the local intel store path |
 
 ## Global flags
 
@@ -113,6 +124,63 @@ arbitraitor inspect https://example.com/install.sh --sha256 abc123... --minisign
 arbitraitor inspect ./downloads/script.sh
 ```
 
+## Fetch command
+
+```sh
+arbitraitor fetch <URL> [flags]
+```
+
+Fetches an artifact from a URL with provenance verification, content-addressed
+storage, and optional receipt emission. When invoked via a wrapper symlink
+(`curl`/`wget`), the `--tool` flag is set automatically and passthrough
+arguments are captured after `--`.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output <PATH>` | Write the fetched artifact to this path instead of stdout |
+| `--sha256 <HEX>` | Expected SHA-256 digest for provenance verification |
+| `--signature <PATH>` | minisign signature file (repeatable; requires key via config) |
+| `--cosign-bundle <PATH>` | cosign bundle file (repeatable) |
+| `--identity <IDENTITY>` | cosign identity (repeatable) |
+| `--issuer <ISSUER>` | cosign certificate issuer (repeatable) |
+| `--expected-type <TYPE>` | Expected artifact type (e.g., `shell`, `elf`, `archive`) |
+| `--expected-content-type <TYPE>` | Expected content type (e.g., `application/x-sh`) |
+| `--max-bytes <BYTES>` | Maximum bytes to fetch |
+| `--header <HEADER>` | HTTP header to send (repeatable, format: `Key: Value`) |
+| `--policy <PATH>` | Policy file path |
+| `--recursive` | Recursively fetch and inspect referenced payloads |
+| `--sandbox` | Sandbox execution after fetch |
+| `--non-interactive` | Skip interactive approval prompts |
+| `--json` | Output results as JSON |
+| `--sarif` | Output results as SARIF |
+| `--receipt <PATH>` | Write a JSON receipt to this path |
+| `--no-cache` | Skip cache and force a fresh fetch |
+
+### Examples
+
+```sh
+# Basic fetch
+arbitraitor fetch https://example.com/install.sh
+
+# Fetch with output file and SHA-256 pinning
+arbitraitor fetch --output install.sh --sha256 abc123... https://example.com/install.sh
+
+# Fetch with cosign provenance verification
+arbitraitor fetch \
+  --cosign-bundle artifact.bundle \
+  --identity builder@example.test \
+  --issuer https://issuer.example.test \
+  https://example.com/artifact
+
+# Fetch with receipt output
+arbitraitor fetch --receipt receipt.json https://example.com/install.sh
+
+# Non-interactive JSON output
+arbitraitor fetch --non-interactive --json https://example.com/install.sh
+```
+
 ## Run command
 
 ```sh
@@ -143,6 +211,33 @@ arbitraitor run https://example.com/binary --native --network
 # With policy file
 arbitraitor run https://example.com/install.sh --policy ./my-policy.toml
 ```
+
+### Supported artifact types
+
+Only shell scripts and native executables are runnable by `arbitraitor run`
+(see [ADR-0036](../../docs/adr/0036-run-pipeline-content-type-execution-gate.md)
+for the rationale):
+
+| `ArtifactType`                                  | Executable via       |
+|-------------------------------------------------|----------------------|
+| `ShellScript(Posix \| Bash \| Zsh)`             | `/bin/bash`          |
+| `PeExecutable`, `ElfExecutable`, `MachOExecutable` | native binary     |
+
+All other classified types — `HtmlDocument`, `JsonDocument`, `XmlDocument`,
+`GenericText`, `GenericBinary`, archives (`ZipArchive`, `TarArchive`,
+`*Compressed`), `PowerShellScript`, `PythonScript`, `JavaScript`, and
+`Unknown` — fail closed with `blocked by policy` (exit code
+`BlockedByPolicy`) before reaching the execution layer. Piping such bytes to
+`/bin/bash` is incorrect (bash doesn't understand them) and unsafe (HTML,
+JSON, and XML can incidentally contain bash-parseable `$(...)`,
+redirections, and pipes).
+
+When a script or native execution does fail, the user-visible error now
+includes the captured child stderr so the actual root cause is visible
+(e.g. `script input I/O failure during write-script-stdin (child exited 1;
+stderr: "bash: !DOCTYPE: event not found")`), distinguishing "I fed bash
+junk" from "kernel denied the user namespace" from "Landlock blocked the
+interpreter path". See #612 for the bug report and Fix B details.
 
 ## Wrappers command
 
@@ -633,6 +728,21 @@ arbitraitor execute receipt.approval.json
 # With network access:
 arbitraitor execute receipt.approval.json --network
 ```
+
+### Supported artifact types
+
+Only `ArtifactType::ShellScript(_)` artifacts are executable via the
+`execute` command. All other classified types — `HtmlDocument`,
+`JsonDocument`, `XmlDocument`, `GenericText`, `GenericBinary`, archives,
+`PowerShellScript`, `PythonScript`, `JavaScript`, and `Unknown` — fail
+closed with an error before reaching `ScriptExecution::bash`, even when
+the approval file is otherwise valid. This mirrors the content-type gate
+on `arbitraitor run` and `run_approved_artifact` (MCP) per
+[ADR-0036](../../docs/adr/0036-run-pipeline-content-type-execution-gate.md)
+and [issue #612](https://github.com/arbsec/arbitraitor/issues/612).
+Native executables are also not accepted via `execute` because the
+approval flow always binds to the bash interpreter (native execution
+uses a separate release path).
 
 ## Report command
 

@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arbitraitor_core::config::ExecutionConfig;
 use arbitraitor_model::operation::{GrantedCapabilities, OperationPlan};
 use arbitraitor_model::verdict::AssuranceLevel;
+use arbitraitor_sandbox::LandlockAbiVersion;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
@@ -136,13 +137,41 @@ pub enum ExecError {
         source: io::Error,
     },
     /// Piping the script bytes to the interpreter's standard input failed.
-    #[error("script input I/O failure during {stage}")]
+    ///
+    /// When `write_all` or `flush` fails it is usually because the interpreter
+    /// process exited before consuming the script bytes (`EPIPE`) — for example
+    /// because the script bytes were not valid syntax for the interpreter, or
+    /// because a pre-exec sandbox step (such as `unshare --user`) was denied
+    /// by the kernel or container runtime. To preserve the actual root cause,
+    /// the variant also carries whatever the child printed to its stderr and
+    /// the exit code it died with, captured best-effort after the failed
+    /// write. Callers SHOULD surface `child_stderr` in user-facing diagnostics
+    /// when it is non-empty; absent a captured stderr, the `source` I/O error
+    /// is the only available signal.
+    #[error("script input I/O failure during {stage}{child_detail}")]
     ScriptIo {
         /// Operation stage identifier (e.g. `"write-script-stdin"`).
         stage: &'static str,
         /// Source I/O error.
         #[source]
         source: io::Error,
+        /// Exit code the child reported before the write failed, when the
+        /// child could be reaped. `None` when the child was still running,
+        /// was killed by a signal, or could not be waited on.
+        child_exit_code: Option<i32>,
+        /// Best-effort capture of the child's stderr stream after the failed
+        /// write. May be empty when the child produced no stderr, when output
+        /// exceeded the cap and the child was killed, or when reaping failed
+        /// before any bytes could be drained.
+        child_stderr: Vec<u8>,
+        /// Pre-rendered human-readable detail derived from
+        /// `child_exit_code` / `child_stderr` so thiserror's `Display` impl
+        /// can append it without a custom `fmt::Display` override. Built once
+        /// at construction by [`ExecError::script_io`]. Callers MUST use
+        /// that constructor rather than building the struct literal directly
+        /// so the `child_detail` field stays consistent with the
+        /// `child_exit_code` / `child_stderr` fields.
+        child_detail: String,
     },
     /// Native execution lacks both explicit CLI approval and trusted policy approval.
     #[error("native execution requires explicit --native or trusted policy approval")]
@@ -208,6 +237,101 @@ pub enum ExecError {
         /// Name of the control lacking a proof.
         control: &'static str,
     },
+}
+
+impl ExecError {
+    /// Constructs a [`ExecError::ScriptIo`] with the supplied stage, source,
+    /// and best-effort child state. Renders a stable, human-readable
+    /// `child_detail` suffix so the [`Display`](std::fmt::Display)
+    /// representation surfaces the actual root cause (e.g. `bash: !DOCTYPE:
+    /// event not found`, `unshare: operation not permitted`) when one was
+    /// captured.
+    ///
+    /// Empty `child_stderr` and `None` exit code yield an empty
+    /// `child_detail`, leaving the existing message form unchanged. Callers
+    /// MUST use this constructor rather than building the variant struct
+    /// directly so the `child_detail` field stays consistent with the
+    /// `child_exit_code` / `child_stderr` fields.
+    #[must_use]
+    pub fn script_io(
+        stage: &'static str,
+        source: io::Error,
+        child_exit_code: Option<i32>,
+        child_stderr: Vec<u8>,
+    ) -> Self {
+        let child_detail = Self::script_io_detail(child_exit_code, child_stderr.as_slice());
+        Self::ScriptIo {
+            stage,
+            source,
+            child_exit_code,
+            child_stderr,
+            child_detail,
+        }
+    }
+
+    /// Renders the suffix appended after `script input I/O failure during
+    /// {stage}` for [`ExecError::ScriptIo`]. Exposed publicly so sibling
+    /// executors (e.g. [`PowerShellError::ScriptIo`](crate::PowerShellError::ScriptIo))
+    /// can share the same rendering rule without re-implementing it.
+    /// Returns an empty string when no child state was captured so the
+    /// message stays as terse as before.
+    ///
+    /// The captured stderr is byte-truncated to 1 KiB before UTF-8 lossy
+    /// decoding: `String::from_utf8_lossy` replaces any partial trailing
+    /// codepoint with U+FFFD, so this is panic-safe even when the
+    /// attacker-controlled child stderr ends mid-multibyte-char right at the
+    /// cap. This matters because the bytes come from the executed child
+    /// (bash, unshare, pwsh, ...) whose output the parent does not control.
+    ///
+    /// ADR-0016 (Safe Presentation) requires untrusted text to be escaped
+    /// and bounded before display. Because `arbitraitor-exec` sits BELOW
+    /// the `arbitraitor-mcp::sanitize_for_agent` renderer in the dependency
+    /// stack, we apply the two crucial defenses inline: (1) the `{:?}`
+    /// debug-format at the call site quotes the preview and escapes all C0
+    /// control bytes including ANSI sequences, preventing terminal injection;
+    /// (2) this function replaces Arbitraitor's untrusted-data markers
+    /// (`<<ARBITRAITOR_UNTRUSTED_DATA_START>>` / `<<ARBITRAITOR_UNTRUSTED_DATA_END>>`)
+    /// with placeholder text so an attacker who controls the child stderr
+    /// cannot spoof the markers and confuse downstream agent consumers that
+    /// rely on them to fence untrusted content.
+    #[must_use]
+    pub fn script_io_detail(child_exit_code: Option<i32>, child_stderr: &[u8]) -> String {
+        // Cap rendered stderr to keep failure messages and receipts bounded.
+        // 1 KiB is ample for the "bash: parse error" / "unshare: not permitted"
+        // class of diagnostics and holds even multi-line shell errors.
+        const MAX_STDERR_LEN: usize = 1024;
+        // Escape Arbitraitor untrusted-data markers per ADR-0016 so an
+        // attacker who controls the child stderr cannot spoof markers and
+        // confuse downstream agent consumers (See Safe Presentation
+        // invariant in docs/conventions.md). The literals are duplicated
+        // here rather than imported from `arbitraitor-mcp` because
+        // `arbitraitor-exec` sits below `arbitraitor-mcp` in the dependency
+        // stack.
+        const ARBITRAITOR_UNTRUSTED_START: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_START>>";
+        const ARBITRAITOR_UNTRUSTED_END: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_END>>";
+        // Truncate bytes FIRST, then lossy-decode. `from_utf8_lossy` replaces
+        // any partial trailing codepoint with U+FFFD, so a slice that ends mid
+        // multibyte char cannot panic (the previous `&str[..usize]` form
+        // would panic in the same position).
+        let truncated_bytes: &[u8] = if child_stderr.len() > MAX_STDERR_LEN {
+            &child_stderr[..MAX_STDERR_LEN]
+        } else {
+            child_stderr
+        };
+        let decoded = String::from_utf8_lossy(truncated_bytes);
+        let sanitized = decoded
+            .replace(ARBITRAITOR_UNTRUSTED_START, "[escaped-untrusted-start]")
+            .replace(ARBITRAITOR_UNTRUSTED_END, "[escaped-untrusted-end]");
+        let trimmed = sanitized.trim_end_matches(['\n', '\r', ' ']);
+        match (child_exit_code, trimmed.is_empty()) {
+            (None, true) => String::new(),
+            (Some(code), true) => format!(" (child exited with code {code})"),
+            (Some(code), false) => format!(" (child exited {code}; stderr: {trimmed:?})"),
+            (None, false) => {
+                format!(" (child produced stderr without an exit code; stderr: {trimmed:?})")
+            }
+        }
+    }
 }
 
 /// Network access policy prepared for downstream sandbox enforcement.
@@ -689,6 +813,9 @@ pub struct EffectiveControls {
     pub syscall_filtering: Option<EffectiveControl>,
     /// Resource limits (CPU, memory, FDs, processes).
     pub resource_limits: Option<EffectiveControl>,
+    /// Effective Landlock ABI version observed when filesystem isolation uses Landlock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 /// Proofs supplied to the builder that each containment control is active.
@@ -710,6 +837,8 @@ pub struct ControlProofs {
     pub syscall_filtering: Option<String>,
     /// Proof of resource-limit enforcement.
     pub resource_limits: Option<String>,
+    /// Effective Landlock ABI version backing the filesystem-isolation proof.
+    pub landlock_abi_version: Option<LandlockAbiVersion>,
 }
 
 impl ControlProofs {
@@ -742,6 +871,7 @@ impl ControlProofs {
             )?),
             syscall_filtering: Some(Self::require(self.syscall_filtering, "syscall filtering")?),
             resource_limits: Some(Self::require(self.resource_limits, "resource limits")?),
+            landlock_abi_version: self.landlock_abi_version,
         })
     }
 }

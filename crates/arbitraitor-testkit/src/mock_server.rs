@@ -91,6 +91,17 @@ impl MockHttpServer {
         self.absolute_url(&route_path)
     }
 
+    /// Configures a redirect to an arbitrary absolute URL.
+    pub async fn redirect_to(&self, target: &str) -> String {
+        let route_path = self.unique_path("redirect-to");
+        Mock::given(method("GET"))
+            .and(path(route_path.as_str()))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", target))
+            .mount(&self.server)
+            .await;
+        self.absolute_url(&route_path)
+    }
+
     /// Configures a response carrying metadata that identifies a private peer address.
     ///
     /// This provides metadata for header-based private-address detection tests only. `WireMock`

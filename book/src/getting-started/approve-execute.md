@@ -24,6 +24,8 @@ arbitraitor execute receipt.approval.json
 
 Reads the artifact from CAS by SHA-256 and executes it via sandboxed bash. Use `--network` to allow network access during execution.
 
+Only `ArtifactType::ShellScript(Posix | Bash)` artifacts are executable via this path; all other classified types (HTML, JSON, XML, archives, Zsh, `Unknown`, etc.) fail closed even when the approval file is otherwise valid. See [ADR-0036](../../../docs/adr/0036-run-pipeline-content-type-execution-gate.md) for the rationale.
+
 ```sh
 # With network access:
 arbitraitor execute receipt.approval.json --network

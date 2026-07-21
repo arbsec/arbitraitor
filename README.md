@@ -224,7 +224,7 @@ backward compatibility; new users should use `wrappers init --install`.
 - **MCP integration** — `arbitraitor mcp` starts a JSON-RPC 2.0 server over stdio for AI agent inspection, scanning, and approved execution
 - **Plugin system** — Subprocess protocol, Wasmtime Component Model, plugin registry with trust tiers
 - **Package manager adapters** — cargo, npm, uv, pnpm, yarn, bun lifecycle policies and lockfile analysis
-- **Community intelligence** — Feed submission, review workflow, transparency log, URLhaus adapter
+- **Community intelligence** — Feed submission, review workflow, transparency log, URLhaus and OpenSSF malicious-packages adapters
 - **Receipts** — RFC 8785 JCS canonicalized receipts with full audit trail
 - **HTTP safety** — SSRF protection, truncation detection, redirect policy enforcement
 
@@ -242,7 +242,7 @@ arbitraitor-cli             Command-line interface (23 subcommands)
 │   ├── arbitraitor-shell       Shell script analyzer (bash/dash)
 │   ├── arbitraitor-powershell  PowerShell AST analyzer
 │   ├── arbitraitor-yarax       YARA-X scanner integration
-│   ├── arbitraitor-archive     Archive inspection (6 formats, 15 hazard types)
+│   ├── arbitraitor-archive     Archive inspection (6 formats, 16 hazard types)
 │   └── arbitraitor-av          Antivirus adapters (ClamAV, Microsoft Defender)
 ├── arbitraitor-provenance   Signature/attestation verification
 ├── arbitraitor-intel        Threat intelligence feeds
@@ -294,7 +294,7 @@ See [conventions](docs/conventions.md) for the full configuration reference.
 
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/README.md) — 26 accepted
+- [Architecture Decision Records](docs/adr/README.md) — 35 accepted
 - [Development conventions](docs/conventions.md) — coding rules, security invariants
 - Crate documentation: `cargo doc --workspace --open`
 

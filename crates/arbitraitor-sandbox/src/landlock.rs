@@ -9,6 +9,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
+use std::fmt;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
@@ -16,6 +17,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Landlock filesystem access flags.
 ///
@@ -74,6 +77,72 @@ pub mod access_fs {
         | TRUNCATE;
 }
 
+/// Running-kernel Landlock ABI version returned by the kernel probe.
+///
+/// The Linux UAPI currently defines ABI versions v1 through v10. The wrapper
+/// accepts any non-zero version so newer kernels remain representable until
+/// Arbitraitor's policy matrix is updated.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct LandlockAbiVersion(u32);
+
+impl LandlockAbiVersion {
+    /// Landlock ABI v1: initial filesystem restrictions (Linux 5.13).
+    pub const V1: Self = Self(1);
+    /// Landlock ABI v2: file modes isolation (Linux 5.19).
+    pub const V2: Self = Self(2);
+    /// Landlock ABI v3: truncate / ioctl restrictions (Linux 6.2).
+    pub const V3: Self = Self(3);
+    /// Landlock ABI v4: TCP connect/bind (Linux 6.7).
+    pub const V4: Self = Self(4);
+    /// Landlock ABI v5: IOCTL device (Linux 6.10).
+    pub const V5: Self = Self(5);
+    /// Landlock ABI v6: signal scope + abstract UNIX socket (Linux 6.12).
+    pub const V6: Self = Self(6);
+    /// Landlock ABI v7: audit log (Linux 6.15).
+    pub const V7: Self = Self(7);
+    /// Landlock ABI v8: TSYNC flag on `landlock_restrict_self` (Linux 7.0-rc).
+    pub const V8: Self = Self(8);
+    /// Landlock ABI v9: `RESOLVE_UNIX` behind downstream patches.
+    pub const V9: Self = Self(9);
+    /// Landlock ABI v10: UDP connect/bind (Linux 6.16).
+    pub const V10: Self = Self(10);
+
+    /// Builds a Landlock ABI version from a kernel-reported version number.
+    #[must_use]
+    pub const fn new(version: u32) -> Option<Self> {
+        if version == 0 {
+            None
+        } else {
+            Some(Self(version))
+        }
+    }
+
+    /// Returns the numeric ABI version reported by the kernel.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for LandlockAbiVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "v{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for LandlockAbiVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let version = u32::deserialize(deserializer)?;
+        Self::new(version)
+            .ok_or_else(|| serde::de::Error::custom("Landlock ABI version must be non-zero"))
+    }
+}
+
 /// A path-beneath Landlock rule captured before `fork` and installed in the child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PathRule {
@@ -115,9 +184,43 @@ struct LandlockPathBeneathAttr {
 }
 
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+#[cfg(target_os = "linux")]
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
 const ABI_V1_ACCESS: u64 = (1_u64 << 13) - 1;
 const ABI_V2_ACCESS: u64 = ABI_V1_ACCESS | access_fs::REFER;
 const ABI_V3_ACCESS: u64 = ABI_V2_ACCESS | access_fs::TRUNCATE;
+
+/// Probes the running kernel's effective Landlock ABI version.
+///
+/// Linux exposes the ABI probe through `landlock_create_ruleset(NULL, 0,
+/// LANDLOCK_CREATE_RULESET_VERSION)`, returning the highest ABI version the
+/// kernel supports. Unsupported kernels and non-Linux platforms return `None`.
+#[must_use]
+#[cfg(target_os = "linux")]
+pub fn probe_landlock_abi_version() -> Option<LandlockAbiVersion> {
+    // SAFETY: [Category 8 — FFI Boundary]
+    // `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` is
+    // the documented Landlock ABI probe. The kernel dereferences no pointers,
+    // creates no fd, and returns a scalar ABI version or a negative errno.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            ptr::null::<libc::c_void>(),
+            0_usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    parse_landlock_abi_probe(ret)
+}
+
+/// Probes the running kernel's effective Landlock ABI version.
+///
+/// Non-Linux platforms have no Landlock UAPI and therefore report `None`.
+#[must_use]
+#[cfg(not(target_os = "linux"))]
+pub const fn probe_landlock_abi_version() -> Option<LandlockAbiVersion> {
+    None
+}
 
 /// Registers a `pre_exec` closure that installs a Landlock ruleset.
 ///
@@ -161,15 +264,18 @@ fn capture_rules(rules: &[PathRule]) -> Vec<(CString, u64)> {
 
 #[cfg(target_os = "linux")]
 fn install_landlock_ruleset(rules: &[(CString, u64)]) -> io::Result<()> {
-    install_landlock_ruleset_with_abi(rules, landlock_abi())
+    install_landlock_ruleset_with_abi(rules, probe_landlock_abi_version())
 }
 
 #[cfg(target_os = "linux")]
-fn install_landlock_ruleset_with_abi(rules: &[(CString, u64)], abi: Option<u32>) -> io::Result<()> {
+fn install_landlock_ruleset_with_abi(
+    rules: &[(CString, u64)],
+    abi: Option<LandlockAbiVersion>,
+) -> io::Result<()> {
     let Some(abi) = abi else {
         return Ok(());
     };
-    let access_mask = supported_access_mask(abi);
+    let access_mask = supported_access_mask(abi.get());
     let ruleset_fd = create_ruleset(access_mask)?;
 
     for (path, access) in rules {
@@ -193,26 +299,17 @@ fn install_landlock_ruleset_with_abi(rules: &[(CString, u64)], abi: Option<u32>)
 }
 
 #[cfg(target_os = "linux")]
-fn landlock_abi() -> Option<u32> {
-    // SAFETY: `landlock_create_ruleset(NULL, 0, 0)` is the documented ABI probe.
-    // It dereferences no pointers, creates no ruleset fd, and returns the highest
-    // supported Landlock ABI version or `ENOSYS` on kernels without Landlock.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            ptr::null::<libc::c_void>(),
-            0_usize,
-            0_u32,
-        )
-    };
+fn parse_landlock_abi_probe(ret: libc::c_long) -> Option<LandlockAbiVersion> {
     if ret < 0 {
         return None;
     }
-    u32::try_from(ret).ok()
+    u32::try_from(ret).ok().and_then(LandlockAbiVersion::new)
 }
 
 #[cfg(target_os = "linux")]
 const fn supported_access_mask(abi: u32) -> u64 {
+    // Only ABI v1-v3 filesystem rights are enforced today. ABI v4+ controls
+    // are recorded for receipts only until ADR-0028's planned matrix is wired.
     match abi {
         0 => 0,
         1 => ABI_V1_ACCESS,
@@ -322,7 +419,68 @@ mod tests {
     fn landlock_supported_returns_bool() {
         fn accepts_bool(_value: bool) {}
 
-        accepts_bool(landlock_abi().is_some());
+        accepts_bool(probe_landlock_abi_version().is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_abi_probe_returns_supported_version() {
+        let version = probe_landlock_abi_version();
+        assert!(
+            version.is_some_and(|abi| abi >= LandlockAbiVersion::V1),
+            "Linux host must report Landlock ABI v1+"
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn landlock_abi_probe_is_absent_off_linux() {
+        assert_eq!(probe_landlock_abi_version(), None);
+    }
+
+    #[test]
+    fn landlock_abi_version_parses_nonzero_versions() -> Result<(), Box<dyn std::error::Error>> {
+        // Given: kernel ABI probe result values in the documented v1-v10 range.
+        // When: values are parsed into the Landlock ABI newtype.
+        // Then: every non-zero ABI version preserves its number.
+        let versions = [
+            LandlockAbiVersion::V1,
+            LandlockAbiVersion::V2,
+            LandlockAbiVersion::V3,
+            LandlockAbiVersion::V4,
+            LandlockAbiVersion::V5,
+            LandlockAbiVersion::V6,
+            LandlockAbiVersion::V7,
+            LandlockAbiVersion::V8,
+            LandlockAbiVersion::V9,
+            LandlockAbiVersion::V10,
+        ];
+        for (index, expected) in versions.into_iter().enumerate() {
+            let version = u32::try_from(index + 1)?;
+            assert_eq!(LandlockAbiVersion::new(version), Some(expected));
+            assert_eq!(expected.get(), version);
+            let json = serde_json::to_string(&expected)?;
+            let decoded: LandlockAbiVersion = serde_json::from_str(&json)?;
+            assert_eq!(decoded, expected);
+        }
+        assert_eq!(LandlockAbiVersion::V10.get(), 10);
+        assert_eq!(LandlockAbiVersion::V10.to_string(), "v10");
+        Ok(())
+    }
+
+    #[test]
+    fn landlock_abi_version_rejects_zero_and_negative_json() {
+        assert_eq!(LandlockAbiVersion::new(0), None);
+        assert!(serde_json::from_str::<LandlockAbiVersion>("0").is_err());
+        assert!(serde_json::from_str::<LandlockAbiVersion>("-1").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_probe_return_parsing_rejects_errors_and_zero() {
+        assert_eq!(parse_landlock_abi_probe(-1), None);
+        assert_eq!(parse_landlock_abi_probe(0), None);
+        assert_eq!(parse_landlock_abi_probe(7), Some(LandlockAbiVersion::V7));
     }
 
     #[cfg(target_os = "linux")]
@@ -335,7 +493,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn landlock_allows_binary_execution() -> Result<(), Box<dyn std::error::Error>> {
-        if landlock_abi().is_none() {
+        if probe_landlock_abi_version().is_none() {
             return Ok(());
         }
 
@@ -354,7 +512,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn landlock_allows_working_directory() -> Result<(), Box<dyn std::error::Error>> {
-        if landlock_abi().is_none() {
+        if probe_landlock_abi_version().is_none() {
             return Ok(());
         }
 
@@ -387,7 +545,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn landlock_blocks_access_to_disallowed_paths() -> Result<(), Box<dyn std::error::Error>> {
-        if landlock_abi().is_none() {
+        if probe_landlock_abi_version().is_none() {
             return Ok(());
         }
 

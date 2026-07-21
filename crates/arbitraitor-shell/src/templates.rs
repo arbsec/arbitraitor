@@ -80,9 +80,10 @@ pub fn category_risk(category: FindingCategory) -> &'static str {
              and execution into one opaque step, bypassing static analysis."
         }
         FindingCategory::ArchiveHazard => {
-            "The archive contains hazardous entries — path traversal (../../etc/passwd), \
-             absolute paths, symlinks pointing outside the archive, or oversized entries. \
-             These can overwrite system files or exhaust resources during extraction."
+            "The archive contains hazardous entries such as traversal paths, absolute paths, escaping symlinks, or oversized members that can overwrite files or exhaust resources."
+        }
+        FindingCategory::ParserDifferential => {
+            "Independent parsers disagree about archive members. This can let a scanner see a clean member set while an extractor releases another payload."
         }
         FindingCategory::PackageRisk => {
             "The content poses a package ecosystem risk — typosquatting, dependency \
@@ -162,6 +163,10 @@ pub fn recommendation_for(category: FindingCategory) -> String {
         }
         FindingCategory::ArchiveHazard => {
             "Extract with path sanitization enabled and reject archives with traversal entries."
+        }
+        FindingCategory::ParserDifferential => {
+            "Reject the artifact until the parser disagreement is explained and the exact \
+             extracted member set is proven safe."
         }
         FindingCategory::PackageRisk => {
             "Verify the package name against the official registry and audit dependencies."
