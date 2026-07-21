@@ -119,9 +119,32 @@ pub struct PluginCommand {
 
 #[derive(Subcommand)]
 pub enum PluginSubcommand {
+    /// List locally registered plugins.
     List,
+    /// Inspect a locally registered plugin manifest.
+    #[command(alias = "inspect")]
     Info { id: String },
+    /// Search the plugin registry.
+    Search { query: String },
+    /// Discover plugins from local plugin directories.
     Discover,
+    /// Install a plugin from the registry by ID.
+    Install { id: String },
+    /// Update installed plugins.
+    Update {
+        /// Update all installed plugins.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Enable an installed plugin by ID.
+    Enable { id: String },
+    /// Disable an installed plugin by ID.
+    Disable { id: String },
+    /// Trust a plugin digest or signer identity.
+    Trust { digest_or_signer: String },
+    /// Run plugin health checks.
+    Doctor,
+    /// Remove a locally registered plugin.
     Remove { id: String },
 }
 
@@ -802,15 +825,9 @@ pub(crate) fn update(command: &UpdateCommand) -> Result<()> {
 }
 
 pub(crate) fn plugin(command: &PluginCommand) -> Result<()> {
-    let mut registry = arbitraitor_plugin_host::registry::PluginRegistry::new(
-        arbitraitor_plugin_host::registry::PluginRegistry::default_dirs(),
-    );
-    registry
-        .discover()
-        .map_err(|e| miette::miette!("plugin discovery failed: {e}"))?;
-
     match &command.subcommand {
         PluginSubcommand::List => {
+            let registry = discovered_plugin_registry()?;
             let mut stdout = std::io::stdout().lock();
             let plugins = registry.list();
             writeln!(stdout, "Registered plugins: {}", plugins.len()).into_diagnostic()?;
@@ -827,19 +844,78 @@ pub(crate) fn plugin(command: &PluginCommand) -> Result<()> {
             }
         }
         PluginSubcommand::Info { id } => {
+            let registry = discovered_plugin_registry()?;
             let plugin = registry
                 .get(id)
                 .ok_or_else(|| miette::miette!("plugin '{id}' not found"))?;
             let json = serde_json::to_string_pretty(&plugin.manifest).into_diagnostic()?;
             writeln!(std::io::stdout().lock(), "{json}").into_diagnostic()?;
         }
+        PluginSubcommand::Search { query } => {
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin search for '{query}': not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
         PluginSubcommand::Discover => {
+            let mut registry = arbitraitor_plugin_host::registry::PluginRegistry::new(
+                arbitraitor_plugin_host::registry::PluginRegistry::default_dirs(),
+            );
             let count = registry
                 .discover()
                 .map_err(|e| miette::miette!("discovery failed: {e}"))?;
             writeln!(std::io::stdout().lock(), "Discovered {count} plugins").into_diagnostic()?;
         }
+        PluginSubcommand::Install { id } => {
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin install for '{id}': not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
+        PluginSubcommand::Update { all } => {
+            let scope = if *all {
+                "all plugins"
+            } else {
+                "selected plugins"
+            };
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin update for {scope}: not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
+        PluginSubcommand::Enable { id } => {
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin enable for '{id}': not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
+        PluginSubcommand::Disable { id } => {
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin disable for '{id}': not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
+        PluginSubcommand::Trust { digest_or_signer } => {
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin trust for '{digest_or_signer}': not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
+        PluginSubcommand::Doctor => {
+            writeln!(
+                std::io::stdout().lock(),
+                "Plugin doctor: not yet implemented (registry plumbing pending)"
+            )
+            .into_diagnostic()?;
+        }
         PluginSubcommand::Remove { id } => {
+            let mut registry = discovered_plugin_registry()?;
             registry
                 .unregister(id)
                 .ok_or_else(|| miette::miette!("plugin '{id}' not found"))?;
@@ -847,6 +923,16 @@ pub(crate) fn plugin(command: &PluginCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn discovered_plugin_registry() -> Result<arbitraitor_plugin_host::registry::PluginRegistry> {
+    let mut registry = arbitraitor_plugin_host::registry::PluginRegistry::new(
+        arbitraitor_plugin_host::registry::PluginRegistry::default_dirs(),
+    );
+    registry
+        .discover()
+        .map_err(|e| miette::miette!("plugin discovery failed: {e}"))?;
+    Ok(registry)
 }
 
 pub(crate) fn hook(command: &HookCommand) -> Result<()> {

@@ -1042,6 +1042,120 @@ fn wrap_command_requires_tool() {
 }
 
 #[test]
+fn plugin_search_parses_query() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "search", "yara"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Search { query } => assert_eq!(query, "yara"),
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_inspect_alias_parses_id() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "inspect", "detector.example"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Info { id } => assert_eq!(id, "detector.example"),
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_install_parses_id() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "install", "detector.example"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Install { id } => assert_eq!(id, "detector.example"),
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_update_parses_all_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "update", "--all"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Update { all } => assert!(all),
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_enable_parses_id() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "enable", "detector.example"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Enable { id } => assert_eq!(id, "detector.example"),
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_disable_parses_id() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "disable", "detector.example"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Disable { id } => assert_eq!(id, "detector.example"),
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_trust_parses_digest_or_signer() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "plugin",
+        "trust",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Trust { digest_or_signer } => {
+                assert_eq!(
+                    digest_or_signer,
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                );
+            }
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_doctor_parses() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "plugin", "doctor"])?;
+    match cli.command {
+        Command::Plugin(cmd) => match cmd.subcommand {
+            commands::PluginSubcommand::Doctor => {}
+            _ => return Err("parsed wrong plugin subcommand".into()),
+        },
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
 fn symlink_invocation_parses_as_fetch_wrapper() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli_from_args([
         "/tmp/shims/curl",
