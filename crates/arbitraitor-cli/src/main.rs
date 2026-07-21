@@ -67,6 +67,8 @@ enum Command {
     Inspect(Box<InspectCommand>),
     /// Fetch an artifact with provenance verification (spec §28.2).
     Fetch(Box<FetchCommand>),
+    /// Wrap an existing tool invocation through Arbitraitor (spec §28.1).
+    Wrap(WrapCommand),
     Run(Box<run::RunCommand>),
     Daemon(DaemonCommand),
     Unpack(UnpackCommand),
@@ -211,6 +213,16 @@ struct FetchCommand {
     /// Skip cache and force a fresh fetch.
     #[arg(long)]
     no_cache: bool,
+}
+
+/// Wrap an existing tool invocation and submit useful artifacts to Arbitraitor.
+#[derive(Args)]
+struct WrapCommand {
+    /// Tool to wrap, such as `curl`, `wget`, `bash`, or `brew`.
+    tool: String,
+    /// Original tool arguments after `--`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 /// Output format for the `--explain` report.
@@ -463,6 +475,9 @@ async fn run_main() -> Result<()> {
         Command::Fetch(command) => {
             wrapper_fetch(&command, &config).await?;
         }
+        Command::Wrap(command) => {
+            wrap(command, &config).await?;
+        }
         Command::Run(command) => {
             let exit_code = run::run(*command, &config).await?;
             if exit_code != 0 {
@@ -657,6 +672,88 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
 
     emit_wrapper_output(&outcome.bytes, output_path.as_deref(), remote_name, &url)?;
     Ok(())
+}
+
+async fn wrap(command: WrapCommand, config: &Config) -> Result<()> {
+    match WrapperTarget::from_binary_name(&command.tool) {
+        Some(WrapperTarget::Curl | WrapperTarget::Wget) => {
+            let fetch = FetchCommand {
+                tool: Some(command.tool),
+                args: command.args,
+                output: None,
+                sha256: None,
+                signature: Vec::new(),
+                cosign_bundle: Vec::new(),
+                identity: Vec::new(),
+                issuer: Vec::new(),
+                expected_type: None,
+                expected_content_type: None,
+                max_bytes: None,
+                header: Vec::new(),
+                policy: None,
+                recursive: false,
+                sandbox: false,
+                non_interactive: false,
+                json: false,
+                sarif: false,
+                receipt: None,
+                no_cache: false,
+            };
+            wrapper_fetch(&fetch, config).await?;
+        }
+        None if command.tool == "bash" => {
+            wrap_bash(&command, config).await?;
+        }
+        None => {
+            writeln!(
+                std::io::stderr().lock(),
+                "warning: wrap support for `{}` is not implemented; no content was released",
+                command.tool
+            )
+            .into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+async fn wrap_bash(command: &WrapCommand, config: &Config) -> Result<()> {
+    let Some(script) = bash_script_argument(&command.args) else {
+        writeln!(
+            std::io::stderr().lock(),
+            "warning: wrap bash could not identify a script path; no content was released"
+        )
+        .into_diagnostic()?;
+        return Ok(());
+    };
+    let outcome = pipeline::inspect(
+        script,
+        None,
+        None,
+        None,
+        None,
+        pipeline::signature_inputs(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())?,
+        config,
+        None,
+    )
+    .await?;
+    if outcome.verdict != Verdict::Pass {
+        miette::bail!(
+            "wrap rejected bash script with verdict {:?}",
+            outcome.verdict
+        );
+    }
+    writeln!(
+        std::io::stderr().lock(),
+        "warning: wrap bash inspected {script}; execution is not implemented and no content was released"
+    )
+    .into_diagnostic()?;
+    Ok(())
+}
+
+fn bash_script_argument(args: &[String]) -> Option<&str> {
+    args.iter()
+        .map(String::as_str)
+        .find(|arg| !arg.starts_with('-'))
 }
 
 fn emit_wrapper_output(
