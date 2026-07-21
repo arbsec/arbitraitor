@@ -317,6 +317,7 @@ fn scan_command_parses_all_flags() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Daemon(_)
         | Command::Fetch(_)
+        | Command::Wrap(_)
         | Command::Unpack(_)
         | Command::Intel(_)
         | Command::Run(_)
@@ -364,6 +365,7 @@ fn scan_command_defaults() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Daemon(_)
         | Command::Fetch(_)
+        | Command::Wrap(_)
         | Command::Unpack(_)
         | Command::Intel(_)
         | Command::Run(_)
