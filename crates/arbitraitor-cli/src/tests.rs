@@ -1,13 +1,15 @@
 use super::{
     Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
-    emit_wrapper_output, parse_cli_from_args, pipeline::parse_fetch_source,
+    emit_wrapper_output, parse_cli_from_args, pipeline::parse_fetch_source, query_daemon_status,
     wrapper_output_destination, wrapper_url_argument, write_status_text,
 };
 use arbitraitor_fetch::FetchSource;
+use arbitraitor_model::origin::CallerOrigin;
 use clap::Parser;
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
@@ -537,6 +539,7 @@ fn status_command_parses_text_mode() -> Result<(), Box<dyn std::error::Error>> {
             assert!(!command.json);
             assert!(command.cas_dir.is_none());
             assert!(command.rules.is_none());
+            assert!(command.socket.is_none());
         }
         _ => return Err("parsed wrong command".into()),
     }
@@ -555,6 +558,117 @@ fn status_command_parses_json_flag() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn status_command_parses_socket_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "status",
+        "--socket",
+        "/tmp/arbitraitor-status.sock",
+    ])?;
+
+    match cli.command {
+        Command::Status(command) => {
+            assert_eq!(
+                command.socket.as_deref(),
+                Some(std::path::Path::new("/tmp/arbitraitor-status.sock"))
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn status_falls_back_when_socket_missing() -> Result<(), Box<dyn std::error::Error>> {
+    let root = unique_temp_path("status-no-daemon");
+    fs::create_dir_all(root.join("objects").join("ab"))?;
+    fs::write(root.join("objects").join("ab").join("object"), b"data")?;
+
+    let checker = HealthChecker::new().with_store(root.clone());
+    let report = checker.check();
+    let mut buffer = Vec::new();
+    write_status_text(&mut buffer, &report, None)?;
+
+    let output = String::from_utf8(buffer)?;
+    assert!(output.contains("Arbitraitor v"));
+    assert!(
+        output.contains("Daemon: not running"),
+        "missing-daemon output must announce store-only fallback: {output}",
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn status_query_returns_none_when_daemon_socket_missing() {
+    // A path under /tmp that has no socket bound. The handler must NOT error:
+    // missing-daemon is the documented spec §28.1 fallback path.
+    let socket = unique_temp_path("status-missing-daemon").join("daemon.sock");
+    let info = query_daemon_status(&socket).await;
+    assert!(
+        info.is_none(),
+        "missing daemon must return None, not error: {info:?}",
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn status_query_returns_info_from_real_daemon() -> Result<(), Box<dyn std::error::Error>> {
+    // Spawn a real daemon on a temp socket, drive a couple of operations
+    // through it, then verify the CLI handler reads the daemon_info snapshot.
+    let root = unique_temp_path("status-real-daemon");
+    fs::create_dir_all(&root)?;
+    let socket = root.join("daemon.sock");
+    let daemon = arbitraitor_daemon::Daemon::new(&socket);
+    let handle = tokio::spawn(async move { daemon.run().await });
+
+    // Wait for the listener to appear.
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(socket.exists(), "daemon socket was not created");
+
+    // Drive a Health request so the recent-operations ring has an entry.
+    let _ = arbitraitor_daemon::request_once(
+        &socket,
+        &arbitraitor_daemon::DaemonRequest::Health {
+            caller_origin: CallerOrigin::HumanTty,
+            capability_token: None,
+        },
+    )
+    .await?;
+
+    let info = query_daemon_status(&socket)
+        .await
+        .ok_or("daemon running: query must return Some(daemon_info)")?;
+
+    assert!(info.pid > 0);
+    assert!(
+        info.recent_operations
+            .iter()
+            .all(|op| op.operation != "status"),
+        "Status must not self-record: {info:?}",
+    );
+
+    // Shutdown the daemon so the spawned task can finish.
+    let _ = arbitraitor_daemon::request_once(
+        &socket,
+        &arbitraitor_daemon::DaemonRequest::Shutdown {
+            caller_origin: CallerOrigin::HumanTty,
+            capability_token: None,
+        },
+    )
+    .await?;
+    let _ = handle.await;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn status_command_outputs_text() -> Result<(), Box<dyn std::error::Error>> {
     let root = unique_temp_path("status-text");
     fs::create_dir_all(root.join("objects").join("ab"))?;
@@ -565,7 +679,7 @@ fn status_command_outputs_text() -> Result<(), Box<dyn std::error::Error>> {
         .with_rule_pack("v2024.6".to_owned())
         .check();
     let mut buffer = Vec::new();
-    write_status_text(&mut buffer, &report)?;
+    write_status_text(&mut buffer, &report, None)?;
     let output = String::from_utf8(buffer)?;
 
     assert!(output.contains("Arbitraitor v"));
@@ -573,7 +687,46 @@ fn status_command_outputs_text() -> Result<(), Box<dyn std::error::Error>> {
     assert!(output.contains("Detector"));
     assert!(output.contains("Version"));
     assert!(output.contains("Healthy"));
+    assert!(
+        output.contains("Daemon: not running"),
+        "expected store-only fallback text, got: {output}",
+    );
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn status_command_outputs_text_with_daemon_info() -> Result<(), Box<dyn std::error::Error>> {
+    let report = HealthChecker::new().check();
+    let daemon = arbitraitor_daemon::DaemonInfo {
+        pid: 4242,
+        uptime_secs: 13,
+        last_operation: Some(arbitraitor_daemon::RecentOperation {
+            operation: "inspect".to_owned(),
+            outcome: "success".to_owned(),
+            uptime_ms: 250,
+            sha256: Some("deadbeef".repeat(8)),
+            error: None,
+        }),
+        recent_operations: vec![arbitraitor_daemon::RecentOperation {
+            operation: "scan".to_owned(),
+            outcome: "success".to_owned(),
+            uptime_ms: 100,
+            sha256: Some("feedface".repeat(8)),
+            error: None,
+        }],
+    };
+    let mut buffer = Vec::new();
+    write_status_text(&mut buffer, &report, Some(&daemon))?;
+    let output = String::from_utf8(buffer)?;
+
+    assert!(output.contains("Daemon:"));
+    assert!(output.contains("pid: 4242"));
+    assert!(output.contains("uptime: 13s"));
+    assert!(output.contains("last operation: inspect (success)"));
+    assert!(output.contains("recent operations:"));
+    assert!(output.contains("scan"));
+    assert!(output.contains("inspect"));
     Ok(())
 }
 

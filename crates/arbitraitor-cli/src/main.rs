@@ -18,7 +18,9 @@ use arbitraitor_archive::{
 use arbitraitor_artifact::classify;
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::HealthChecker;
-use arbitraitor_daemon::{Daemon, DaemonRequest, default_socket_path, request_once};
+use arbitraitor_daemon::{
+    Daemon, DaemonInfo, DaemonRequest, RecentOperation, default_socket_path, request_once,
+};
 use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
 use arbitraitor_intel::{
     IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
@@ -242,6 +244,11 @@ struct UnpackCommand {
 }
 
 /// Report Arbitraitor component health and version information.
+///
+/// When the local daemon is running, the report includes daemon process
+/// identity (PID, uptime) and the daemon's recent operations. When no
+/// daemon is reachable, the report falls back to the local-store-only
+/// summary (spec §28.1).
 #[derive(Args)]
 struct StatusCommand {
     /// Output the full health report as JSON.
@@ -253,6 +260,9 @@ struct StatusCommand {
     /// Load YARA-X rule packs from this directory and report their versions.
     #[arg(long, value_name = "DIR")]
     rules: Option<PathBuf>,
+    /// Daemon socket path to query (defaults to the standard path).
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
 }
 
 /// `arbitraitor intel` — manage local threat-intelligence feeds.
@@ -494,7 +504,7 @@ async fn run_main() -> Result<()> {
             intel(command).await?;
         }
         Command::Status(command) => {
-            status(&command, &config)?;
+            status(&command, &config).await?;
         }
         Command::Wrappers(command) => {
             wrappers(command)?;
@@ -1196,7 +1206,7 @@ fn shim_error_to_miette(error: &ShimError, action: &str) -> miette::Report {
     miette::miette!("shim {action} failed: {error}")
 }
 
-fn status(command: &StatusCommand, config: &Config) -> Result<()> {
+async fn status(command: &StatusCommand, config: &Config) -> Result<()> {
     let cas_dir = command
         .cas_dir
         .clone()
@@ -1213,9 +1223,21 @@ fn status(command: &StatusCommand, config: &Config) -> Result<()> {
     }
 
     let report = checker.check();
+    let socket = command.socket.clone().unwrap_or_else(default_socket_path);
+    let daemon = query_daemon_status(&socket).await;
 
     if command.json {
-        let json = serde_json::to_vec_pretty(&report).into_diagnostic()?;
+        let mut value = serde_json::to_value(&report)
+            .map_err(|error| miette::miette!("failed to encode health report: {error}"))?;
+        if let Some(map) = value.as_object_mut() {
+            let daemon_value = match &daemon {
+                Some(info) => serde_json::to_value(info)
+                    .map_err(|error| miette::miette!("failed to encode daemon info: {error}"))?,
+                None => serde_json::Value::Null,
+            };
+            map.insert("daemon".to_owned(), daemon_value);
+        }
+        let json = serde_json::to_vec_pretty(&value).into_diagnostic()?;
         std::io::stdout()
             .lock()
             .write_all(&json)
@@ -1223,7 +1245,21 @@ fn status(command: &StatusCommand, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    write_status_text(&mut std::io::stdout().lock(), &report)
+    write_status_text(&mut std::io::stdout().lock(), &report, daemon.as_ref())
+}
+
+/// Queries the daemon for its `Status` snapshot, returning `None` when the
+/// socket is unreachable. Never errors: a missing daemon is a normal
+/// (store-only) status outcome (spec §28.1 fallback).
+pub async fn query_daemon_status(socket: &Path) -> Option<DaemonInfo> {
+    let request = DaemonRequest::Status {
+        caller_origin: CallerOrigin::HumanTty,
+        capability_token: None,
+    };
+    match request_once(socket, &request).await {
+        Ok(response) if response.success => response.daemon_info,
+        Ok(_) | Err(_) => None,
+    }
 }
 
 fn rule_pack_versions(rules_dir: &Path) -> Result<Vec<String>> {
@@ -1244,6 +1280,7 @@ fn rule_pack_versions(rules_dir: &Path) -> Result<Vec<String>> {
 fn write_status_text(
     writer: &mut impl std::io::Write,
     report: &arbitraitor_core::health::HealthReport,
+    daemon: Option<&DaemonInfo>,
 ) -> Result<()> {
     writeln!(writer, "Arbitraitor v{}", report.version).into_diagnostic()?;
     writeln!(writer, "Overall: {:?}", report.overall).into_diagnostic()?;
@@ -1261,6 +1298,48 @@ fn write_status_text(
             .into_diagnostic()?;
         }
     }
+    writeln!(writer).into_diagnostic()?;
+    match daemon {
+        Some(info) => write_daemon_section(writer, info)?,
+        None => writeln!(writer, "Daemon: not running (store-only status)").into_diagnostic()?,
+    }
+    Ok(())
+}
+
+fn write_daemon_section(writer: &mut impl std::io::Write, info: &DaemonInfo) -> Result<()> {
+    writeln!(writer, "Daemon:").into_diagnostic()?;
+    writeln!(writer, "  pid: {}", info.pid).into_diagnostic()?;
+    writeln!(writer, "  uptime: {}s", info.uptime_secs).into_diagnostic()?;
+    match &info.last_operation {
+        Some(last) => writeln!(
+            writer,
+            "  last operation: {} ({})",
+            last.operation, last.outcome
+        )
+        .into_diagnostic()?,
+        None => writeln!(writer, "  last operation: <none>").into_diagnostic()?,
+    }
+    if !info.recent_operations.is_empty() {
+        writeln!(writer, "  recent operations:").into_diagnostic()?;
+        for entry in &info.recent_operations {
+            write_recent_operation(writer, entry)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_recent_operation(writer: &mut impl std::io::Write, entry: &RecentOperation) -> Result<()> {
+    let sha = entry
+        .sha256
+        .as_deref()
+        .map_or_else(|| "<no-digest>".to_owned(), ToOwned::to_owned);
+    let sha_truncated: String = sha.chars().take(16).collect();
+    writeln!(
+        writer,
+        "    - {:<7} {:<7} up+{:>6}ms {}",
+        entry.operation, entry.outcome, entry.uptime_ms, sha_truncated
+    )
+    .into_diagnostic()?;
     Ok(())
 }
 
