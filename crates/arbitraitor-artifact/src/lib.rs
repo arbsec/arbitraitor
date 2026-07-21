@@ -9,6 +9,7 @@ use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategor
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 use thiserror::Error;
 
 /// Native executable metadata parsing.
@@ -76,6 +77,38 @@ pub enum ArtifactType {
     XmlDocument,
     /// Empty or otherwise unclassifiable payload.
     Unknown,
+}
+
+impl FromStr for ArtifactType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "elf" | "elf-executable" => Ok(Self::ElfExecutable),
+            "pe" | "pe-executable" => Ok(Self::PeExecutable),
+            "mach-o" | "macho" | "mach-o-executable" => Ok(Self::MachOExecutable),
+            "sh" | "shell" | "shell-script" => Ok(Self::ShellScript(ShellKind::Posix)),
+            "archive" | "zip" | "zip-archive" => Ok(Self::ZipArchive),
+            "tar" | "tar-archive" => Ok(Self::TarArchive),
+            "gzip" | "gz" | "gzip-compressed" => Ok(Self::GzipCompressed),
+            "xz" | "xz-compressed" => Ok(Self::XzCompressed),
+            "bzip2" | "bz2" | "bzip2-compressed" => Ok(Self::Bzip2Compressed),
+            "zstd" | "zst" | "zstd-compressed" => Ok(Self::ZstdCompressed),
+            "powershell" | "powershell-script" => Ok(Self::PowerShellScript),
+            "python" | "python-script" => Ok(Self::PythonScript),
+            "javascript" | "js" => Ok(Self::JavaScript),
+            "lnk" | "windows-shortcut" => Ok(Self::WindowsShortcut),
+            "text" | "generic-text" => Ok(Self::GenericText),
+            "binary" | "generic-binary" => Ok(Self::GenericBinary),
+            "html" | "html-document" => Ok(Self::HtmlDocument),
+            "json" | "json-document" => Ok(Self::JsonDocument),
+            "xml" | "xml-document" => Ok(Self::XmlDocument),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(format!(
+                "unsupported artifact type {value:?}; expected elf, pe, mach-o, sh, or archive"
+            )),
+        }
+    }
 }
 
 /// Text encoding class detected while classifying content.

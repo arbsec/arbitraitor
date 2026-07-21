@@ -4,14 +4,19 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use arbitraitor_analysis::{RetrievalInfo as AnalysisRetrievalInfo, analyze_recursive};
 use arbitraitor_artifact::{ArtifactType, ShellKind, classify};
 use arbitraitor_core::config::Config;
 use arbitraitor_core::health::{HealthChecker, HealthStatus, YaraRulesProbe};
 use arbitraitor_mcp::sanitize_for_agent;
 use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::verdict::{Severity, Verdict};
 use arbitraitor_policy::PolicyEngine;
-use arbitraitor_receipt::Receipt;
+use arbitraitor_receipt::{
+    DetectorVersion, FindingSummary, Receipt, ReceiptBuilder, ReceiptTimestamps, RetrievalInfo,
+    VerdictInfo,
+};
 use arbitraitor_store::ContentStore;
 use arbitraitor_update::verifier::UpdateVerifier;
 use arbitraitor_wrapper::init as shell_init;
@@ -24,10 +29,28 @@ use std::path::Path;
 use crate::{ExplainFormat, pipeline::default_cas_dir, write_explainability, write_report};
 
 #[derive(Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "clap bool fields intentionally mirror the scan flag surface"
+)]
 pub struct ScanCommand {
     pub path: Option<PathBuf>,
     #[arg(long)]
     pub stdin: bool,
+    #[arg(long)]
+    pub emit_on_pass: bool,
+    #[arg(long)]
+    pub recursive: bool,
+    #[arg(long = "type", value_name = "TYPE")]
+    pub artifact_type: Option<ArtifactType>,
+    #[arg(long = "name", value_name = "NAME")]
+    pub detector_name: Option<String>,
+    #[arg(long = "source-url", value_name = "URL")]
+    pub source_url: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long)]
+    pub sarif: bool,
     #[arg(long, value_name = "DIR")]
     pub rules: Option<PathBuf>,
     #[arg(long)]
@@ -226,6 +249,16 @@ pub struct ExecuteCommand {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
+    if command.json && command.sarif {
+        miette::bail!("--json and --sarif cannot be used together");
+    }
+    if command.emit_on_pass && (command.json || command.sarif) {
+        miette::bail!("--emit-on-pass cannot be combined with structured output flags");
+    }
+    if command.emit_on_pass && !command.stdin {
+        miette::bail!("--emit-on-pass requires --stdin");
+    }
+
     let max_bytes = config.store.max_bytes;
     let bytes = if command.stdin {
         let mut buf = Vec::new();
@@ -265,19 +298,72 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
 
     let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::new(Sha256::digest(&bytes).into());
 
-    let (coordinator, _rule_pack_versions) =
+    let (coordinator, rule_pack_versions) =
         crate::pipeline::analysis_coordinator(command.rules.as_deref())?;
-    let result = coordinator.analyze(&bytes);
+    let source_name = scan_source_name(command);
+    let retrieval = command
+        .source_url
+        .as_deref()
+        .unwrap_or(&source_name)
+        .to_owned();
+    let mut result = coordinator.analyze_with_retrieval(
+        &bytes,
+        Some(AnalysisRetrievalInfo {
+            requested_location: Some(retrieval.clone()),
+            final_location: None,
+            content_type: None,
+            byte_count: Some(u64::try_from(bytes.len()).into_diagnostic()?),
+        }),
+    );
+
+    if command.recursive {
+        let (_node, recursive_findings) = analyze_recursive(&coordinator, &bytes, 8);
+        result.findings.extend(recursive_findings);
+        result.verdict = verdict_from_findings(&result.findings, result.verdict);
+    }
+
+    if let Some(expected) = command.artifact_type
+        && !artifact_type_matches(expected, result.classification.artifact_type)
+    {
+        miette::bail!(
+            "artifact type mismatch: expected {expected:?}, observed {:?}",
+            result.classification.artifact_type
+        );
+    }
+
+    if let Some(name) = command.detector_name.as_deref() {
+        result.findings.retain(|finding| finding.detector == name);
+        result
+            .detector_results
+            .retain(|detector_result| detector_result.metadata.id == name);
+    }
 
     let cas_root = config.store.cas_dir.clone().unwrap_or_else(default_cas_dir);
 
-    write_report(
-        &mut std::io::stderr().lock(),
-        &result,
-        &artifact_sha256,
-        &cas_root,
-        &[],
-    )?;
+    let receipt = build_scan_receipt(&ScanReceiptInput {
+        source_url: &retrieval,
+        result: &result,
+        artifact_sha256: &artifact_sha256,
+        artifact_size: bytes.len(),
+        rule_pack_versions: &rule_pack_versions,
+    })?;
+
+    if command.json {
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &receipt).into_diagnostic()?;
+        writeln!(std::io::stdout().lock()).into_diagnostic()?;
+    } else if command.sarif {
+        let sarif = receipt.to_sarif("arbitraitor", env!("CARGO_PKG_VERSION"));
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &sarif).into_diagnostic()?;
+        writeln!(std::io::stdout().lock()).into_diagnostic()?;
+    } else {
+        write_report(
+            &mut std::io::stderr().lock(),
+            &result,
+            &artifact_sha256,
+            &cas_root,
+            &[],
+        )?;
+    }
 
     let format = match (command.explain, command.format) {
         (_, Some(f)) => Some(f),
@@ -285,7 +371,14 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
         (false, None) => None,
     };
     if let Some(fmt) = format {
-        write_explainability(&result.findings, "scan", fmt)?;
+        write_explainability(&result.findings, &source_name, fmt)?;
+    }
+
+    if command.emit_on_pass && result.verdict == Verdict::Pass {
+        std::io::stdout()
+            .lock()
+            .write_all(&bytes)
+            .into_diagnostic()?;
     }
 
     let exit_code = ExitCode::from(result.verdict);
@@ -293,6 +386,101 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
         std::process::exit(exit_code.as_i32());
     }
     Ok(())
+}
+
+struct ScanReceiptInput<'a> {
+    source_url: &'a str,
+    result: &'a arbitraitor_analysis::AnalysisResult,
+    artifact_sha256: &'a Sha256Digest,
+    artifact_size: usize,
+    rule_pack_versions: &'a [DetectorVersion],
+}
+
+fn build_scan_receipt(input: &ScanReceiptInput<'_>) -> Result<Receipt> {
+    let artifact_size = u64::try_from(input.artifact_size).into_diagnostic()?;
+    let retrieval = RetrievalInfo::new(input.source_url).with_byte_count(artifact_size);
+    let now = crate::pipeline::timestamp();
+    let mut builder = ReceiptBuilder::new(
+        env!("CARGO_PKG_VERSION"),
+        input.artifact_sha256.to_string(),
+        artifact_size,
+        VerdictInfo {
+            verdict: input.result.verdict,
+            deciding_rule: None,
+            policy_trace: vec!["arbitraitor scan built-in verdict derivation".to_owned()],
+        },
+        ReceiptTimestamps {
+            created: now.clone(),
+            modified: now,
+        },
+    )
+    .artifact_type(format!("{:?}", input.result.classification.artifact_type))
+    .retrieval(retrieval)
+    .findings(input.result.findings.iter().map(FindingSummary::from));
+
+    for detector_result in &input.result.detector_results {
+        builder = builder.detector_version(DetectorVersion {
+            id: detector_result.metadata.id.clone(),
+            version: detector_result.metadata.version.clone(),
+        });
+    }
+    for rule_pack_version in input.rule_pack_versions {
+        builder = builder.detector_version(rule_pack_version.clone());
+    }
+
+    Ok(builder.build())
+}
+
+fn scan_source_name(command: &ScanCommand) -> String {
+    command.source_url.clone().unwrap_or_else(|| {
+        command
+            .path
+            .as_ref()
+            .map_or_else(|| "stdin://".to_owned(), |path| path.display().to_string())
+    })
+}
+
+fn verdict_from_findings(
+    findings: &[arbitraitor_model::finding::Finding],
+    fallback: Verdict,
+) -> Verdict {
+    if findings
+        .iter()
+        .any(|finding| finding.severity == Severity::Critical)
+    {
+        Verdict::Block
+    } else if findings
+        .iter()
+        .any(|finding| finding.severity == Severity::High)
+    {
+        Verdict::Prompt
+    } else if findings.is_empty() {
+        fallback
+    } else {
+        Verdict::Warn
+    }
+}
+
+fn artifact_type_matches(expected: ArtifactType, actual: ArtifactType) -> bool {
+    expected == actual
+        || matches!(
+            (expected, actual),
+            (
+                ArtifactType::ShellScript(_),
+                ArtifactType::ShellScript(_)
+                    | ArtifactType::PowerShellScript
+                    | ArtifactType::PythonScript
+                    | ArtifactType::JavaScript
+            ) | (
+                ArtifactType::ZipArchive,
+                ArtifactType::ZipArchive
+                    | ArtifactType::TarArchive
+                    | ArtifactType::GzipCompressed
+                    | ArtifactType::XzCompressed
+                    | ArtifactType::Bzip2Compressed
+                    | ArtifactType::ZstdCompressed
+            )
+        )
 }
 
 pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
@@ -1330,6 +1518,18 @@ mod tests {
     const APPROVER: &str = "round-2-test";
     const VERDICT: &str = "pass";
     const TTL_SECONDS: u64 = 3600;
+
+    #[test]
+    fn verdict_from_findings_preserves_fail_closed_fallback_when_filtered_empty() {
+        assert_eq!(verdict_from_findings(&[], Verdict::Block), Verdict::Block);
+        assert_eq!(verdict_from_findings(&[], Verdict::Prompt), Verdict::Prompt);
+        assert_eq!(verdict_from_findings(&[], Verdict::Warn), Verdict::Warn);
+        assert_eq!(
+            verdict_from_findings(&[], Verdict::Incomplete),
+            Verdict::Incomplete
+        );
+        assert_eq!(verdict_from_findings(&[], Verdict::Pass), Verdict::Pass);
+    }
 
     /// Build an `ApprovalFile` for the bash-execution path with the given
     /// artifact digest, pinned to network-isolated. Far-future timestamps

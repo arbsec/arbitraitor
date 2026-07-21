@@ -94,6 +94,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### CLI
+
+- `arbitraitor scan` now exposes the full spec §28.4 flag surface:
+  `--emit-on-pass`, `--recursive`, `--type`, `--name`, `--source-url`,
+  `--json`, and `--sarif`.
+
 #### Archive
 
 - `FindingCategory::ParserDifferential` and archive `ParserSmelting` hazard

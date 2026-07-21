@@ -425,6 +425,13 @@ Scans a local file or stdin without network retrieval. Runs detectors and report
 | Flag | Description |
 |------|-------------|
 | `--stdin` | Read input from stdin instead of a file path |
+| `--emit-on-pass` | Buffer stdin and emit the original bytes to stdout only when the scan verdict is `Pass` |
+| `--recursive` | Recursively scan archive payloads |
+| `--type <TYPE>` | Require an artifact class (`elf`, `pe`, `mach-o`, `sh`, `archive`) |
+| `--name <NAME>` | Keep findings and detector status for the named detector only |
+| `--source-url <URL>` | Record a source URL in scan provenance metadata |
+| `--json` | Output the structured scan receipt as JSON instead of human-readable text |
+| `--sarif` | Output scan findings as SARIF 2.1.0 |
 | `--rules <DIR>` | Path to a directory of YARA-X rule packs |
 | `--explain` | Print an explainability summary after findings |
 | `--format <FORMAT>` | Output format for explainability: `text`, `shellcheck` (implies `--explain`) |
@@ -440,6 +447,12 @@ curl -s https://example.com/script.sh | arbitraitor scan --stdin
 
 # Scan with explainability output
 arbitraitor scan ./script.sh --explain
+
+# Emit structured JSON receipt
+arbitraitor scan ./script.sh --json
+
+# Gate piped bytes: stdout receives bytes only on Pass
+curl -s https://example.com/script.sh | arbitraitor scan --stdin --emit-on-pass
 ```
 
 ## Explain command
