@@ -102,6 +102,7 @@ fn inspect_accepts_sha256_flag() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Daemon(_)
         | Command::Fetch(_)
+        | Command::Wrap(_)
         | Command::Unpack(_)
         | Command::Intel(_)
         | Command::Run(_)
@@ -186,6 +187,7 @@ fn inspect_accepts_rules_directory_flag() -> Result<(), Box<dyn std::error::Erro
         }
         Command::Daemon(_)
         | Command::Fetch(_)
+        | Command::Wrap(_)
         | Command::Unpack(_)
         | Command::Intel(_)
         | Command::Run(_)
@@ -244,6 +246,7 @@ fn inspect_accepts_signature_flags() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Daemon(_)
         | Command::Fetch(_)
+        | Command::Wrap(_)
         | Command::Unpack(_)
         | Command::Intel(_)
         | Command::Run(_)
@@ -345,6 +348,7 @@ fn unpack_accepts_archive_and_output_flags() -> Result<(), Box<dyn std::error::E
         Command::Inspect(_)
         | Command::Daemon(_)
         | Command::Fetch(_)
+        | Command::Wrap(_)
         | Command::Intel(_)
         | Command::Run(_)
         | Command::Status(_)
@@ -833,6 +837,55 @@ fn update_verify_with_explicit_sig_parses() -> Result<(), Box<dyn std::error::Er
         _ => return Err("parsed wrong command".into()),
     }
     Ok(())
+}
+
+#[test]
+fn wrap_command_parses_curl() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "wrap",
+        "curl",
+        "--",
+        "-fsSL",
+        "https://example.com/install.sh",
+    ])?;
+
+    match cli.command {
+        Command::Wrap(command) => {
+            assert_eq!(command.tool, "curl");
+            assert_eq!(command.args, ["-fsSL", "https://example.com/install.sh"]);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn wrap_command_parses_wget() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "wrap",
+        "wget",
+        "--",
+        "-qO-",
+        "https://example.com/install.sh",
+    ])?;
+
+    match cli.command {
+        Command::Wrap(command) => {
+            assert_eq!(command.tool, "wget");
+            assert_eq!(command.args, ["-qO-", "https://example.com/install.sh"]);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn wrap_command_requires_tool() {
+    let result = Cli::try_parse_from(["arbitraitor", "wrap"]);
+
+    assert!(result.is_err());
 }
 
 #[test]
