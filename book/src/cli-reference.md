@@ -834,39 +834,48 @@ arbitraitor graph ./archive.tar.gz
 ## Approve command
 
 ```sh
-arbitraitor approve <RECEIPT>
+arbitraitor approve <RECEIPT> [flags]
 ```
 
-Decoupled approval flow: reads a receipt from a prior inspection, displays findings, prompts for approval, and writes a time-limited approval file (5-minute expiry).
-
-### Examples
-
-```sh
-arbitraitor inspect https://example.com/install.sh --receipt receipt.json
-arbitraitor approve receipt.json
-# Writes receipt.approval.json
-```
-
-## Execute command
-
-```sh
-arbitraitor execute <APPROVAL> [flags]
-```
-
-Executes an artifact from CAS using a previously generated approval file.
+Decoupled approval flow: reads a receipt from a prior inspection, displays findings, prompts for approval, and writes a time-limited approval file (5-minute expiry). If `--output` is omitted, the approval path defaults to `<receipt>.approval.json`.
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
+| `--output <PATH>` | Write the approval file to this path |
+
+### Examples
+
+```sh
+arbitraitor inspect https://example.com/install.sh --receipt receipt.json
+arbitraitor approve receipt.json --output approval.json
+# Without --output, writes receipt.approval.json
+arbitraitor approve receipt.json
+```
+
+## Execute command
+
+```sh
+arbitraitor execute --approval <APPROVAL> [flags]
+```
+
+Executes an artifact from CAS using a previously generated approval file.
+The legacy positional approval path is still accepted for compatibility but emits a deprecation warning; use `--approval <PATH>` for new scripts.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--approval <PATH>` | Approval file from `arbitraitor approve` |
 | `--network` | Allow network access during execution |
 
 ### Examples
 
 ```sh
-arbitraitor execute receipt.approval.json
+arbitraitor execute --approval approval.json
 # With network access:
-arbitraitor execute receipt.approval.json --network
+arbitraitor execute --approval approval.json --network
 ```
 
 ### Supported artifact types

@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-#### CLI
-
-- `arbitraitor doctor` now reports the full spec §28.8 health-check set in JSON and human-readable output: policy validity, YARA-X rules, AV adapters, scanner freshness, feed signatures, update trust root, sandbox adapters, plugin manifests, plugin protocol compatibility, wrapper coverage, shim PATH order, clock skew, proxy settings, and receipt signing key checks.
-
 ### Changed
 
 #### Documentation
@@ -96,9 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
-- `arbitraitor scan` now exposes the full spec §28.4 flag surface:
-  `--emit-on-pass`, `--recursive`, `--type`, `--name`, `--source-url`,
-  `--json`, and `--sarif`.
+- `arbitraitor approve` now accepts `--output <PATH>` for explicit approval
+  file destinations while retaining the existing `<receipt>.approval.json`
+  default. `arbitraitor execute` now accepts `--approval <PATH>` and keeps
+  the legacy positional approval path as a deprecated fallback.
 
 #### Archive
 
@@ -151,10 +146,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
-- `arbitraitor plugin` now exposes the full spec §28.7 CLI surface:
-  `search`, `inspect` (alias for `info`), `install`, `update --all`,
-  `enable`, `disable`, `trust`, and `doctor`. Registry-backed operations
-  return explicit stub messages while registry plumbing is pending.
 - `arbitraitor wrap <tool> -- ...` — first-class spec §28.1 wrapper
   command. `curl` and `wget` delegate to the guarded wrapper-fetch
   pipeline, `bash` inspects a local script path without executing it, and
