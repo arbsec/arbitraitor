@@ -130,6 +130,15 @@ posix, tcsh, oil.
 See [wrappers CLI reference](book/src/cli/wrappers.md) for the full
 surface including the deprecated `hook init` migration path.
 
+Use `arbitraitor wrap` when you want an explicit one-shot wrapper command
+instead of PATH shims:
+
+```sh
+arbitraitor wrap curl -- -fsSL https://example.com/install.sh
+arbitraitor wrap wget -- -qO- https://example.com/install.sh
+arbitraitor wrap bash -- ./approved-script.sh
+```
+
 ### Scan a local file or stdin
 
 ```sh
@@ -231,7 +240,7 @@ backward compatibility; new users should use `wrappers init --install`.
 ## Architecture
 
 ```text
-arbitraitor-cli             Command-line interface (23 subcommands)
+arbitraitor-cli             Command-line interface (24 subcommands)
 ├── arbitraitor-core         Config, metrics, health checks, state machine
 │   ├── arbitraitor-model    Domain types, receipts, findings (newtypes)
 │   └── arbitraitor-policy   TOML policy engine with rule evaluation

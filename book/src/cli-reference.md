@@ -8,6 +8,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 |---------|-------------|
 | `arbitraitor inspect` | Retrieve and analyze an artifact without executing it |
 | `arbitraitor fetch` | Fetch an artifact with provenance verification (spec §28.2) |
+| `arbitraitor wrap` | Wrap an existing tool invocation through Arbitraitor (spec §28.1) |
 | `arbitraitor run` | Execute the full pipeline with approval flow |
 | `arbitraitor scan` | Scan a local file or stdin without retrieval |
 | `arbitraitor explain` | Explain a verdict from a receipt file |
@@ -179,6 +180,30 @@ arbitraitor fetch --receipt receipt.json https://example.com/install.sh
 
 # Non-interactive JSON output
 arbitraitor fetch --non-interactive --json https://example.com/install.sh
+```
+
+## Wrap command
+
+```sh
+arbitraitor wrap <TOOL> -- [tool arguments...]
+```
+
+Wraps an existing tool invocation as a first-class top-level command. The
+wrapper parses the original tool and arguments, creates a normalized operation
+plan, and submits useful artifacts to Arbitraitor core. The wrapper does not
+decide the final verdict and does not release content directly.
+
+`curl` and `wget` invocations delegate to the same guarded download pipeline
+used by PATH shims. `bash` inspects a local script path when one is present;
+other tools currently emit a warning and release nothing.
+
+### Examples
+
+```sh
+arbitraitor wrap curl -- -fsSL https://example.com/install.sh
+arbitraitor wrap wget -- -qO- https://example.com/install.sh
+arbitraitor wrap bash -- ./approved-script.sh
+arbitraitor wrap brew -- install example
 ```
 
 ## Run command
