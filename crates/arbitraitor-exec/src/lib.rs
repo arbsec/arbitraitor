@@ -327,7 +327,9 @@ impl ExecError {
             (None, true) => String::new(),
             (Some(code), true) => format!(" (child exited with code {code})"),
             (Some(code), false) => format!(" (child exited {code}; stderr: {trimmed:?})"),
-            (None, false) => format!(" (child exited before reading stdin; stderr: {trimmed:?})"),
+            (None, false) => {
+                format!(" (child produced stderr without an exit code; stderr: {trimmed:?})")
+            }
         }
     }
 }

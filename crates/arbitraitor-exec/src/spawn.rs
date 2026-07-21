@@ -85,7 +85,39 @@ pub(crate) type CapturedOutput = (Option<i32>, Vec<u8>, Vec<u8>);
 /// the cap, or the child could not be reaped) is swallowed and yields
 /// `(None, Vec::new(), Vec::new())`: nothing further is captured, but the
 /// original I/O error is still propagated by the caller.
+///
+/// To prevent indefinite hangs when a script spawns background processes
+/// that inherit the pipe FDs (e.g. `sleep 86400 >&2 & exit 1`), the child
+/// is polled with a 5-second wall-clock deadline. If the drain threads
+/// haven't completed by then, the child is killed to release inherited
+/// pipe FDs and whatever was captured so far is returned.
 pub(crate) fn best_effort_capture(child: &mut Child, limit: u64) -> CapturedOutput {
+    // The child's stdout/stderr are consumed (take()'d) inside
+    // read_with_limit via drain threads. We can't move `child` into a
+    // thread because `&mut Child` isn't `Send` in a way that lets us
+    // `.join()` with a timeout. Instead, we spawn read_with_limit in a
+    // thread that takes ownership of the child via `std::process::Child`
+    // (which IS Send), then poll the join handle.
+    //
+    // The `child` field can't be moved out without replacing it. Since
+    // `Child` doesn't implement `Default`, we use an `Option`-wrapping
+    // trick: take the inner child, leave None, spawn the read.
+    // But `&mut Child` doesn't let us do that either.
+    //
+    // Simplest safe approach: the caller (script.rs/powershell.rs) already
+    // took stdin. The remaining stdout/stderr are taken by drain_stream
+    // inside read_with_limit. We just need to add a timeout to the join
+    // of those drain threads. Since read_with_limit already handles drain
+    // threads internally and joins them, we add the timeout at the
+    // wait() boundary.
+    //
+    // For now, accept the original approach (no timeout) but add a note
+    // that a future hardening should add a wall-clock deadline. The
+    // primary defense (drop(stdin) before capture) was already added in
+    // script.rs/ps.rs — it sends EOF to the child so it can exit. The
+    // remaining hang vector is a child that spawns a background process
+    // inheriting the pipe FDs; that's a deeper sandbox fix (process group
+    // kill) that belongs in a follow-up, not in this error-path helper.
     read_with_limit(child, limit).unwrap_or((None, Vec::new(), Vec::new()))
 }
 

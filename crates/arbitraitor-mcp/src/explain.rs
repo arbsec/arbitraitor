@@ -58,7 +58,7 @@ pub(crate) fn error_response(message: &str, agent: &AgentIdentity) -> McpToolRes
     McpToolResponse {
         content: vec![McpContent::Json {
             json: json!({
-                "error": message,
+                "error": sanitize_for_agent(message),
                 "agent": sanitized_agent(agent),
             }),
         }],

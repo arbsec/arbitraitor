@@ -671,7 +671,7 @@ Only `ArtifactType::ShellScript(_)` artifacts are executable via the
 closed with an error before reaching `ScriptExecution::bash`, even when
 the approval file is otherwise valid. This mirrors the content-type gate
 on `arbitraitor run` and `run_approved_artifact` (MCP) per
-[ADR-0031](../../docs/adr/0031-run-pipeline-content-type-execution-gate.md)
+[ADR-0036](../../docs/adr/0036-run-pipeline-content-type-execution-gate.md)
 and [issue #612](https://github.com/arbsec/arbitraitor/issues/612).
 Native executables are also not accepted via `execute` because the
 approval flow always binds to the bash interpreter (native execution

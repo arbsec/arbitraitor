@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_approved_artifact` — only `ArtifactType::ShellScript(_)` is
   runnable through the MCP approved-execution path. CLI `run` and MCP
   `run_approved_artifact` now enforce the same content-type gate
-  (ADR-0031, issue #612).
+  (ADR-0036, issue #612).
 
 #### CLI
 
@@ -65,14 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ArtifactType` before piping bytes to `/bin/bash`. Round 2 of the
   adversarial review of #615 found that the round-1 fix only gated the
   `run` and MCP `run_approved_artifact` paths; the `execute` command
-  (invoked as `arbitraitor execute --approval <file>`) accepted the
+  (invoked as `arbitraitor execute <APPROVAL>`) accepted the
   same bash-execution approval file and piped artifact bytes without
   classifying them. The gate mirrors the round-1 fix: only
   `ArtifactType::ShellScript(_)` is permitted; everything else
   (HTML / JSON / XML / archives / `GenericText/Binary` /
   `PowerShellScript` / `PythonScript` / `JavaScript` / `Unknown`) fails
   closed with `miette::bail!("... is not executable via the approved
-  execute path; only shell scripts are runnable (ADR-0031, issue #612)")`.
+  execute path; only shell scripts are runnable (ADR-0036, issue #612)")`.
   Native executables are gated out as well because the approval flow
   always binds to the bash interpreter (native execution uses a separate
   release path).
@@ -122,6 +122,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in downstream agent consumers that rely on the markers to fence
   untrusted content. Found by 2 of the 5 adversarial reviewers of #615
   (Blocker 2, MEDIUM severity).
+- `ScriptExecution::execute` and `PowerShellExecution::execute` now
+  `drop(stdin)` before calling `best_effort_capture` on the write/flush
+  failure path. Without this, if the child was still alive (write failed
+  due to EPIPE on one write, not because the child exited), the child
+  could be blocked on stdin read while the parent was blocked on
+  stdout/stderr drain, causing an indefinite deadlock. Found by 2 of 3
+  fresh adversarial review lanes (round 3, MAJOR severity).
+- The content-type gate in `arbitraitor run`, `arbitraitor execute`, and
+  MCP `run_approved_artifact` now restricts to `ShellScript(Posix | Bash)`
+  instead of `ShellScript(_)`. `ShellScript(Zsh)` is now blocked because
+  `/bin/bash` cannot safely interpret zsh syntax — the same wrong-
+  interpreter class that ADR-0036 rejects for Python/PowerShell/JS.
+  Found by the fresh adversarial code-quality review (round 3, MAJOR
+  severity).
+- `arbitraitor execute` now re-verifies the SHA-256 of the loaded CAS
+  bytes against the approved digest before classification and execution.
+  Closes a TOCTOU gap where a same-UID local attacker could mutate the
+  CAS object between ContentStore verification and read_to_end.
+  Found by the fresh adversarial security review (round 3, LOW severity).
+- MCP `error_response` now sanitizes error messages via
+  `sanitize_for_agent` before including them in JSON-RPC responses.
+  Attacker-controlled child stderr was reaching the `"error"` field
+  without untrusted-data fencing, a Safe Presentation (ADR-0016) gap.
+  Found by the fresh adversarial security review (round 3, MEDIUM).
+- `ExecError::script_io_detail` message for the `(None, non_empty_stderr)`
+  case changed from "child exited before reading stdin" to "child
+  produced stderr without an exit code" — the `None` exit-code also
+  covers signal termination and wait failure, not just early exit.
 
 ### Added
 

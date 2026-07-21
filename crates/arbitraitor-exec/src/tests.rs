@@ -780,3 +780,38 @@ fn script_io_detail_neutralizes_ansi_control_sequences_in_stderr() {
         "ESC should be escaped as `\\u{{1b}}` literal text; got {detail:?}"
     );
 }
+
+/// Regression test for `From<ExecError>` for `PowerShellError`: the conversion
+/// must preserve all `ScriptIo` fields (`child_exit_code`, `child_stderr`,
+/// `child_detail`) so PowerShell execution diagnostics are consistent with
+/// the bash path after the conversion at `powershell.rs:176`.
+#[test]
+fn from_exec_error_preserves_script_io_fields() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::PowerShellError;
+
+    let stderr = b"pwsh: syntax error at line 1".to_vec();
+    let original = ExecError::script_io(
+        "write-script-stdin",
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "EPIPE"),
+        Some(1),
+        stderr.clone(),
+    );
+
+    let converted: PowerShellError = original.into();
+    let PowerShellError::ScriptIo {
+        child_exit_code,
+        child_stderr,
+        child_detail,
+        ..
+    } = converted
+    else {
+        return Err("expected PowerShellError::ScriptIo variant".into());
+    };
+    assert_eq!(child_exit_code, Some(1));
+    assert_eq!(child_stderr, stderr);
+    assert!(
+        child_detail.contains("pwsh: syntax error"),
+        "child_detail should contain the rendered stderr; got {child_detail:?}"
+    );
+    Ok(())
+}

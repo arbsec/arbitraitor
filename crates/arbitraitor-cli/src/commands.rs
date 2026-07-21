@@ -9,6 +9,7 @@ use arbitraitor_core::config::Config;
 use arbitraitor_core::health::{HealthChecker, HealthStatus};
 use arbitraitor_mcp::sanitize_for_agent;
 use arbitraitor_model::exit_code::ExitCode;
+use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_policy::PolicyEngine;
 use arbitraitor_receipt::Receipt;
 use arbitraitor_store::ContentStore;
@@ -1112,20 +1113,26 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut handle.read(), &mut bytes).into_diagnostic()?;
 
-    // ADR-0031 / issue #612 (Blocker 4 from the round-1 adversarial review,
-    // extended to the `arbitraitor execute` command in round 2 of the
-    // review): gate the approved artifact by classified ArtifactType before
-    // piping bytes to bash. The approval file pins the interpreter to bash,
-    // but a user (or automation) could approve an HTML / JSON / XML /
-    // archive / Unknown artifact via `arbitraitor approve` and execute it
-    // via `arbitraitor execute`, bypassing the content-type gate at the
-    // `run` pipeline layer. Piping such bytes to bash is unsafe (HTML etc.
-    // can incidentally contain bash-parseable `$(...)`, redirections, pipes)
-    // — the same rationale as ADR-0031 applies here. Only
-    // `ArtifactType::ShellScript(_)` is runnable through this execute
-    // path; everything else fails closed. (Native executables are gated
-    // out as well because the approval flow always binds to the bash
-    // interpreter; native execution uses a separate release path.)
+    // Re-verify the digest of the loaded bytes against the approved SHA-256.
+    // ContentStore::get verifies the CAS object, but the handle returned
+    // is not continuously verified during read. A same-UID local attacker
+    // could mutate the CAS file between verification and read, causing
+    // different bytes to be executed than were approved. This rehash
+    // closes that TOCTOU gap (ADR-0015 safe-destination, invariant #2
+    // immutable identity).
+    let actual_sha = Sha256Digest::new(Sha256::digest(&bytes).into());
+    if actual_sha != sha {
+        miette::bail!(
+            "artifact bytes do not match approved SHA-256: expected {sha}, got {actual_sha}"
+        );
+    }
+
+    // ADR-0036 / issue #612: gate the approved artifact by classified
+    // ArtifactType before piping bytes to bash. The approval file pins
+    // the interpreter to bash, but the bytes themselves must be
+    // classified as shell scripts (Posix or Bash) to be safely
+    // interpretable by /bin/bash. Zsh, PowerShell, Python, JavaScript,
+    // HTML, JSON, XML, archives, and unknown types all fail closed.
     let classification = classify(&bytes);
     if !matches!(
         classification.artifact_type,
@@ -1133,7 +1140,7 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     ) {
         miette::bail!(
             "artifact type {:?} is not executable via the approved execute path; \
-             only shell scripts are runnable (ADR-0031, issue #612)",
+             only shell scripts are runnable (ADR-0036, issue #612)",
             classification.artifact_type
         );
     }
@@ -1319,7 +1326,7 @@ mod tests {
     /// to bash. An HTML artifact (verifiably `ArtifactType::HtmlDocument`)
     /// is approved via the bash-execution approval flow and then passed
     /// through `execute(&command, &config)`. Without the gate the bytes
-    /// would be piped to `/bin/bash` (unsafe per ADR-0031: HTML can
+    /// would be piped to `/bin/bash` (unsafe per ADR-0036: HTML can
     /// incidentally contain bash-parseable `$(...)`, redirections, pipes).
     /// With the gate, the function must bail with "is not executable via
     /// the approved execute path" and name the artifact type.

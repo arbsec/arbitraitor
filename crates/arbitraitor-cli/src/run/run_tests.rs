@@ -211,6 +211,10 @@ async fn run_blocks_non_executable_artifact_types()
             rendered.contains("is not executable"),
             "output for {artifact_type:?} should explain the artifact is not executable; got: {rendered}"
         );
+        assert!(
+            rendered.contains(&format!("{artifact_type:?}")),
+            "output should name the specific artifact type {artifact_type:?}; got: {rendered}"
+        );
     }
     Ok(())
 }
