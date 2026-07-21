@@ -376,21 +376,40 @@ arbitraitor wrappers init-script
 arbitraitor status [flags]
 ```
 
+`status` reports Arbitraitor component health, daemon-process identity
+(PID, uptime, last operation), and the bounded recent-operations ring
+buffer when a local daemon is running. Falls back to a store-only
+summary when the daemon socket is unreachable (spec §28.1).
+
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Output as JSON |
+| `--json` | Output the full report (health + daemon snapshot) as JSON |
 | `--detectors` | Show detector status |
 | `--feeds` | Show intelligence feed status |
 | `--store` | Show store health and disk usage |
+| `--cas-dir <DIR>` | Override the content-addressed store root to probe |
+| `--rules <DIR>` | Load YARA-X rule packs from this directory and report their versions |
+| `--socket <PATH>` | Daemon socket path to query (default: standard `~/.cache/arbitraitor/daemon.sock`) |
 
-### What it checks
+### What it reports
+
+The `status` command surfaces:
 
 - **Store**: CAS health, corruption check, garbage collection status
 - **Detectors**: Loaded plugins and their current status
 - **Feeds**: Last sync time and freshness for each configured feed
 - **Config**: Validity of configuration files
+- **Daemon (if running)**: PID, uptime in seconds, last operation, and a
+  bounded list of recent operations (`inspect`, `scan`, `query_receipt`,
+  `health`, `shutdown`). When no daemon is reachable, the report line
+  `Daemon: not running (store-only status)` is emitted so callers can
+  distinguish "daemon down" from "daemon healthy".
+
+The JSON shape mirrors the human-readable layout — every component
+report is keyed under `health.checks`, and the daemon snapshot (or
+`null`) is a top-level `daemon` field.
 
 ## Scan command
 

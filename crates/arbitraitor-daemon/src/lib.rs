@@ -11,10 +11,14 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Maximum number of recent operations retained for the `Status` endpoint.
+const RECENT_OPERATIONS_CAPACITY: usize = 32;
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
@@ -109,6 +113,18 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capability_token: Option<String>,
     },
+    /// Report daemon process identity (PID, uptime), the embedded health
+    /// report, and the bounded ring of recent operations (spec §28.1).
+    Status {
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
+    },
 }
 
 impl DaemonRequest {
@@ -121,7 +137,8 @@ impl DaemonRequest {
             | Self::Scan { caller_origin, .. }
             | Self::QueryReceipt { caller_origin, .. }
             | Self::Health { caller_origin, .. }
-            | Self::Shutdown { caller_origin, .. } => caller_origin.clone(),
+            | Self::Shutdown { caller_origin, .. }
+            | Self::Status { caller_origin, .. } => caller_origin.clone(),
         }
     }
 
@@ -142,6 +159,9 @@ impl DaemonRequest {
                 capability_token, ..
             }
             | Self::Shutdown {
+                capability_token, ..
+            }
+            | Self::Status {
                 capability_token, ..
             } => capability_token.as_deref(),
         }
@@ -165,6 +185,44 @@ pub struct DaemonResponse {
     /// Full health report for `Health` requests; absent for all other requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_report: Option<arbitraitor_core::health::HealthReport>,
+    /// Daemon-process snapshot for `Status` requests; absent for all others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_info: Option<DaemonInfo>,
+}
+
+/// Single record describing one operation seen by the daemon.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentOperation {
+    /// Operation variant label (`inspect`, `scan`, `query_receipt`,
+    /// `health`, `shutdown`, `status`).
+    pub operation: String,
+    /// Outcome label (e.g. `success`, `error`, `rate_limited`).
+    pub outcome: String,
+    /// Monotonic millisecond offset since the daemon started.
+    pub uptime_ms: u64,
+    /// Optional SHA-256 for `Inspect` / `Scan` completions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Optional bounded error description (truncated to 512 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Daemon-process snapshot returned by `Status` (spec §28.1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonInfo {
+    /// Process identifier of the running daemon.
+    pub pid: u32,
+    /// Seconds elapsed since the daemon started accepting requests.
+    pub uptime_secs: u64,
+    /// Most-recent record, if any operations have been recorded yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_operation: Option<RecentOperation>,
+    /// Recent operations in newest-first order, bounded to
+    /// `RECENT_OPERATIONS_CAPACITY` entries.
+    pub recent_operations: Vec<RecentOperation>,
 }
 
 /// Local daemon server.
@@ -179,6 +237,8 @@ pub struct Daemon {
     shutdown: Arc<AtomicBool>,
     notify_shutdown: Arc<Notify>,
     rate_limits: Arc<Mutex<HashMap<u32, VecDeque<Instant>>>>,
+    recent_operations: Arc<Mutex<VecDeque<RecentOperation>>>,
+    started_at: Arc<Instant>,
 }
 
 /// Summary of the cleanup actions performed by [`run_crash_recovery`].
@@ -371,6 +431,10 @@ impl Daemon {
             shutdown: Arc::new(AtomicBool::new(false)),
             notify_shutdown: Arc::new(Notify::new()),
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            recent_operations: Arc::new(Mutex::new(VecDeque::with_capacity(
+                RECENT_OPERATIONS_CAPACITY,
+            ))),
+            started_at: Arc::new(Instant::now()),
         }
     }
 
@@ -457,6 +521,8 @@ impl Daemon {
             rate_limits: Arc::clone(&self.rate_limits),
             rate_limit_requests: self.rate_limit_requests,
             rate_limit_window: self.rate_limit_window,
+            recent_operations: Arc::clone(&self.recent_operations),
+            started_at: Arc::clone(&self.started_at),
         }
     }
 
@@ -503,6 +569,8 @@ struct DaemonState {
     rate_limits: Arc<Mutex<HashMap<u32, VecDeque<Instant>>>>,
     rate_limit_requests: usize,
     rate_limit_window: Duration,
+    recent_operations: Arc<Mutex<VecDeque<RecentOperation>>>,
+    started_at: Arc<Instant>,
 }
 
 async fn handle_connection(mut stream: UnixStream, state: DaemonState) -> Result<(), DaemonError> {
@@ -581,6 +649,13 @@ fn stamp_caller_origin(request: DaemonRequest) -> DaemonRequest {
             caller_origin: CallerOrigin::DaemonLocal,
             capability_token,
         },
+        DaemonRequest::Status {
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::Status {
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
     }
 }
 
@@ -614,6 +689,17 @@ async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) 
         capability_token_present = capability_token.is_some(),
         "daemon operation receipt"
     );
+    let response = dispatch_request(request, state).await;
+    if let Some(entry) = build_recent_record(state, operation_label, &response) {
+        record_recent(state, entry).await;
+    }
+    response
+}
+
+/// Dispatches a [`DaemonRequest`] to the matching handler. Does not record
+/// results — the caller wraps with [`build_recent_record`] when the variant
+/// is meant to surface in the recent-operations list (spec §28.1).
+async fn dispatch_request(request: DaemonRequest, state: &DaemonState) -> DaemonResponse {
     match request {
         DaemonRequest::Inspect {
             url,
@@ -648,8 +734,13 @@ async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) 
                 sha256: None,
                 error: None,
                 health_report: None,
+                daemon_info: None,
             }
         }
+        DaemonRequest::Status {
+            caller_origin: _,
+            capability_token: _,
+        } => status_response(state).await,
     }
 }
 
@@ -661,7 +752,46 @@ fn operation_label(request: &DaemonRequest) -> &'static str {
         DaemonRequest::QueryReceipt { .. } => "query_receipt",
         DaemonRequest::Health { .. } => "health",
         DaemonRequest::Shutdown { .. } => "shutdown",
+        DaemonRequest::Status { .. } => "status",
     }
+}
+
+/// Truncates a daemon error message for the recent-operations ring buffer.
+///
+/// The buffer is intended for operator display, not log capture — we keep it
+/// bounded so a maliciously long error never bloats the IPC payload.
+fn truncate_error(message: &str) -> String {
+    const MAX_BYTES: usize = 512;
+    if message.len() <= MAX_BYTES {
+        return message.to_owned();
+    }
+    let mut truncated = String::with_capacity(MAX_BYTES + 3);
+    truncated.push_str(&message[..MAX_BYTES]);
+    truncated.push_str("...");
+    truncated
+}
+
+/// Builds a [`RecentOperation`] for the response, or `None` for variants we
+/// intentionally do not surface (the `Status` request would otherwise be
+/// self-referential in the ring buffer).
+fn build_recent_record(
+    state: &DaemonState,
+    operation: &'static str,
+    response: &DaemonResponse,
+) -> Option<RecentOperation> {
+    if operation == "status" {
+        return None;
+    }
+    let uptime_ms = u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let outcome = if response.success { "success" } else { "error" };
+    let error = response.error.as_deref().map(truncate_error);
+    Some(RecentOperation {
+        operation: operation.to_owned(),
+        outcome: outcome.to_owned(),
+        uptime_ms,
+        sha256: response.sha256.clone(),
+        error,
+    })
 }
 
 async fn inspect_url(
@@ -740,6 +870,7 @@ fn query_receipt(sha256: &str, state: &DaemonState) -> DaemonResponse {
             sha256: Some(handle.digest().to_string()),
             error: None,
             health_report: None,
+            daemon_info: None,
         },
         Err(error) => error_response(error.to_string()),
     }
@@ -759,6 +890,7 @@ fn analysis_response(
         sha256: Some(digest.to_string()),
         error: None,
         health_report: None,
+        daemon_info: None,
     }
 }
 
@@ -770,6 +902,7 @@ fn error_response(message: impl Into<String>) -> DaemonResponse {
         sha256: None,
         error: Some(message.into()),
         health_report: None,
+        daemon_info: None,
     }
 }
 
@@ -784,6 +917,39 @@ fn health_response(state: &DaemonState) -> DaemonResponse {
         sha256: None,
         error: None,
         health_report: Some(report),
+        daemon_info: None,
+    }
+}
+
+async fn status_response(state: &DaemonState) -> DaemonResponse {
+    let uptime_ms = state.started_at.elapsed().as_millis();
+    let uptime_secs = u64::try_from(uptime_ms / 1000).unwrap_or(u64::MAX);
+    let recent = state.recent_operations.lock().await;
+    let last_operation = recent.front().cloned();
+    let recent_operations: Vec<RecentOperation> = recent.iter().cloned().collect();
+    drop(recent);
+    let pid = process::id();
+    DaemonResponse {
+        success: true,
+        verdict: Some(format!("uptime={uptime_secs}s")),
+        findings_count: 0,
+        sha256: None,
+        error: None,
+        health_report: None,
+        daemon_info: Some(DaemonInfo {
+            pid,
+            uptime_secs,
+            last_operation,
+            recent_operations,
+        }),
+    }
+}
+
+async fn record_recent(state: &DaemonState, entry: RecentOperation) {
+    let mut recent = state.recent_operations.lock().await;
+    recent.push_front(entry);
+    while recent.len() > RECENT_OPERATIONS_CAPACITY {
+        let _ = recent.pop_back();
     }
 }
 
@@ -1056,6 +1222,74 @@ mod tests {
 
     #[tokio::test]
     #[cfg(target_os = "linux")]
+    async fn status_response_reports_pid_uptime_and_recent_ops()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_path("status")?;
+        let socket = root.join("daemon.sock");
+        let daemon = Daemon::new(&socket);
+        let handle = tokio::spawn(async move { daemon.run().await });
+        wait_for_socket(&socket).await?;
+
+        // Drive a couple of real operations through the daemon so the
+        // recent-operations ring buffer has something to surface.
+        let _ = request_once(
+            &socket,
+            &DaemonRequest::Health {
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+
+        let response = request_once(
+            &socket,
+            &DaemonRequest::Status {
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+
+        assert!(response.success, "{:?}", response.error);
+        let info = response
+            .daemon_info
+            .as_ref()
+            .ok_or("status response must include daemon_info")?;
+        assert!(info.pid > 0, "pid must be populated, got {}", info.pid);
+        // We expect at least one record (the `Health` request that
+        // immediately preceded the `Status` call). The `Status` request
+        // itself must NOT appear in the buffer to avoid self-reference.
+        assert!(
+            !info.recent_operations.is_empty(),
+            "recent_operations must record at least the prior request",
+        );
+        assert!(
+            info.recent_operations
+                .iter()
+                .all(|op| op.operation != "status"),
+            "Status request must not appear in recent_operations (self-ref)",
+        );
+        assert!(
+            info.last_operation.is_some(),
+            "last_operation must point at the most recent entry",
+        );
+        assert!(info.uptime_secs <= 600, "sanity bound on uptime_secs");
+
+        let _ = request_once(
+            &socket,
+            &DaemonRequest::Shutdown {
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+        handle.await??;
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
     async fn shutdown_command_stops_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("shutdown")?;
         let socket = root.join("daemon.sock");
@@ -1136,6 +1370,23 @@ mod tests {
         };
         let json = serde_json::to_string(&request)?;
         assert!(json.contains("\"caller_origin\":\"human_ipc\""));
+        let decoded: DaemonRequest = serde_json::from_str(&json)?;
+        assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_request_status_round_trips_with_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let request = DaemonRequest::Status {
+            caller_origin: CallerOrigin::HumanIpc,
+            capability_token: None,
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"caller_origin\":\"human_ipc\""));
+        assert!(
+            !json.contains("capability_token"),
+            "Option::None capability_token must not be serialized",
+        );
         let decoded: DaemonRequest = serde_json::from_str(&json)?;
         assert_eq!(decoded, request);
         Ok(())
