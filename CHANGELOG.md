@@ -139,6 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
+- `arbitraitor wrap <tool> -- ...` — first-class spec §28.1 wrapper
+  command. `curl` and `wget` delegate to the guarded wrapper-fetch
+  pipeline, `bash` inspects a local script path without executing it, and
+  unimplemented tools warn without releasing content.
 - `arbitraitor execute` (the approved-artifact execution command,
   separate from `arbitraitor run`) now gates execution by classified
   `ArtifactType` before piping bytes to `/bin/bash`. Round 2 of the
