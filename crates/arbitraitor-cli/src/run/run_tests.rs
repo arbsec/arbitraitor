@@ -11,8 +11,9 @@ use clap::Parser;
 use sha2::{Digest, Sha256};
 
 use super::{
-    EXIT_SUCCESS, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand, RunFailure,
-    RunFuture, RunServices, run_with_services,
+    DeprecatedRunAliases, EXIT_SUCCESS, ExecutionMode, ExecutionOutput, InspectedArtifact,
+    RunApprovalFlags, RunCommand, RunExecutionOptions, RunFailure, RunFuture, RunServices,
+    run_with_services,
 };
 use arbitraitor_model::exit_code::ExitCode;
 
@@ -23,7 +24,20 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
         "arbitraitor",
         "run",
         "https://example.com/install.sh",
+        "--interpreter",
+        "/usr/local/bin/bash",
         "--native",
+        "--working-directory",
+        "/tmp/arbitraitor-run",
+        "--clean-environment",
+        "--allow-env",
+        "TERM",
+        "--allow-env",
+        "LANG",
+        "--sandbox",
+        "restricted",
+        "--approve",
+        "approval.json",
         "--non-interactive",
         "--network",
         "--policy",
@@ -64,10 +78,80 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
 
     // Then: every field reflects the CLI input.
     assert_eq!(command.url, "https://example.com/install.sh");
-    assert!(command.native);
-    assert!(command.non_interactive);
-    assert!(command.network);
-    assert_eq!(command.policy, Some(PathBuf::from("policy.toml")));
+    assert_eq!(
+        command.interpreter,
+        Some(PathBuf::from("/usr/local/bin/bash"))
+    );
+    assert!(command.approval.native);
+    assert_eq!(
+        command.working_directory,
+        Some(PathBuf::from("/tmp/arbitraitor-run"))
+    );
+    assert!(command.approval.clean_environment);
+    assert_eq!(command.allow_env, ["TERM", "LANG"]);
+    assert_eq!(command.sandbox, Some("restricted".to_owned()));
+    assert_eq!(command.approve, Some(PathBuf::from("approval.json")));
+    assert!(command.approval.non_interactive);
+    assert!(command.compatibility.network);
+    assert_eq!(
+        command.compatibility.policy,
+        Some(PathBuf::from("policy.toml"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_binds_approval_context_to_requested_interpreter()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a prompt verdict and a custom interpreter path.
+    let mut command = command(false, false);
+    command.interpreter = Some(PathBuf::from("/opt/arbitraitor/interpreters/bash"));
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Prompt, false));
+    let mut output = Vec::new();
+
+    // When: approval is requested.
+    let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
+    // Then: ADR-0013 binding uses the requested interpreter path.
+    assert_eq!(code, EXIT_SUCCESS);
+    let context = services
+        .approval_context
+        .ok_or("approval context was not captured")?;
+    assert_eq!(context.interpreter, "/opt/arbitraitor/interpreters/bash");
+    assert_ne!(context.interpreter, "/bin/bash");
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_passes_spec_flags_to_execution_services()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a script run with the spec-defined execution flags.
+    let mut command = command(false, false);
+    command.interpreter = Some(PathBuf::from("/usr/local/bin/zsh"));
+    command.working_directory = Some(PathBuf::from("/tmp/arbitraitor-run"));
+    command.approval.clean_environment = true;
+    command.allow_env = vec!["TERM".to_owned(), "LANG".to_owned()];
+    command.sandbox = Some("observe".to_owned());
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Pass, false));
+    let mut output = Vec::new();
+
+    // When: the artifact executes.
+    let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
+    // Then: the service boundary receives the full flag surface.
+    assert_eq!(code, EXIT_SUCCESS);
+    let options = services
+        .execution_options
+        .ok_or("execution options were not captured")?;
+    assert_eq!(options.interpreter, PathBuf::from("/usr/local/bin/zsh"));
+    assert!(options.interpreter_args.is_empty());
+    assert_eq!(
+        options.working_directory,
+        Some(PathBuf::from("/tmp/arbitraitor-run"))
+    );
+    assert!(options.clean_environment);
+    assert_eq!(options.allow_env, ["TERM", "LANG"]);
+    assert_eq!(options.sandbox, Some("observe".to_owned()));
     Ok(())
 }
 
@@ -369,10 +453,20 @@ fn native_release_rejects_symlink_at_cache_path()
 fn command(native: bool, non_interactive: bool) -> RunCommand {
     RunCommand {
         url: "https://example.test/install.sh".to_owned(),
-        native,
-        non_interactive,
-        network: false,
-        policy: None,
+        interpreter: None,
+        approval: RunApprovalFlags {
+            native,
+            non_interactive,
+            clean_environment: false,
+        },
+        working_directory: None,
+        allow_env: Vec::new(),
+        sandbox: None,
+        approve: None,
+        compatibility: DeprecatedRunAliases {
+            network: false,
+            policy: None,
+        },
     }
 }
 
@@ -424,7 +518,9 @@ fn fake_artifact_with_type(verdict: Verdict, artifact_type: ArtifactType) -> Ins
 struct FakeServices {
     artifact: InspectedArtifact,
     approval_requested: bool,
+    approval_context: Option<PlanContext>,
     executed: bool,
+    execution_options: Option<RunExecutionOptions>,
     execution: ExecutionOutput,
     receipt_path: PathBuf,
     written_receipt: Option<PathBuf>,
@@ -435,7 +531,9 @@ impl FakeServices {
         Self {
             artifact,
             approval_requested: false,
+            approval_context: None,
             executed: false,
+            execution_options: None,
             execution: ExecutionOutput {
                 exit_code: Some(0),
                 stdout: Vec::new(),
@@ -461,9 +559,10 @@ impl RunServices for FakeServices {
         &mut self,
         _artifact: &InspectedArtifact,
         _plan: &str,
-        _ctx: &PlanContext,
+        ctx: &PlanContext,
     ) -> std::result::Result<bool, RunFailure> {
         self.approval_requested = true;
+        self.approval_context = Some(ctx.clone());
         Ok(true)
     }
 
@@ -471,9 +570,10 @@ impl RunServices for FakeServices {
         &mut self,
         _mode: ExecutionMode,
         _artifact: &InspectedArtifact,
-        _network_allowed: bool,
+        options: &RunExecutionOptions,
     ) -> std::result::Result<ExecutionOutput, RunFailure> {
         self.executed = true;
+        self.execution_options = Some(options.clone());
         Ok(self.execution.clone())
     }
 

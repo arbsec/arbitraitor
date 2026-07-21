@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
-use arbitraitor_exec::script::ExecutionResult;
+use arbitraitor_exec::script::{ExecutionResult, ScriptExecution};
+use arbitraitor_exec::{EnvAllowlist, ExecutionPolicy, SandboxConfig, TempDirectoryPolicy};
 #[cfg(target_os = "linux")]
 use arbitraitor_exec::{NativeExecution, NativeExecutionGate};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
@@ -30,8 +31,8 @@ use sha2::{Digest, Sha256};
 use crate::pipeline::{default_cas_dir, timestamp};
 
 use super::{
-    DetectorSummary, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand, RunFailure,
-    RunFuture, RunServices,
+    DetectorSummary, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand,
+    RunExecutionOptions, RunFailure, RunFuture, RunServices,
 };
 
 pub(super) struct DefaultRunServices;
@@ -85,13 +86,11 @@ impl RunServices for DefaultRunServices {
         &mut self,
         mode: ExecutionMode,
         artifact: &InspectedArtifact,
-        network_allowed: bool,
+        options: &RunExecutionOptions,
     ) -> std::result::Result<ExecutionOutput, RunFailure> {
         match mode {
             ExecutionMode::Script => {
-                let execution = arbitraitor_exec::script::ScriptExecution::bash()
-                    .map_err(|error| RunFailure::Execution(error.to_string()))?
-                    .with_network_isolated(!network_allowed);
+                let execution = script_execution(options)?;
                 execution
                     .execute(&artifact.bytes)
                     .map(execution_output)
@@ -115,6 +114,54 @@ impl RunServices for DefaultRunServices {
             .map_err(|error| RunFailure::Internal(error.to_string()))?;
         std::fs::write(&path, json).map_err(|error| RunFailure::Internal(error.to_string()))?;
         Ok(path)
+    }
+}
+
+fn script_execution(
+    options: &RunExecutionOptions,
+) -> std::result::Result<ScriptExecution, RunFailure> {
+    let mut policy = ExecutionPolicy::default();
+    if options.clean_environment {
+        policy.environment_allowlist = EnvAllowlist::new(options.allow_env.clone())
+            .map_err(|error| RunFailure::Execution(error.to_string()))?;
+    } else {
+        for name in &options.allow_env {
+            policy
+                .environment_allowlist
+                .insert(name.clone())
+                .map_err(|error| RunFailure::Execution(error.to_string()))?;
+        }
+    }
+    if let Some(directory) = &options.working_directory {
+        policy.working_directory = TempDirectoryPolicy::Fixed(directory.clone());
+    }
+    let execution = ScriptExecution::new(
+        options.interpreter.clone(),
+        options.interpreter_args.iter().map(String::as_str),
+    )
+    .map_err(|error| RunFailure::Execution(error.to_string()))?
+    .with_environment_policy(
+        policy,
+        std::env::vars_os()
+            .filter_map(|(name, value)| name.into_string().ok().map(|name| (name, value))),
+    )
+    .map_err(|error| RunFailure::Execution(error.to_string()))?
+    .with_network_isolated(!options.network_allowed)
+    .with_sandbox_config(sandbox_config(options.sandbox.as_deref())?);
+    Ok(execution)
+}
+
+fn sandbox_config(mode: Option<&str>) -> std::result::Result<SandboxConfig, RunFailure> {
+    match mode.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("restricted" | "disposable" | "observe") => Ok(SandboxConfig::default()),
+        Some("none") => Ok(SandboxConfig {
+            no_new_privs: false,
+            dumpable: true,
+            close_fds: false,
+        }),
+        Some(other) => Err(RunFailure::Execution(format!(
+            "unsupported sandbox mode {other:?}; expected none, observe, restricted, or disposable"
+        ))),
     }
 }
 
@@ -235,14 +282,14 @@ fn policy_verdict(
     result: &arbitraitor_analysis::AnalysisResult,
     is_https: bool,
 ) -> std::result::Result<Verdict, RunFailure> {
-    let Some(path) = &command.policy else {
+    let Some(path) = &command.compatibility.policy else {
         return Ok(result.verdict);
     };
     let policy_toml =
         std::fs::read_to_string(path).map_err(|error| RunFailure::Internal(error.to_string()))?;
     let engine = PolicyEngine::load(&policy_toml)
         .map_err(|error| RunFailure::Internal(error.to_string()))?;
-    let context = EvalContext::new(!command.non_interactive)
+    let context = EvalContext::new(!command.approval.non_interactive)
         .with_artifact_type(format!("{:?}", result.classification.artifact_type))
         .with_source_url(command.url.clone())
         .with_https(is_https)
@@ -251,7 +298,7 @@ fn policy_verdict(
 }
 
 fn policy_digest(command: &RunCommand) -> std::result::Result<String, RunFailure> {
-    let Some(path) = &command.policy else {
+    let Some(path) = &command.compatibility.policy else {
         return Ok(String::new());
     };
     let policy_toml =
