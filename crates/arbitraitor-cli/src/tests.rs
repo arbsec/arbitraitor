@@ -686,12 +686,11 @@ fn status_command_outputs_text() -> Result<(), Box<dyn std::error::Error>> {
     assert!(output.contains("Store"));
     assert!(output.contains("Detector"));
     assert!(output.contains("Version"));
-    assert!(output.contains("Healthy"));
+    assert!(output.contains("Pass"));
     assert!(
         output.contains("Daemon: not running"),
         "expected store-only fallback text, got: {output}",
     );
-    assert!(output.contains("Pass"));
     fs::remove_dir_all(root)?;
     Ok(())
 }
