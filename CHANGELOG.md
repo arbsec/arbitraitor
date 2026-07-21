@@ -139,6 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
+- `arbitraitor plugin` now exposes the full spec §28.7 CLI surface:
+  `search`, `inspect` (alias for `info`), `install`, `update --all`,
+  `enable`, `disable`, `trust`, and `doctor`. Registry-backed operations
+  return explicit stub messages while registry plumbing is pending.
 - `arbitraitor wrap <tool> -- ...` — first-class spec §28.1 wrapper
   command. `curl` and `wget` delegate to the guarded wrapper-fetch
   pipeline, `bash` inspects a local script path without executing it, and
