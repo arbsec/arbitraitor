@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
+pub use arbitraitor_sandbox::SandboxConfig;
+
 #[cfg(target_os = "linux")]
 pub mod native;
 pub mod powershell;
