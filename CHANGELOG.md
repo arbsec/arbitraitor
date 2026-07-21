@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### CLI
+
+- `arbitraitor doctor` now reports the full spec §28.8 health-check set in JSON and human-readable output: policy validity, YARA-X rules, AV adapters, scanner freshness, feed signatures, update trust root, sandbox adapters, plugin manifests, plugin protocol compatibility, wrapper coverage, shim PATH order, clock skew, proxy settings, and receipt signing key checks.
+
 ### Changed
 
 #### Documentation

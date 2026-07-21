@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{ComponentHealth, HealthChecker, HealthReport, HealthStatus};
+use super::{ComponentHealth, HealthChecker, HealthReport, HealthStatus, YaraRulesProbe};
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -48,9 +48,9 @@ fn healthy_report_when_store_exists() {
         .with_rule_pack("v2024.6".to_owned())
         .check();
 
-    assert_eq!(report.overall, HealthStatus::Healthy);
+    assert_eq!(report.overall, HealthStatus::Warn);
     let store = report.checks.get("store").expect("store check present");
-    assert_eq!(store.status, HealthStatus::Healthy);
+    assert_eq!(store.status, HealthStatus::Pass);
     assert!(store.message.contains("1 objects"));
     let _ = fs::remove_dir_all(root);
 }
@@ -61,9 +61,9 @@ fn unhealthy_when_store_missing() {
 
     let report = HealthChecker::new().with_store(root).check();
 
-    assert_eq!(report.overall, HealthStatus::Unhealthy);
+    assert_eq!(report.overall, HealthStatus::Fail);
     let store = report.checks.get("store").expect("store check present");
-    assert_eq!(store.status, HealthStatus::Unhealthy);
+    assert_eq!(store.status, HealthStatus::Fail);
     assert!(store.message.contains("missing"));
 }
 
@@ -72,12 +72,12 @@ fn degraded_when_no_detectors() {
     let root = unique_temp_dir("no-detectors");
     let report = HealthChecker::new().with_store(root.clone()).check();
 
-    assert_eq!(report.overall, HealthStatus::Degraded);
+    assert_eq!(report.overall, HealthStatus::Warn);
     let detectors = report
         .checks
         .get("detectors")
         .expect("detectors check present");
-    assert_eq!(detectors.status, HealthStatus::Degraded);
+    assert_eq!(detectors.status, HealthStatus::Warn);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -89,7 +89,7 @@ fn degraded_when_store_is_empty() {
     let report = HealthChecker::new().with_store(root.clone()).check();
 
     let store = report.checks.get("store").expect("store check present");
-    assert_eq!(store.status, HealthStatus::Degraded);
+    assert_eq!(store.status, HealthStatus::Warn);
     assert!(store.message.contains("zero objects"));
     let _ = fs::remove_dir_all(root);
 }
@@ -109,27 +109,27 @@ fn json_report_serializes() -> Result<(), Box<dyn std::error::Error>> {
     assert!(decoded.checks.contains_key("store"));
     assert!(decoded.checks.contains_key("detectors"));
     assert!(decoded.checks.contains_key("version"));
-    assert_eq!(decoded.checks["version"].status, HealthStatus::Healthy);
+    assert_eq!(decoded.checks["version"].status, HealthStatus::Pass);
     Ok(())
 }
 
 #[test]
 fn status_worst_is_ordered() {
     assert_eq!(
-        HealthStatus::Healthy.worst(HealthStatus::Degraded),
-        HealthStatus::Degraded,
+        HealthStatus::Pass.worst(HealthStatus::Warn),
+        HealthStatus::Warn,
     );
     assert_eq!(
-        HealthStatus::Degraded.worst(HealthStatus::Healthy),
-        HealthStatus::Degraded,
+        HealthStatus::Warn.worst(HealthStatus::Pass),
+        HealthStatus::Warn,
     );
     assert_eq!(
-        HealthStatus::Unhealthy.worst(HealthStatus::Healthy),
-        HealthStatus::Unhealthy,
+        HealthStatus::Fail.worst(HealthStatus::Pass),
+        HealthStatus::Fail,
     );
     assert_eq!(
-        HealthStatus::Healthy.worst(HealthStatus::Healthy),
-        HealthStatus::Healthy,
+        HealthStatus::Pass.worst(HealthStatus::Pass),
+        HealthStatus::Pass,
     );
 }
 
@@ -137,13 +137,13 @@ fn status_worst_is_ordered() {
 fn version_check_is_always_healthy() {
     let report = HealthChecker::new().check();
     let version = report.checks.get("version").expect("version check present");
-    assert_eq!(version.status, HealthStatus::Healthy);
+    assert_eq!(version.status, HealthStatus::Pass);
     assert!(version.message.starts_with("arbitraitor v"));
 }
 
 #[test]
 fn component_health_with_details_attaches_payload() {
-    let health = ComponentHealth::new(HealthStatus::Healthy, "ok")
+    let health = ComponentHealth::new(HealthStatus::Pass, "ok")
         .with_details(serde_json::json!({"count": 42}));
     let details = health.details.expect("details should be attached");
     assert_eq!(details["count"], 42);
@@ -158,6 +158,122 @@ fn detector_versions_reported_in_message() {
         .checks
         .get("detectors")
         .expect("detectors check present");
-    assert_eq!(detectors.status, HealthStatus::Healthy);
+    assert_eq!(detectors.status, HealthStatus::Pass);
     assert!(detectors.message.contains("detector-a v1.0"));
+}
+
+#[test]
+fn policy_validity_reports_pass_and_fail() {
+    let root = unique_temp_dir("policy");
+    let policy = root.join("policy.toml");
+    fs::write(&policy, "version = 1\n").unwrap();
+
+    let result = HealthChecker::new()
+        .with_policy_file(policy)
+        .check_policy_validity();
+
+    assert_eq!(result.status, HealthStatus::Pass);
+    fs::write(root.join("bad.toml"), "version = 2").unwrap();
+    let bad = HealthChecker::new()
+        .with_policy_file(root.join("bad.toml"))
+        .check_policy_validity();
+    assert_eq!(bad.status, HealthStatus::Fail);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn yara_rules_report_parse_result() {
+    let root = unique_temp_dir("yara");
+    fs::write(root.join("rule.yar"), "rule ok { condition: true }").unwrap();
+
+    let result = HealthChecker::new()
+        .with_yara_rules(YaraRulesProbe::parsed(root.clone(), vec!["v1".to_owned()]))
+        .check_yara_rules();
+
+    assert_eq!(result.status, HealthStatus::Pass);
+    let failed = HealthChecker::new()
+        .with_yara_rules(YaraRulesProbe::failed(root.clone(), "syntax"))
+        .check_yara_rules();
+    assert_eq!(failed.status, HealthStatus::Fail);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn configured_key_checks_require_non_empty_files() {
+    let root = unique_temp_dir("keys");
+    let key = root.join("key.pub");
+    fs::write(&key, b"public-key").unwrap();
+
+    assert_eq!(
+        HealthChecker::new()
+            .with_update_trust_root(key.clone())
+            .check_update_trust_root()
+            .status,
+        HealthStatus::Pass,
+    );
+    assert_eq!(
+        HealthChecker::new()
+            .with_receipt_signing_key(key)
+            .check_receipt_signing_key()
+            .status,
+        HealthStatus::Pass,
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn plugin_checks_cover_manifests_and_protocol() {
+    let root = unique_temp_dir("plugins");
+    let plugin = root.join("demo");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("manifest.toml"), "protocol_version = 1\n").unwrap();
+
+    let checker = HealthChecker::new().with_plugin_dir(root.clone());
+
+    assert_eq!(checker.check_plugin_manifests().status, HealthStatus::Pass);
+    assert_eq!(checker.check_plugin_protocol().status, HealthStatus::Pass);
+    fs::write(plugin.join("manifest.toml"), "protocol_version = 99\n").unwrap();
+    assert_eq!(checker.check_plugin_protocol().status, HealthStatus::Fail);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn feed_signature_and_scanner_freshness_checks_pass_for_readable_files() {
+    let root = unique_temp_dir("feeds");
+    let sig = root.join("feed.sig");
+    fs::write(&sig, b"signature").unwrap();
+
+    let checker = HealthChecker::new()
+        .with_feed_signature_path(sig.clone())
+        .with_scanner_signature_path(sig);
+
+    assert_eq!(checker.check_feed_signatures().status, HealthStatus::Pass);
+    assert_eq!(checker.check_scanner_freshness().status, HealthStatus::Pass);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn remaining_doctor_checks_return_typed_statuses() {
+    let checker = HealthChecker::new();
+    assert!(matches!(
+        checker.check_av_adapters().status,
+        HealthStatus::Pass | HealthStatus::Warn
+    ));
+    assert!(matches!(
+        checker.check_sandbox_adapters().status,
+        HealthStatus::Pass | HealthStatus::Warn | HealthStatus::Skipped
+    ));
+    assert!(matches!(
+        checker.check_wrapper_coverage().status,
+        HealthStatus::Pass | HealthStatus::Warn | HealthStatus::Skipped
+    ));
+    assert_eq!(checker.check_clock_skew().status, HealthStatus::Pass);
+    assert!(matches!(
+        checker.check_proxy_settings().status,
+        HealthStatus::Pass | HealthStatus::Skipped
+    ));
+    assert_eq!(
+        checker.check_shim_path_order().status,
+        HealthStatus::Skipped
+    );
 }

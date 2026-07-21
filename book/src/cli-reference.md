@@ -518,7 +518,7 @@ arbitraitor policy my-policy.toml
 arbitraitor doctor [flags]
 ```
 
-Runs system health diagnostics and outputs a JSON report covering store health, detector status, and rule pack versions.
+Runs system health diagnostics. The default output is human-readable; `--json` emits the structured report for automation. The report covers store health, detectors, policies, YARA-X rules, antivirus adapters, scanner freshness, feed signatures, update trust roots, sandbox adapters, plugin manifests and protocol compatibility, wrapper coverage, shim PATH order, clock skew, proxy settings, and receipt signing keys.
 
 ### Flags
 
@@ -526,6 +526,29 @@ Runs system health diagnostics and outputs a JSON report covering store health, 
 |------|-------------|
 | `--cas-dir <DIR>` | Override the CAS directory to check |
 | `--rules <DIR>` | Path to rule packs directory |
+| `--json` | Emit structured JSON with each check status as `pass`, `fail`, `warn`, or `skipped` |
+
+### Checks
+
+| Check | Description |
+|-------|-------------|
+| `store` | CAS directory exists, is writable, and reports object counts |
+| `detectors` | Detector and rule-pack versions are configured |
+| `version` | Arbitraitor build and rule-pack version summary |
+| `policy_validity` | Configured standalone policy TOML parses and validates |
+| `yara_rules` | Configured YARA-X rule directories exist and parse |
+| `av_adapters` | ClamAV or Microsoft Defender command availability |
+| `scanner_freshness` | Scanner signature/database files are within the freshness window when configured |
+| `feed_signatures` | Configured intel feed signature files exist and are readable |
+| `update_trust_root` | Configured update trust-root key exists and is readable |
+| `sandbox_adapters` | Platform sandbox adapter availability |
+| `plugin_manifests` | Installed plugin manifests are readable |
+| `plugin_protocol` | Installed plugin manifests advertise compatible protocol metadata when declared |
+| `wrapper_coverage` | Installed `curl`/`wget` commands have wrapper semantic coverage |
+| `shim_path_order` | Shim directory precedes original tools in `PATH` |
+| `clock_skew` | Local system clock is plausible for signature freshness decisions |
+| `proxy_settings` | Proxy environment variables use supported URL schemes |
+| `receipt_signing_key` | Configured receipt signing key exists and is readable |
 
 ## Rules command
 

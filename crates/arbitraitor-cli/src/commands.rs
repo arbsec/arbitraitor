@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use arbitraitor_artifact::{ArtifactType, ShellKind, classify};
 use arbitraitor_core::config::Config;
-use arbitraitor_core::health::{HealthChecker, HealthStatus};
+use arbitraitor_core::health::{HealthChecker, HealthStatus, YaraRulesProbe};
 use arbitraitor_mcp::sanitize_for_agent;
 use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::ids::Sha256Digest;
@@ -466,13 +466,37 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         .clone()
         .or_else(|| config.store.cas_dir.clone())
         .unwrap_or_else(default_cas_dir);
-    let mut checker = HealthChecker::new().with_store(cas_dir.clone());
-    if let Some(rules_dir) = command.rules.as_deref() {
-        let versions = crate::rule_pack_versions(rules_dir)?;
-        if let Some(first) = versions.first() {
-            checker = checker.with_rule_pack(first.clone());
+    let shim_dir = std::env::var_os("HOME").map_or_else(
+        || PathBuf::from("/dev/null"),
+        |h| PathBuf::from(h).join(".arbitraitor").join("shims"),
+    );
+    let mut checker = HealthChecker::new()
+        .with_store(cas_dir.clone())
+        .with_shim_dir(shim_dir.clone());
+    if let Some(policy_file) = &config.policy.policy_file {
+        checker = checker.with_policy_file(policy_file.clone());
+    }
+    let rule_dirs = command
+        .rules
+        .iter()
+        .cloned()
+        .chain(config.detectors.yara_rule_packs.iter().cloned())
+        .collect::<Vec<_>>();
+    for rules_dir in rule_dirs {
+        match crate::rule_pack_versions(&rules_dir) {
+            Ok(versions) => {
+                if let Some(first) = versions.first() {
+                    checker = checker.with_rule_pack(first.clone());
+                }
+                checker = checker
+                    .with_detector_versions(versions.clone())
+                    .with_yara_rules(YaraRulesProbe::parsed(rules_dir, versions));
+            }
+            Err(error) => {
+                checker =
+                    checker.with_yara_rules(YaraRulesProbe::failed(rules_dir, error.to_string()));
+            }
         }
-        checker = checker.with_detector_versions(versions);
     }
     let report = checker.check();
 
@@ -491,15 +515,11 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     let store_healthy = report
         .checks
         .get("store")
-        .is_some_and(|c| c.status == HealthStatus::Healthy);
+        .is_some_and(|c| c.status.is_pass());
 
     let shell_info = shell_init::detect_shell();
     let shell_ok = shell_info.is_some();
 
-    let shim_dir = std::env::var_os("HOME").map_or_else(
-        || PathBuf::from("/dev/null"),
-        |h| PathBuf::from(h).join(".arbitraitor").join("shims"),
-    );
     let shim_config = ShimConfig {
         shim_dir: shim_dir.clone(),
         use_symlinks: false,
@@ -538,14 +558,43 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     let healthy_count = report
         .checks
         .values()
-        .filter(|c| c.status == HealthStatus::Healthy)
+        .filter(|c| c.status.is_pass())
         .count();
+    let report_has_failures = report
+        .checks
+        .values()
+        .any(|c| c.status == HealthStatus::Fail);
     print_health_row(
         &mut stdout,
         "checks",
         &format!("{healthy_count}/{check_count} healthy"),
         check_count > 0,
     )?;
+    for component_name in [
+        "policy_validity",
+        "yara_rules",
+        "av_adapters",
+        "scanner_freshness",
+        "feed_signatures",
+        "update_trust_root",
+        "sandbox_adapters",
+        "plugin_manifests",
+        "plugin_protocol",
+        "wrapper_coverage",
+        "shim_path_order",
+        "clock_skew",
+        "proxy_settings",
+        "receipt_signing_key",
+    ] {
+        if let Some(component) = report.checks.get(component_name) {
+            print_health_row(
+                &mut stdout,
+                component_name,
+                &format!("{:?}: {}", component.status, component.message),
+                component.status != HealthStatus::Fail,
+            )?;
+        }
+    }
 
     let shell_label = match &shell_info {
         Some(d) => format!(
@@ -592,7 +641,8 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         tar_rs_ok,
     )?;
 
-    all_healthy = all_healthy && shims_ok && path_has_shim && rcfile_ok && tar_rs_ok;
+    all_healthy =
+        all_healthy && !report_has_failures && shims_ok && path_has_shim && rcfile_ok && tar_rs_ok;
 
     if !all_healthy {
         writeln!(stdout).into_diagnostic()?;
