@@ -70,6 +70,7 @@
   - [ADR 0033: Fetch cross-protocol credential secrecy](./adr/0033-fetch-cross-protocol-credential-secrecy.md)
   - [ADR 0034: Apple Containerization GA strategy for macOS 26+](./adr/0034-apple-containerization-ga-strategy.md)
   - [ADR 0035: LNK argument padding detection (CVE-2025-9491)](./adr/0035-lnk-argument-padding-cve-2025-9491.md)
+  - [ADR 0036: `run` pipeline content-type execution gate](./adr/0036-run-pipeline-content-type-execution-gate.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)

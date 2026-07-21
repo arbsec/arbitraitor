@@ -22,6 +22,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FeedSourceClass::OssfMaliciousPackages` so malicious npm packages can be
   ingested into the signed local intel store without raw string IDs.
 
+#### Exec
+
+- `ExecError::script_io(stage, source, child_exit_code, child_stderr)`
+  — new public constructor for `ExecError::ScriptIo` that pre-renders a
+  stable, bounded (≤1 KiB) `child_detail` suffix from the captured child
+  state. The `ScriptIo` variant now carries `child_exit_code:
+  Option<i32>`, `child_stderr: Vec<u8>`, and `child_detail: String` fields
+  so callers see the actual root cause (e.g. `bash: !DOCTYPE: event not
+  found`, `unshare: operation not permitted`) when the interpreter exits
+  before consuming the streamed script bytes. Fixes the diagnostic-loss
+  half of #612: when bash or `unshare` exits early, the user-visible
+  error now distinguishes "I fed bash junk" from "kernel denied the user
+  namespace" from "Landlock blocked the interpreter path".
+- `ExecError::script_io_detail(child_exit_code, child_stderr)` — shared
+  public helper that renders the `child_detail` suffix. `PowerShellError::
+  ScriptIo` mirrors the new fields and reuses this helper so PowerShell
+  execution gets the same diagnostic improvement when wired.
+- `spawn::best_effort_capture(child, limit)` — internal drain helper that
+  captures a child's exit code and piped stdout/stderr after a prior
+  operation (typically `write_all` to the child's stdin) has already
+  failed. Swallows secondary `read_with_limit` errors so the original
+  I/O error remains the primary signal.
+
+#### MCP
+
+- `RunApprovedArtifactError::NotExecutable { artifact_type }` — new
+  variant produced by `RunApprovedArtifactTool::run` when an
+  approved-but-non-shell-script artifact's bytes are about to be piped to
+  `/bin/bash`. Closes Blocker 4 from the adversarial review of #615: an
+  agent can no longer approve an HTML / JSON / XML / archive / Unknown
+  artifact via `request_approval` and execute it via
+  `run_approved_artifact` — only `ArtifactType::ShellScript(_)` is
+  runnable through the MCP approved-execution path. CLI `run` and MCP
+  `run_approved_artifact` now enforce the same content-type gate
+  (ADR-0036, issue #612).
+
+#### CLI
+
+- `arbitraitor execute` (the approved-artifact execution command,
+  separate from `arbitraitor run`) now gates execution by classified
+  `ArtifactType` before piping bytes to `/bin/bash`. Round 2 of the
+  adversarial review of #615 found that the round-1 fix only gated the
+  `run` and MCP `run_approved_artifact` paths; the `execute` command
+  (invoked as `arbitraitor execute <APPROVAL>`) accepted the
+  same bash-execution approval file and piped artifact bytes without
+  classifying them. The gate mirrors the round-1 fix: only
+  `ArtifactType::ShellScript(_)` is permitted; everything else
+  (HTML / JSON / XML / archives / `GenericText/Binary` /
+  `PowerShellScript` / `PythonScript` / `JavaScript` / `Unknown`) fails
+  closed with `miette::bail!("... is not executable via the approved
+  execute path; only shell scripts are runnable (ADR-0036, issue #612)")`.
+  Native executables are gated out as well because the approval flow
+  always binds to the bash interpreter (native execution uses a separate
+  release path).
+
+### Changed
+
+#### CLI
+
+- `arbitraitor run` now gates execution by classified `ArtifactType`.
+  Only `ShellScript(_)` (`Posix` / `Bash` / `Zsh`) and native executable
+  types (`PeExecutable`, `ElfExecutable`, `MachOExecutable`) reach
+  `ExecutionMode::Script` / `ExecutionMode::Native`. Every other type —
+  `HtmlDocument`, `JsonDocument`, `XmlDocument`, `GenericText`,
+  `GenericBinary`, archives (`ZipArchive`, `TarArchive`,
+  `*Compressed`), `PowerShellScript`, `PythonScript`, `JavaScript`, and
+  `Unknown` — fails closed with `RunFailure::Blocked` (exit code
+  `BlockedByPolicy`) before reaching the execution layer. Piping those
+  bytes to `/bin/bash` was incorrect (bash doesn't understand them) and
+  unsafe (HTML/JSON/XML can incidentally contain bash-parseable
+  `$(...)`, redirections, and pipes). Fixes the content-type-gate half
+  of #612. See ADR-0036 for the rationale.
+- `InspectedArtifact` (private to `arbitraitor-cli/src/run/`) now carries
+  `ArtifactType` directly rather than its stringified `{:?}` form, and the
+  `is_native: bool` field is dropped in favor of deriving native vs.
+  script from `artifact_type` via `execution_mode_for_type`. Receipt
+  serialization is unchanged (`format!("{:?}", artifact_type)` is passed
+  to `ReceiptBuilder::artifact_type` on demand).
+
+### Fixed
+
+#### Exec
+
+- `ExecError::script_io_detail` is now panic-safe when the captured child
+  stderr is attacker-controlled UTF-8 longer than 1 KiB. The previous
+  byte-index slice `&str[..1024]` panicked if byte 1024 fell inside a
+  multibyte codepoint; the fix truncates the BYTES first, then
+  lossy-decodes via `String::from_utf8_lossy`, which replaces any partial
+  trailing codepoint with U+FFFD. Found by 3 of the 5 adversarial
+  reviewers of #615 (Blocker 1, MEDIUM severity).
+- `ExecError::script_io_detail` now escapes Arbitraitor untrusted-data
+  markers (`<<ARBITRAITOR_UNTRUSTED_DATA_START>>` /
+  `<<ARBITRAITOR_UNTRUSTED_DATA_END>>`) inside the captured child
+  stderr, satisfying the Safe Presentation invariant (ADR-0016) that
+  untrusted text must be escaped and bounded before display. The
+  `{:?}` debug-format at the call site already neutralizes ANSI control
+  sequences; the marker escape additionally prevents prompt-injection
+  in downstream agent consumers that rely on the markers to fence
+  untrusted content. Found by 2 of the 5 adversarial reviewers of #615
+  (Blocker 2, MEDIUM severity).
+- `ScriptExecution::execute` and `PowerShellExecution::execute` now
+  `drop(stdin)` before calling `best_effort_capture` on the write/flush
+  failure path. Without this, if the child was still alive (write failed
+  due to EPIPE on one write, not because the child exited), the child
+  could be blocked on stdin read while the parent was blocked on
+  stdout/stderr drain, causing an indefinite deadlock. Found by 2 of 3
+  fresh adversarial review lanes (round 3, MAJOR severity).
+- The content-type gate in `arbitraitor run`, `arbitraitor execute`, and
+  MCP `run_approved_artifact` now restricts to `ShellScript(Posix | Bash)`
+  instead of `ShellScript(_)`. `ShellScript(Zsh)` is now blocked because
+  `/bin/bash` cannot safely interpret zsh syntax — the same wrong-
+  interpreter class that ADR-0036 rejects for Python/PowerShell/JS.
+  Found by the fresh adversarial code-quality review (round 3, MAJOR
+  severity).
+- `arbitraitor execute` now re-verifies the SHA-256 of the loaded CAS
+  bytes against the approved digest before classification and execution.
+  Closes a TOCTOU gap where a same-UID local attacker could mutate the
+  CAS object between ContentStore verification and read_to_end.
+  Found by the fresh adversarial security review (round 3, LOW severity).
+- MCP `error_response` now sanitizes error messages via
+  `sanitize_for_agent` before including them in JSON-RPC responses.
+  Attacker-controlled child stderr was reaching the `"error"` field
+  without untrusted-data fencing, a Safe Presentation (ADR-0016) gap.
+  Found by the fresh adversarial security review (round 3, MEDIUM).
+- `ExecError::script_io_detail` message for the `(None, non_empty_stderr)`
+  case changed from "child exited before reading stdin" to "child
+  produced stderr without an exit code" — the `None` exit-code also
+  covers signal termination and wait failure, not just early exit.
+
+### Added
+
 #### Receipt
 
 - `arbitraitor_model::vex` now models the VEX format matrix for receipt
