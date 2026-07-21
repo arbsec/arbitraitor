@@ -147,6 +147,13 @@ arbitraitor scan ./suspicious.sh
 
 # Scan piped input
 curl -s https://example.com/script.sh | arbitraitor scan --stdin
+
+# Emit a receipt as JSON, or SARIF for code-scanning integrations
+arbitraitor scan ./suspicious.sh --json
+arbitraitor scan ./suspicious.sh --sarif
+
+# Gate piped input: bytes are emitted only when the verdict is Pass
+curl -s https://example.com/script.sh | arbitraitor scan --stdin --emit-on-pass
 ```
 
 ### Explain a verdict
