@@ -62,11 +62,38 @@ pub struct Receipt {
     /// contained execution contexts; `None` for inspect/mediated.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effective_controls: Option<EffectiveControls>,
+    /// Metadata from allow rules that authorized release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_rule_metadata: Vec<AllowRuleMetadata>,
     /// Plan-bound approval and override binding metadata, when execution used approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalInfo>,
     /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
+}
+
+/// Metadata from an allow rule recorded in the receipt audit trail.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllowRuleMetadata {
+    /// Rule identifier that supplied this metadata.
+    pub rule_id: String,
+
+    /// Expiration time for the allow, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<SystemTime>,
+
+    /// Scope for the allow: `user`, `project`, or `org`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+
+    /// Identity that created the allow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+
+    /// Reason why the allow was granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Plan-bound approval and override metadata embedded in execution receipts.
@@ -480,6 +507,7 @@ impl ReceiptBuilder {
                 detector_provenance: Vec::new(),
                 timestamps,
                 effective_controls: None,
+                allow_rule_metadata: Vec::new(),
                 approval: None,
                 signature: None,
             },
@@ -563,6 +591,16 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn effective_controls(mut self, controls: EffectiveControls) -> Self {
         self.receipt.effective_controls = Some(controls);
+        self
+    }
+
+    /// Add allow-rule metadata to the receipt audit trail.
+    #[must_use]
+    pub fn allow_rule_metadata<I>(mut self, metadata: I) -> Self
+    where
+        I: IntoIterator<Item = AllowRuleMetadata>,
+    {
+        self.receipt.allow_rule_metadata.extend(metadata);
         self
     }
 
@@ -862,6 +900,40 @@ mod tests {
             decoded.approval.as_ref().and_then(|info| info.exit_status),
             Some(0)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_round_trips_with_allow_rule_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let expiry = UNIX_EPOCH + Duration::from_mins(10);
+        let metadata = AllowRuleMetadata {
+            rule_id: "allow-url-pattern".to_owned(),
+            expiry: Some(expiry),
+            scope: Some("project".to_owned()),
+            creator: Some("security@example.invalid".to_owned()),
+            reason: Some("temporary exception while upstream release is fixed".to_owned()),
+        };
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xcd).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: Some("allow-url-pattern".to_owned()),
+                policy_trace: vec!["matched allow rule".to_owned()],
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .allow_rule_metadata([metadata.clone()])
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: Receipt = serde_json::from_str(&json)?;
+
+        assert_eq!(decoded.allow_rule_metadata, vec![metadata]);
         Ok(())
     }
 
