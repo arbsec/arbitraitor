@@ -114,6 +114,43 @@ impl EBpfObservationAdapter {
     }
 }
 
+/// Probes whether `io_uring` is available on the running Linux kernel
+/// (spec §27.3, "`io_uring` restrictions").
+///
+/// `io_uring` bypasses seccomp because queued operations execute inside the
+/// kernel without traversing the syscall filter. Kernel 6.6+ ships the
+/// `kernel.io_uring_disabled` sysctl:
+///
+/// | Value | Meaning |
+/// |-------|---------|
+/// | `0`   | `io_uring` is enabled (available to all tasks) |
+/// | `1`   | Disabled for unprivileged tasks (root still has access) |
+/// | `2`   | Fully disabled for all tasks |
+///
+/// Returns `Some(true)` when `io_uring` is available (`disabled = 0`),
+/// `Some(false)` when disabled (`1` or `2`), and `None` when the sysctl
+/// is absent (kernel < 6.6 or non-Linux) — the availability is unknown.
+#[must_use]
+#[cfg(target_os = "linux")]
+pub fn probe_io_uring_available() -> Option<bool> {
+    let contents = std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled").ok()?;
+    let value = contents.trim();
+    match value {
+        "0" => Some(true),
+        "1" | "2" => Some(false),
+        _ => None,
+    }
+}
+
+/// Probes whether `io_uring` is available on the running kernel.
+///
+/// Non-Linux platforms have no `io_uring` UAPI and therefore report `None`.
+#[must_use]
+#[cfg(not(target_os = "linux"))]
+pub const fn probe_io_uring_available() -> Option<bool> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -153,5 +190,36 @@ mod tests {
     #[test]
     fn ebpf_observation_is_not_available_in_mvp() {
         assert!(!EBpfObservationAdapter::is_available());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn io_uring_probe_returns_some_on_linux() {
+        // Given: running on a Linux host where /proc/sys/kernel/io_uring_disabled
+        // may or may not exist (kernel >= 6.6 vs older).
+        // When: probing io_uring availability.
+        // Then: the probe returns Some(bool) when the sysctl exists, or None
+        // when the kernel predates 6.6.
+        let result = probe_io_uring_available();
+        match result {
+            Some(available) => {
+                // If the sysctl exists, the value must be a known state.
+                let contents = std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled")
+                    .expect("sysctl must exist when probe returns Some");
+                let value = contents.trim();
+                assert!(value == "0" || value == "1" || value == "2");
+                assert_eq!(available, value == "0");
+            }
+            None => {
+                // Kernel < 6.6: sysctl absent → None is correct.
+                assert!(std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled").is_err());
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn io_uring_probe_returns_none_off_linux() {
+        assert_eq!(probe_io_uring_available(), None);
     }
 }
