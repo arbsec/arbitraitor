@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
@@ -23,7 +23,8 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::{EvalContext, PolicyEngine};
 use arbitraitor_receipt::{
-    DetectorVersion, FindingSummary, ReceiptBuilder, ReceiptTimestamps, RetrievalInfo, VerdictInfo,
+    ApprovalInfo, DetectorVersion, FindingSummary, ReceiptBuilder, ReceiptTimestamps,
+    RetrievalInfo, VerdictInfo,
 };
 use arbitraitor_store::ContentStore;
 use sha2::{Digest, Sha256};
@@ -32,7 +33,7 @@ use crate::pipeline::{default_cas_dir, timestamp};
 
 use super::{
     DetectorSummary, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand,
-    RunExecutionOptions, RunFailure, RunFuture, RunServices,
+    RunExecutionOptions, RunFailure, RunFuture, RunServices, approval_capabilities,
 };
 
 pub(super) struct DefaultRunServices;
@@ -51,7 +52,7 @@ impl RunServices for DefaultRunServices {
         artifact: &InspectedArtifact,
         plan: &str,
         ctx: &PlanContext,
-    ) -> std::result::Result<bool, RunFailure> {
+    ) -> std::result::Result<Option<ApprovalInfo>, RunFailure> {
         let tool = RequestApprovalTool::with_prompt(
             Arc::new(StdinApprovalPrompt),
             ApprovalTokenIssuer::new(),
@@ -70,16 +71,22 @@ impl RunServices for DefaultRunServices {
         if response.is_error {
             return Err(RunFailure::Approval("approval tool failed".to_owned()));
         }
-        response
+        let json = response
             .content
             .iter()
             .find_map(|content| match content {
-                McpContent::Json { json } => {
-                    json.get("approved").and_then(serde_json::Value::as_bool)
-                }
+                McpContent::Json { json } => Some(json),
                 McpContent::Text { .. } => None,
             })
-            .ok_or_else(|| RunFailure::Approval("approval response missing decision".to_owned()))
+            .ok_or_else(|| RunFailure::Approval("approval response missing decision".to_owned()))?;
+        if !json
+            .get("approved")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        Ok(Some(approval_info_from_response(json, artifact, ctx)?))
     }
 
     fn execute(
@@ -104,17 +111,82 @@ impl RunServices for DefaultRunServices {
         &mut self,
         artifact: &InspectedArtifact,
         output: &ExecutionOutput,
+        approval: Option<&ApprovalInfo>,
     ) -> std::result::Result<PathBuf, RunFailure> {
         let dir = arbitraitor_home()?.join("receipts");
         std::fs::create_dir_all(&dir).map_err(|error| RunFailure::Internal(error.to_string()))?;
         let digest_prefix: String = artifact.sha256.to_string().chars().take(12).collect();
         let path = dir.join(format!("{}-{digest_prefix}.json", timestamp()));
-        let receipt = build_run_receipt(artifact, output)?;
+        let receipt = build_run_receipt(artifact, output, approval)?;
         let json = serde_json::to_vec_pretty(&receipt)
             .map_err(|error| RunFailure::Internal(error.to_string()))?;
         std::fs::write(&path, json).map_err(|error| RunFailure::Internal(error.to_string()))?;
         Ok(path)
     }
+}
+
+fn approval_info_from_response(
+    json: &serde_json::Value,
+    artifact: &InspectedArtifact,
+    ctx: &PlanContext,
+) -> std::result::Result<ApprovalInfo, RunFailure> {
+    let plan_digest = json
+        .get("plan_digest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RunFailure::Approval("approval response missing plan digest".to_owned()))?
+        .parse()
+        .map_err(|error: arbitraitor_model::ids::Sha256DigestParseError| {
+            RunFailure::Approval(format!("approval response plan digest is invalid: {error}"))
+        })?;
+    let expires_at = json
+        .get("expires_at")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RunFailure::Approval("approval response missing expiry".to_owned()))?
+        .parse::<u64>()
+        .map_err(|error| RunFailure::Approval(format!("approval expiry is invalid: {error}")))?;
+    let token = json
+        .get("approval_token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RunFailure::Approval("approval response missing token".to_owned()))?;
+    Ok(ApprovalInfo {
+        plan_digest,
+        artifact_digest: artifact.sha256.clone(),
+        expiry: Some(UNIX_EPOCH + Duration::from_secs(expires_at)),
+        nonce: approval_nonce_from_token(token)?,
+        bound_capabilities: approval_capabilities(ctx.network_isolated, &[]),
+        override_reason: Some(format!("{:?}", artifact.verdict)),
+        override_scope: Some(format!("artifact:{}", artifact.sha256)),
+        exit_status: None,
+    })
+}
+
+fn approval_nonce_from_token(token: &str) -> std::result::Result<String, RunFailure> {
+    let mut parts = token.split('.');
+    let version = parts
+        .next()
+        .ok_or_else(|| RunFailure::Approval("approval token is malformed".to_owned()))?;
+    let payload_hex = parts
+        .next()
+        .ok_or_else(|| RunFailure::Approval("approval token is missing payload".to_owned()))?;
+    let _signature_hex = parts
+        .next()
+        .ok_or_else(|| RunFailure::Approval("approval token is missing signature".to_owned()))?;
+    if version != "v2" || parts.next().is_some() {
+        return Err(RunFailure::Approval(
+            "approval token is malformed".to_owned(),
+        ));
+    }
+    let payload = hex::decode(payload_hex).map_err(|error| {
+        RunFailure::Approval(format!("approval token payload is invalid: {error}"))
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&payload).map_err(|error| {
+        RunFailure::Approval(format!("approval token payload is invalid: {error}"))
+    })?;
+    value
+        .get("nonce")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| RunFailure::Approval("approval token missing nonce".to_owned()))
 }
 
 fn script_execution(
@@ -368,6 +440,7 @@ fn native_release_path(sha256: &Sha256Digest) -> std::result::Result<PathBuf, Ru
 fn build_run_receipt(
     artifact: &InspectedArtifact,
     output: &ExecutionOutput,
+    approval: Option<&ApprovalInfo>,
 ) -> std::result::Result<arbitraitor_receipt::Receipt, RunFailure> {
     let now = timestamp();
     let artifact_size = u64::try_from(artifact.size_bytes)
@@ -399,6 +472,9 @@ fn build_run_receipt(
         sha256_verified: true,
         timestamp: now,
     });
+    if let Some(approval) = approval {
+        builder = builder.approval(approval.clone());
+    }
     for detector in &artifact.detector_versions {
         builder = builder.detector_version(detector.clone());
     }
