@@ -521,6 +521,7 @@ fn all_control_proofs() -> ControlProofs {
         syscall_filtering: Some("seccomp-bpf".to_owned()),
         resource_limits: Some("setrlimit".to_owned()),
         landlock_abi_version: Some(arbitraitor_sandbox::LandlockAbiVersion::V7),
+        io_uring_available: Some(false),
     }
 }
 
@@ -613,6 +614,7 @@ fn contained_with_all_proofs_records_enforced_matrix() -> Result<(), Box<dyn std
         controls.landlock_abi_version,
         Some(arbitraitor_sandbox::LandlockAbiVersion::V7)
     );
+    assert_eq!(controls.io_uring_available, Some(false));
     Ok(())
 }
 
