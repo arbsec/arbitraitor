@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// evaluation time depends on the `EvalContext` provided by the caller; an
 /// unresolved field is treated as `Unavailable` and falls through to the
 /// configured default per `DefaultsConfig::fail_closed_on_unavailable`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     /// Schema version. Only `1` is currently accepted.
@@ -71,7 +71,7 @@ pub struct Policy {
 }
 
 /// Default actions applied when no rule matches.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefaultsConfig {
     /// Action taken when no rule matches.
@@ -107,7 +107,7 @@ fn default_non_interactive_action() -> PolicyAction {
 }
 
 /// Network-level constraints checked before rule evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Require HTTPS (or equivalent secure transport) for the source URL.
@@ -144,7 +144,7 @@ impl Default for NetworkConfig {
 ///   This is the critical credential-leak defence from spec §11.2
 ///   (lines 608-612); callers opt in to cross-origin credential
 ///   forwarding only when the redirect chain is fully trusted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedirectsConfig {
     /// Maximum number of redirects to follow.
@@ -195,7 +195,7 @@ fn default_redirect_max() -> u32 {
 ///
 /// Parsing to concrete byte / duration values happens in the enforcing crate;
 /// the policy engine only stores and fingerprints them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
     /// Maximum download size, e.g. `"1GiB"`.
@@ -225,7 +225,7 @@ fn default_max_analysis_time() -> String {
 }
 
 /// Artifact integrity requirements.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct IntegrityConfig {
     /// Require a caller-provided expected SHA-256 digest before retrieval.
@@ -237,7 +237,7 @@ pub struct IntegrityConfig {
 ///
 /// Parsed into the policy fingerprint; enforcement happens in the
 /// analysis pipeline when the provenance verifier runs (issue #514).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProvenanceConfig {
     /// Artifact classes that require a valid signature before release.
@@ -252,7 +252,7 @@ pub struct ProvenanceConfig {
 }
 
 /// A trusted Sigstore signer identity (spec §14.3, §23.3 example).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigstoreIdentity {
     /// Fulcio OIDC issuer URL (e.g. `https://token.actions.githubusercontent.com`).
@@ -262,7 +262,7 @@ pub struct SigstoreIdentity {
 }
 
 /// Per-detector policy (spec §15, §23.3 example).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DetectorConfig {
     /// Whether this detector is required for a passing verdict.
@@ -297,7 +297,7 @@ fn default_false() -> bool {
 ///
 /// Rules are evaluated in declaration order. The first rule whose condition
 /// matches determines the verdict.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     /// Human-readable rule identifier used in receipts and diagnostics.
@@ -362,7 +362,7 @@ impl From<PolicyAction> for Verdict {
 /// category = "malware-signature"
 /// confidence = "confirmed"
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Condition {
     /// All sub-conditions must evaluate to *matched*.
@@ -413,7 +413,7 @@ impl Default for Condition {
 }
 
 /// A field path plus a comparison operator.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FieldMatch {
     /// Dotted field path, e.g. `"finding.category"` or `"context.is_https"`.
     pub field: String,
@@ -423,7 +423,7 @@ pub struct FieldMatch {
 }
 
 /// Comparison operators available in field matches.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchOp {
     /// Exact equality (case-insensitive, `_` and `-` treated as equivalent).
@@ -450,7 +450,7 @@ pub enum MatchOp {
 }
 
 /// A scalar value that can appear on the right-hand side of a match operator.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ScalarValue {
     /// Boolean literal.

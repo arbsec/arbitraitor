@@ -50,6 +50,9 @@ pub struct Receipt {
     pub release: Option<ReleaseInfo>,
     /// Detector versions that contributed to this receipt.
     pub detector_versions: Vec<DetectorVersion>,
+    /// Security-relevant operator decisions recorded for audit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit_trail: Vec<AuditEvent>,
     /// Binary provenance for subprocess detectors (sha256, version, ruleset digest).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detector_provenance: Vec<DetectorProvenance>,
@@ -395,6 +398,16 @@ pub struct DetectorVersion {
     pub version: String,
 }
 
+/// A security-relevant decision captured in the receipt audit trail.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditEvent {
+    /// Stable event kind.
+    pub kind: String,
+    /// Human-readable audit detail.
+    pub detail: String,
+}
+
 /// Receipt timestamps.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -455,6 +468,7 @@ impl ReceiptBuilder {
                 verdict,
                 release: None,
                 detector_versions: Vec::new(),
+                audit_trail: Vec::new(),
                 detector_provenance: Vec::new(),
                 timestamps,
                 effective_controls: None,
@@ -520,6 +534,13 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn detector_version(mut self, detector_version: DetectorVersion) -> Self {
         self.receipt.detector_versions.push(detector_version);
+        self
+    }
+
+    /// Add a security audit event.
+    #[must_use]
+    pub fn audit_event(mut self, event: AuditEvent) -> Self {
+        self.receipt.audit_trail.push(event);
         self
     }
 

@@ -11,6 +11,7 @@ use arbitraitor_model::verdict::Verdict;
 use clap::Parser;
 use sha2::{Digest, Sha256};
 
+use super::run_services::{build_run_receipt, validate_cli_policy_override};
 use super::{
     DeprecatedRunAliases, EXIT_SUCCESS, ExecutionMode, ExecutionOutput, InspectedArtifact,
     RunApprovalFlags, RunCommand, RunExecutionOptions, RunFailure, RunFuture, RunServices,
@@ -44,6 +45,7 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
         "--network",
         "--policy",
         "policy.toml",
+        "--audit-override",
     ]);
 
     // When: clap parses the subcommand.
@@ -98,6 +100,55 @@ fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Err
     assert_eq!(
         command.compatibility.policy,
         Some(PathBuf::from("policy.toml"))
+    );
+    assert!(command.compatibility.audit_override);
+    Ok(())
+}
+
+#[test]
+fn cli_policy_override_without_audit_override_is_rejected() {
+    // Given: a command-line policy override without audit consent.
+    let mut command = command(false, false);
+    command.compatibility.policy = Some(PathBuf::from("policy.toml"));
+
+    // When: the override gate is evaluated.
+    let result = validate_cli_policy_override(&command);
+
+    // Then: the override is rejected.
+    assert!(
+        matches!(result, Err(RunFailure::Blocked(message)) if message.contains("--audit-override"))
+    );
+}
+
+#[test]
+fn cli_policy_override_with_audit_override_is_allowed_and_audited()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a command-line policy override with audit consent.
+    let mut command = command(false, false);
+    command.compatibility.policy = Some(PathBuf::from("policy.toml"));
+    command.compatibility.audit_override = true;
+    let mut artifact = fake_artifact(Verdict::Pass, false);
+    artifact.audit_trail = vec!["CLI policy override applied from policy.toml".to_owned()];
+
+    // When: the override gate and receipt audit path run.
+    assert!(validate_cli_policy_override(&command).is_ok());
+    let receipt = build_run_receipt(
+        &artifact,
+        &ExecutionOutput {
+            exit_code: Some(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+    )
+    .map_err(|error| format!("receipt build failed: {error:?}"))?;
+
+    // Then: the receipt records the override.
+    assert_eq!(receipt.audit_trail.len(), 1);
+    assert_eq!(receipt.audit_trail[0].kind, "cli-policy-override");
+    assert!(
+        receipt.audit_trail[0]
+            .detail
+            .contains("CLI policy override")
     );
     Ok(())
 }
@@ -458,6 +509,7 @@ fn native_release_rejects_symlink_at_cache_path()
         findings: Vec::new(),
         detectors: Vec::new(),
         detector_versions: Vec::new(),
+        audit_trail: Vec::new(),
         requested_url: "https://example.test/native".to_owned(),
         final_url: "https://example.test/native".to_owned(),
         store_dir: store_dir.clone(),
@@ -490,6 +542,7 @@ fn command(native: bool, non_interactive: bool) -> RunCommand {
         compatibility: DeprecatedRunAliases {
             network: false,
             policy: None,
+            audit_override: false,
         },
     }
 }
@@ -513,6 +566,7 @@ fn fake_artifact(verdict: Verdict, is_native: bool) -> InspectedArtifact {
         findings: Vec::new(),
         detectors: Vec::new(),
         detector_versions: Vec::new(),
+        audit_trail: Vec::new(),
         requested_url: "https://example.test/install.sh".to_owned(),
         final_url: "https://example.test/install.sh".to_owned(),
         store_dir: PathBuf::new(),
@@ -533,6 +587,7 @@ fn fake_artifact_with_type(verdict: Verdict, artifact_type: ArtifactType) -> Ins
         findings: Vec::new(),
         detectors: Vec::new(),
         detector_versions: Vec::new(),
+        audit_trail: Vec::new(),
         requested_url: "https://example.test/install.sh".to_owned(),
         final_url: "https://example.test/install.sh".to_owned(),
         store_dir: PathBuf::new(),
