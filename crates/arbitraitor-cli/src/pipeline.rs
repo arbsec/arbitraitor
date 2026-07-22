@@ -269,10 +269,12 @@ pub(crate) fn build_receipt(
     let now = timestamp();
     let mut builder = ReceiptBuilder::new(
         env!("CARGO_PKG_VERSION"),
-        artifact_sha256.to_string(),
+        artifact_sha256.clone(),
         artifact_size,
         VerdictInfo {
             verdict: result.verdict,
+            confidence: None,
+            explanation: None,
             deciding_rule: None,
             policy_trace: vec!["arbitraitor-analysis built-in verdict derivation".to_owned()],
         },

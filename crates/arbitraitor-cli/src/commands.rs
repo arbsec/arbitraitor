@@ -439,10 +439,12 @@ fn build_scan_receipt(input: &ScanReceiptInput<'_>) -> Result<Receipt> {
     let now = crate::pipeline::timestamp();
     let mut builder = ReceiptBuilder::new(
         env!("CARGO_PKG_VERSION"),
-        input.artifact_sha256.to_string(),
+        input.artifact_sha256.clone(),
         artifact_size,
         VerdictInfo {
             verdict: input.result.verdict,
+            confidence: None,
+            explanation: None,
             deciding_rule: None,
             policy_trace: vec!["arbitraitor scan built-in verdict derivation".to_owned()],
         },
@@ -533,14 +535,14 @@ pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
     writeln!(
         stdout,
         "Artifact: {}",
-        sanitize_for_agent(&receipt.artifact_sha256)
+        sanitize_for_agent(&receipt.artifact.digest.to_string())
     )
     .into_diagnostic()?;
     writeln!(stdout, "Verdict: {:?}", receipt.verdict.verdict).into_diagnostic()?;
     writeln!(stdout).into_diagnostic()?;
 
-    writeln!(stdout, "Findings ({})", receipt.findings.len()).into_diagnostic()?;
-    for (i, finding) in receipt.findings.iter().enumerate() {
+    writeln!(stdout, "Findings ({})", receipt.finding_summaries().len()).into_diagnostic()?;
+    for (i, finding) in receipt.finding_summaries().iter().enumerate() {
         writeln!(
             stdout,
             "  {}. [{:?}] {}",
@@ -551,7 +553,8 @@ pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
         .into_diagnostic()?;
     }
 
-    if let Some(retrieval) = &receipt.retrieval {
+    let retrieval = &receipt.retrieval;
+    if !retrieval.requested_url().is_empty() || retrieval.final_url().is_some() {
         writeln!(stdout).into_diagnostic()?;
         writeln!(stdout, "Retrieval:").into_diagnostic()?;
         let url = retrieval.requested_url();
@@ -1281,14 +1284,14 @@ pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> 
     let receipt_bytes = std::fs::read(&command.receipt).into_diagnostic()?;
     let receipt: Receipt = serde_json::from_slice(&receipt_bytes)
         .map_err(|e| miette::miette!("invalid receipt file: {e}"))?;
-    let sha = &receipt.artifact_sha256;
+    let sha = receipt.artifact.digest.to_string();
     let verdict = receipt.verdict.verdict;
 
     let mut stderr = std::io::stderr().lock();
     writeln!(stderr, "Artifact: {sha}").into_diagnostic()?;
     writeln!(stderr, "Verdict:  {verdict:?}").into_diagnostic()?;
-    writeln!(stderr, "Findings: {}", receipt.findings.len()).into_diagnostic()?;
-    for f in &receipt.findings {
+    writeln!(stderr, "Findings: {}", receipt.finding_summaries().len()).into_diagnostic()?;
+    for f in receipt.finding_summaries() {
         writeln!(stderr, "  - {}", f.title).into_diagnostic()?;
     }
     writeln!(stderr).into_diagnostic()?;
@@ -1322,17 +1325,16 @@ fn write_approval_for_receipt(
         .map_or(0, |d| d.as_secs());
     let expiry = now + 300;
 
-    let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::from_str(&receipt.artifact_sha256)
-        .map_err(|e| miette::miette!("invalid SHA-256 in receipt: {e}"))?;
     let plan_inputs = crate::approval::ExecutionPlanInputs {
-        artifact_sha256,
+        artifact_sha256: receipt.artifact.digest.clone(),
         network_isolated: true,
         policy_snapshot_digest: receipt
+            .policy
             .policy_digest
-            .clone()
-            .unwrap_or_else(|| "unset".to_owned()),
+            .as_ref()
+            .map_or_else(|| "unset".to_owned(), |digest| digest.as_str().to_owned()),
         detector_snapshot_digest: receipt
-            .detector_versions
+            .detector_versions()
             .iter()
             .map(|d| format!("{}:{}", d.id, d.version))
             .collect::<Vec<_>>()
@@ -1628,10 +1630,12 @@ mod tests {
     fn receipt_for_digest(sha256: &Sha256Digest) -> Receipt {
         ReceiptBuilder::new(
             "0.1.0",
-            sha256.to_string(),
+            sha256.clone(),
             12,
             VerdictInfo {
                 verdict: Verdict::Prompt,
+                confidence: None,
+                explanation: None,
                 deciding_rule: Some("test.prompt".to_owned()),
                 policy_trace: vec!["prompted for approval".to_owned()],
             },

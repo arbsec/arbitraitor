@@ -447,10 +447,12 @@ fn build_run_receipt(
         .map_err(|error| RunFailure::Internal(error.to_string()))?;
     let mut builder = ReceiptBuilder::new(
         env!("CARGO_PKG_VERSION"),
-        artifact.sha256.to_string(),
+        artifact.sha256.clone(),
         artifact_size,
         VerdictInfo {
             verdict: artifact.verdict,
+            confidence: None,
+            explanation: None,
             deciding_rule: None,
             policy_trace: vec!["arbitraitor-cli run pipeline".to_owned()],
         },
@@ -467,10 +469,13 @@ fn build_run_receipt(
     )
     .findings(artifact.findings.iter().map(FindingSummary::from))
     .release(arbitraitor_receipt::ReleaseInfo {
-        method: arbitraitor_receipt::ReleaseMethod::Execute,
+        method: Some(arbitraitor_receipt::ReleaseMethod::Execute),
+        legacy_method: None,
         destination: Some(format!("exit-code={:?}", output.exit_code)),
-        sha256_verified: true,
-        timestamp: now,
+        sha256_verified: Some(true),
+        timestamp: Some(now),
+        effective_controls: None,
+        approval: None,
     });
     if let Some(approval) = approval {
         builder = builder.approval(approval.clone());
