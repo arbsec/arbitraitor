@@ -52,7 +52,7 @@ mod schema;
 mod trace;
 mod vex;
 
-pub use context::EvalContext;
+pub use context::{DetectorHealth, EvalContext, OperationMode};
 pub use engine::PolicyEngine;
 pub use error::PolicyError;
 pub use schema::{

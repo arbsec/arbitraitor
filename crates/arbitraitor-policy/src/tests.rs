@@ -6,7 +6,7 @@ use arbitraitor_model::finding::{Evidence, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
-use crate::{EvalContext, PolicyEngine};
+use crate::{DetectorHealth, EvalContext, OperationMode, PolicyEngine};
 use arbitraitor_model::origin::CallerOrigin;
 
 // ---------------------------------------------------------------------------
@@ -91,6 +91,32 @@ fn make_finding(category: FindingCategory, severity: Severity, confidence: Confi
 
 fn interactive_https_ctx() -> EvalContext {
     EvalContext::new(true).with_https(true)
+}
+
+fn full_eval_context() -> EvalContext {
+    EvalContext {
+        operation_mode: OperationMode::Contained,
+        artifact_digest: Some(Sha256Digest::new([1; 32])),
+        artifact_type: Some("python-package".to_owned()),
+        source_url: Some("https://origin.example/artifact".to_owned()),
+        redirect_chain: vec![
+            "https://origin.example/artifact".to_owned(),
+            "https://mirror.example/artifact".to_owned(),
+        ],
+        provenance_verified: true,
+        provenance_signer: Some("builder@example.com".to_owned()),
+        findings_count: 7,
+        block_findings_count: 2,
+        intel_matches: vec!["ioc-123".to_owned(), "feed-7".to_owned()],
+        detector_health: DetectorHealth::SomeUnhealthy,
+        recursive_graph_complete: true,
+        execution_interpreter: Some("/usr/bin/python3".to_owned()),
+        execution_network: true,
+        is_interactive: true,
+        is_https: true,
+        is_private_network: false,
+        caller_origin: CallerOrigin::DaemonLocal,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +276,92 @@ all = [{ field = "context.artifact_type", equals = "shell-script" }]
     let engine = PolicyEngine::load(policy).unwrap();
     let ctx = interactive_https_ctx().with_artifact_type("shell-script");
     let verdict = engine.evaluate(&[], &ctx);
+    assert_eq!(verdict, Verdict::Block);
+}
+
+#[test]
+fn resolves_all_eval_context_fields_when_populated() {
+    let policy = r#"
+version = 1
+
+[defaults]
+action = "block"
+
+[[rules]]
+id = "allow-rich-context"
+action = "pass"
+[rules.when]
+all = [
+  { field = "context.operation_mode", equals = "contained" },
+  { field = "context.artifact_digest", equals = "0101010101010101010101010101010101010101010101010101010101010101" },
+  { field = "context.artifact_type", equals = "python-package" },
+  { field = "context.source_url", equals = "https://origin.example/artifact" },
+  { field = "context.redirect_chain", contains = "https://mirror.example/artifact" },
+  { field = "context.provenance_verified", equals = true },
+  { field = "context.provenance_signer", equals = "builder@example.com" },
+  { field = "context.findings_count", equals = 7 },
+  { field = "context.block_findings_count", greater_than = 1 },
+  { field = "context.intel_matches", contains = "ioc-123" },
+  { field = "context.detector_health", equals = "some-unhealthy" },
+  { field = "context.recursive_graph_complete", equals = true },
+  { field = "context.execution_interpreter", equals = "/usr/bin/python3" },
+  { field = "context.execution_network", equals = true },
+]
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+
+    let verdict = engine.evaluate(&[], &full_eval_context());
+
+    assert_eq!(verdict, Verdict::Pass);
+}
+
+#[test]
+fn eval_context_absent_optional_fields_are_unavailable_not_panics() {
+    let policy = r#"
+version = 1
+
+[defaults]
+action = "block"
+
+[[rules]]
+id = "optional-context-fields"
+action = "pass"
+[rules.when]
+any = [
+  { field = "context.artifact_digest", equals = "0101010101010101010101010101010101010101010101010101010101010101" },
+  { field = "context.provenance_signer", equals = "builder@example.com" },
+  { field = "context.execution_interpreter", equals = "/usr/bin/python3" },
+]
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+
+    let verdict = engine.evaluate(&[], &EvalContext::new(true));
+
+    assert_eq!(verdict, Verdict::Block);
+}
+
+#[test]
+fn policy_rule_can_match_new_eval_context_field() {
+    let policy = r#"
+version = 1
+
+[defaults]
+action = "pass"
+
+[[rules]]
+id = "block-mediated-operation"
+action = "block"
+[rules.when]
+all = [{ field = "context.operation_mode", equals = "mediated" }]
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+    let ctx = EvalContext {
+        operation_mode: OperationMode::Mediated,
+        ..EvalContext::new(true)
+    };
+
+    let verdict = engine.evaluate(&[], &ctx);
+
     assert_eq!(verdict, Verdict::Block);
 }
 

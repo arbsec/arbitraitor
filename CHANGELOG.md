@@ -88,6 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Policy
+
+- `EvalContext` now carries spec §23.1 policy inputs for operation mode,
+  artifact identity, redirect chains, provenance, aggregate findings,
+  intelligence matches, detector health, recursive graph completeness, and
+  execution context. Policy rules can match the new `context.*` fields.
+
 #### CLI
 
 - `arbitraitor shim` now supports `curl`, `wget`, and `brew` alongside
