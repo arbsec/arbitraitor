@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Receipt
+
+- `Receipt::to_intoto_statement()` now exports a derived in-toto Statement v1
+  envelope with the full receipt as `predicate`, a typed SHA-256 subject, and
+  the Arbitraitor verdict predicate type for DSSE signing workflows.
+
 #### Sandbox
 
 - `io_uring` availability probe (spec §27.3). The sandbox crate now reads
