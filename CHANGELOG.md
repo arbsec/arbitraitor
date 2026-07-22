@@ -273,6 +273,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Receipt
 
+- `arbitraitor-receipt::ApprovalInfo` and `Receipt::approval` now record
+  ADR-0013 plan-bound approval metadata (artifact digest, plan digest,
+  expiry, nonce, bound capabilities, override reason/scope) plus the §31.2
+  execution exit status for approved execution receipts.
 - `arbitraitor_model::vex` now models the VEX format matrix for receipt
   companion artifacts: OpenVEX 0.2.0 parsing with the current product and
   vulnerability structs, rejection of OpenVEX 0.0.x/0.1.x contexts, CSAF 2.0
