@@ -824,6 +824,12 @@ pub struct EffectiveControls {
     /// consumers should recommend `sysctl kernel.io_uring_disabled=1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io_uring_available: Option<bool>,
+    /// Whether unprivileged user namespaces are available without host restriction.
+    ///
+    /// `Some(true)` signals an expanded kernel attack surface and receipt
+    /// consumers should recommend `sysctl kernel.unprivileged_userns_clone=0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userns_available: Option<bool>,
 }
 
 /// Proofs supplied to the builder that each containment control is active.
@@ -849,6 +855,8 @@ pub struct ControlProofs {
     pub landlock_abi_version: Option<LandlockAbiVersion>,
     /// Whether `io_uring` is available on the host kernel (spec §27.3).
     pub io_uring_available: Option<bool>,
+    /// Whether unprivileged user namespaces are available without host restriction.
+    pub userns_available: Option<bool>,
 }
 
 impl ControlProofs {
@@ -871,6 +879,12 @@ impl ControlProofs {
                  Recommend: sysctl kernel.io_uring_disabled=1 (or =2 for full disable)"
             );
         }
+        if self.userns_available == Some(true) {
+            tracing::warn!(
+                "unprivileged user namespaces are available without AppArmor restriction; \
+                 recommend: sysctl kernel.unprivileged_userns_clone=0"
+            );
+        }
         Ok(EffectiveControls {
             filesystem_isolation: Some(Self::require(
                 self.filesystem_isolation,
@@ -889,6 +903,7 @@ impl ControlProofs {
             resource_limits: Some(Self::require(self.resource_limits, "resource limits")?),
             landlock_abi_version: self.landlock_abi_version,
             io_uring_available: self.io_uring_available,
+            userns_available: self.userns_available,
         })
     }
 }
