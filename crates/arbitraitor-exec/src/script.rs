@@ -24,7 +24,7 @@ use arbitraitor_model::verdict::AssuranceLevel;
 use arbitraitor_sandbox::{PathRule, configure_filesystem_isolation};
 use tracing::debug;
 
-use crate::{ExecError, ExecutionContext, ExecutionContextBuilder};
+use crate::{ExecError, ExecutionContext, ExecutionContextBuilder, ExecutionPolicy};
 
 #[cfg(target_os = "linux")]
 const UNSHARE_PATH: &str = "/usr/bin/unshare";
@@ -115,6 +115,45 @@ impl ScriptExecution {
             #[cfg(target_os = "linux")]
             resource_limits: crate::ResourceLimits::default(),
         })
+    }
+
+    /// Rebuilds the mediated execution context with caller-supplied policy and
+    /// source environment.
+    ///
+    /// This is used by higher-level approval-bound CLI flows that need to pin
+    /// additional plan dimensions such as the working directory or environment
+    /// allowlist while retaining the already selected interpreter path and
+    /// argument vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError`] when the policy or source environment cannot produce
+    /// a valid mediated [`ExecutionContext`].
+    pub fn with_environment_policy<I, K, V>(
+        mut self,
+        policy: ExecutionPolicy,
+        source_environment: I,
+    ) -> Result<Self, ExecError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<std::ffi::OsString>,
+    {
+        let plan = operation_plan(&self.interpreter, &self.interpreter_args);
+        let grants = GrantedCapabilities::new(
+            CapabilityGrant(false),
+            CapabilityGrant(false),
+            CapabilityGrant(true),
+            CapabilityGrant(false),
+        );
+        self.environment = ExecutionContextBuilder::new(plan, grants)
+            .assurance_level(AssuranceLevel::Mediated)
+            .command(self.interpreter.clone())
+            .arguments(self.interpreter_args.iter().map(String::as_str))
+            .policy(policy)
+            .source_environment(source_environment)
+            .build()?;
+        Ok(self)
     }
 
     /// Controls whether the interpreter is launched inside an isolated Linux

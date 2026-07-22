@@ -6,7 +6,7 @@ mod run_tests;
 
 use std::future::Future;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use arbitraitor_artifact::{ArtifactType, ShellKind};
@@ -19,8 +19,10 @@ use arbitraitor_model::verdict::Verdict;
 use arbitraitor_receipt::DetectorVersion;
 use clap::Args;
 use miette::{IntoDiagnostic, Result};
+use sha2::{Digest, Sha256};
 
 use self::run_services::DefaultRunServices;
+use crate::approval::ApprovalFile;
 
 // Spec §29 exit codes. The constants below are kept as private aliases so
 // the historical `i32`-typed call sites in this module can switch to
@@ -40,6 +42,35 @@ pub struct RunCommand {
     /// URL to fetch and execute.
     pub url: String,
 
+    /// Interpreter path for script execution.
+    #[arg(long, value_name = "PATH")]
+    pub interpreter: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub(super) approval: RunApprovalFlags,
+
+    /// Working directory assigned to the child process.
+    #[arg(long, value_name = "PATH")]
+    pub working_directory: Option<PathBuf>,
+
+    /// Environment variable copied when `--clean-environment` is set.
+    #[arg(long, value_name = "VAR")]
+    pub allow_env: Vec<String>,
+
+    /// Sandbox mode override (`none`, `observe`, `restricted`, `disposable`).
+    #[arg(long, value_name = "MODE")]
+    pub sandbox: Option<String>,
+
+    /// Pre-approved approval file path.
+    #[arg(long, value_name = "PATH")]
+    pub approve: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub(super) compatibility: DeprecatedRunAliases,
+}
+
+#[derive(Args, Clone, Debug)]
+pub(super) struct RunApprovalFlags {
     /// Pre-approve native binary execution without interactive prompt.
     #[arg(long)]
     pub native: bool,
@@ -48,13 +79,66 @@ pub struct RunCommand {
     #[arg(long)]
     pub non_interactive: bool,
 
-    /// Allow network access during execution (default: isolated).
+    /// Start the child with an empty environment allowlist.
     #[arg(long)]
+    pub clean_environment: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub(super) struct DeprecatedRunAliases {
+    /// Deprecated alias retained for compatibility; use `--sandbox none` for
+    /// unrestricted execution instead.
+    #[arg(long, hide = true)]
     pub network: bool,
 
-    /// Policy file path.
-    #[arg(long)]
+    /// Deprecated policy file path alias retained for compatibility.
+    #[arg(long, hide = true)]
     pub policy: Option<PathBuf>,
+}
+
+impl RunCommand {
+    fn interpreter_path(&self) -> PathBuf {
+        self.interpreter
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/bin/bash"))
+    }
+
+    fn interpreter_arguments(&self) -> Vec<String> {
+        if self.interpreter.is_some() {
+            Vec::new()
+        } else {
+            vec!["--noprofile".to_owned(), "--norc".to_owned()]
+        }
+    }
+
+    fn network_allowed(&self) -> bool {
+        self.compatibility.network || self.sandbox.as_deref() == Some("none")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RunExecutionOptions {
+    interpreter: PathBuf,
+    interpreter_args: Vec<String>,
+    working_directory: Option<PathBuf>,
+    clean_environment: bool,
+    allow_env: Vec<String>,
+    sandbox: Option<String>,
+    network_allowed: bool,
+}
+
+impl RunExecutionOptions {
+    fn from_command(command: &RunCommand) -> Self {
+        Self {
+            interpreter: command.interpreter_path(),
+            interpreter_args: command.interpreter_arguments(),
+            working_directory: command.working_directory.clone(),
+            clean_environment: command.approval.clean_environment,
+            allow_env: command.allow_env.clone(),
+            sandbox: command.sandbox.clone(),
+            network_allowed: command.network_allowed(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -123,7 +207,7 @@ pub(super) trait RunServices {
         &mut self,
         mode: ExecutionMode,
         artifact: &InspectedArtifact,
-        network_allowed: bool,
+        options: &RunExecutionOptions,
     ) -> std::result::Result<ExecutionOutput, RunFailure>;
 
     fn write_receipt(
@@ -150,6 +234,7 @@ async fn run_with_services(
     services: &mut impl RunServices,
     writer: &mut impl Write,
 ) -> Result<i32> {
+    write_deprecated_alias_warnings(writer, command)?;
     writeln!(writer, "Fetching {}...", command.url).into_diagnostic()?;
     let artifact = match services.prepare(command, config).await {
         Ok(artifact) => artifact,
@@ -162,16 +247,17 @@ async fn run_with_services(
         Ok(mode) => mode,
         Err(message) => return write_failure(writer, RunFailure::Blocked(message)),
     };
-    let network_isolated = !command.network;
+    let options = RunExecutionOptions::from_command(command);
+    let network_isolated = !options.network_allowed;
     let plan = execution_plan(mode, network_isolated);
-    let mut ctx = PlanContext::for_bash(network_isolated, artifact.policy_digest.clone());
+    let mut ctx = plan_context(command, &artifact, network_isolated);
     if mode == ExecutionMode::Native {
         ctx.interpreter = format!("native:{}", artifact.sha256);
     }
     writeln!(writer, "Plan: {plan}").into_diagnostic()?;
 
-    if mode == ExecutionMode::Native && !command.native {
-        if command.non_interactive {
+    if mode == ExecutionMode::Native && !command.approval.native {
+        if command.approval.non_interactive && command.approve.is_none() {
             return write_failure(
                 writer,
                 RunFailure::PromptRequired(
@@ -179,7 +265,7 @@ async fn run_with_services(
                 ),
             );
         }
-        let approved = match services.request_approval(&artifact, &plan, &ctx) {
+        let approved = match request_approval(command, services, &artifact, &plan, &ctx) {
             Ok(approved) => approved,
             Err(error) => return write_failure(writer, error),
         };
@@ -194,14 +280,14 @@ async fn run_with_services(
 
     match artifact.verdict {
         Verdict::Pass | Verdict::Warn => {}
-        Verdict::Prompt if command.non_interactive => {
+        Verdict::Prompt if command.approval.non_interactive && command.approve.is_none() => {
             return write_failure(
                 writer,
                 RunFailure::PromptRequired("approval required in non-interactive mode".to_owned()),
             );
         }
         Verdict::Prompt => {
-            let approved = match services.request_approval(&artifact, &plan, &ctx) {
+            let approved = match request_approval(command, services, &artifact, &plan, &ctx) {
                 Ok(approved) => approved,
                 Err(error) => return write_failure(writer, error),
             };
@@ -232,7 +318,7 @@ async fn run_with_services(
         }
     }
 
-    let output = match services.execute(mode, &artifact, command.network) {
+    let output = match services.execute(mode, &artifact, &options) {
         Ok(output) => output,
         Err(error) => return write_failure(writer, error),
     };
@@ -249,6 +335,107 @@ async fn run_with_services(
     } else {
         Ok(exit_code)
     }
+}
+
+fn write_deprecated_alias_warnings(writer: &mut impl Write, command: &RunCommand) -> Result<()> {
+    if command.compatibility.network {
+        writeln!(
+            writer,
+            "warning: --network is deprecated; use --sandbox none"
+        )
+        .into_diagnostic()?;
+    }
+    if command.compatibility.policy.is_some() {
+        writeln!(
+            writer,
+            "warning: --policy is deprecated and hidden from help"
+        )
+        .into_diagnostic()?;
+    }
+    Ok(())
+}
+
+fn plan_context(
+    command: &RunCommand,
+    artifact: &InspectedArtifact,
+    network_isolated: bool,
+) -> PlanContext {
+    let interpreter = command.interpreter_path();
+    PlanContext {
+        interpreter: interpreter.display().to_string(),
+        interpreter_digest: interpreter_digest_or_empty(&interpreter),
+        network_isolated,
+        policy_snapshot_digest: artifact.policy_digest.clone(),
+        detector_snapshot_digest: detector_snapshot_digest(artifact),
+        intelligence_snapshot_digest: String::new(),
+    }
+}
+
+fn request_approval(
+    command: &RunCommand,
+    services: &mut impl RunServices,
+    artifact: &InspectedArtifact,
+    plan: &str,
+    ctx: &PlanContext,
+) -> std::result::Result<bool, RunFailure> {
+    if let Some(path) = &command.approve {
+        validate_approval_file(path, artifact, ctx)?;
+        Ok(true)
+    } else {
+        services.request_approval(artifact, plan, ctx)
+    }
+}
+
+fn validate_approval_file(
+    path: &Path,
+    artifact: &InspectedArtifact,
+    ctx: &PlanContext,
+) -> std::result::Result<(), RunFailure> {
+    let bytes = std::fs::read(path).map_err(|error| RunFailure::Approval(error.to_string()))?;
+    let approval: ApprovalFile = serde_json::from_slice(&bytes)
+        .map_err(|error| RunFailure::Approval(format!("invalid approval file: {error}")))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    approval
+        .verify(now)
+        .map_err(|error| RunFailure::Approval(error.to_string()))?;
+    if approval.artifact_sha256 != artifact.sha256.to_string() {
+        return Err(RunFailure::Approval(
+            "approval artifact digest does not match fetched artifact".to_owned(),
+        ));
+    }
+    if approval.interpreter != ctx.interpreter {
+        return Err(RunFailure::Approval(
+            "approval interpreter does not match execution plan".to_owned(),
+        ));
+    }
+    if approval.network_isolated != ctx.network_isolated {
+        return Err(RunFailure::Approval(
+            "approval network policy does not match execution plan".to_owned(),
+        ));
+    }
+    if approval.policy_snapshot_digest != ctx.policy_snapshot_digest {
+        return Err(RunFailure::Approval(
+            "approval policy digest does not match execution plan".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn detector_snapshot_digest(artifact: &InspectedArtifact) -> String {
+    artifact
+        .detector_versions
+        .iter()
+        .map(|version| format!("{}:{}", version.id, version.version))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn interpreter_digest_or_empty(path: &Path) -> String {
+    std::fs::read(path)
+        .map(|bytes| hex::encode(Sha256::digest(bytes)))
+        .unwrap_or_default()
 }
 
 fn execution_plan(mode: ExecutionMode, network_isolated: bool) -> String {
