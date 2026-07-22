@@ -7,6 +7,7 @@ mod commands;
 mod pipeline;
 mod pm;
 mod run;
+mod shim;
 
 use std::ffi::OsString;
 use std::io::Write;
