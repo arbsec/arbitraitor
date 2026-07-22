@@ -17,4 +17,17 @@ pub enum PolicyError {
     /// Canonical serialization for the digest failed.
     #[error("failed to serialize policy for digest: {0}")]
     Digest(String),
+
+    /// A lower-precedence policy tried to weaken an inherited layer.
+    #[error("policy layer {layer:?} weakens inherited policy: {detail}")]
+    Weakening {
+        /// Layer that attempted the weakening change.
+        layer: crate::PolicyPrecedence,
+        /// Human-readable monotonicity violations.
+        detail: String,
+    },
+
+    /// A CLI override was provided without explicit audit consent.
+    #[error("CLI policy override requires --audit-override")]
+    AuditOverrideRequired,
 }

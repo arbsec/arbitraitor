@@ -95,6 +95,10 @@ pub(super) struct DeprecatedRunAliases {
     /// Deprecated policy file path alias retained for compatibility.
     #[arg(long, hide = true)]
     pub policy: Option<PathBuf>,
+
+    /// Required to apply a command-line policy override.
+    #[arg(long, hide = true)]
+    pub audit_override: bool,
 }
 
 impl RunCommand {
@@ -160,6 +164,7 @@ pub(super) struct InspectedArtifact {
     findings: Vec<Finding>,
     detectors: Vec<DetectorSummary>,
     detector_versions: Vec<DetectorVersion>,
+    audit_trail: Vec<String>,
     requested_url: String,
     final_url: String,
     store_dir: PathBuf,

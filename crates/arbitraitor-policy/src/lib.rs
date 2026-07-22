@@ -53,7 +53,7 @@ mod trace;
 mod vex;
 
 pub use context::{DetectorHealth, EvalContext, OperationMode};
-pub use engine::PolicyEngine;
+pub use engine::{LayeredPolicy, PolicyEngine, PolicyLayer, PolicyPrecedence};
 pub use error::PolicyError;
 pub use schema::{
     Condition, DefaultsConfig, FieldMatch, LimitsConfig, MatchOp, NetworkConfig, Policy,

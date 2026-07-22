@@ -6,7 +6,9 @@ use arbitraitor_model::finding::{Evidence, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
-use crate::{DetectorHealth, EvalContext, OperationMode, PolicyEngine};
+use crate::{
+    DetectorHealth, EvalContext, OperationMode, PolicyEngine, PolicyLayer, PolicyPrecedence,
+};
 use arbitraitor_model::origin::CallerOrigin;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +121,10 @@ fn full_eval_context() -> EvalContext {
     }
 }
 
+fn parsed_policy(toml: &str) -> crate::Policy {
+    PolicyEngine::load(toml).unwrap().policy().clone()
+}
+
 // ---------------------------------------------------------------------------
 // Required tests
 // ---------------------------------------------------------------------------
@@ -165,6 +171,149 @@ version = 1
     let engine = PolicyEngine::load(policy).unwrap();
 
     assert!(!engine.policy().integrity.require_digest);
+}
+
+#[test]
+fn project_policy_tightens_organization_policy() {
+    // Given: organization policy prompts by default.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"prompt\"\n");
+    let project = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+
+    // When: project policy is layered below organization policy.
+    let layered = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    )
+    .unwrap();
+
+    // Then: the stricter project default becomes effective.
+    assert_eq!(layered.policy.defaults.action, crate::PolicyAction::Block);
+}
+
+#[test]
+fn project_policy_weakens_organization_policy_is_rejected() {
+    // Given: organization policy blocks by default.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+    let project = parsed_policy("version = 1\n[defaults]\naction = \"prompt\"\n");
+
+    // When: project policy tries to weaken the inherited action.
+    let result = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+
+    // Then: weakening is rejected with layer-specific detail.
+    assert!(matches!(
+        result,
+        Err(crate::PolicyError::Weakening {
+            layer: PolicyPrecedence::Project,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cli_tightening_on_top_of_user_policy_is_allowed() {
+    // Given: user policy warns by default and CLI tightening blocks by default.
+    let user = parsed_policy("version = 1\n[defaults]\naction = \"warn\"\n");
+    let cli = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+
+    // When: CLI tightening is layered after user policy.
+    let layered = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::User,
+                policy: user,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::CliTightening,
+                policy: cli,
+            },
+        ],
+        false,
+    )
+    .unwrap();
+
+    // Then: the CLI tightening is effective.
+    assert_eq!(layered.policy.defaults.action, crate::PolicyAction::Block);
+}
+
+#[test]
+fn cli_override_without_audit_override_is_rejected() {
+    // Given: inherited policy blocks and CLI override would pass.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+    let cli = parsed_policy("version = 1\n[defaults]\naction = \"pass\"\n");
+
+    // When: CLI override is supplied without audit consent.
+    let result = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::CliOverride,
+                policy: cli,
+            },
+        ],
+        false,
+    );
+
+    // Then: override is rejected before it can weaken the policy.
+    assert!(matches!(
+        result,
+        Err(crate::PolicyError::AuditOverrideRequired)
+    ));
+}
+
+#[test]
+fn cli_override_with_audit_override_is_allowed_and_audited() {
+    // Given: inherited policy blocks and CLI override would pass.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+    let cli = parsed_policy("version = 1\n[defaults]\naction = \"pass\"\n");
+
+    // When: CLI override is supplied with audit consent.
+    let layered = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::CliOverride,
+                policy: cli,
+            },
+        ],
+        true,
+    )
+    .unwrap();
+
+    // Then: override becomes effective and leaves an audit record.
+    assert_eq!(layered.policy.defaults.action, crate::PolicyAction::Pass);
+    assert!(
+        layered
+            .audit_trail
+            .iter()
+            .any(|event| event.contains("CLI override"))
+    );
 }
 
 #[test]

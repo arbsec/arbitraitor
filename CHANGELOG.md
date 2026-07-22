@@ -113,6 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `npm`, adds `shim real <tool>` for resolving the real binary outside the
   shim directory, and adds `shim status` to show every supported shim slot.
 
+#### Policy
+
+- Policy layering now follows spec §23.5 precedence: organization, project,
+  user, CLI tightening, then audited CLI override. Lower layers may tighten
+  inherited policy; weakening changes are rejected unless supplied as a CLI
+  override with `--audit-override`, which is recorded in the receipt audit trail.
+
 #### Archive
 
 - `FindingCategory::ParserDifferential` and archive `ParserSmelting` hazard

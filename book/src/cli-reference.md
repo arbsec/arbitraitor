@@ -150,7 +150,8 @@ arguments are captured after `--`.
 | `--expected-content-type <TYPE>` | Expected content type (e.g., `application/x-sh`) |
 | `--max-bytes <BYTES>` | Maximum bytes to fetch |
 | `--header <HEADER>` | HTTP header to send (repeatable, format: `Key: Value`) |
-| `--policy <PATH>` | Policy file path |
+| `--policy <PATH>` | Policy file path (CLI override; requires `--audit-override`) |
+| `--audit-override` | Record and allow the `--policy` CLI override in the receipt audit trail |
 | `--recursive` | Recursively fetch and inspect referenced payloads |
 | `--sandbox` | Sandbox execution after fetch |
 | `--non-interactive` | Skip interactive approval prompts |
@@ -233,8 +234,8 @@ arbitraitor run https://example.com/install.sh --non-interactive
 # With native binary and network access
 arbitraitor run https://example.com/binary --native --network
 
-# With policy file
-arbitraitor run https://example.com/install.sh --policy ./my-policy.toml
+# With an audited CLI policy override
+arbitraitor run https://example.com/install.sh --policy ./my-policy.toml --audit-override
 ```
 
 ### Supported artifact types
