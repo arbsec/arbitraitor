@@ -830,6 +830,7 @@ mod tests {
                 proof: Some("setrlimit".to_owned()),
             }),
             landlock_abi_version: Some(serde_json::from_value(serde_json::json!(7))?),
+            io_uring_available: Some(false),
         };
         let receipt = ReceiptBuilder::new(
             "0.1.0",

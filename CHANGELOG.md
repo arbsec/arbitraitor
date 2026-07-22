@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Sandbox
+
+- `io_uring` availability probe (spec §27.3). The sandbox crate now reads
+  `/proc/sys/kernel/io_uring_disabled` on Linux 6.6+ and records the result
+  in `EffectiveControls.io_uring_available`. When `io_uring` is enabled
+  (`disabled=0`), the exec crate emits a `tracing::warn!` recommending
+  `sysctl kernel.io_uring_disabled=1` (or `=2` for full disable) because
+  `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
+  platforms and kernels < 6.6 report `None` (not applicable).
+
 ### Changed
 
 #### Documentation

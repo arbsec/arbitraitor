@@ -818,6 +818,12 @@ pub struct EffectiveControls {
     /// Effective Landlock ABI version observed when filesystem isolation uses Landlock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landlock_abi_version: Option<LandlockAbiVersion>,
+    /// Whether `io_uring` is available on the host kernel (spec §27.3).
+    ///
+    /// `Some(true)` signals that `io_uring` bypasses seccomp; receipt
+    /// consumers should recommend `sysctl kernel.io_uring_disabled=1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_uring_available: Option<bool>,
 }
 
 /// Proofs supplied to the builder that each containment control is active.
@@ -841,6 +847,8 @@ pub struct ControlProofs {
     pub resource_limits: Option<String>,
     /// Effective Landlock ABI version backing the filesystem-isolation proof.
     pub landlock_abi_version: Option<LandlockAbiVersion>,
+    /// Whether `io_uring` is available on the host kernel (spec §27.3).
+    pub io_uring_available: Option<bool>,
 }
 
 impl ControlProofs {
@@ -857,6 +865,12 @@ impl ControlProofs {
     }
 
     fn into_effective_controls(self) -> Result<EffectiveControls, ExecError> {
+        if self.io_uring_available == Some(true) {
+            tracing::warn!(
+                "io_uring is available on this host; it bypasses seccomp. \
+                 Recommend: sysctl kernel.io_uring_disabled=1 (or =2 for full disable)"
+            );
+        }
         Ok(EffectiveControls {
             filesystem_isolation: Some(Self::require(
                 self.filesystem_isolation,
@@ -874,6 +888,7 @@ impl ControlProofs {
             syscall_filtering: Some(Self::require(self.syscall_filtering, "syscall filtering")?),
             resource_limits: Some(Self::require(self.resource_limits, "resource limits")?),
             landlock_abi_version: self.landlock_abi_version,
+            io_uring_available: self.io_uring_available,
         })
     }
 }
