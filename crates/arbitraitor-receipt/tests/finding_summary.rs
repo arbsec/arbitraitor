@@ -43,10 +43,12 @@ fn finding(taxonomy: TaxonomyRef) -> Finding {
 fn receipt(summary: FindingSummary) -> Receipt {
     ReceiptBuilder::new(
         "0.1.0",
-        "ab".repeat(32),
+        Sha256Digest::new([0xab; 32]),
         12,
         VerdictInfo {
             verdict: Verdict::Block,
+            confidence: None,
+            explanation: None,
             deciding_rule: Some("block.dynamic-eval".to_owned()),
             policy_trace: vec!["dynamic eval blocked".to_owned()],
         },

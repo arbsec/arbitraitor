@@ -20,50 +20,358 @@ use thiserror::Error;
 use url::Url;
 
 /// Current receipt schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+const V1_SCHEMA_VERSION: u32 = 1;
+
+const fn current_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+
+const fn v1_schema_version() -> u32 {
+    V1_SCHEMA_VERSION
+}
 
 /// Tamper-evident audit record for an inspected artifact.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
-    /// Receipt schema version. Currently [`CURRENT_SCHEMA_VERSION`].
+    /// Receipt schema version. New receipts use [`CURRENT_SCHEMA_VERSION`].
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u32,
+    /// Redacted request metadata.
+    #[serde(default)]
+    pub request: RequestInfo,
+    /// Inspected artifact identity and classification.
+    #[serde(default)]
+    pub artifact: ArtifactInfo,
+    /// Redacted retrieval metadata.
+    #[serde(default)]
+    pub retrieval: RetrievalInfo,
+    /// Provenance verification metadata.
+    #[serde(default)]
+    pub provenance: ProvenanceInfo,
+    /// Recursive payload graph metadata.
+    #[serde(default)]
+    pub payload_graph: PayloadGraphInfo,
+    /// Detector identity, version, provenance, and health metadata.
+    #[serde(default)]
+    pub detectors: DetectorsInfo,
+    /// Finding summaries and aggregate facets.
+    #[serde(default)]
+    pub findings: FindingsInfo,
+    /// Policy snapshot and rule evaluation metadata.
+    #[serde(default)]
+    pub policy: PolicyInfo,
+    /// Final verdict information.
+    #[serde(default)]
+    pub verdict: VerdictInfo,
+    /// Release metadata.
+    #[serde(default)]
+    pub release: ReleaseInfo,
+    /// Receipt lifecycle timestamps.
+    #[serde(default)]
+    pub timestamps: TimestampsInfo,
+    /// Optional detached signature over the canonical unsigned receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ReceiptSignature>,
+}
+
+impl<'de> Deserialize<'de> for Receipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("artifact").is_some() {
+            return ReceiptV2::deserialize(value)
+                .map(Receipt::from)
+                .map_err(serde::de::Error::custom);
+        }
+        V1Receipt::deserialize(value)
+            .map(Self::from_v1)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptV2 {
+    #[serde(default = "current_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    request: RequestInfo,
+    #[serde(default)]
+    artifact: ArtifactInfo,
+    #[serde(default)]
+    retrieval: RetrievalInfo,
+    #[serde(default)]
+    provenance: ProvenanceInfo,
+    #[serde(default)]
+    payload_graph: PayloadGraphInfo,
+    #[serde(default)]
+    detectors: DetectorsInfo,
+    #[serde(default)]
+    findings: FindingsInfo,
+    #[serde(default)]
+    policy: PolicyInfo,
+    #[serde(default)]
+    verdict: VerdictInfo,
+    #[serde(default)]
+    release: ReleaseInfo,
+    #[serde(default)]
+    timestamps: TimestampsInfo,
+    #[serde(default)]
+    signature: Option<ReceiptSignature>,
+}
+
+impl From<ReceiptV2> for Receipt {
+    fn from(mut value: ReceiptV2) -> Self {
+        value.retrieval.requested_url.clone_from(&value.request.url);
+        if value.retrieval.content_type.is_none() {
+            value
+                .retrieval
+                .content_type
+                .clone_from(&value.artifact.content_type);
+        }
+        Self {
+            schema_version: value.schema_version.max(CURRENT_SCHEMA_VERSION),
+            request: value.request,
+            artifact: value.artifact,
+            retrieval: value.retrieval,
+            provenance: value.provenance,
+            payload_graph: value.payload_graph,
+            detectors: value.detectors,
+            findings: value.findings,
+            policy: value.policy,
+            verdict: value.verdict,
+            release: value.release,
+            timestamps: value.timestamps,
+            signature: value.signature,
+        }
+    }
+}
+
+/// Legacy flat v1 receipt shape accepted for migration.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct V1Receipt {
+    /// Legacy schema version.
+    #[serde(default = "v1_schema_version")]
     pub schema_version: u32,
     /// Arbitraitor version that produced the receipt.
     pub arbitraitor_version: String,
     /// Digest of the effective configuration snapshot, when available.
-    pub config_digest: Option<String>,
+    pub config_digest: Option<SnapshotDigest>,
     /// Digest of the effective policy snapshot, when available.
-    pub policy_digest: Option<String>,
-    /// SHA-256 digest of the inspected artifact as lowercase hexadecimal.
-    pub artifact_sha256: String,
+    pub policy_digest: Option<SnapshotDigest>,
+    /// SHA-256 digest of the inspected artifact.
+    pub artifact_sha256: Sha256Digest,
     /// Size of the inspected artifact in bytes.
     pub artifact_size: u64,
     /// Optional artifact type label.
     pub artifact_type: Option<String>,
     /// Optional redacted retrieval metadata.
+    #[serde(default)]
     pub retrieval: Option<RetrievalInfo>,
     /// Finding summaries included in the receipt.
+    #[serde(default)]
     pub findings: Vec<FindingSummary>,
     /// Final policy verdict information.
     pub verdict: VerdictInfo,
     /// Optional release information.
+    #[serde(default)]
     pub release: Option<ReleaseInfo>,
     /// Detector versions that contributed to this receipt.
+    #[serde(default)]
     pub detector_versions: Vec<DetectorVersion>,
-    /// Binary provenance for subprocess detectors (sha256, version, ruleset digest).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Binary provenance for subprocess detectors.
+    #[serde(default)]
     pub detector_provenance: Vec<DetectorProvenance>,
     /// Receipt creation and update timestamps.
     pub timestamps: ReceiptTimestamps,
-    /// Per-control effective-controls matrix (ADR-0007). Present only for
-    /// contained execution contexts; `None` for inspect/mediated.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Per-control effective-controls matrix (ADR-0007).
+    #[serde(default)]
     pub effective_controls: Option<EffectiveControls>,
-    /// Plan-bound approval and override binding metadata, when execution used approval.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Plan-bound approval metadata.
+    #[serde(default)]
     pub approval: Option<ApprovalInfo>,
     /// Optional detached signature over the canonical unsigned receipt.
+    #[serde(default)]
     pub signature: Option<ReceiptSignature>,
+}
+
+/// Redacted request metadata for the receipt envelope.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestInfo {
+    /// Redacted originally requested URL.
+    pub url: String,
+    /// HTTP method or local pseudo-method when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Redacted request headers retained for audit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderInfo>,
+}
+
+/// Redacted request header name/value pair.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderInfo {
+    /// Header name.
+    pub name: String,
+    /// Redacted header value.
+    pub value: String,
+}
+
+/// Inspected artifact identity and classification metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactInfo {
+    /// SHA-256 digest of the inspected artifact.
+    pub digest: Sha256Digest,
+    /// Artifact type label.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+    /// Size of the inspected artifact in bytes.
+    pub size: u64,
+    /// Response content type, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+impl Default for ArtifactInfo {
+    fn default() -> Self {
+        Self {
+            digest: Sha256Digest::new([0; 32]),
+            artifact_type: None,
+            size: 0,
+            content_type: None,
+        }
+    }
+}
+
+/// Provenance verification metadata for the receipt envelope.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceInfo {
+    /// Signer identity asserted by provenance verification, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_identity: Option<String>,
+    /// Certificate issuer asserted by provenance verification, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_issuer: Option<String>,
+    /// SHA-256 digest of the verification bundle, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_sha256: Option<Sha256Digest>,
+}
+
+/// Recursive payload graph metadata for the receipt envelope.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PayloadGraphInfo {
+    /// Child artifact digests discovered during recursive inspection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_artifacts: Vec<Sha256Digest>,
+    /// Edge type labels connecting payload graph nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_types: Vec<String>,
+    /// Whether recursive graph discovery completed without truncation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_complete: Option<bool>,
+}
+
+/// Detector metadata for the receipt envelope.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorsInfo {
+    /// Arbitraitor version that produced the receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_version: Option<String>,
+    /// Detector versions that contributed to this receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<DetectorVersion>,
+    /// Binary provenance for subprocess detectors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<DetectorProvenance>,
+    /// Detector health observations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health: Vec<DetectorHealth>,
+}
+
+/// Detector health observation retained in receipts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorHealth {
+    /// Detector identifier.
+    pub id: String,
+    /// Health status label.
+    pub status: String,
+}
+
+/// Finding metadata for the receipt envelope.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindingsInfo {
+    /// Finding summaries included in the receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summaries: Vec<FindingSummary>,
+    /// Aggregate finding categories represented in `summaries`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<FindingCategory>,
+    /// Aggregate severities represented in `summaries`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub severities: Vec<Severity>,
+}
+
+/// Policy snapshot and rule evaluation metadata for the receipt envelope.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyInfo {
+    /// Digest of the effective configuration snapshot, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<SnapshotDigest>,
+    /// Digest of the effective policy snapshot, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_digest: Option<SnapshotDigest>,
+    /// Safe, bounded policy rule evaluation entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_evaluations: Vec<String>,
+    /// Final policy verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<Verdict>,
+}
+
+/// Opaque digest label for policy and configuration snapshots.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct SnapshotDigest(String);
+
+impl SnapshotDigest {
+    /// Creates an opaque snapshot digest label.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the serialized digest label.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SnapshotDigest {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SnapshotDigest {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
 }
 
 /// Plan-bound approval and override metadata embedded in execution receipts.
@@ -89,6 +397,73 @@ pub struct ApprovalInfo {
 }
 
 impl Receipt {
+    /// Migrates a legacy flat v1 receipt into the v2 envelope shape.
+    #[must_use]
+    pub fn from_v1(v1: V1Receipt) -> Self {
+        let retrieval = v1.retrieval.unwrap_or_default();
+        let request = RequestInfo {
+            url: redact_url(&retrieval.requested_url),
+            method: None,
+            headers: Vec::new(),
+        };
+        let artifact = ArtifactInfo {
+            digest: v1.artifact_sha256,
+            artifact_type: v1.artifact_type,
+            size: v1.artifact_size,
+            content_type: retrieval.content_type.clone(),
+        };
+        let verdict = v1.verdict;
+        let policy = PolicyInfo {
+            config_digest: v1.config_digest,
+            policy_digest: v1.policy_digest,
+            rule_evaluations: verdict.policy_trace.clone(),
+            verdict: Some(verdict.verdict),
+        };
+        let release = v1.release.map_or_else(ReleaseInfo::default, |mut release| {
+            release.effective_controls = v1.effective_controls;
+            release.approval = v1.approval;
+            release
+        });
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            request,
+            artifact,
+            retrieval,
+            provenance: ProvenanceInfo::default(),
+            payload_graph: PayloadGraphInfo::default(),
+            detectors: DetectorsInfo {
+                producer_version: Some(v1.arbitraitor_version),
+                versions: v1.detector_versions,
+                provenance: v1.detector_provenance,
+                health: Vec::new(),
+            },
+            findings: FindingsInfo::from_summaries(v1.findings),
+            policy,
+            verdict,
+            release,
+            timestamps: TimestampsInfo::from(v1.timestamps),
+            signature: v1.signature,
+        }
+    }
+
+    /// Returns the artifact digest recorded by this receipt.
+    #[must_use]
+    pub const fn artifact_sha256(&self) -> &Sha256Digest {
+        &self.artifact.digest
+    }
+
+    /// Returns the finding summaries recorded by this receipt.
+    #[must_use]
+    pub fn finding_summaries(&self) -> &[FindingSummary] {
+        &self.findings.summaries
+    }
+
+    /// Returns detector versions recorded by this receipt.
+    #[must_use]
+    pub fn detector_versions(&self) -> &[DetectorVersion] {
+        &self.detectors.versions
+    }
+
     /// Return RFC 8785 JSON Canonicalization Scheme bytes for this receipt.
     ///
     /// # Errors
@@ -127,9 +502,9 @@ impl Receipt {
         Ok(InTotoStatement {
             statement_type: "https://in-toto.io/Statement/v1".to_owned(),
             subject: vec![InTotoSubject {
-                name: format!("sha256:{}", self.artifact_sha256),
+                name: format!("sha256:{}", self.artifact.digest),
                 digest: InTotoDigest {
-                    sha256: self.artifact_sha256.clone(),
+                    sha256: self.artifact.digest.to_string(),
                 },
             }],
             predicate_type: "https://arbitraitor.dev/verdict/v1".to_owned(),
@@ -176,16 +551,32 @@ pub struct InTotoDigest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalInfo {
+    #[serde(default, skip_serializing)]
     requested_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     final_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     redirect_chain: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     byte_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tls_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_cert_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     redirect_credential_secrecy: Option<RedirectCredentialSecrecy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transport_metadata: Vec<String>,
+}
+
+impl Default for RetrievalInfo {
+    fn default() -> Self {
+        Self::new("")
+    }
 }
 
 impl RetrievalInfo {
@@ -202,6 +593,7 @@ impl RetrievalInfo {
             tls_version: None,
             peer_cert_fingerprint: None,
             redirect_credential_secrecy: None,
+            transport_metadata: Vec::new(),
         }
     }
 
@@ -290,6 +682,26 @@ impl RetrievalInfo {
     }
 }
 
+impl FindingsInfo {
+    fn from_summaries(summaries: Vec<FindingSummary>) -> Self {
+        let mut categories = Vec::new();
+        let mut severities = Vec::new();
+        for summary in &summaries {
+            if !categories.contains(&summary.category) {
+                categories.push(summary.category);
+            }
+            if !severities.contains(&summary.severity) {
+                severities.push(summary.severity);
+            }
+        }
+        Self {
+            summaries,
+            categories,
+            severities,
+        }
+    }
+}
+
 /// Finding subset recorded in receipts.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -353,16 +765,63 @@ impl From<&Finding> for FindingSummary {
 pub struct VerdictInfo {
     /// Final policy verdict.
     pub verdict: Verdict,
+    /// Verdict confidence, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Confidence>,
+    /// Safe human-readable verdict explanation, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     /// Policy rule that decided the verdict, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deciding_rule: Option<String>,
     /// Safe, bounded policy trace entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policy_trace: Vec<String>,
 }
 
+impl Default for VerdictInfo {
+    fn default() -> Self {
+        Self {
+            verdict: Verdict::Error,
+            confidence: None,
+            explanation: None,
+            deciding_rule: None,
+            policy_trace: Vec::new(),
+        }
+    }
+}
+
 /// Release information included when an artifact is released.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseInfo {
+    /// Release method.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<ReleaseMethod>,
+    /// Legacy release method retained for v1 migration compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_method: Option<ReleaseMethod>,
+    /// Release destination, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// Whether SHA-256 was re-verified immediately before release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256_verified: Option<bool>,
+    /// Release timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// Per-control effective-controls matrix (ADR-0007).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_controls: Option<EffectiveControls>,
+    /// Plan-bound approval and override binding metadata, when execution used approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalInfo>,
+}
+
+/// Legacy v1 release information accepted during receipt migration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct V1ReleaseInfo {
     /// Release method.
     pub method: ReleaseMethod,
     /// Release destination, if applicable.
@@ -371,6 +830,20 @@ pub struct ReleaseInfo {
     pub sha256_verified: bool,
     /// Release timestamp.
     pub timestamp: String,
+}
+
+impl From<V1ReleaseInfo> for ReleaseInfo {
+    fn from(value: V1ReleaseInfo) -> Self {
+        Self {
+            method: Some(value.method),
+            legacy_method: None,
+            destination: value.destination,
+            sha256_verified: Some(value.sha256_verified),
+            timestamp: Some(value.timestamp),
+            effective_controls: None,
+            approval: None,
+        }
+    }
 }
 
 /// Supported artifact release methods.
@@ -405,6 +878,47 @@ pub struct ReceiptTimestamps {
     pub modified: String,
 }
 
+/// Receipt lifecycle timestamps for the v2 envelope.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimestampsInfo {
+    /// Operation start timestamp, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    /// Retrieval completion timestamp, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval: Option<String>,
+    /// Analysis completion timestamp, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<String>,
+    /// Verdict timestamp, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// Release timestamp, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    /// Receipt creation timestamp.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created: String,
+    /// Receipt last-modified timestamp.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub modified: String,
+}
+
+impl From<ReceiptTimestamps> for TimestampsInfo {
+    fn from(value: ReceiptTimestamps) -> Self {
+        Self {
+            start: Some(value.created.clone()),
+            retrieval: None,
+            analysis: None,
+            verdict: Some(value.modified.clone()),
+            release: None,
+            created: value.created,
+            modified: value.modified,
+        }
+    }
+}
+
 /// Minisign signature metadata embedded in a signed receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -436,29 +950,42 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn new(
         arbitraitor_version: impl Into<String>,
-        artifact_sha256: impl Into<String>,
+        artifact_sha256: Sha256Digest,
         artifact_size: u64,
         verdict: VerdictInfo,
         timestamps: ReceiptTimestamps,
     ) -> Self {
+        let policy_trace = verdict.policy_trace.clone();
+        let verdict_value = verdict.verdict;
         Self {
             receipt: Receipt {
                 schema_version: CURRENT_SCHEMA_VERSION,
-                arbitraitor_version: arbitraitor_version.into(),
-                config_digest: None,
-                policy_digest: None,
-                artifact_sha256: artifact_sha256.into(),
-                artifact_size,
-                artifact_type: None,
-                retrieval: None,
-                findings: Vec::new(),
+                request: RequestInfo::default(),
+                artifact: ArtifactInfo {
+                    digest: artifact_sha256,
+                    artifact_type: None,
+                    size: artifact_size,
+                    content_type: None,
+                },
+                retrieval: RetrievalInfo::default(),
+                provenance: ProvenanceInfo::default(),
+                payload_graph: PayloadGraphInfo::default(),
+                detectors: DetectorsInfo {
+                    producer_version: Some(arbitraitor_version.into()),
+                    versions: Vec::new(),
+                    provenance: Vec::new(),
+                    health: Vec::new(),
+                },
+                findings: FindingsInfo::default(),
+                policy: PolicyInfo {
+                    config_digest: None,
+                    policy_digest: None,
+                    rule_evaluations: policy_trace,
+                    verdict: Some(verdict_value),
+                },
                 verdict,
-                release: None,
-                detector_versions: Vec::new(),
-                detector_provenance: Vec::new(),
-                timestamps,
-                effective_controls: None,
-                approval: None,
+                release: ReleaseInfo::default(),
+                timestamps: TimestampsInfo::from(timestamps),
                 signature: None,
             },
         }
@@ -466,36 +993,46 @@ impl ReceiptBuilder {
 
     /// Set the configuration digest.
     #[must_use]
-    pub fn config_digest(mut self, digest: impl Into<String>) -> Self {
-        self.receipt.config_digest = Some(digest.into());
+    pub fn config_digest(mut self, digest: impl Into<SnapshotDigest>) -> Self {
+        self.receipt.policy.config_digest = Some(digest.into());
         self
     }
 
     /// Set the policy digest.
     #[must_use]
-    pub fn policy_digest(mut self, digest: impl Into<String>) -> Self {
-        self.receipt.policy_digest = Some(digest.into());
+    pub fn policy_digest(mut self, digest: impl Into<SnapshotDigest>) -> Self {
+        self.receipt.policy.policy_digest = Some(digest.into());
         self
     }
 
     /// Set the artifact type label.
     #[must_use]
     pub fn artifact_type(mut self, artifact_type: impl Into<String>) -> Self {
-        self.receipt.artifact_type = Some(artifact_type.into());
+        self.receipt.artifact.artifact_type = Some(artifact_type.into());
         self
     }
 
     /// Set retrieval metadata.
     #[must_use]
     pub fn retrieval(mut self, retrieval: RetrievalInfo) -> Self {
-        self.receipt.retrieval = Some(retrieval);
+        self.receipt.request.url = retrieval.requested_url.clone();
+        self.receipt
+            .artifact
+            .content_type
+            .clone_from(&retrieval.content_type);
+        if let Some(byte_count) = retrieval.byte_count {
+            self.receipt.artifact.size = byte_count;
+        }
+        self.receipt.retrieval = retrieval;
         self
     }
 
     /// Add a finding summary.
     #[must_use]
     pub fn finding(mut self, finding: FindingSummary) -> Self {
-        self.receipt.findings.push(finding);
+        self.receipt.findings.summaries.push(finding);
+        let summaries = std::mem::take(&mut self.receipt.findings.summaries);
+        self.receipt.findings = FindingsInfo::from_summaries(summaries);
         self
     }
 
@@ -505,42 +1042,48 @@ impl ReceiptBuilder {
     where
         I: IntoIterator<Item = FindingSummary>,
     {
-        self.receipt.findings.extend(findings);
+        self.receipt.findings.summaries.extend(findings);
+        let summaries = std::mem::take(&mut self.receipt.findings.summaries);
+        self.receipt.findings = FindingsInfo::from_summaries(summaries);
         self
     }
 
     /// Set release metadata.
     #[must_use]
     pub fn release(mut self, release: ReleaseInfo) -> Self {
-        self.receipt.release = Some(release);
+        self.receipt
+            .timestamps
+            .release
+            .clone_from(&release.timestamp);
+        self.receipt.release = release;
         self
     }
 
     /// Add detector version metadata.
     #[must_use]
     pub fn detector_version(mut self, detector_version: DetectorVersion) -> Self {
-        self.receipt.detector_versions.push(detector_version);
+        self.receipt.detectors.versions.push(detector_version);
         self
     }
 
     /// Add detector binary provenance metadata (subprocess detectors).
     #[must_use]
     pub fn detector_provenance(mut self, provenance: DetectorProvenance) -> Self {
-        self.receipt.detector_provenance.push(provenance);
+        self.receipt.detectors.provenance.push(provenance);
         self
     }
 
     /// Set the per-control effective-controls matrix (ADR-0007).
     #[must_use]
     pub fn effective_controls(mut self, controls: EffectiveControls) -> Self {
-        self.receipt.effective_controls = Some(controls);
+        self.receipt.release.effective_controls = Some(controls);
         self
     }
 
     /// Set plan-bound approval metadata.
     #[must_use]
     pub fn approval(mut self, approval: ApprovalInfo) -> Self {
-        self.receipt.approval = Some(approval);
+        self.receipt.release.approval = Some(approval);
         self
     }
 
@@ -714,10 +1257,12 @@ mod tests {
     fn sample_receipt() -> Receipt {
         ReceiptBuilder::new(
             "0.1.0",
-            "ab".repeat(32),
+            sample_digest(0xab),
             12,
             VerdictInfo {
                 verdict: Verdict::Warn,
+                confidence: Some(Confidence::High),
+                explanation: Some("suspicious script matched policy".to_owned()),
                 deciding_rule: Some("rule.warn.suspicious".to_owned()),
                 policy_trace: vec!["matched suspicious script rule".to_owned()],
             },
@@ -753,10 +1298,13 @@ mod tests {
             taxonomies: Vec::new(),
         })
         .release(ReleaseInfo {
-            method: ReleaseMethod::File,
+            method: Some(ReleaseMethod::File),
+            legacy_method: None,
             destination: Some("/tmp/install.sh".to_owned()),
-            sha256_verified: true,
-            timestamp: "2026-06-17T00:00:01Z".to_owned(),
+            sha256_verified: Some(true),
+            timestamp: Some("2026-06-17T00:00:01Z".to_owned()),
+            effective_controls: None,
+            approval: None,
         })
         .detector_version(DetectorVersion {
             id: "detector.shell".to_owned(),
@@ -804,10 +1352,12 @@ mod tests {
     fn receipt_round_trips_with_approval_info() -> Result<(), Box<dyn std::error::Error>> {
         let receipt = ReceiptBuilder::new(
             "0.1.0",
-            sample_digest(0xab).to_string(),
+            sample_digest(0xab),
             12,
             VerdictInfo {
                 verdict: Verdict::Prompt,
+                confidence: None,
+                explanation: None,
                 deciding_rule: Some("rule.prompt.execution".to_owned()),
                 policy_trace: vec!["approval required".to_owned()],
             },
@@ -824,7 +1374,11 @@ mod tests {
 
         assert_eq!(decoded, receipt);
         assert_eq!(
-            decoded.approval.as_ref().and_then(|info| info.exit_status),
+            decoded
+                .release
+                .approval
+                .as_ref()
+                .and_then(|info| info.exit_status),
             Some(0)
         );
         Ok(())
@@ -836,7 +1390,7 @@ mod tests {
 
         let decoded: Receipt = serde_json::from_str(&json)?;
 
-        assert_eq!(decoded.approval, None);
+        assert_eq!(decoded.release.approval, None);
         Ok(())
     }
 
@@ -848,16 +1402,20 @@ mod tests {
         let object = value
             .as_object_mut()
             .ok_or("receipt JSON must be an object")?;
-        object.insert("approval".to_owned(), serde_json::Value::Null);
+        object
+            .entry("release".to_owned())
+            .or_insert_with(|| serde_json::json!({}))["approval"] = serde_json::Value::Null;
         let decoded: Receipt = serde_json::from_value(value)?;
 
-        assert_eq!(decoded.approval, None);
+        assert_eq!(decoded.release.approval, None);
         assert_eq!(decoded.canonical_bytes()?, receipt.canonical_bytes()?);
         assert!(
             !serde_json::to_value(&decoded)?
                 .as_object()
                 .ok_or("receipt JSON must be an object")?
-                .contains_key("approval")
+                .get("release")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|release| release.contains_key("approval"))
         );
         Ok(())
     }
@@ -914,6 +1472,93 @@ mod tests {
     }
 
     #[test]
+    fn v2_receipt_contains_required_envelope_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_value(sample_receipt())?;
+        let object = json.as_object().ok_or("receipt JSON must be an object")?;
+        let expected = [
+            "schema_version",
+            "request",
+            "artifact",
+            "retrieval",
+            "provenance",
+            "payload_graph",
+            "detectors",
+            "findings",
+            "policy",
+            "verdict",
+            "release",
+            "timestamps",
+        ];
+
+        for field in expected {
+            assert!(
+                object.contains_key(field),
+                "missing envelope field: {field}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v1_flat_receipt_migrates_to_v2_envelope() -> Result<(), Box<dyn std::error::Error>> {
+        let json = r#"{
+            "schema_version":1,
+            "arbitraitor_version":"0.1.0",
+            "config_digest":"config:01",
+            "policy_digest":"policy:01",
+            "artifact_sha256":"abababababababababababababababababababababababababababababababab",
+            "artifact_size":12,
+            "artifact_type":"shell-script",
+            "retrieval":{
+                "requested_url":"https://user:secret@example.com/install.sh?token=secret",
+                "final_url":"https://example.com/install.sh",
+                "redirect_chain":[],
+                "status_code":200,
+                "content_type":"text/x-shellscript",
+                "byte_count":12,
+                "tls_version":"TLSv1.3",
+                "peer_cert_fingerprint":"sha256:abcd"
+            },
+            "findings":[],
+            "verdict":{
+                "verdict":"warn",
+                "deciding_rule":"rule.warn.suspicious",
+                "policy_trace":["matched suspicious script rule"]
+            },
+            "release":null,
+            "detector_versions":[{"id":"detector.shell","version":"1.2.3"}],
+            "detector_provenance":[],
+            "timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},
+            "signature":null
+        }"#;
+
+        let decoded: Receipt = serde_json::from_str(json)?;
+
+        assert_eq!(decoded.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(decoded.request.url, "https://example.com/install.sh");
+        assert_eq!(decoded.artifact.digest, sample_digest(0xab));
+        assert_eq!(
+            decoded.artifact.artifact_type.as_deref(),
+            Some("shell-script")
+        );
+        assert_eq!(
+            decoded.artifact.content_type.as_deref(),
+            Some("text/x-shellscript")
+        );
+        assert_eq!(decoded.detectors.versions.len(), 1);
+        assert_eq!(
+            decoded
+                .policy
+                .policy_digest
+                .as_ref()
+                .map(SnapshotDigest::as_str),
+            Some("policy:01")
+        );
+        assert_eq!(decoded.verdict.verdict, Verdict::Warn);
+        Ok(())
+    }
+
+    #[test]
     fn effective_controls_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         use arbitraitor_exec::{ControlStatus, EffectiveControl};
 
@@ -953,10 +1598,12 @@ mod tests {
         };
         let receipt = ReceiptBuilder::new(
             "0.1.0",
-            "ab".repeat(32),
+            sample_digest(0xab),
             1,
             VerdictInfo {
                 verdict: Verdict::Pass,
+                confidence: None,
+                explanation: None,
                 deciding_rule: None,
                 policy_trace: Vec::new(),
             },
@@ -978,7 +1625,7 @@ mod tests {
             "serialized receipt must include effective Landlock ABI version"
         );
         let decoded: Receipt = serde_json::from_str(&json)?;
-        assert_eq!(decoded.effective_controls, Some(controls));
+        assert_eq!(decoded.release.effective_controls, Some(controls));
         Ok(())
     }
 
@@ -1028,7 +1675,7 @@ mod tests {
         verify_receipt(&signed, &key.pk)?;
 
         let mut tampered = signed.clone();
-        tampered.receipt.artifact_size += 1;
+        tampered.receipt.artifact.size += 1;
         assert!(matches!(
             verify_receipt(&tampered, &key.pk),
             Err(VerifyError::InvalidSignature { .. })
@@ -1047,10 +1694,14 @@ mod tests {
             .prop_map(|(version, digests, size, artifact_type, trace)| {
                 let mut builder = ReceiptBuilder::new(
                     version,
-                    digests[0].clone(),
+                    digests[0]
+                        .parse()
+                        .unwrap_or_else(|_| Sha256Digest::new([0; 32])),
                     size,
                     VerdictInfo {
                         verdict: Verdict::Pass,
+                        confidence: None,
+                        explanation: None,
                         deciding_rule: None,
                         policy_trace: trace,
                     },
@@ -1082,7 +1733,10 @@ mod tests {
         assert_eq!(stmt.statement_type, "https://in-toto.io/Statement/v1");
         assert_eq!(stmt.predicate_type, "https://arbitraitor.dev/verdict/v1");
         assert!(!stmt.subject.is_empty());
-        assert_eq!(stmt.subject[0].digest.sha256, receipt.artifact_sha256);
+        assert_eq!(
+            stmt.subject[0].digest.sha256,
+            receipt.artifact.digest.to_string()
+        );
         Ok(())
     }
 
@@ -1220,7 +1874,7 @@ impl Receipt {
     #[must_use]
     pub fn to_sarif(&self, tool_name: &str, tool_version: &str) -> SarifReport {
         let rules: Vec<SarifRule> = self
-            .findings
+            .finding_summaries()
             .iter()
             .map(|f| SarifRule {
                 id: f.id.clone(),
@@ -1243,7 +1897,7 @@ impl Receipt {
             .collect();
 
         let results: Vec<SarifResult> = self
-            .findings
+            .finding_summaries()
             .iter()
             .map(|f| {
                 let level = match f.severity {
@@ -1260,7 +1914,7 @@ impl Receipt {
                                 artifact_location: SarifArtifactLocation {
                                     uri: format!(
                                         "sha256:{}:line:{}",
-                                        self.artifact_sha256, loc.line
+                                        self.artifact.digest, loc.line
                                     ),
                                 },
                                 region: Some(SarifRegion {
