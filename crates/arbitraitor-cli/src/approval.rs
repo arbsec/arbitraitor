@@ -106,10 +106,10 @@ pub struct ExecutionPlanInputs {
 impl ApprovalFile {
     /// Computes the canonical plan digest from the plan-bound fields.
     ///
-    /// The digest covers every field that materially affects execution.
-    /// Fields outside the plan (`nonce`, `approver`, `approved_at`,
-    /// `expires_at`, `verdict`, `schema_version`, and `plan_digest` itself)
-    /// are excluded.
+    /// The digest covers every field that materially affects execution plus
+    /// the single-use capability fields (`nonce`, `expires_at`). Fields
+    /// outside that binding (`approver`, `approved_at`, `verdict`,
+    /// `schema_version`, and `plan_digest` itself) are excluded.
     #[must_use]
     pub fn compute_plan_digest(&self) -> String {
         let mut buf = String::new();
@@ -158,6 +158,8 @@ impl ApprovalFile {
             self.detector_snapshot_digest
         )
         .unwrap_or(());
+        writeln!(buf, "nonce={}", self.nonce).unwrap_or(());
+        writeln!(buf, "expires_at={}", self.expires_at).unwrap_or(());
         let mut hasher = Sha256::new();
         hasher.update(buf.as_bytes());
         hex::encode(hasher.finalize())

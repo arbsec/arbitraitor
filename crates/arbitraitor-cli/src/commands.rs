@@ -259,12 +259,19 @@ fn parse_sha256_arg(raw: &str) -> std::result::Result<String, String> {
 pub struct ApproveCommand {
     /// Receipt file from a prior inspection.
     pub receipt: PathBuf,
+    /// Path to write the generated approval file.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct ExecuteCommand {
-    /// Approval file from 'arbitraitor approve'.
-    pub approval: PathBuf,
+    /// Approval file from `arbitraitor approve`.
+    #[arg(long, value_name = "PATH")]
+    pub approval: Option<PathBuf>,
+    /// Deprecated positional approval path. Use `--approval <PATH>`.
+    #[arg(value_name = "APPROVAL")]
+    pub positional_approval: Option<PathBuf>,
     /// Allow network access during execution.
     #[arg(long)]
     pub network: bool,
@@ -1363,12 +1370,28 @@ pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> 
         miette::bail!("approval denied");
     }
 
+    let approval_path =
+        write_approval_for_receipt(&receipt, &command.receipt, command.output.as_deref())?;
+    writeln!(
+        std::io::stdout().lock(),
+        "approval written to: {}",
+        approval_path.display()
+    )
+    .into_diagnostic()?;
+    Ok(())
+}
+
+fn write_approval_for_receipt(
+    receipt: &Receipt,
+    receipt_path: &Path,
+    output: Option<&Path>,
+) -> Result<PathBuf> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let expiry = now + 300;
 
-    let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::from_str(sha)
+    let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::from_str(&receipt.artifact_sha256)
         .map_err(|e| miette::miette!("invalid SHA-256 in receipt: {e}"))?;
     let plan_inputs = crate::approval::ExecutionPlanInputs {
         artifact_sha256,
@@ -1389,24 +1412,37 @@ pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> 
         "stdin-human-confirmation",
         now,
         expiry,
-        &format!("{verdict:?}"),
+        &format!("{:?}", receipt.verdict.verdict),
     )
     .map_err(|e| miette::miette!("failed to build approval: {e}"))?;
 
-    let approval_path = command.receipt.with_extension("approval.json");
+    let approval_path = output.map_or_else(
+        || receipt_path.with_extension("approval.json"),
+        Path::to_path_buf,
+    );
     let json = serde_json::to_vec_pretty(&approval).into_diagnostic()?;
     std::fs::write(&approval_path, json).into_diagnostic()?;
-    writeln!(
-        std::io::stdout().lock(),
-        "approval written to: {}",
-        approval_path.display()
-    )
-    .into_diagnostic()?;
-    Ok(())
+    Ok(approval_path)
+}
+
+fn execute_approval_path(command: &ExecuteCommand) -> Result<&Path> {
+    if let Some(path) = command.approval.as_deref() {
+        return Ok(path);
+    }
+    if let Some(path) = command.positional_approval.as_deref() {
+        writeln!(
+            std::io::stderr().lock(),
+            "warning: positional approval path is deprecated; use --approval <PATH>"
+        )
+        .into_diagnostic()?;
+        return Ok(path);
+    }
+    miette::bail!("missing approval file; pass --approval <PATH>")
 }
 
 pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
-    let approval_bytes = std::fs::read(&command.approval).into_diagnostic()?;
+    let approval_path = execute_approval_path(command)?;
+    let approval_bytes = std::fs::read(approval_path).into_diagnostic()?;
     let approval: crate::approval::ApprovalFile = serde_json::from_slice(&approval_bytes)
         .map_err(|e| miette::miette!("invalid approval file: {e}"))?;
 
@@ -1598,6 +1634,8 @@ mod tests {
     use super::*;
     use crate::approval::ExecutionPlanInputs;
     use arbitraitor_model::ids::Sha256Digest;
+    use arbitraitor_model::verdict::Verdict;
+    use arbitraitor_receipt::{DetectorVersion, ReceiptBuilder, ReceiptTimestamps, VerdictInfo};
     use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1656,6 +1694,134 @@ mod tests {
         Ok(sha256)
     }
 
+    fn receipt_for_digest(sha256: &Sha256Digest) -> Receipt {
+        ReceiptBuilder::new(
+            "0.1.0",
+            sha256.to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Prompt,
+                deciding_rule: Some("test.prompt".to_owned()),
+                policy_trace: vec!["prompted for approval".to_owned()],
+            },
+            ReceiptTimestamps {
+                created: "2026-07-22T00:00:00Z".to_owned(),
+                modified: "2026-07-22T00:00:00Z".to_owned(),
+            },
+        )
+        .policy_digest("policy:test")
+        .detector_version(DetectorVersion {
+            id: "detector.test".to_owned(),
+            version: "1.0.0".to_owned(),
+        })
+        .build()
+    }
+
+    #[test]
+    fn approve_with_output_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("arb-approve-output-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root)?;
+        let receipt_path = root.join("receipt.json");
+        let approval_path = root.join("custom-approval.json");
+        let sha256 = Sha256Digest::new([0x42; 32]);
+        let receipt = receipt_for_digest(&sha256);
+        std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
+
+        let written =
+            write_approval_for_receipt(&receipt, &receipt_path, Some(approval_path.as_path()))?;
+
+        assert_eq!(written, approval_path);
+        let approval: crate::approval::ApprovalFile =
+            serde_json::from_slice(&std::fs::read(&approval_path)?)?;
+        approval.verify(approval.approved_at)?;
+        assert_eq!(approval.artifact_sha256, sha256.to_string());
+        assert_eq!(approval.policy_snapshot_digest, "policy:test");
+        assert_eq!(approval.detector_snapshot_digest, "detector.test:1.0.0");
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn approve_without_output_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("arb-approve-default-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root)?;
+        let receipt_path = root.join("receipt.json");
+        let default_path = root.join("receipt.approval.json");
+        let sha256 = Sha256Digest::new([0x24; 32]);
+        let receipt = receipt_for_digest(&sha256);
+        std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
+
+        let written = write_approval_for_receipt(&receipt, &receipt_path, None)?;
+
+        assert_eq!(written, default_path);
+        let approval: crate::approval::ApprovalFile =
+            serde_json::from_slice(&std::fs::read(&default_path)?)?;
+        approval.verify(approval.approved_at)?;
+        assert_eq!(approval.artifact_sha256, sha256.to_string());
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn execute_with_approval_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = b"<!DOCTYPE html>\n<html><body>flag path</body></html>\n".to_vec();
+        let cas_root =
+            std::env::temp_dir().join(format!("arb-execute-flag-{}", std::process::id()));
+        std::fs::remove_dir_all(&cas_root).ok();
+        let sha256 = store_bytes_under_cas(&cas_root, &bytes)?;
+        let approval = build_approval(sha256.clone())?;
+        let approval_path = cas_root.join("approval-from-flag.json");
+        std::fs::write(&approval_path, serde_json::to_vec_pretty(&approval)?)?;
+        let mut config = Config::default();
+        config.store.cas_dir = Some(cas_root.clone());
+        let command = ExecuteCommand {
+            approval: Some(approval_path),
+            positional_approval: None,
+            network: false,
+        };
+
+        let result = execute(&command, &config);
+
+        std::fs::remove_dir_all(&cas_root).ok();
+        let Err(err) = result else {
+            return Err("execute() should have reached the HTML gate via --approval".into());
+        };
+        assert!(format!("{err}").contains("is not executable via the approved execute path"));
+        Ok(())
+    }
+
+    #[test]
+    fn execute_with_positional_deprecated() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = b"<!DOCTYPE html>\n<html><body>positional path</body></html>\n".to_vec();
+        let cas_root =
+            std::env::temp_dir().join(format!("arb-execute-positional-{}", std::process::id()));
+        std::fs::remove_dir_all(&cas_root).ok();
+        let sha256 = store_bytes_under_cas(&cas_root, &bytes)?;
+        let approval = build_approval(sha256.clone())?;
+        let approval_path = cas_root.join("approval-from-positional.json");
+        std::fs::write(&approval_path, serde_json::to_vec_pretty(&approval)?)?;
+        let mut config = Config::default();
+        config.store.cas_dir = Some(cas_root.clone());
+        let command = ExecuteCommand {
+            approval: None,
+            positional_approval: Some(approval_path),
+            network: false,
+        };
+
+        let result = execute(&command, &config);
+
+        std::fs::remove_dir_all(&cas_root).ok();
+        let Err(err) = result else {
+            return Err(
+                "execute() should have reached the HTML gate via positional approval".into(),
+            );
+        };
+        assert!(format!("{err}").contains("is not executable via the approved execute path"));
+        Ok(())
+    }
+
     /// Regression test for the round-2 adversarial review of PR #615
     /// (Blocker 4 extended scope): `arbitraitor execute` must gate the
     /// approved artifact by classified `ArtifactType` before piping bytes
@@ -1685,7 +1851,8 @@ mod tests {
         config.store.cas_dir = Some(cas_root.clone());
 
         let command = ExecuteCommand {
-            approval: approval_path.clone(),
+            approval: Some(approval_path.clone()),
+            positional_approval: None,
             network: false,
         };
 
@@ -1738,7 +1905,8 @@ mod tests {
         config.store.cas_dir = Some(cas_root.clone());
 
         let command = ExecuteCommand {
-            approval: approval_path.clone(),
+            approval: Some(approval_path.clone()),
+            positional_approval: None,
             network: false,
         };
 

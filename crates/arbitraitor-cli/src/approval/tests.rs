@@ -78,6 +78,17 @@ fn tampered_interpreter_arguments_is_rejected() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn tampered_environment_profile_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = valid_file()?;
+    file.environment_profile_digest = "env:evil".to_owned();
+    assert!(matches!(
+        file.verify(5_000),
+        Err(ApprovalError::PlanDigestMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
 fn tampered_network_isolated_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let mut file = valid_file()?;
     file.network_isolated = false;
@@ -122,12 +133,13 @@ fn tampered_plan_digest_itself_is_rejected() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn changing_nonce_does_not_invalidate_digest() -> Result<(), Box<dyn std::error::Error>> {
-    // nonce is outside the plan binding — changing it alone is allowed
-    // (single-use enforcement is a separate layer).
+fn tampered_nonce_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let mut file = valid_file()?;
     file.nonce = "different-nonce".to_owned();
-    file.verify(5_000)?;
+    assert!(matches!(
+        file.verify(5_000),
+        Err(ApprovalError::PlanDigestMismatch)
+    ));
     Ok(())
 }
 
@@ -140,10 +152,13 @@ fn changing_approver_does_not_invalidate_digest() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn changing_expiry_does_not_invalidate_digest() -> Result<(), Box<dyn std::error::Error>> {
+fn tampered_expiry_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let mut file = valid_file()?;
     file.expires_at = 99_999;
-    file.verify(5_000)?;
+    assert!(matches!(
+        file.verify(5_000),
+        Err(ApprovalError::PlanDigestMismatch)
+    ));
     Ok(())
 }
 
