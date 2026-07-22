@@ -985,6 +985,7 @@ mod tests {
             }),
             landlock_abi_version: Some(serde_json::from_value(serde_json::json!(7))?),
             io_uring_available: Some(false),
+            userns_available: Some(true),
         };
         let receipt = ReceiptBuilder::new(
             "0.1.0",
@@ -1012,6 +1013,10 @@ mod tests {
             json.contains("landlock_abi_version"),
             "serialized receipt must include effective Landlock ABI version"
         );
+        assert!(
+            json.contains("userns_available"),
+            "serialized receipt must include user namespace availability"
+        );
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded.effective_controls, Some(controls));
         Ok(())
@@ -1034,6 +1039,7 @@ mod tests {
         let json = r#"{"filesystem_isolation":{"requested":true,"applied":"enforced","proof":"landlock"},"network_isolation":{"requested":true,"applied":"enforced","proof":"network-namespace"},"process_tree_control":{"requested":true,"applied":"enforced","proof":"pid-namespace"},"privilege_suppression":{"requested":true,"applied":"enforced","proof":"no-new-privs"},"syscall_filtering":{"requested":true,"applied":"enforced","proof":"seccomp-bpf"},"resource_limits":{"requested":true,"applied":"enforced","proof":"setrlimit"}}"#;
         let controls: EffectiveControls = serde_json::from_str(json)?;
         assert_eq!(controls.landlock_abi_version, None);
+        assert_eq!(controls.userns_available, None);
         Ok(())
     }
 
