@@ -602,6 +602,7 @@ fn finalize_trace(
         rules_evaluated,
         final_decision,
         default_action,
+        allow_rule_metadata: Vec::new(),
     }
 }
 
