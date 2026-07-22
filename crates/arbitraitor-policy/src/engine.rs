@@ -407,6 +407,8 @@ enum FieldValue {
     },
     /// Boolean value.
     Bool(bool),
+    /// Integer value.
+    Int(i64),
     /// List of strings (e.g. `finding.tags`).
     List(Vec<String>),
     /// Evidence not available for this evaluation target.
@@ -474,6 +476,42 @@ fn resolve_finding_field(name: &str, finding: Option<&Finding>) -> FieldValue {
 
 fn resolve_context_field(name: &str, context: &EvalContext) -> FieldValue {
     match name {
+        "operation_mode" => FieldValue::Text {
+            canonical: normalize_str(context.operation_mode.as_str()),
+            rank: None,
+        },
+        "artifact_digest" => match &context.artifact_digest {
+            Some(digest) => FieldValue::Text {
+                canonical: digest.to_string(),
+                rank: None,
+            },
+            None => FieldValue::Unavailable,
+        },
+        "redirect_chain" => FieldValue::List(context.redirect_chain.clone()),
+        "provenance_verified" => FieldValue::Bool(context.provenance_verified),
+        "provenance_signer" => match &context.provenance_signer {
+            Some(signer) => FieldValue::Text {
+                canonical: normalize_str(signer),
+                rank: None,
+            },
+            None => FieldValue::Unavailable,
+        },
+        "findings_count" => FieldValue::Int(usize_to_i64(context.findings_count)),
+        "block_findings_count" => FieldValue::Int(usize_to_i64(context.block_findings_count)),
+        "intel_matches" => FieldValue::List(context.intel_matches.clone()),
+        "detector_health" => FieldValue::Text {
+            canonical: normalize_str(context.detector_health.as_str()),
+            rank: None,
+        },
+        "recursive_graph_complete" => FieldValue::Bool(context.recursive_graph_complete),
+        "execution_interpreter" => match &context.execution_interpreter {
+            Some(interpreter) => FieldValue::Text {
+                canonical: normalize_str(interpreter),
+                rank: None,
+            },
+            None => FieldValue::Unavailable,
+        },
+        "execution_network" => FieldValue::Bool(context.execution_network),
         "is_https" => FieldValue::Bool(context.is_https),
         "is_private_network" => FieldValue::Bool(context.is_private_network),
         "is_interactive" => FieldValue::Bool(context.is_interactive),
@@ -516,6 +554,11 @@ impl MatchOp {
                 ScalarValue::Str(s) => parse_bool(s).is_some_and(|v| v == *b),
                 ScalarValue::Int(_) => false,
             },
+            (MatchOp::Equals(scalar), FieldValue::Int(n)) => match scalar {
+                ScalarValue::Int(v) => *v == *n,
+                ScalarValue::Str(s) => s.parse::<i64>().is_ok_and(|v| v == *n),
+                ScalarValue::Bool(_) => false,
+            },
 
             // --- OneOf ---
             (MatchOp::OneOf(scalars), FieldValue::Text { canonical, .. }) => {
@@ -526,6 +569,11 @@ impl MatchOp {
                 ScalarValue::Str(text) => parse_bool(text).is_some_and(|v| v == *b),
                 ScalarValue::Int(_) => false,
             }),
+            (MatchOp::OneOf(scalars), FieldValue::Int(n)) => scalars.iter().any(|s| match s {
+                ScalarValue::Int(v) => *v == *n,
+                ScalarValue::Str(text) => text.parse::<i64>().is_ok_and(|v| v == *n),
+                ScalarValue::Bool(_) => false,
+            }),
 
             // --- NotIn (complement of OneOf; spec §23.1.1 example) ---
             (MatchOp::NotIn(scalars), FieldValue::Text { canonical, .. }) => {
@@ -535,6 +583,11 @@ impl MatchOp {
                 ScalarValue::Bool(v) => *v == *b,
                 ScalarValue::Str(text) => parse_bool(text).is_some_and(|v| v == *b),
                 ScalarValue::Int(_) => false,
+            }),
+            (MatchOp::NotIn(scalars), FieldValue::Int(n)) => !scalars.iter().any(|s| match s {
+                ScalarValue::Int(v) => *v == *n,
+                ScalarValue::Str(text) => text.parse::<i64>().is_ok_and(|v| v == *n),
+                ScalarValue::Bool(_) => false,
             }),
 
             // --- Contains ---
@@ -551,6 +604,9 @@ impl MatchOp {
             // --- GreaterThan ---
             (MatchOp::GreaterThan(scalar), FieldValue::Text { rank: Some(r), .. }) => {
                 scalar_rank(scalar).is_some_and(|target| *r > target)
+            }
+            (MatchOp::GreaterThan(scalar), FieldValue::Int(n)) => {
+                scalar_int(scalar).is_some_and(|target| *n > target)
             }
 
             // --- Type mismatches: never match ---
@@ -584,6 +640,18 @@ fn parse_bool(s: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
+}
+
+fn scalar_int(scalar: &ScalarValue) -> Option<i64> {
+    match scalar {
+        ScalarValue::Int(n) => Some(*n),
+        ScalarValue::Str(s) => s.parse::<i64>().ok(),
+        ScalarValue::Bool(_) => None,
+    }
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Looks up the ordinal rank of a scalar value (for severity / confidence).
@@ -740,6 +808,18 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         "tags",
     ];
     const CONTEXT_FIELDS: &[&str] = &[
+        "operation_mode",
+        "artifact_digest",
+        "redirect_chain",
+        "provenance_verified",
+        "provenance_signer",
+        "findings_count",
+        "block_findings_count",
+        "intel_matches",
+        "detector_health",
+        "recursive_graph_complete",
+        "execution_interpreter",
+        "execution_network",
         "is_https",
         "is_private_network",
         "is_interactive",
