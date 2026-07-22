@@ -8,6 +8,7 @@ use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::time::{Duration, UNIX_EPOCH};
 
 use arbitraitor_artifact::{ArtifactType, ShellKind};
 use arbitraitor_core::config::Config;
@@ -16,7 +17,7 @@ use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
-use arbitraitor_receipt::DetectorVersion;
+use arbitraitor_receipt::{ApprovalInfo, DetectorVersion};
 use clap::Args;
 use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
@@ -201,7 +202,7 @@ pub(super) trait RunServices {
         artifact: &InspectedArtifact,
         plan: &str,
         ctx: &PlanContext,
-    ) -> std::result::Result<bool, RunFailure>;
+    ) -> std::result::Result<Option<ApprovalInfo>, RunFailure>;
 
     fn execute(
         &mut self,
@@ -214,6 +215,7 @@ pub(super) trait RunServices {
         &mut self,
         artifact: &InspectedArtifact,
         output: &ExecutionOutput,
+        approval: Option<&ApprovalInfo>,
     ) -> std::result::Result<PathBuf, RunFailure>;
 }
 
@@ -255,6 +257,7 @@ async fn run_with_services(
         ctx.interpreter = format!("native:{}", artifact.sha256);
     }
     writeln!(writer, "Plan: {plan}").into_diagnostic()?;
+    let mut approval_info = None;
 
     if mode == ExecutionMode::Native && !command.approval.native {
         if command.approval.non_interactive && command.approve.is_none() {
@@ -265,16 +268,17 @@ async fn run_with_services(
                 ),
             );
         }
-        let approved = match request_approval(command, services, &artifact, &plan, &ctx) {
-            Ok(approved) => approved,
+        let approval = match request_approval(command, services, &artifact, &plan, &ctx) {
+            Ok(approval) => approval,
             Err(error) => return write_failure(writer, error),
         };
-        if !approved {
+        if approval.is_none() {
             return write_failure(
                 writer,
                 RunFailure::Approval("native execution not approved".to_owned()),
             );
         }
+        approval_info = approval;
         writeln!(writer, "Native execution approved.").into_diagnostic()?;
     }
 
@@ -287,13 +291,14 @@ async fn run_with_services(
             );
         }
         Verdict::Prompt => {
-            let approved = match request_approval(command, services, &artifact, &plan, &ctx) {
-                Ok(approved) => approved,
+            let approval = match request_approval(command, services, &artifact, &plan, &ctx) {
+                Ok(approval) => approval,
                 Err(error) => return write_failure(writer, error),
             };
-            if !approved {
+            if approval.is_none() {
                 return write_failure(writer, RunFailure::Approval("approval denied".to_owned()));
             }
+            approval_info = approval;
             writeln!(writer, "Approved. Executing...").into_diagnostic()?;
         }
         Verdict::Block => {
@@ -322,8 +327,21 @@ async fn run_with_services(
         Ok(output) => output,
         Err(error) => return write_failure(writer, error),
     };
-    write_sanitized_output(writer, &output)?;
-    let receipt_path = match services.write_receipt(&artifact, &output) {
+    if let Some(approval) = &mut approval_info {
+        approval.exit_status = output.exit_code;
+    }
+    finish_run(services, writer, &artifact, &output, approval_info.as_ref())
+}
+
+fn finish_run(
+    services: &mut impl RunServices,
+    writer: &mut impl Write,
+    artifact: &InspectedArtifact,
+    output: &ExecutionOutput,
+    approval_info: Option<&ApprovalInfo>,
+) -> Result<i32> {
+    write_sanitized_output(writer, output)?;
+    let receipt_path = match services.write_receipt(artifact, output, approval_info) {
         Ok(path) => path,
         Err(error) => return write_failure(writer, error),
     };
@@ -377,10 +395,9 @@ fn request_approval(
     artifact: &InspectedArtifact,
     plan: &str,
     ctx: &PlanContext,
-) -> std::result::Result<bool, RunFailure> {
+) -> std::result::Result<Option<ApprovalInfo>, RunFailure> {
     if let Some(path) = &command.approve {
-        validate_approval_file(path, artifact, ctx)?;
-        Ok(true)
+        validate_approval_file(path, artifact, ctx).map(Some)
     } else {
         services.request_approval(artifact, plan, ctx)
     }
@@ -390,7 +407,7 @@ fn validate_approval_file(
     path: &Path,
     artifact: &InspectedArtifact,
     ctx: &PlanContext,
-) -> std::result::Result<(), RunFailure> {
+) -> std::result::Result<ApprovalInfo, RunFailure> {
     let bytes = std::fs::read(path).map_err(|error| RunFailure::Approval(error.to_string()))?;
     let approval: ApprovalFile = serde_json::from_slice(&bytes)
         .map_err(|error| RunFailure::Approval(format!("invalid approval file: {error}")))?;
@@ -420,7 +437,59 @@ fn validate_approval_file(
             "approval policy digest does not match execution plan".to_owned(),
         ));
     }
-    Ok(())
+    approval_info_from_file(&approval, artifact, None)
+}
+
+pub(super) fn approval_info_from_file(
+    approval: &ApprovalFile,
+    artifact: &InspectedArtifact,
+    exit_status: Option<i32>,
+) -> std::result::Result<ApprovalInfo, RunFailure> {
+    let plan_digest = approval.plan_digest.parse().map_err(
+        |error: arbitraitor_model::ids::Sha256DigestParseError| {
+            RunFailure::Approval(format!("approval plan digest is invalid: {error}"))
+        },
+    )?;
+    let artifact_digest = approval.artifact_sha256.parse().map_err(
+        |error: arbitraitor_model::ids::Sha256DigestParseError| {
+            RunFailure::Approval(format!("approval artifact digest is invalid: {error}"))
+        },
+    )?;
+    Ok(ApprovalInfo {
+        plan_digest,
+        artifact_digest,
+        expiry: Some(UNIX_EPOCH + Duration::from_secs(approval.expires_at)),
+        nonce: approval.nonce.clone(),
+        bound_capabilities: approval_capabilities(
+            approval.network_isolated,
+            &approval.filesystem_grants,
+        ),
+        override_reason: Some(approval.verdict.clone()),
+        override_scope: Some(format!("artifact:{}", artifact.sha256)),
+        exit_status,
+    })
+}
+
+pub(super) fn approval_capabilities(
+    network_isolated: bool,
+    filesystem_grants: &[String],
+) -> Vec<String> {
+    let mut capabilities = vec!["process:execute".to_owned()];
+    if network_isolated {
+        capabilities.push("network:isolated".to_owned());
+    } else {
+        capabilities.push("network:allowed".to_owned());
+    }
+    if filesystem_grants.is_empty() {
+        capabilities.push("filesystem:none".to_owned());
+    } else {
+        capabilities.extend(
+            filesystem_grants
+                .iter()
+                .map(|grant| format!("filesystem:{grant}")),
+        );
+    }
+    capabilities
 }
 
 fn detector_snapshot_digest(artifact: &InspectedArtifact) -> String {

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
+use std::time::{Duration, UNIX_EPOCH};
 
 use arbitraitor_artifact::{ArtifactType, ShellKind};
 use arbitraitor_core::config::Config;
@@ -16,6 +17,7 @@ use super::{
     run_with_services,
 };
 use arbitraitor_model::exit_code::ExitCode;
+use arbitraitor_receipt::ApprovalInfo;
 
 #[test]
 fn run_parses_url_and_flags() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -236,7 +238,29 @@ async fn run_writes_receipt_on_success() -> std::result::Result<(), Box<dyn std:
     // Then: receipt writing is invoked and reported.
     assert_eq!(code, EXIT_SUCCESS);
     assert_eq!(services.written_receipt, Some(receipt_path.clone()));
+    assert_eq!(services.receipt_approval, None);
     assert!(String::from_utf8(output)?.contains(&receipt_path.display().to_string()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_writes_approval_binding_exit_status_to_receipt()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let command = command(false, false);
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Prompt, false));
+    services.execution.exit_code = Some(7);
+    let mut output = Vec::new();
+
+    let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
+    assert_eq!(code, 7);
+    assert_eq!(
+        services
+            .receipt_approval
+            .as_ref()
+            .and_then(|approval| approval.exit_status),
+        Some(7)
+    );
     Ok(())
 }
 
@@ -515,6 +539,23 @@ fn fake_artifact_with_type(verdict: Verdict, artifact_type: ArtifactType) -> Ins
     }
 }
 
+fn fake_approval_info(sha256: &Sha256Digest, exit_status: Option<i32>) -> ApprovalInfo {
+    ApprovalInfo {
+        plan_digest: Sha256Digest::new([0x11; 32]),
+        artifact_digest: sha256.clone(),
+        expiry: Some(UNIX_EPOCH + Duration::from_mins(5)),
+        nonce: "fake-approval-nonce".to_owned(),
+        bound_capabilities: vec![
+            "process:execute".to_owned(),
+            "network:isolated".to_owned(),
+            "filesystem:none".to_owned(),
+        ],
+        override_reason: Some("Prompt".to_owned()),
+        override_scope: Some(format!("artifact:{sha256}")),
+        exit_status,
+    }
+}
+
 struct FakeServices {
     artifact: InspectedArtifact,
     approval_requested: bool,
@@ -524,6 +565,7 @@ struct FakeServices {
     execution: ExecutionOutput,
     receipt_path: PathBuf,
     written_receipt: Option<PathBuf>,
+    receipt_approval: Option<ApprovalInfo>,
 }
 
 impl FakeServices {
@@ -541,6 +583,7 @@ impl FakeServices {
             },
             receipt_path: PathBuf::from("/tmp/arbitraitor-fake-receipt.json"),
             written_receipt: None,
+            receipt_approval: None,
         }
     }
 }
@@ -560,10 +603,10 @@ impl RunServices for FakeServices {
         _artifact: &InspectedArtifact,
         _plan: &str,
         ctx: &PlanContext,
-    ) -> std::result::Result<bool, RunFailure> {
+    ) -> std::result::Result<Option<ApprovalInfo>, RunFailure> {
         self.approval_requested = true;
         self.approval_context = Some(ctx.clone());
-        Ok(true)
+        Ok(Some(fake_approval_info(&self.artifact.sha256, None)))
     }
 
     fn execute(
@@ -581,9 +624,11 @@ impl RunServices for FakeServices {
         &mut self,
         _artifact: &InspectedArtifact,
         _output: &ExecutionOutput,
+        approval: Option<&ApprovalInfo>,
     ) -> std::result::Result<PathBuf, RunFailure> {
         let path = self.receipt_path.clone();
         self.written_receipt = Some(path.clone());
+        self.receipt_approval = approval.cloned();
         Ok(path)
     }
 }
