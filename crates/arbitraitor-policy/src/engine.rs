@@ -8,11 +8,44 @@ use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use crate::context::EvalContext;
 use crate::error::PolicyError;
 use crate::schema::{Condition, FieldMatch, MatchOp, Policy, PolicyAction, Rule, ScalarValue};
-use crate::trace::{AllowRuleMetadata, PolicyTrace, RuleEvaluation};
+use crate::trace::{PolicyTrace, RuleEvaluation};
 
 /// Synthetic rule identifier used in [`RuleEvaluation::rule_id`] when a hard
 /// network constraint produced the final block.
 const NETWORK_CONSTRAINT_ID: &str = "__network__";
+
+/// Ordered policy precedence level from spec §23.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PolicyPrecedence {
+    /// Organization-managed policy.
+    Organization,
+    /// Project-local policy, which may only tighten organization policy.
+    Project,
+    /// User policy, which may only tighten inherited organization/project policy.
+    User,
+    /// Command-line tightening policy.
+    CliTightening,
+    /// Command-line override policy, allowed only with audit consent.
+    CliOverride,
+}
+
+/// One policy document tagged with its precedence level.
+#[derive(Debug, Clone)]
+pub struct PolicyLayer {
+    /// Precedence level for this policy.
+    pub precedence: PolicyPrecedence,
+    /// Parsed policy document for this layer.
+    pub policy: Policy,
+}
+
+/// Effective layered policy plus audit entries produced while merging.
+#[derive(Debug, Clone)]
+pub struct LayeredPolicy {
+    /// Effective policy after ordered layering.
+    pub policy: Policy,
+    /// Audit records for policy override decisions.
+    pub audit_trail: Vec<String>,
+}
 
 // ---------------------------------------------------------------------------
 // PolicyEngine
@@ -40,18 +73,78 @@ impl PolicyEngine {
     pub fn load(toml_str: &str) -> Result<Self, PolicyError> {
         let policy: Policy = toml::from_str(toml_str)?;
 
-        if policy.version != 1 {
-            return Err(PolicyError::Invalid(format!(
-                "unsupported policy version: {} (only version 1 is supported)",
-                policy.version
-            )));
-        }
-
-        validate_rules(&policy.rules)?;
+        validate_policy(&policy)?;
 
         let digest = compute_digest(&policy)?;
 
         Ok(Self { policy, digest })
+    }
+
+    /// Compiles an already parsed policy document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::Invalid`] when the policy version, rule IDs, or
+    /// field references are invalid.
+    pub fn from_policy(policy: Policy) -> Result<Self, PolicyError> {
+        validate_policy(&policy)?;
+        let digest = compute_digest(&policy)?;
+        Ok(Self { policy, digest })
+    }
+
+    /// Merges ordered policy layers and compiles the effective policy.
+    ///
+    /// Lower-precedence scopes may replace an inherited policy only when the
+    /// replacement is monotonic: actions become stricter, constraints are more
+    /// selective, limits shrink, scopes narrow, and inherited rules remain present.
+    /// [`PolicyPrecedence::CliOverride`] is the only weakening layer and is
+    /// rejected unless `audit_override` is `true`; when accepted, an audit
+    /// record is emitted in the returned [`LayeredPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::Invalid`] for malformed layers,
+    /// [`PolicyError::Weakening`] for non-override weakening, or
+    /// [`PolicyError::AuditOverrideRequired`] when a CLI override lacks audit
+    /// consent.
+    pub fn merge_layers(
+        layers: impl IntoIterator<Item = PolicyLayer>,
+        audit_override: bool,
+    ) -> Result<LayeredPolicy, PolicyError> {
+        let mut layers = layers.into_iter().collect::<Vec<_>>();
+        layers.sort_by_key(|layer| layer.precedence);
+
+        let mut iter = layers.into_iter();
+        let first = iter.next().ok_or_else(|| {
+            PolicyError::Invalid("at least one policy layer is required".to_owned())
+        })?;
+        validate_policy(&first.policy)?;
+
+        let mut effective = first.policy;
+        let mut inherited_precedence = first.precedence;
+        let mut audit_trail = Vec::new();
+        for layer in iter {
+            validate_policy(&layer.policy)?;
+            if layer.precedence == PolicyPrecedence::CliOverride {
+                if !audit_override {
+                    return Err(PolicyError::AuditOverrideRequired);
+                }
+                audit_trail.push(format!(
+                    "CLI override applied over inherited {inherited_precedence:?} policy with --audit-override"
+                ));
+                effective = layer.policy;
+                inherited_precedence = layer.precedence;
+                continue;
+            }
+            ensure_tightening(&effective, &layer.policy, layer.precedence)?;
+            effective = layer.policy;
+            inherited_precedence = layer.precedence;
+        }
+
+        Ok(LayeredPolicy {
+            policy: effective,
+            audit_trail,
+        })
     }
 
     /// Returns the SHA-256 digest of the canonical policy representation.
@@ -101,15 +194,28 @@ impl PolicyEngine {
         let mut evaluations: Vec<RuleEvaluation> = Vec::new();
 
         // --- Hard network constraints (checked first, fail-closed) ---
-        if let Some(reason) = network_constraint_failure(&self.policy, context) {
+        let net = &self.policy.network;
+        if net.require_https && !context.is_https {
             evaluations.push(RuleEvaluation {
                 rule_id: NETWORK_CONSTRAINT_ID.to_owned(),
                 matched: true,
-                reason: reason.to_owned(),
+                reason: "network constraint failed: HTTPS required but request is not HTTPS"
+                    .to_owned(),
             });
             return (
                 Verdict::Block,
-                finalize_trace(evaluations, PolicyAction::Block, default_action, Vec::new()),
+                finalize_trace(evaluations, PolicyAction::Block, default_action),
+            );
+        }
+        if net.block_private_networks && context.is_private_network {
+            evaluations.push(RuleEvaluation {
+                rule_id: NETWORK_CONSTRAINT_ID.to_owned(),
+                matched: true,
+                reason: "network constraint failed: private/loopback network is blocked".to_owned(),
+            });
+            return (
+                Verdict::Block,
+                finalize_trace(evaluations, PolicyAction::Block, default_action),
             );
         }
 
@@ -137,23 +243,13 @@ impl PolicyEngine {
                     if verdict == Verdict::Block {
                         return (
                             verdict,
-                            finalize_matching_rule(
-                                evaluations,
-                                resolved_action,
-                                default_action,
-                                rule,
-                            ),
+                            finalize_trace(evaluations, resolved_action, default_action),
                         );
                     }
                     if !saw_unavailable || !fail_closed_on_unavailable {
                         return (
                             verdict,
-                            finalize_matching_rule(
-                                evaluations,
-                                resolved_action,
-                                default_action,
-                                rule,
-                            ),
+                            finalize_trace(evaluations, resolved_action, default_action),
                         );
                     }
                     best_non_block = Some((verdict, resolved_action));
@@ -179,15 +275,12 @@ impl PolicyEngine {
         if saw_unavailable && fail_closed_on_unavailable {
             return (
                 Verdict::Block,
-                finalize_trace(evaluations, PolicyAction::Block, default_action, Vec::new()),
+                finalize_trace(evaluations, PolicyAction::Block, default_action),
             );
         }
 
         if let Some((verdict, action)) = best_non_block {
-            return (
-                verdict,
-                finalize_trace(evaluations, action, default_action, Vec::new()),
-            );
+            return (verdict, finalize_trace(evaluations, action, default_action));
         }
 
         // --- Default action ---
@@ -200,19 +293,303 @@ impl PolicyEngine {
         );
         (
             verdict,
-            finalize_trace(evaluations, resolved_action, default_action, Vec::new()),
+            finalize_trace(evaluations, resolved_action, default_action),
         )
     }
 }
 
-fn network_constraint_failure(policy: &Policy, context: &EvalContext) -> Option<&'static str> {
-    if policy.network.require_https && !context.is_https {
-        return Some("network constraint failed: HTTPS required but request is not HTTPS");
+fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
+    if policy.version != 1 {
+        return Err(PolicyError::Invalid(format!(
+            "unsupported policy version: {} (only version 1 is supported)",
+            policy.version
+        )));
     }
-    if policy.network.block_private_networks && context.is_private_network {
-        return Some("network constraint failed: private/loopback network is blocked");
+    validate_rules(&policy.rules)
+}
+
+fn ensure_tightening(
+    inherited: &Policy,
+    candidate: &Policy,
+    layer: PolicyPrecedence,
+) -> Result<(), PolicyError> {
+    let mut violations = Vec::new();
+    check_defaults(&inherited.defaults, &candidate.defaults, &mut violations);
+    check_network(&inherited.network, &candidate.network, &mut violations);
+    check_limits(&inherited.limits, &candidate.limits, &mut violations);
+    check_integrity(&inherited.integrity, &candidate.integrity, &mut violations);
+    check_provenance(
+        &inherited.provenance,
+        &candidate.provenance,
+        &mut violations,
+    );
+    check_detectors(&inherited.detectors, &candidate.detectors, &mut violations);
+    check_rules(&inherited.rules, &candidate.rules, &mut violations);
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(PolicyError::Weakening {
+            layer,
+            detail: violations.join("; "),
+        })
     }
-    None
+}
+
+fn action_rank(action: PolicyAction) -> u8 {
+    match action {
+        PolicyAction::Pass => 0,
+        PolicyAction::Warn => 1,
+        PolicyAction::Prompt => 2,
+        PolicyAction::Block => 3,
+    }
+}
+
+fn check_action(
+    inherited: PolicyAction,
+    candidate: PolicyAction,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    if action_rank(candidate) < action_rank(inherited) {
+        violations.push(format!(
+            "{field}: cannot weaken from {inherited:?} to {candidate:?}"
+        ));
+    }
+}
+
+fn check_defaults(
+    inherited: &crate::schema::DefaultsConfig,
+    candidate: &crate::schema::DefaultsConfig,
+    violations: &mut Vec<String>,
+) {
+    check_action(
+        inherited.action,
+        candidate.action,
+        "defaults.action",
+        violations,
+    );
+    check_action(
+        inherited.non_interactive_prompt_action,
+        candidate.non_interactive_prompt_action,
+        "defaults.non_interactive_prompt_action",
+        violations,
+    );
+    if inherited.fail_closed_on_unavailable && !candidate.fail_closed_on_unavailable {
+        violations
+            .push("defaults.fail_closed_on_unavailable: cannot disable fail-closed".to_owned());
+    }
+}
+
+fn check_network(
+    inherited: &crate::schema::NetworkConfig,
+    candidate: &crate::schema::NetworkConfig,
+    violations: &mut Vec<String>,
+) {
+    if inherited.require_https && !candidate.require_https {
+        violations.push("network.require_https: cannot relax HTTPS requirement".to_owned());
+    }
+    if inherited.block_private_networks && !candidate.block_private_networks {
+        violations.push("network.block_private_networks: cannot allow private networks".to_owned());
+    }
+    if candidate.redirects.max > inherited.redirects.max {
+        violations.push(format!(
+            "network.redirects.max: cannot raise redirect limit from {} to {}",
+            inherited.redirects.max, candidate.redirects.max
+        ));
+    }
+    if !inherited.redirects.allow_https_to_http && candidate.redirects.allow_https_to_http {
+        violations.push(
+            "network.redirects.allow_https_to_http: cannot allow HTTPS to HTTP redirects"
+                .to_owned(),
+        );
+    }
+    if !inherited.redirects.allow_cross_origin && candidate.redirects.allow_cross_origin {
+        violations
+            .push("network.redirects.allow_cross_origin: cannot widen redirect scope".to_owned());
+    }
+    if !inherited.redirects.forward_authorization_cross_origin
+        && candidate.redirects.forward_authorization_cross_origin
+    {
+        violations.push("network.redirects.forward_authorization_cross_origin: cannot forward credentials cross-origin".to_owned());
+    }
+}
+
+fn check_limits(
+    inherited: &crate::schema::LimitsConfig,
+    candidate: &crate::schema::LimitsConfig,
+    violations: &mut Vec<String>,
+) {
+    check_parseable_limit(
+        &inherited.max_download_bytes,
+        &candidate.max_download_bytes,
+        "limits.max_download_bytes",
+        parse_bytes,
+        violations,
+    );
+    check_parseable_limit(
+        &inherited.max_analysis_time,
+        &candidate.max_analysis_time,
+        "limits.max_analysis_time",
+        parse_seconds,
+        violations,
+    );
+}
+
+fn check_parseable_limit(
+    inherited: &str,
+    candidate: &str,
+    field: &str,
+    parse: fn(&str) -> Option<u64>,
+    violations: &mut Vec<String>,
+) {
+    match (parse(inherited), parse(candidate)) {
+        (Some(before), Some(after)) if after > before => violations.push(format!(
+            "{field}: cannot raise limit from {inherited:?} to {candidate:?}"
+        )),
+        (Some(_), None) if candidate != inherited => {
+            violations.push(format!("{field}: unparseable replacement {candidate:?}"));
+        }
+        _ => {}
+    }
+}
+
+fn parse_bytes(value: &str) -> Option<u64> {
+    parse_unit(
+        value,
+        &[
+            ("tib", 1_u64 << 40),
+            ("gib", 1_u64 << 30),
+            ("mib", 1_u64 << 20),
+            ("kib", 1_u64 << 10),
+            ("b", 1),
+        ],
+    )
+}
+
+fn parse_seconds(value: &str) -> Option<u64> {
+    parse_unit(value, &[("s", 1), ("m", 60), ("h", 3_600)])
+}
+
+fn parse_unit(value: &str, units: &[(&str, u64)]) -> Option<u64> {
+    let normalized = value.trim().to_ascii_lowercase();
+    for &(suffix, multiplier) in units {
+        if let Some(number) = normalized.strip_suffix(suffix) {
+            let count = number.trim().parse::<u64>().ok()?;
+            return count.checked_mul(multiplier);
+        }
+    }
+    normalized.parse::<u64>().ok()
+}
+
+fn check_integrity(
+    inherited: &crate::schema::IntegrityConfig,
+    candidate: &crate::schema::IntegrityConfig,
+    violations: &mut Vec<String>,
+) {
+    if inherited.require_digest && !candidate.require_digest {
+        violations.push("integrity.require_digest: cannot relax digest requirement".to_owned());
+    }
+}
+
+fn check_provenance(
+    inherited: &crate::schema::ProvenanceConfig,
+    candidate: &crate::schema::ProvenanceConfig,
+    violations: &mut Vec<String>,
+) {
+    for class in &inherited.require_signature_for {
+        if !candidate.require_signature_for.contains(class) {
+            violations.push(format!(
+                "provenance.require_signature_for: cannot remove inherited scope {class:?}"
+            ));
+        }
+    }
+    if !inherited.trusted_sigstore_identities.is_empty() {
+        for identity in &candidate.trusted_sigstore_identities {
+            if inherited.trusted_sigstore_identities.contains(identity) {
+                continue;
+            }
+            violations.push(format!(
+                "provenance.trusted_sigstore_identities: cannot add trusted identity {}",
+                identity.subject
+            ));
+        }
+    }
+}
+
+fn check_detectors(
+    inherited: &std::collections::BTreeMap<String, crate::schema::DetectorConfig>,
+    candidate: &std::collections::BTreeMap<String, crate::schema::DetectorConfig>,
+    violations: &mut Vec<String>,
+) {
+    for (name, inherited_detector) in inherited {
+        let Some(candidate_detector) = candidate.get(name) else {
+            violations.push(format!(
+                "detectors.{name}: cannot remove inherited detector policy"
+            ));
+            continue;
+        };
+        if inherited_detector.required && !candidate_detector.required {
+            violations.push(format!(
+                "detectors.{name}.required: cannot disable required detector"
+            ));
+        }
+        for class in &inherited_detector.required_for {
+            if !candidate_detector.required_for.contains(class) {
+                violations.push(format!(
+                    "detectors.{name}.required_for: cannot remove inherited class {class:?}"
+                ));
+            }
+        }
+        for platform in &inherited_detector.required_on {
+            if !candidate_detector.required_on.contains(platform) {
+                violations.push(format!(
+                    "detectors.{name}.required_on: cannot remove inherited platform {platform:?}"
+                ));
+            }
+        }
+    }
+}
+
+fn check_rules(inherited: &[Rule], candidate: &[Rule], violations: &mut Vec<String>) {
+    for inherited_rule in inherited {
+        let Some(candidate_rule) = candidate.iter().find(|rule| rule.id == inherited_rule.id)
+        else {
+            let rule_id = &inherited_rule.id;
+            violations.push(format!("rules: cannot remove inherited rule {rule_id:?}"));
+            continue;
+        };
+        check_action(
+            inherited_rule.action,
+            candidate_rule.action,
+            &format!("rules.{}.action", inherited_rule.id),
+            violations,
+        );
+        if !condition_tightens(&inherited_rule.when, &candidate_rule.when) {
+            violations.push(format!(
+                "rules.{}.when: replacement must preserve inherited condition or add conditions",
+                inherited_rule.id
+            ));
+        }
+    }
+}
+
+fn condition_tightens(inherited: &Condition, candidate: &Condition) -> bool {
+    match (inherited, candidate) {
+        (same_inherited, same_candidate) if same_inherited == same_candidate => true,
+        (Condition::All(inherited_conditions), Condition::All(candidate_conditions)) => {
+            inherited_conditions
+                .iter()
+                .all(|condition| candidate_conditions.contains(condition))
+        }
+        (inherited_condition, Condition::All(candidate_conditions)) => {
+            candidate_conditions.contains(inherited_condition)
+        }
+        (
+            Condition::All(_) | Condition::Any(_) | Condition::Match(_),
+            Condition::Any(_) | Condition::Match(_),
+        ) => false,
+    }
 }
 
 /// Builds the final [`PolicyTrace`] from the collected rule evaluations.
@@ -220,41 +597,13 @@ fn finalize_trace(
     rules_evaluated: Vec<RuleEvaluation>,
     final_decision: PolicyAction,
     default_action: PolicyAction,
-    allow_rule_metadata: Vec<AllowRuleMetadata>,
 ) -> PolicyTrace {
     PolicyTrace {
         rules_evaluated,
         final_decision,
         default_action,
-        allow_rule_metadata,
+        allow_rule_metadata: Vec::new(),
     }
-}
-
-fn finalize_matching_rule(
-    rules_evaluated: Vec<RuleEvaluation>,
-    final_decision: PolicyAction,
-    default_action: PolicyAction,
-    rule: &Rule,
-) -> PolicyTrace {
-    finalize_trace(
-        rules_evaluated,
-        final_decision,
-        default_action,
-        allow_rule_metadata(rule),
-    )
-}
-
-fn allow_rule_metadata(rule: &Rule) -> Vec<AllowRuleMetadata> {
-    if rule.action != PolicyAction::Pass {
-        return Vec::new();
-    }
-    vec![AllowRuleMetadata {
-        rule_id: rule.id.clone(),
-        expiry: rule.expiry,
-        scope: rule.scope.clone(),
-        creator: rule.creator.clone(),
-        reason: rule.reason.clone(),
-    }]
 }
 
 /// Returns the [`PolicyAction`] that actually produced the verdict, after
@@ -808,41 +1157,9 @@ fn validate_rules(rules: &[Rule]) -> Result<(), PolicyError> {
                 rule.id
             )));
         }
-        validate_allow_rule_metadata(rule)?;
         validate_condition(&rule.when)?;
     }
     Ok(())
-}
-
-fn validate_allow_rule_metadata(rule: &Rule) -> Result<(), PolicyError> {
-    if rule.action != PolicyAction::Pass {
-        return Ok(());
-    }
-    if rule.expiry.is_none() && condition_uses_source_url(&rule.when) {
-        return Err(PolicyError::Invalid(
-            "broad indicators (URL patterns) require expiry".to_owned(),
-        ));
-    }
-    if let Some(scope) = &rule.scope {
-        match scope.as_str() {
-            "user" | "project" | "org" => {}
-            _ => {
-                return Err(PolicyError::Invalid(format!(
-                    "allow rule scope must be one of: user, project, org; got '{scope}'"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn condition_uses_source_url(cond: &Condition) -> bool {
-    match cond {
-        Condition::All(conditions) | Condition::Any(conditions) => {
-            conditions.iter().any(condition_uses_source_url)
-        }
-        Condition::Match(fm) => fm.field == "context.source_url",
-    }
 }
 
 /// Recursively validates that all field references are known.

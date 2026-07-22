@@ -6,7 +6,9 @@ use arbitraitor_model::finding::{Evidence, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
-use crate::{DetectorHealth, EvalContext, OperationMode, PolicyEngine};
+use crate::{
+    DetectorHealth, EvalContext, OperationMode, PolicyEngine, PolicyLayer, PolicyPrecedence,
+};
 use arbitraitor_model::origin::CallerOrigin;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +121,10 @@ fn full_eval_context() -> EvalContext {
     }
 }
 
+fn parsed_policy(toml: &str) -> crate::Policy {
+    PolicyEngine::load(toml).unwrap().policy().clone()
+}
+
 // ---------------------------------------------------------------------------
 // Required tests
 // ---------------------------------------------------------------------------
@@ -168,87 +174,145 @@ version = 1
 }
 
 #[test]
-fn allow_rule_with_sha256_digest_without_expiry_is_accepted() {
-    let policy = r#"
-version = 1
+fn project_policy_tightens_organization_policy() {
+    // Given: organization policy prompts by default.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"prompt\"\n");
+    let project = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
 
-[[rules]]
-id = "allow-pinned-digest"
-action = "pass"
-[rules.when]
-all = [{ field = "integrity.sha256", equals = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }]
-"#;
+    // When: project policy is layered below organization policy.
+    let layered = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    )
+    .unwrap();
 
-    let engine = PolicyEngine::load(policy).unwrap();
-
-    assert_eq!(engine.policy().rules[0].id, "allow-pinned-digest");
-    assert!(engine.policy().rules[0].expiry.is_none());
+    // Then: the stricter project default becomes effective.
+    assert_eq!(layered.policy.defaults.action, crate::PolicyAction::Block);
 }
 
 #[test]
-fn allow_rule_with_url_pattern_without_expiry_is_rejected() {
-    let policy = r#"
-version = 1
+fn project_policy_weakens_organization_policy_is_rejected() {
+    // Given: organization policy blocks by default.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+    let project = parsed_policy("version = 1\n[defaults]\naction = \"prompt\"\n");
 
-[[rules]]
-id = "allow-url-pattern"
-action = "pass"
-[rules.when]
-all = [{ field = "context.source_url", contains = "example.invalid/tools/" }]
-"#;
-
-    let error = PolicyEngine::load(policy).unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("broad indicators (URL patterns) require expiry")
+    // When: project policy tries to weaken the inherited action.
+    let result = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
     );
+
+    // Then: weakening is rejected with layer-specific detail.
+    assert!(matches!(
+        result,
+        Err(crate::PolicyError::Weakening {
+            layer: PolicyPrecedence::Project,
+            ..
+        })
+    ));
 }
 
 #[test]
-fn allow_rule_with_url_pattern_and_expiry_is_accepted() {
-    let policy = r#"
-version = 1
+fn cli_tightening_on_top_of_user_policy_is_allowed() {
+    // Given: user policy warns by default and CLI tightening blocks by default.
+    let user = parsed_policy("version = 1\n[defaults]\naction = \"warn\"\n");
+    let cli = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
 
-[[rules]]
-id = "allow-url-pattern"
-action = "pass"
-expiry = 2026-12-31T23:59:59Z
-[rules.when]
-all = [{ field = "context.source_url", contains = "example.invalid/tools/" }]
-"#;
+    // When: CLI tightening is layered after user policy.
+    let layered = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::User,
+                policy: user,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::CliTightening,
+                policy: cli,
+            },
+        ],
+        false,
+    )
+    .unwrap();
 
-    let engine = PolicyEngine::load(policy).unwrap();
-
-    assert!(engine.policy().rules[0].expiry.is_some());
+    // Then: the CLI tightening is effective.
+    assert_eq!(layered.policy.defaults.action, crate::PolicyAction::Block);
 }
 
 #[test]
-fn allow_rule_metadata_fields_round_trip_through_toml_parse() {
-    let policy = r#"
-version = 1
+fn cli_override_without_audit_override_is_rejected() {
+    // Given: inherited policy blocks and CLI override would pass.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+    let cli = parsed_policy("version = 1\n[defaults]\naction = \"pass\"\n");
 
-[[rules]]
-id = "allow-url-pattern"
-action = "pass"
-expiry = 2026-12-31T23:59:59Z
-scope = "project"
-creator = "security@example.invalid"
-reason = "temporary exception while upstream release is fixed"
-[rules.when]
-all = [{ field = "context.source_url", contains = "example.invalid/tools/" }]
-"#;
+    // When: CLI override is supplied without audit consent.
+    let result = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::CliOverride,
+                policy: cli,
+            },
+        ],
+        false,
+    );
 
-    let engine = PolicyEngine::load(policy).unwrap();
-    let rule = &engine.policy().rules[0];
+    // Then: override is rejected before it can weaken the policy.
+    assert!(matches!(
+        result,
+        Err(crate::PolicyError::AuditOverrideRequired)
+    ));
+}
 
-    assert!(rule.expiry.is_some());
-    assert_eq!(rule.scope.as_deref(), Some("project"));
-    assert_eq!(rule.creator.as_deref(), Some("security@example.invalid"));
-    assert_eq!(
-        rule.reason.as_deref(),
-        Some("temporary exception while upstream release is fixed")
+#[test]
+fn cli_override_with_audit_override_is_allowed_and_audited() {
+    // Given: inherited policy blocks and CLI override would pass.
+    let organization = parsed_policy("version = 1\n[defaults]\naction = \"block\"\n");
+    let cli = parsed_policy("version = 1\n[defaults]\naction = \"pass\"\n");
+
+    // When: CLI override is supplied with audit consent.
+    let layered = PolicyEngine::merge_layers(
+        [
+            PolicyLayer {
+                precedence: PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            PolicyLayer {
+                precedence: PolicyPrecedence::CliOverride,
+                policy: cli,
+            },
+        ],
+        true,
+    )
+    .unwrap();
+
+    // Then: override becomes effective and leaves an audit record.
+    assert_eq!(layered.policy.defaults.action, crate::PolicyAction::Pass);
+    assert!(
+        layered
+            .audit_trail
+            .iter()
+            .any(|event| event.contains("CLI override"))
     );
 }
 
@@ -375,7 +439,6 @@ action = "block"
 [[rules]]
 id = "allow-rich-context"
 action = "pass"
-expiry = 2026-12-31T23:59:59Z
 [rules.when]
 all = [
   { field = "context.operation_mode", equals = "contained" },

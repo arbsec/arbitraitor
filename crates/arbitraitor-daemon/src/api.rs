@@ -24,7 +24,7 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::{EvalContext, PolicyEngine};
 use arbitraitor_receipt::{
-    AllowRuleMetadata, DetectorVersion, FindingSummary, Receipt, ReceiptBuilder, ReceiptTimestamps,
+    DetectorVersion, FindingSummary, Receipt, ReceiptBuilder, ReceiptTimestamps,
     RetrievalInfo as ReceiptRetrieval, VerdictInfo,
 };
 use arbitraitor_store::{ContentStore, MetadataEntry, RetentionMode};
@@ -208,7 +208,6 @@ struct ReceiptInput<'a> {
     verdict: Verdict,
     findings: &'a [Finding],
     detector_results: &'a [arbitraitor_analysis::DetectorResult],
-    allow_rule_metadata: Vec<AllowRuleMetadata>,
 }
 
 impl ArbitraitorApi {
@@ -253,7 +252,7 @@ impl ArbitraitorApi {
         let result = self
             .coordinator
             .analyze_with_retrieval(&bytes, Some(retrieval));
-        let (verdict, trace) = self.policy.evaluate_with_trace(
+        let verdict = self.policy.evaluate(
             &result.findings,
             &EvalContext::new(false).with_source_url(redact_url(url)),
         );
@@ -267,17 +266,6 @@ impl ArbitraitorApi {
             verdict,
             findings: &result.findings,
             detector_results: &result.detector_results,
-            allow_rule_metadata: trace
-                .allow_rule_metadata
-                .iter()
-                .map(|metadata| AllowRuleMetadata {
-                    rule_id: metadata.rule_id.clone(),
-                    expiry: metadata.expiry,
-                    scope: metadata.scope.clone(),
-                    creator: metadata.creator.clone(),
-                    reason: metadata.reason.clone(),
-                })
-                .collect(),
         };
         let receipt_path = self.persist_receipt(&receipt_input)?;
         Ok(InspectionResult {
@@ -511,8 +499,7 @@ impl ArbitraitorApi {
             timestamps,
         )
         .retrieval(retrieval)
-        .findings(input.findings.iter().map(FindingSummary::from))
-        .allow_rule_metadata(input.allow_rule_metadata.clone());
+        .findings(input.findings.iter().map(FindingSummary::from));
 
         for detector in input.detector_results {
             builder = builder.detector_version(DetectorVersion {

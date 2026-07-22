@@ -161,7 +161,6 @@ pub(super) struct InspectedArtifact {
     artifact_type: ArtifactType,
     verdict: Verdict,
     policy_digest: String,
-    allow_rule_metadata: Vec<arbitraitor_receipt::AllowRuleMetadata>,
     findings: Vec<Finding>,
     detectors: Vec<DetectorSummary>,
     detector_versions: Vec<DetectorVersion>,

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
@@ -23,8 +23,8 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_policy::{EvalContext, PolicyEngine};
 use arbitraitor_receipt::{
-    AllowRuleMetadata, ApprovalInfo, DetectorVersion, FindingSummary, ReceiptBuilder,
-    ReceiptTimestamps, RetrievalInfo, VerdictInfo,
+    ApprovalInfo, AuditEvent, DetectorVersion, FindingSummary, ReceiptBuilder, ReceiptTimestamps,
+    RetrievalInfo, VerdictInfo,
 };
 use arbitraitor_store::ContentStore;
 use sha2::{Digest, Sha256};
@@ -33,7 +33,7 @@ use crate::pipeline::{default_cas_dir, timestamp};
 
 use super::{
     DetectorSummary, ExecutionMode, ExecutionOutput, InspectedArtifact, RunCommand,
-    RunExecutionOptions, RunFailure, RunFuture, RunServices, approval_capabilities,
+    RunExecutionOptions, RunFailure, RunFuture, RunServices,
 };
 
 pub(super) struct DefaultRunServices;
@@ -71,22 +71,32 @@ impl RunServices for DefaultRunServices {
         if response.is_error {
             return Err(RunFailure::Approval("approval tool failed".to_owned()));
         }
-        let json = response
+        response
             .content
             .iter()
             .find_map(|content| match content {
-                McpContent::Json { json } => Some(json),
+                McpContent::Json { json } => {
+                    json.get("approved").and_then(serde_json::Value::as_bool)
+                }
                 McpContent::Text { .. } => None,
             })
-            .ok_or_else(|| RunFailure::Approval("approval response missing decision".to_owned()))?;
-        if !json
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Ok(None);
-        }
-        Ok(Some(approval_info_from_response(json, artifact, ctx)?))
+            .ok_or_else(|| RunFailure::Approval("approval response missing decision".to_owned()))
+            .map(|approved| {
+                if approved {
+                    Some(ApprovalInfo {
+                        plan_digest: artifact.sha256.clone(),
+                        artifact_digest: artifact.sha256.clone(),
+                        expiry: None,
+                        nonce: format!("cli-{}", timestamp()),
+                        bound_capabilities: Vec::new(),
+                        override_reason: None,
+                        override_scope: None,
+                        exit_status: None,
+                    })
+                } else {
+                    None
+                }
+            })
     }
 
     fn execute(
@@ -111,82 +121,18 @@ impl RunServices for DefaultRunServices {
         &mut self,
         artifact: &InspectedArtifact,
         output: &ExecutionOutput,
-        approval: Option<&ApprovalInfo>,
+        _approval: Option<&ApprovalInfo>,
     ) -> std::result::Result<PathBuf, RunFailure> {
         let dir = arbitraitor_home()?.join("receipts");
         std::fs::create_dir_all(&dir).map_err(|error| RunFailure::Internal(error.to_string()))?;
         let digest_prefix: String = artifact.sha256.to_string().chars().take(12).collect();
         let path = dir.join(format!("{}-{digest_prefix}.json", timestamp()));
-        let receipt = build_run_receipt(artifact, output, approval)?;
+        let receipt = build_run_receipt(artifact, output)?;
         let json = serde_json::to_vec_pretty(&receipt)
             .map_err(|error| RunFailure::Internal(error.to_string()))?;
         std::fs::write(&path, json).map_err(|error| RunFailure::Internal(error.to_string()))?;
         Ok(path)
     }
-}
-
-fn approval_info_from_response(
-    json: &serde_json::Value,
-    artifact: &InspectedArtifact,
-    ctx: &PlanContext,
-) -> std::result::Result<ApprovalInfo, RunFailure> {
-    let plan_digest = json
-        .get("plan_digest")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| RunFailure::Approval("approval response missing plan digest".to_owned()))?
-        .parse()
-        .map_err(|error: arbitraitor_model::ids::Sha256DigestParseError| {
-            RunFailure::Approval(format!("approval response plan digest is invalid: {error}"))
-        })?;
-    let expires_at = json
-        .get("expires_at")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| RunFailure::Approval("approval response missing expiry".to_owned()))?
-        .parse::<u64>()
-        .map_err(|error| RunFailure::Approval(format!("approval expiry is invalid: {error}")))?;
-    let token = json
-        .get("approval_token")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| RunFailure::Approval("approval response missing token".to_owned()))?;
-    Ok(ApprovalInfo {
-        plan_digest,
-        artifact_digest: artifact.sha256.clone(),
-        expiry: Some(UNIX_EPOCH + Duration::from_secs(expires_at)),
-        nonce: approval_nonce_from_token(token)?,
-        bound_capabilities: approval_capabilities(ctx.network_isolated, &[]),
-        override_reason: Some(format!("{:?}", artifact.verdict)),
-        override_scope: Some(format!("artifact:{}", artifact.sha256)),
-        exit_status: None,
-    })
-}
-
-fn approval_nonce_from_token(token: &str) -> std::result::Result<String, RunFailure> {
-    let mut parts = token.split('.');
-    let version = parts
-        .next()
-        .ok_or_else(|| RunFailure::Approval("approval token is malformed".to_owned()))?;
-    let payload_hex = parts
-        .next()
-        .ok_or_else(|| RunFailure::Approval("approval token is missing payload".to_owned()))?;
-    let _signature_hex = parts
-        .next()
-        .ok_or_else(|| RunFailure::Approval("approval token is missing signature".to_owned()))?;
-    if version != "v2" || parts.next().is_some() {
-        return Err(RunFailure::Approval(
-            "approval token is malformed".to_owned(),
-        ));
-    }
-    let payload = hex::decode(payload_hex).map_err(|error| {
-        RunFailure::Approval(format!("approval token payload is invalid: {error}"))
-    })?;
-    let value: serde_json::Value = serde_json::from_slice(&payload).map_err(|error| {
-        RunFailure::Approval(format!("approval token payload is invalid: {error}"))
-    })?;
-    value
-        .get("nonce")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| RunFailure::Approval("approval token missing nonce".to_owned()))
 }
 
 fn script_execution(
@@ -279,8 +225,8 @@ async fn prepare_artifact(
         byte_count: Some(fetch_receipt.bytes_written),
     };
     let result = AnalysisCoordinator::new().analyze_with_retrieval(&bytes, Some(retrieval));
-    let policy_result = evaluate_policy(command, &result, fetch_url.as_url().scheme() == "https")?;
-    let policy_digest = policy_digest(command)?;
+    let policy_decision =
+        policy_decision(command, &result, fetch_url.as_url().scheme() == "https")?;
     let detector_versions = result
         .detector_results
         .iter()
@@ -309,12 +255,12 @@ async fn prepare_artifact(
             .map_err(|error| RunFailure::Internal(error.to_string()))?,
         content_type,
         artifact_type: result.classification.artifact_type,
-        verdict: policy_result.verdict,
-        policy_digest,
-        allow_rule_metadata: policy_result.allow_rule_metadata,
+        verdict: policy_decision.verdict,
+        policy_digest: policy_decision.digest,
         findings: result.findings,
         detectors,
         detector_versions,
+        audit_trail: policy_decision.audit_trail,
         requested_url: command.url.clone(),
         final_url: fetch_receipt
             .metadata
@@ -350,22 +296,25 @@ async fn store_artifact(
     }
 }
 
-struct PolicyEvaluationResult {
+struct PolicyDecision {
     verdict: Verdict,
-    allow_rule_metadata: Vec<AllowRuleMetadata>,
+    digest: String,
+    audit_trail: Vec<String>,
 }
 
-fn evaluate_policy(
+fn policy_decision(
     command: &RunCommand,
     result: &arbitraitor_analysis::AnalysisResult,
     is_https: bool,
-) -> std::result::Result<PolicyEvaluationResult, RunFailure> {
+) -> std::result::Result<PolicyDecision, RunFailure> {
     let Some(path) = &command.compatibility.policy else {
-        return Ok(PolicyEvaluationResult {
+        return Ok(PolicyDecision {
             verdict: result.verdict,
-            allow_rule_metadata: Vec::new(),
+            digest: String::new(),
+            audit_trail: Vec::new(),
         });
     };
+    validate_cli_policy_override(command)?;
     let policy_toml =
         std::fs::read_to_string(path).map_err(|error| RunFailure::Internal(error.to_string()))?;
     let engine = PolicyEngine::load(&policy_toml)
@@ -375,32 +324,26 @@ fn evaluate_policy(
         .with_source_url(command.url.clone())
         .with_https(is_https)
         .with_private_network(false);
-    let (verdict, trace) = engine.evaluate_with_trace(&result.findings, &context);
-    Ok(PolicyEvaluationResult {
-        verdict,
-        allow_rule_metadata: trace
-            .allow_rule_metadata
-            .iter()
-            .map(|metadata| AllowRuleMetadata {
-                rule_id: metadata.rule_id.clone(),
-                expiry: metadata.expiry,
-                scope: metadata.scope.clone(),
-                creator: metadata.creator.clone(),
-                reason: metadata.reason.clone(),
-            })
-            .collect(),
+    let digest = engine.digest();
+    Ok(PolicyDecision {
+        verdict: engine.evaluate(&result.findings, &context),
+        digest: digest.clone(),
+        audit_trail: vec![format!(
+            "CLI policy override applied from {} with --audit-override; digest={digest}",
+            path.display()
+        )],
     })
 }
 
-fn policy_digest(command: &RunCommand) -> std::result::Result<String, RunFailure> {
-    let Some(path) = &command.compatibility.policy else {
-        return Ok(String::new());
-    };
-    let policy_toml =
-        std::fs::read_to_string(path).map_err(|error| RunFailure::Internal(error.to_string()))?;
-    PolicyEngine::load(&policy_toml)
-        .map(|engine| engine.digest())
-        .map_err(|error| RunFailure::Internal(error.to_string()))
+pub(super) fn validate_cli_policy_override(
+    command: &RunCommand,
+) -> std::result::Result<(), RunFailure> {
+    if command.compatibility.policy.is_some() && !command.compatibility.audit_override {
+        return Err(RunFailure::Blocked(
+            "--policy is a CLI policy override and requires --audit-override".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn execution_output(result: ExecutionResult) -> ExecutionOutput {
@@ -460,10 +403,9 @@ fn native_release_path(sha256: &Sha256Digest) -> std::result::Result<PathBuf, Ru
     Ok(dir.join(format!("{sha256}.bin")))
 }
 
-fn build_run_receipt(
+pub(super) fn build_run_receipt(
     artifact: &InspectedArtifact,
     output: &ExecutionOutput,
-    approval: Option<&ApprovalInfo>,
 ) -> std::result::Result<arbitraitor_receipt::Receipt, RunFailure> {
     let now = timestamp();
     let artifact_size = u64::try_from(artifact.size_bytes)
@@ -489,18 +431,20 @@ fn build_run_receipt(
             .with_final_url(artifact.final_url.clone()),
     )
     .findings(artifact.findings.iter().map(FindingSummary::from))
-    .allow_rule_metadata(artifact.allow_rule_metadata.clone())
     .release(arbitraitor_receipt::ReleaseInfo {
         method: arbitraitor_receipt::ReleaseMethod::Execute,
         destination: Some(format!("exit-code={:?}", output.exit_code)),
         sha256_verified: true,
         timestamp: now,
     });
-    if let Some(approval) = approval {
-        builder = builder.approval(approval.clone());
-    }
     for detector in &artifact.detector_versions {
         builder = builder.detector_version(detector.clone());
+    }
+    for event in &artifact.audit_trail {
+        builder = builder.audit_event(AuditEvent {
+            kind: "cli-policy-override".to_owned(),
+            detail: event.clone(),
+        });
     }
     Ok(builder.build())
 }

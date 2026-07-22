@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Receipt
+#### Policy
 
-- `Receipt::to_intoto_statement()` now exports a derived in-toto Statement v1
-  envelope with the full receipt as `predicate`, a typed SHA-256 subject, and
-  the Arbitraitor verdict predicate type for DSSE signing workflows.
+- Allow rules now accept `expiry`, `scope`, `creator`, and `reason` metadata;
+  broad URL-based allow indicators require an expiry and matching allow-rule
+  metadata is recorded in receipts.
 
 #### Sandbox
 
@@ -24,13 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sysctl kernel.io_uring_disabled=1` (or `=2` for full disable) because
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
-- User namespace availability probe (spec §27.3). The sandbox crate now reads
-  `/proc/sys/kernel/unprivileged_userns_clone` plus Ubuntu 23.10+
-  `/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined` and records
-  the effective status in `EffectiveControls.userns_available`. When
-  unprivileged user namespaces are available without AppArmor restriction, the
-  exec crate emits a `tracing::warn!` recommending
-  `sysctl kernel.unprivileged_userns_clone=0`.
 
 ### Changed
 
@@ -125,13 +118,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor shim` now supports `curl`, `wget`, and `brew` alongside
   `npm`, adds `shim real <tool>` for resolving the real binary outside the
   shim directory, and adds `shim status` to show every supported shim slot.
-
-#### Policy
-
-- Policy layering now follows spec §23.5 precedence: organization, project,
-  user, CLI tightening, then audited CLI override. Lower layers may tighten
-  inherited policy; weakening changes are rejected unless supplied as a CLI
-  override with `--audit-override`, which is recorded in the receipt audit trail.
 
 #### Archive
 
