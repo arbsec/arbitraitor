@@ -17,7 +17,7 @@ pub use observed::{FileOperation, OBSERVED_EVENT_SCHEMA_VERSION, ObservedEvent, 
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
 pub use seccomp::configure_network_isolation;
 
-pub use linux_adapters::probe_io_uring_available;
+pub use linux_adapters::{probe_io_uring_available, probe_userns_available};
 pub mod linux_adapters;
 mod observed;
 pub mod windows_adapters;
@@ -236,6 +236,14 @@ pub struct EffectiveControls {
     /// `Some(false)` means it is disabled via sysctl; `None` means the
     /// probe could not determine availability (non-Linux or kernel < 6.6).
     pub io_uring_available: Option<bool>,
+    /// Whether unprivileged user namespaces are available without host restriction.
+    ///
+    /// `Some(true)` means `kernel.unprivileged_userns_clone=1` and Ubuntu's
+    /// `AppArmor` `apparmor_restrict_unprivileged_unconfined` mediation is not
+    /// restricting unconfined user namespaces. `Some(false)` means the kernel
+    /// or `AppArmor` restricts user namespaces. `None` means unavailable probe
+    /// data (non-Linux or missing/unknown sysctl state).
+    pub userns_available: Option<bool>,
 }
 
 impl EffectiveControls {
@@ -254,6 +262,7 @@ impl EffectiveControls {
             resource_limits: ControlState::Unavailable,
             landlock_abi_version: None,
             io_uring_available: None,
+            userns_available: None,
         }
     }
 
@@ -272,6 +281,7 @@ impl EffectiveControls {
             resource_limits: ControlState::Available,
             landlock_abi_version: None,
             io_uring_available: None,
+            userns_available: None,
         }
     }
 
@@ -391,6 +401,7 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
         let mut controls = EffectiveControls::all_available();
         controls.landlock_abi_version = probe_landlock_abi_version();
         controls.io_uring_available = probe_io_uring_available();
+        controls.userns_available = probe_userns_available();
         controls
     } else if platform.eq_ignore_ascii_case("macos") || platform.eq_ignore_ascii_case("darwin") {
         // ADR-0024: macOS containment ADR deferred — no primitive wired up.
@@ -781,6 +792,7 @@ mod tests {
         );
         assert_eq!(controls.resource_limits, ControlState::Unavailable);
         assert_eq!(controls.io_uring_available, None);
+        assert_eq!(controls.userns_available, None);
         assert!(controls.has_unavailable());
         assert!(!controls.is_fully_contained());
         assert!(!controls.has_degraded());
@@ -800,6 +812,7 @@ mod tests {
         );
         assert_eq!(controls.resource_limits, ControlState::Available);
         assert_eq!(controls.io_uring_available, None);
+        assert_eq!(controls.userns_available, None);
         assert!(controls.is_fully_contained());
         assert!(!controls.has_unavailable());
         assert!(!controls.has_degraded());
@@ -864,6 +877,7 @@ mod tests {
         // io_uring probe must be populated on Linux (Some or None depending
         // on kernel version, but the field must be set by the probe).
         assert_eq!(controls.io_uring_available, probe_io_uring_available());
+        assert_eq!(controls.userns_available, probe_userns_available());
     }
 
     #[test]
@@ -879,6 +893,7 @@ mod tests {
                 .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
         );
         assert_eq!(controls.io_uring_available, probe_io_uring_available());
+        assert_eq!(controls.userns_available, probe_userns_available());
     }
 
     #[test]

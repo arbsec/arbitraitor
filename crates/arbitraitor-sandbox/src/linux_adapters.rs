@@ -151,6 +151,51 @@ pub const fn probe_io_uring_available() -> Option<bool> {
     None
 }
 
+/// Probes whether unprivileged user namespaces are available without host restriction.
+///
+/// Linux exposes `kernel.unprivileged_userns_clone` as `0` when unprivileged
+/// user namespaces are disabled and `1` when clone is permitted. Ubuntu 23.10+
+/// additionally exposes `kernel.apparmor_restrict_unprivileged_unconfined`;
+/// when that `AppArmor` mediation flag is `1`, unconfined unprivileged user
+/// namespaces are treated as restricted even if the clone sysctl remains `1`.
+///
+/// Returns `Some(true)` only when unprivileged user namespaces are enabled and
+/// no `AppArmor` restriction is present. Returns `Some(false)` when the kernel
+/// or `AppArmor` restricts them. Returns `None` when the Linux clone sysctl
+/// cannot be read or contains an unknown value.
+#[must_use]
+#[cfg(target_os = "linux")]
+pub fn probe_userns_available() -> Option<bool> {
+    let clone_contents =
+        std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").ok()?;
+    let apparmor_contents =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined").ok();
+    parse_userns_available(&clone_contents, apparmor_contents.as_deref())
+}
+
+/// Probes whether unprivileged user namespaces are available without host restriction.
+///
+/// Non-Linux platforms have no Linux user-namespace sysctl surface and therefore
+/// report `None`.
+#[must_use]
+#[cfg(not(target_os = "linux"))]
+pub const fn probe_userns_available() -> Option<bool> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn parse_userns_available(clone_contents: &str, apparmor_contents: Option<&str>) -> Option<bool> {
+    match clone_contents.trim() {
+        "0" => Some(false),
+        "1" => match apparmor_contents.map(str::trim) {
+            Some("1") => Some(false),
+            Some("0") | None => Some(true),
+            Some(_) => None,
+        },
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -221,5 +266,49 @@ mod tests {
     #[test]
     fn io_uring_probe_returns_none_off_linux() {
         assert_eq!(probe_io_uring_available(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn userns_parse_detects_clone_and_apparmor_restrictions() {
+        // Given: sysctl contents for Linux userns cloning and Ubuntu AppArmor mediation.
+        // When: parsing the effective availability state.
+        // Then: availability is true only when clone is enabled and AppArmor is not restricting it.
+        assert_eq!(parse_userns_available("0\n", None), Some(false));
+        assert_eq!(parse_userns_available("1\n", None), Some(true));
+        assert_eq!(parse_userns_available("1\n", Some("0\n")), Some(true));
+        assert_eq!(parse_userns_available("1\n", Some("1\n")), Some(false));
+        assert_eq!(parse_userns_available("2\n", None), None);
+        assert_eq!(parse_userns_available("1\n", Some("unexpected\n")), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn userns_probe_returns_linux_status_when_sysctl_exists() {
+        // Given: a Linux host where /proc/sys/kernel/unprivileged_userns_clone may exist.
+        // When: probing unprivileged user namespace availability.
+        // Then: the probe reports Some(bool) for known sysctl states or None when unavailable/unknown.
+        let result = probe_userns_available();
+        let clone_contents = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone");
+        match clone_contents {
+            Ok(contents) => assert_eq!(
+                result,
+                parse_userns_available(
+                    &contents,
+                    std::fs::read_to_string(
+                        "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined",
+                    )
+                    .ok()
+                    .as_deref(),
+                )
+            ),
+            Err(_) => assert_eq!(result, None),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn userns_probe_returns_none_off_linux() {
+        assert_eq!(probe_userns_available(), None);
     }
 }
