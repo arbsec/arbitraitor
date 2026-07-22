@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use arbitraitor_exec::EffectiveControls;
 use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
-use arbitraitor_model::ids::Sha256Digest;
+use arbitraitor_model::ids::{Sha256Digest, Sha256DigestParseError};
 use arbitraitor_model::taxonomy::TaxonomyRef;
 use arbitraitor_model::transport::RedirectCredentialSecrecy;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
@@ -125,14 +125,18 @@ impl Receipt {
     ///
     /// Returns an error if serialization of the Statement or its predicate
     /// fails.
-    pub fn to_intoto_statement(&self) -> Result<InTotoStatement, ReceiptError> {
+    pub fn to_intoto_statement(&self) -> Result<IntotoStatement, ReceiptError> {
+        let artifact_sha256 = self
+            .artifact_sha256
+            .parse::<Sha256Digest>()
+            .map_err(ReceiptError::InvalidArtifactDigest)?;
         let predicate = serde_json::to_value(self).map_err(ReceiptError::Canonicalize)?;
-        Ok(InTotoStatement {
+        Ok(IntotoStatement {
             statement_type: "https://in-toto.io/Statement/v1".to_owned(),
-            subject: vec![InTotoSubject {
-                name: format!("sha256:{}", self.artifact_sha256),
-                digest: InTotoDigest {
-                    sha256: self.artifact_sha256.clone(),
+            subject: vec![IntotoSubject {
+                name: format!("sha256:{artifact_sha256}"),
+                digest: IntotoDigest {
+                    sha256: artifact_sha256,
                 },
             }],
             predicate_type: "https://arbitraitor.dev/verdict/v1".to_owned(),
@@ -146,33 +150,37 @@ impl Receipt {
 /// Derived from the canonical RFC 8785 JCS receipt. The Statement is
 /// signed with the same key/capability as the canonical receipt and the
 /// signature envelope is DSSE per in-toto conventions.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InTotoStatement {
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntotoStatement {
     /// Fixed: `https://in-toto.io/Statement/v1`.
     #[serde(rename = "_type")]
     pub statement_type: String,
     /// Artifact subjects the statement attests.
-    pub subject: Vec<InTotoSubject>,
+    pub subject: Vec<IntotoSubject>,
     /// Fixed: `https://arbitraitor.dev/verdict/v1`.
+    #[serde(rename = "predicateType")]
     pub predicate_type: String,
     /// Full Arbitraitor receipt object, verbatim.
     pub predicate: serde_json::Value,
 }
 
 /// A subject entry inside an in-toto Statement.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InTotoSubject {
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntotoSubject {
     /// Subject name, e.g. `sha256:<hex>`.
     pub name: String,
     /// Digest map keyed by algorithm.
-    pub digest: InTotoDigest,
+    pub digest: IntotoDigest,
 }
 
 /// SHA-256 digest map for in-toto subject.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InTotoDigest {
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntotoDigest {
     /// SHA-256 hex digest.
-    pub sha256: String,
+    pub sha256: Sha256Digest,
 }
 
 /// Redacted transport metadata for artifact retrieval.
@@ -584,6 +592,9 @@ pub enum ReceiptError {
         /// Safe diagnostic reason for signing failure.
         reason: String,
     },
+    /// Receipt artifact digest was not valid SHA-256 hex.
+    #[error("receipt artifact SHA-256 is invalid: {0}")]
+    InvalidArtifactDigest(Sha256DigestParseError),
 }
 
 /// Errors produced while verifying signed receipts.
@@ -673,6 +684,9 @@ pub fn verify_receipt(
         .map_err(|error| match error {
             ReceiptError::Canonicalize(error) => VerifyError::Canonicalize(error),
             ReceiptError::Sign { reason } => VerifyError::InvalidSignature { reason },
+            ReceiptError::InvalidArtifactDigest(error) => VerifyError::InvalidSignature {
+                reason: error.to_string(),
+            },
         })?;
 
     minisign::verify(
@@ -1103,7 +1117,6 @@ mod tests {
         assert_eq!(stmt.statement_type, "https://in-toto.io/Statement/v1");
         assert_eq!(stmt.predicate_type, "https://arbitraitor.dev/verdict/v1");
         assert!(!stmt.subject.is_empty());
-        assert_eq!(stmt.subject[0].digest.sha256, receipt.artifact_sha256);
         Ok(())
     }
 
@@ -1112,9 +1125,46 @@ mod tests {
         let receipt = sample_receipt();
         let stmt = receipt.to_intoto_statement()?;
         let json = serde_json::to_string(&stmt)?;
-        let parsed: InTotoStatement = serde_json::from_str(&json)?;
-        assert_eq!(parsed.predicate_type, stmt.predicate_type);
-        assert_eq!(parsed.subject.len(), stmt.subject.len());
+        let parsed: IntotoStatement = serde_json::from_str(&json)?;
+        assert_eq!(parsed, stmt);
+        Ok(())
+    }
+
+    #[test]
+    fn intoto_statement_serializes_statement_type_url() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let json = serde_json::to_value(receipt.to_intoto_statement()?)?;
+
+        assert_eq!(json["_type"], "https://in-toto.io/Statement/v1");
+        assert_eq!(json["predicateType"], "https://arbitraitor.dev/verdict/v1");
+        assert!(json.get("predicate_type").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn intoto_statement_subject_contains_artifact_sha256() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let receipt = sample_receipt();
+        let json = serde_json::to_value(receipt.to_intoto_statement()?)?;
+
+        assert_eq!(
+            json["subject"][0]["name"],
+            format!("sha256:{}", receipt.artifact_sha256)
+        );
+        assert_eq!(
+            json["subject"][0]["digest"]["sha256"],
+            receipt.artifact_sha256
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn intoto_statement_predicate_contains_full_receipt() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let receipt = sample_receipt();
+        let statement = receipt.to_intoto_statement()?;
+
+        assert_eq!(statement.predicate, serde_json::to_value(receipt)?);
         Ok(())
     }
 }
