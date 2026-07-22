@@ -7,9 +7,11 @@
 
 use std::fmt::Write as _;
 use std::io::Cursor;
+use std::time::SystemTime;
 
 use arbitraitor_exec::EffectiveControls;
 use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
+use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::taxonomy::TaxonomyRef;
 use arbitraitor_model::transport::RedirectCredentialSecrecy;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
@@ -57,8 +59,33 @@ pub struct Receipt {
     /// contained execution contexts; `None` for inspect/mediated.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effective_controls: Option<EffectiveControls>,
+    /// Plan-bound approval and override binding metadata, when execution used approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalInfo>,
     /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
+}
+
+/// Plan-bound approval and override metadata embedded in execution receipts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalInfo {
+    /// Digest of the ADR-0013 canonical operation plan bound by the approval.
+    pub plan_digest: Sha256Digest,
+    /// SHA-256 digest of the artifact bound by the approval.
+    pub artifact_digest: Sha256Digest,
+    /// Approval expiry time, when the binding is time-limited.
+    pub expiry: Option<SystemTime>,
+    /// Unique approval nonce preventing replay of the binding.
+    pub nonce: String,
+    /// Network, filesystem, and process capabilities bound by the approval.
+    pub bound_capabilities: Vec<String>,
+    /// Human-readable override reason, when this approval was an override.
+    pub override_reason: Option<String>,
+    /// Override scope, when this approval was scoped.
+    pub override_scope: Option<String>,
+    /// Execution exit status observed for the approved operation.
+    pub exit_status: Option<i32>,
 }
 
 impl Receipt {
@@ -431,6 +458,7 @@ impl ReceiptBuilder {
                 detector_provenance: Vec::new(),
                 timestamps,
                 effective_controls: None,
+                approval: None,
                 signature: None,
             },
         }
@@ -506,6 +534,13 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn effective_controls(mut self, controls: EffectiveControls) -> Self {
         self.receipt.effective_controls = Some(controls);
+        self
+    }
+
+    /// Set plan-bound approval metadata.
+    #[must_use]
+    pub fn approval(mut self, approval: ApprovalInfo) -> Self {
+        self.receipt.approval = Some(approval);
         self
     }
 
@@ -674,6 +709,7 @@ fn hex_upper(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn sample_receipt() -> Receipt {
         ReceiptBuilder::new(
@@ -734,12 +770,95 @@ mod tests {
         .build()
     }
 
+    fn sample_digest(value: u8) -> Sha256Digest {
+        Sha256Digest::new([value; 32])
+    }
+
+    fn sample_approval(exit_status: Option<i32>) -> ApprovalInfo {
+        ApprovalInfo {
+            plan_digest: sample_digest(0x11),
+            artifact_digest: sample_digest(0xab),
+            expiry: Some(UNIX_EPOCH + Duration::from_mins(5)),
+            nonce: "approval-nonce-1".to_owned(),
+            bound_capabilities: vec![
+                "process:execute".to_owned(),
+                "network:isolated".to_owned(),
+                "filesystem:none".to_owned(),
+            ],
+            override_reason: Some("policy prompt override".to_owned()),
+            override_scope: Some("single execution".to_owned()),
+            exit_status,
+        }
+    }
+
     #[test]
     fn receipt_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let receipt = sample_receipt();
         let json = serde_json::to_string(&receipt)?;
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded, receipt);
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_round_trips_with_approval_info() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xab).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Prompt,
+                deciding_rule: Some("rule.prompt.execution".to_owned()),
+                policy_trace: vec!["approval required".to_owned()],
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .approval(sample_approval(Some(0)))
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: Receipt = serde_json::from_str(&json)?;
+
+        assert_eq!(decoded, receipt);
+        assert_eq!(
+            decoded.approval.as_ref().and_then(|info| info.exit_status),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_without_approval_info_still_parses() -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(&sample_receipt())?;
+
+        let decoded: Receipt = serde_json::from_str(&json)?;
+
+        assert_eq!(decoded.approval, None);
+        Ok(())
+    }
+
+    #[test]
+    fn null_approval_info_does_not_change_canonical_bytes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let receipt = sample_receipt();
+        let mut value = serde_json::to_value(&receipt)?;
+        let object = value
+            .as_object_mut()
+            .ok_or("receipt JSON must be an object")?;
+        object.insert("approval".to_owned(), serde_json::Value::Null);
+        let decoded: Receipt = serde_json::from_value(value)?;
+
+        assert_eq!(decoded.approval, None);
+        assert_eq!(decoded.canonical_bytes()?, receipt.canonical_bytes()?);
+        assert!(
+            !serde_json::to_value(&decoded)?
+                .as_object()
+                .ok_or("receipt JSON must be an object")?
+                .contains_key("approval")
+        );
         Ok(())
     }
 
