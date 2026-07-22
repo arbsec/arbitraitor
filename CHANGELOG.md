@@ -90,10 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
-- `arbitraitor approve` now accepts `--output <PATH>` for explicit approval
-  file destinations while retaining the existing `<receipt>.approval.json`
-  default. `arbitraitor execute` now accepts `--approval <PATH>` and keeps
-  the legacy positional approval path as a deprecated fallback.
+- `arbitraitor shim` now supports `curl`, `wget`, and `brew` alongside
+  `npm`, adds `shim real <tool>` for resolving the real binary outside the
+  shim directory, and adds `shim status` to show every supported shim slot.
 
 #### Archive
 

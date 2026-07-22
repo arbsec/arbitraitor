@@ -25,7 +25,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor update` | Verify signed update manifests |
 | `arbitraitor plugin` | Manage plugin registry and local plugin lifecycle |
 | `arbitraitor hook` | Deprecated bash DEBUG trap (prefer `wrappers init --install`) |
-| `arbitraitor shim` | Manage package manager compatibility shims |
+| `arbitraitor shim` | Manage npm/curl/wget/brew compatibility shims |
 | `arbitraitor graph` | Render payload containment tree for archives |
 | `arbitraitor approve` | Approve execution from a receipt file |
 | `arbitraitor execute` | Execute an artifact from CAS using an approval file |
@@ -748,7 +748,7 @@ arbitraitor hook init --binary /usr/local/bin/arbitraitor
 arbitraitor shim <subcommand>
 ```
 
-Manages package manager compatibility shims that route tool invocations through Arbitraitor.
+Manages compatibility shims that route supported tool invocations through Arbitraitor.
 
 ### Subcommands
 
@@ -758,26 +758,58 @@ List installed shims and supported tools:
 
 ```sh
 arbitraitor shim list
-# Supported shims: npm
+# Supported shims: npm, curl, wget, brew
 ```
 
 #### `install <TOOL>`
 
-Install a compatibility shim for a supported package manager. The shim invokes `arbitraitor pm run --tool <TOOL>` so every invocation passes through advisory scan:
+Install a compatibility shim for a supported tool. Shims are written under
+`~/.arbitraitor/shims` and dispatch by tool:
+
+- `npm` invokes `arbitraitor pm run --tool npm`.
+- `curl` and `wget` invoke `arbitraitor fetch --tool <TOOL>`.
+- `brew` invokes `arbitraitor wrap brew`.
 
 ```sh
 arbitraitor shim install npm
+arbitraitor shim install curl
+arbitraitor shim install wget
+arbitraitor shim install brew
 # Writes ~/.arbitraitor/shims/npm
 ```
 
-Supported tools: `npm`.
+Supported tools: `npm`, `curl`, `wget`, `brew`.
 
-#### `uninstall <TOOL>`
+#### `remove <TOOL>` / `uninstall <TOOL>`
 
 Remove a compatibility shim:
 
 ```sh
+arbitraitor shim remove curl
+# Legacy alias:
 arbitraitor shim uninstall npm
+```
+
+#### `real <TOOL>`
+
+Resolve the real binary path for a supported tool by searching `PATH` while
+excluding `~/.arbitraitor/shims`:
+
+```sh
+arbitraitor shim real curl
+# /usr/bin/curl
+```
+
+#### `status`
+
+Show every supported shim and its current slot state:
+
+```sh
+arbitraitor shim status
+# npm: not installed
+# curl: installed
+# wget: not installed
+# brew: not installed
 ```
 
 ## PM command

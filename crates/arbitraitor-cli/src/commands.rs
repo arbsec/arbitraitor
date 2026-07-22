@@ -199,7 +199,14 @@ pub enum ShimSubcommand {
     /// Install a compatibility shim for a package manager tool.
     Install { tool: String },
     /// Remove a compatibility shim.
+    Remove { tool: String },
+    /// Remove a compatibility shim.
+    #[command(hide = true)]
     Uninstall { tool: String },
+    /// Resolve the real tool binary that a shim shadows on PATH.
+    Real { tool: String },
+    /// Show the installation state for every supported shim.
+    Status,
 }
 
 #[derive(Args)]
@@ -1222,84 +1229,8 @@ pub(crate) fn hook(command: &HookCommand) -> Result<()> {
     Ok(())
 }
 
-const SUPPORTED_SHIMS: &[&str] = &["npm"];
-
 pub(crate) fn shim(command: &ShimCommand) -> Result<()> {
-    match &command.subcommand {
-        ShimSubcommand::List => {
-            let mut stdout = std::io::stdout().lock();
-            if SUPPORTED_SHIMS.is_empty() {
-                writeln!(stdout, "No package-manager shims are currently supported.")
-                    .into_diagnostic()?;
-                writeln!(
-                    stdout,
-                    "\nFor curl/wget wrapper support, use:\n  arbitraitor wrappers install"
-                )
-                .into_diagnostic()?;
-                return Ok(());
-            }
-            writeln!(stdout, "Supported shims: {}", SUPPORTED_SHIMS.join(", "))
-                .into_diagnostic()?;
-            writeln!(stdout).into_diagnostic()?;
-            let shim_dir = std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".arbitraitor").join("shims"))
-                .ok_or_else(|| miette::miette!("HOME not set"))?;
-            if !shim_dir.exists() {
-                writeln!(stdout, "No shims installed.").into_diagnostic()?;
-                return Ok(());
-            }
-            for entry in std::fs::read_dir(&shim_dir).into_diagnostic()? {
-                let entry = entry.into_diagnostic()?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                writeln!(stdout, "  {name}").into_diagnostic()?;
-            }
-        }
-        ShimSubcommand::Install { tool } => {
-            if !SUPPORTED_SHIMS.contains(&tool.as_str()) {
-                miette::bail!(
-                    "package-manager shims are not yet implemented; \
-                     use 'arbitraitor wrappers install' for curl/wget support"
-                );
-            }
-            let arb = std::env::current_exe()
-                .map_or_else(|_| "arbitraitor".to_owned(), |p| p.display().to_string());
-            let shim_dir = std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".arbitraitor").join("shims"))
-                .ok_or_else(|| miette::miette!("HOME not set"))?;
-            std::fs::create_dir_all(&shim_dir).into_diagnostic()?;
-            let shim_path = shim_dir.join(tool);
-            let content = format!(
-                "#!/bin/sh\n# Arbitraitor shim for {tool}\nexec {arb} pm run --tool {tool} -- \"$@\"\n"
-            );
-            std::fs::write(&shim_path, content).into_diagnostic()?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755))
-                    .into_diagnostic()?;
-            }
-            writeln!(
-                std::io::stdout().lock(),
-                "installed: {}",
-                shim_path.display()
-            )
-            .into_diagnostic()?;
-        }
-        ShimSubcommand::Uninstall { tool } => {
-            let shim_dir = std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".arbitraitor").join("shims"))
-                .ok_or_else(|| miette::miette!("HOME not set"))?;
-            let shim_path = shim_dir.join(tool);
-            if shim_path.exists() {
-                std::fs::remove_file(&shim_path).into_diagnostic()?;
-                writeln!(std::io::stdout().lock(), "removed: {}", shim_path.display())
-                    .into_diagnostic()?;
-            } else {
-                writeln!(std::io::stdout().lock(), "not installed: {tool}").into_diagnostic()?;
-            }
-        }
-    }
-    Ok(())
+    crate::shim::run(command)
 }
 
 pub(crate) fn graph(command: &GraphCommand) -> Result<()> {
