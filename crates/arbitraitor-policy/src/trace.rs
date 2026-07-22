@@ -15,6 +15,8 @@
 //! - **Stable IDs**: `rule_id` is the same identifier declared in TOML.
 //! - **Receipt-friendly**: types serialize to JSON via serde.
 
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 
 use crate::schema::PolicyAction;
@@ -61,6 +63,30 @@ pub struct RuleEvaluation {
     pub reason: String,
 }
 
+/// Metadata attached to an allow rule that produced a policy pass decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllowRuleMetadata {
+    /// Rule identifier that supplied this metadata.
+    pub rule_id: String,
+
+    /// Expiration time for the allow, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<SystemTime>,
+
+    /// Scope for the allow: `user`, `project`, or `org`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+
+    /// Identity that created the allow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+
+    /// Reason why the allow was granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // PolicyTrace
 // ---------------------------------------------------------------------------
@@ -101,6 +127,10 @@ pub struct PolicyTrace {
     /// distinguish "default fired because nothing matched" from "a rule
     /// produced this action".
     pub default_action: PolicyAction,
+
+    /// Metadata from matching allow rules, if the final decision allowed release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_rule_metadata: Vec<AllowRuleMetadata>,
 }
 
 impl PolicyTrace {

@@ -6,6 +6,7 @@
 //! silently ignored.
 
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 use arbitraitor_model::verdict::Verdict;
 use serde::{Deserialize, Serialize};
@@ -309,6 +310,26 @@ pub struct Rule {
     /// Condition that must be satisfied for the rule to match.
     #[serde(default)]
     pub when: Condition,
+
+    /// Expiration time for this allow rule, required for broad URL indicators.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_expiry",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expiry: Option<SystemTime>,
+
+    /// Scope for this allow rule: `user`, `project`, or `org`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+
+    /// Identity that created this allow rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+
+    /// Human-readable reason why this allow rule was granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Action produced by a policy rule or default.
@@ -410,6 +431,63 @@ impl Default for Condition {
     fn default() -> Self {
         Self::always()
     }
+}
+
+fn deserialize_expiry<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let datetime = Option::<toml::value::Datetime>::deserialize(deserializer)?;
+    datetime
+        .map(datetime_to_system_time)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn datetime_to_system_time(datetime: toml::value::Datetime) -> Result<SystemTime, String> {
+    let date = datetime
+        .date
+        .ok_or_else(|| "expiry must be an offset datetime with a date".to_owned())?;
+    let time = datetime
+        .time
+        .ok_or_else(|| "expiry must be an offset datetime with a time".to_owned())?;
+    let offset_minutes = match datetime
+        .offset
+        .ok_or_else(|| "expiry must include a timezone offset".to_owned())?
+    {
+        toml::value::Offset::Z => 0_i64,
+        toml::value::Offset::Custom { minutes } => i64::from(minutes),
+    };
+    let second = i64::from(time.second.unwrap_or(0));
+    let nanosecond = time.nanosecond.unwrap_or(0);
+    let days = days_from_civil(i64::from(date.year), date.month, date.day);
+    let seconds = days
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(i64::from(time.hour) * 3_600))
+        .and_then(|value| value.checked_add(i64::from(time.minute) * 60))
+        .and_then(|value| value.checked_add(second))
+        .and_then(|value| value.checked_sub(offset_minutes * 60))
+        .ok_or_else(|| "expiry is outside supported SystemTime range".to_owned())?;
+    if seconds < 0 {
+        let seconds = u64::try_from(-seconds)
+            .map_err(|_| "expiry is outside supported SystemTime range".to_owned())?;
+        return Ok(SystemTime::UNIX_EPOCH - std::time::Duration::new(seconds, nanosecond));
+    }
+    let seconds = u64::try_from(seconds)
+        .map_err(|_| "expiry is outside supported SystemTime range".to_owned())?;
+    Ok(SystemTime::UNIX_EPOCH + std::time::Duration::new(seconds, nanosecond))
+}
+
+fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// A field path plus a comparison operator.
