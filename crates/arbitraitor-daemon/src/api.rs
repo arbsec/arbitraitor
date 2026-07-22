@@ -409,11 +409,11 @@ impl ArbitraitorApi {
                 continue;
             }
             summaries.push(ReceiptSummary {
-                sha256: receipt.artifact_sha256.clone(),
+                sha256: receipt.artifact.digest.to_string(),
                 verdict: receipt.verdict.verdict,
-                size_bytes: receipt.artifact_size,
+                size_bytes: receipt.artifact.size,
                 created_at,
-                findings_count: receipt.findings.len(),
+                findings_count: receipt.finding_summaries().len(),
             });
         }
         if let Some(limit) = filter.limit {
@@ -480,6 +480,8 @@ impl ArbitraitorApi {
         };
         let verdict_info = VerdictInfo {
             verdict: input.verdict,
+            confidence: None,
+            explanation: None,
             deciding_rule: None,
             policy_trace: Vec::new(),
         };
@@ -493,7 +495,11 @@ impl ArbitraitorApi {
         };
         let mut builder = ReceiptBuilder::new(
             ARBITRAITOR_VERSION,
-            input.sha256,
+            input.sha256.parse().map_err(
+                |error: arbitraitor_model::ids::Sha256DigestParseError| {
+                    ApiError::Receipt(error.to_string())
+                },
+            )?,
             input.size,
             verdict_info,
             timestamps,

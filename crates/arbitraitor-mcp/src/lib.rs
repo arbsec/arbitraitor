@@ -543,23 +543,16 @@ impl InMemoryReceiptStore {
         Self::default()
     }
 
-    /// Inserts a receipt indexed by its `artifact_sha256` field.
+    /// Inserts a receipt indexed by its artifact digest.
     ///
     /// Returns the digest under which the receipt was recorded. Receipts whose
-    /// `artifact_sha256` is not a valid 64-character hex string are rejected
-    /// so the index cannot be silently poisoned.
+    /// The typed digest prevents the index from being silently poisoned.
     ///
     /// # Errors
     ///
-    /// Returns [`ReceiptLookupError::InvalidDigest`] when the receipt's
-    /// `artifact_sha256` is not a valid 64-character hex string, or
-    /// [`ReceiptLookupError::Poisoned`] when the internal lock is poisoned.
+    /// Returns [`ReceiptLookupError::Poisoned`] when the internal lock is poisoned.
     pub fn record(&self, receipt: Receipt) -> Result<Sha256Digest, ReceiptLookupError> {
-        let digest: Sha256Digest = receipt.artifact_sha256.parse().map_err(
-            |error: arbitraitor_model::ids::Sha256DigestParseError| {
-                ReceiptLookupError::InvalidDigest(error.to_string())
-            },
-        )?;
+        let digest = receipt.artifact.digest.clone();
         self.receipts
             .lock()
             .map_err(|_| ReceiptLookupError::Poisoned)?

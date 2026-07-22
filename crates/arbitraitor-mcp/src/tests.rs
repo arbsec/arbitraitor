@@ -341,7 +341,7 @@ fn scan_artifact_enforces_size_limit() {
 #[test]
 fn query_receipt_returns_known_receipt() {
     let store = InMemoryReceiptStore::new();
-    let receipt = sample_receipt_for_digest("ab".repeat(32));
+    let receipt = sample_receipt_for_digest(&"ab".repeat(32));
     let digest = store
         .record(receipt.clone())
         .unwrap_or_else(|error| panic!("record receipt: {error}"));
@@ -358,11 +358,11 @@ fn query_receipt_returns_known_receipt() {
     assert_eq!(json["release_performed"], false);
     assert_eq!(json["found"], true);
     assert_eq!(json["sha256"], digest.to_string());
-    assert_eq!(json["receipt"]["schema_version"], 1);
+    assert_eq!(json["receipt"]["schema_version"], 2);
     assert!(
-        json["receipt"]["artifact_sha256"]
+        json["receipt"]["artifact"]["digest"]
             .as_str()
-            .is_some_and(|value| value.contains(&receipt.artifact_sha256))
+            .is_some_and(|value| value.contains(&receipt.artifact.digest.to_string()))
     );
     assert!(json["agent_identity"].is_object());
 }
@@ -924,13 +924,18 @@ fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(unique)
 }
 
-fn sample_receipt_for_digest(digest: String) -> Receipt {
+fn sample_receipt_for_digest(digest: &str) -> Receipt {
+    let parsed = digest
+        .parse()
+        .unwrap_or_else(|_| Sha256Digest::new([0; 32]));
     ReceiptBuilder::new(
         "0.1.0",
-        digest,
+        parsed,
         12,
         VerdictInfo {
             verdict: Verdict::Pass,
+            confidence: None,
+            explanation: None,
             deciding_rule: None,
             policy_trace: Vec::new(),
         },
