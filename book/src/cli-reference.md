@@ -23,7 +23,7 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor doctor` | Run system health diagnostics |
 | `arbitraitor rules` | Manage YARA-X rule packs (list, validate) |
 | `arbitraitor update` | Verify signed update manifests |
-| `arbitraitor plugin` | Manage plugin registry (list, info, discover, remove) |
+| `arbitraitor plugin` | Manage plugin registry and local plugin lifecycle |
 | `arbitraitor hook` | Deprecated bash DEBUG trap (prefer `wrappers init --install`) |
 | `arbitraitor shim` | Manage package manager compatibility shims |
 | `arbitraitor graph` | Render payload containment tree for archives |
@@ -621,7 +621,9 @@ arbitraitor update verify manifest.json --key pubkey.pub --signature custom.mini
 arbitraitor plugin <subcommand>
 ```
 
-Manages the plugin registry — discovery, listing, inspection, and removal.
+Manages the plugin registry and local plugin lifecycle. Registry-backed
+operations currently expose the stable CLI surface and return stub output
+until registry plumbing is complete.
 
 ### Subcommands
 
@@ -635,10 +637,19 @@ arbitraitor plugin list
 
 #### `info <ID>`
 
-Show manifest details for a specific plugin:
+Show manifest details for a specific plugin. `inspect` is an alias:
 
 ```sh
 arbitraitor plugin info <id>
+arbitraitor plugin inspect <id>
+```
+
+#### `search <QUERY>`
+
+Search the plugin registry:
+
+```sh
+arbitraitor plugin search yara
 ```
 
 #### `discover`
@@ -647,6 +658,55 @@ Run plugin discovery from default directories:
 
 ```sh
 arbitraitor plugin discover
+```
+
+#### `install <ID>`
+
+Install a plugin by registry ID:
+
+```sh
+arbitraitor plugin install <id>
+```
+
+#### `update [--all]`
+
+Update plugins. Use `--all` to update every installed plugin:
+
+```sh
+arbitraitor plugin update --all
+```
+
+#### `enable <ID>`
+
+Enable an installed plugin:
+
+```sh
+arbitraitor plugin enable <id>
+```
+
+#### `disable <ID>`
+
+Disable an installed plugin:
+
+```sh
+arbitraitor plugin disable <id>
+```
+
+#### `trust <DIGEST_OR_SIGNER>`
+
+Trust a plugin digest or signer identity:
+
+```sh
+arbitraitor plugin trust sha256:<hex>
+arbitraitor plugin trust signer@example.test
+```
+
+#### `doctor`
+
+Run plugin health checks:
+
+```sh
+arbitraitor plugin doctor
 ```
 
 #### `remove <ID>`
