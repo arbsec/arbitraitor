@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sysctl kernel.io_uring_disabled=1` (or `=2` for full disable) because
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
+- User namespace availability probe (spec §27.3). The sandbox crate now reads
+  `/proc/sys/kernel/unprivileged_userns_clone` plus Ubuntu 23.10+
+  `/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined` and records
+  the effective status in `EffectiveControls.userns_available`. When
+  unprivileged user namespaces are available without AppArmor restriction, the
+  exec crate emits a `tracing::warn!` recommending
+  `sysctl kernel.unprivileged_userns_clone=0`.
 
 ### Changed
 
