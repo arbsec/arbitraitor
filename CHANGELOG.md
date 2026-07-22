@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Receipt
+
+- **BREAKING:** Receipt JSON now uses the spec §31.1 v2 top-level envelope:
+  `request`, `artifact`, `retrieval`, `provenance`, `payload_graph`,
+  `detectors`, `findings`, `policy`, `verdict`, `release`, and
+  `timestamps`. Flat v1 receipts still deserialize through the receipt crate's
+  migration path and are upgraded to `schema_version: 2` in memory.
+
 #### Documentation
 
 - `book/src/cli/wrappers.md` — full rewrite. Previous page documented a
