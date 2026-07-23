@@ -8,21 +8,36 @@
 //! Findings, not verdicts — the detector does not block release on its own.
 //! Policy interprets the findings per §18.5.
 
+// allow: SIZE_OK — the detector, snapshot types, config, and lockfile parsers
+// form a single cohesive module for spec §18.5. Splitting would scatter
+// tightly-coupled types across files without reducing cognitive load.
 use crate::{AnalysisContext, Detector, DetectorError};
 use arbitraitor_model::artifact::ArtifactKind;
 use arbitraitor_model::finding::{
-    DetectorMetadata, Evidence, EvidenceKind, Finding, FindingCategory,
+    DetectorMetadata, DetectorProvenance, Evidence, EvidenceKind, Finding, FindingCategory,
 };
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::taxonomy::{TaxonomyName, TaxonomyRef};
 use arbitraitor_model::verdict::{Confidence, Severity};
+use arbitraitor_model::vex::{VexStatement, VexStatus};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 /// Maximum lockfile artifact size accepted (10 MiB).
 const MAX_LOCKFILE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Maximum number of packages to extract before stopping.
 const MAX_PACKAGES: usize = 10_000;
+
+/// Maximum number of advisories in a single OSV snapshot.
+const MAX_ADVISORIES: usize = 50_000;
+
+/// Maximum number of entries in a single KEV snapshot.
+const MAX_KEV_ENTRIES: usize = 10_000;
+
+/// Maximum snapshot file size accepted (50 MiB).
+const MAX_SNAPSHOT_FILE_SIZE: usize = 50 * 1024 * 1024;
 
 /// A single vulnerability advisory in the local OSV/KEV snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -64,6 +79,399 @@ pub enum LockfileFormat {
     UvLock,
     /// Recognized but not yet fully parsed.
     Other,
+}
+
+/// Advisory entry in an OSV snapshot. Alias for [`Advisory`].
+pub type OsvAdvisory = Advisory;
+
+/// A single CISA KEV (Known Exploited Vulnerabilities) catalog entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KevEntry {
+    /// CVE identifier (e.g. `CVE-2026-1234`).
+    pub cve_id: String,
+    /// Vendor name.
+    pub vendor: String,
+    /// Product name.
+    pub product: String,
+    /// Vulnerability name or short description.
+    pub vulnerability_name: String,
+    /// Date the entry was added to the KEV catalog (ISO 8601).
+    pub date_added: Option<String>,
+    /// Whether this vulnerability is known to be used in ransomware campaigns.
+    pub known_ransomware_use: bool,
+}
+
+impl KevEntry {
+    /// Converts this KEV entry into an [`Advisory`] with `is_kev = true`.
+    #[must_use]
+    pub fn to_advisory(&self, ecosystem: &str, package: &str, range: &str) -> Advisory {
+        Advisory {
+            id: self.cve_id.clone(),
+            ecosystem: ecosystem.to_owned(),
+            package: package.to_owned(),
+            affected_range: range.to_owned(),
+            severity: "critical".to_owned(),
+            is_kev: true,
+        }
+    }
+}
+
+/// Offline OSV advisory snapshot loaded from disk.
+#[derive(Clone, Debug)]
+pub struct OsvSnapshot {
+    /// SHA-256 digest of the raw snapshot file bytes.
+    pub digest: Sha256Digest,
+    /// Advisory entries parsed from the snapshot.
+    pub advisories: Vec<OsvAdvisory>,
+}
+
+impl OsvSnapshot {
+    /// Loads an OSV snapshot from a JSON file on disk.
+    ///
+    /// The file digest is computed over the raw bytes so the receipt can
+    /// record provenance without re-reading the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DetectorError::Resource`] if the file cannot be read or
+    /// parsed, or [`DetectorError::Other`] if the advisory count exceeds
+    /// [`MAX_ADVISORIES`].
+    pub fn load_from_path(path: &Path) -> Result<Self, DetectorError> {
+        let bytes = read_snapshot_file(path)?;
+        let digest = Sha256Digest::new(Sha256::digest(&bytes).into());
+        let advisories: Vec<OsvAdvisory> = serde_json::from_slice(&bytes).map_err(|error| {
+            DetectorError::ParseError(format!("osv snapshot parse error: {error}"))
+        })?;
+        if advisories.len() > MAX_ADVISORIES {
+            return Err(DetectorError::Other(format!(
+                "osv snapshot has {} advisories, limit is {MAX_ADVISORIES}",
+                advisories.len()
+            )));
+        }
+        Ok(Self { digest, advisories })
+    }
+
+    /// Creates a snapshot from pre-parsed advisories with a computed digest.
+    #[must_use]
+    pub fn from_advisories(advisories: Vec<OsvAdvisory>) -> Self {
+        let serialized = serde_json::to_vec(&advisories).unwrap_or_default();
+        let digest = Sha256Digest::new(Sha256::digest(&serialized).into());
+        Self { digest, advisories }
+    }
+}
+
+/// Offline CISA KEV snapshot loaded from disk.
+#[derive(Clone, Debug)]
+pub struct KevSnapshot {
+    /// SHA-256 digest of the raw snapshot file bytes.
+    pub digest: Sha256Digest,
+    /// KEV entries parsed from the snapshot.
+    pub entries: Vec<KevEntry>,
+}
+
+impl KevSnapshot {
+    /// Loads a KEV snapshot from a JSON file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DetectorError::Resource`] if the file cannot be read or
+    /// parsed, or [`DetectorError::Other`] if the entry count exceeds
+    /// [`MAX_KEV_ENTRIES`].
+    pub fn load_from_path(path: &Path) -> Result<Self, DetectorError> {
+        let bytes = read_snapshot_file(path)?;
+        let digest = Sha256Digest::new(Sha256::digest(&bytes).into());
+        let entries: Vec<KevEntry> = serde_json::from_slice(&bytes).map_err(|error| {
+            DetectorError::ParseError(format!("kev snapshot parse error: {error}"))
+        })?;
+        if entries.len() > MAX_KEV_ENTRIES {
+            return Err(DetectorError::Other(format!(
+                "kev snapshot has {} entries, limit is {MAX_KEV_ENTRIES}",
+                entries.len()
+            )));
+        }
+        Ok(Self { digest, entries })
+    }
+
+    /// Creates a snapshot from pre-parsed entries with a computed digest.
+    #[must_use]
+    pub fn from_entries(entries: Vec<KevEntry>) -> Self {
+        let serialized = serde_json::to_vec(&entries).unwrap_or_default();
+        let digest = Sha256Digest::new(Sha256::digest(&serialized).into());
+        Self { digest, entries }
+    }
+}
+
+/// Update mode for the dependency-vulnerability detector (spec §18.5).
+///
+/// Controls whether the detector may reach the network for advisory
+/// refresh. The default and safest mode is [`OfflineOnly`].
+///
+/// [`OfflineOnly`]: DepVulnUpdateMode::OfflineOnly
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepVulnUpdateMode {
+    /// Use only the local snapshot; no network access (default).
+    #[default]
+    OfflineOnly,
+    /// Fetch a hash of the remote database and compare to the local snapshot
+    /// digest; refresh only if the hash differs.
+    HashOnly,
+    /// Fetch the full remote database with redaction of PII and source URLs
+    /// before local storage.
+    OnlineWithRedaction,
+}
+
+/// Configuration for the dependency-vulnerability detector (spec §18.5).
+///
+/// Per spec: `enabled = "auto"` is forbidden. The detector must be
+/// explicitly enabled with `enabled = true`. The default is `disabled`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DepVulnConfig {
+    /// Whether the detector is enabled. Must be explicitly `true` to run.
+    /// Defaults to `false` (disabled) per spec §18.5.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Advisory update mode. Defaults to [`DepVulnUpdateMode::OfflineOnly`].
+    #[serde(default)]
+    pub update_mode: DepVulnUpdateMode,
+    /// Path to the OSV snapshot JSON file on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osv_snapshot_path: Option<PathBuf>,
+    /// Path to the CISA KEV snapshot JSON file on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kev_snapshot_path: Option<PathBuf>,
+}
+
+/// Full dependency-vulnerability detector with config, OSV/KEV snapshots,
+/// and VEX interaction (spec §18.5).
+///
+/// This detector wraps the lower-level [`DepVulnDetector`] with:
+/// - Explicit enable/disable (spec: `enabled = "auto"` is forbidden).
+/// - Offline snapshot loading from disk paths in [`DepVulnConfig`].
+/// - VEX-based severity downgrade when a trusted VEX statement asserts
+///   `fixed` or `not_affected` for a matched advisory.
+/// - Snapshot digest exposure for receipt recording.
+pub struct DependencyVulnerabilityDetector {
+    config: DepVulnConfig,
+    inner: DepVulnDetector,
+    vex_statements: Vec<VexStatement>,
+}
+
+impl DependencyVulnerabilityDetector {
+    /// Creates a detector from configuration, loading snapshots from disk.
+    ///
+    /// If `config.enabled` is `false`, the detector is created but will
+    /// return no findings when analyzed (spec: default is disabled).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DetectorError::Resource`] if a configured snapshot path
+    /// cannot be read or parsed.
+    pub fn from_config(config: DepVulnConfig) -> Result<Self, DetectorError> {
+        let mut advisories = Vec::new();
+        let mut digests = Vec::new();
+
+        if let Some(ref path) = config.osv_snapshot_path {
+            let snapshot = OsvSnapshot::load_from_path(path)?;
+            advisories.extend(snapshot.advisories);
+            digests.push(snapshot.digest);
+        }
+
+        if let Some(ref path) = config.kev_snapshot_path {
+            let snapshot = KevSnapshot::load_from_path(path)?;
+            for entry in &snapshot.entries {
+                advisories.push(Advisory {
+                    id: entry.cve_id.clone(),
+                    ecosystem: String::new(),
+                    package: String::new(),
+                    affected_range: "*".to_owned(),
+                    severity: "critical".to_owned(),
+                    is_kev: true,
+                });
+            }
+            digests.push(snapshot.digest);
+        }
+
+        let snapshot_digest = compute_combined_digest(&digests);
+        let inner = DepVulnDetector::new(advisories, snapshot_digest);
+
+        Ok(Self {
+            config,
+            inner,
+            vex_statements: Vec::new(),
+        })
+    }
+
+    /// Creates a detector from pre-loaded snapshots and config.
+    #[must_use]
+    pub fn with_snapshots(
+        config: DepVulnConfig,
+        osv: Option<OsvSnapshot>,
+        kev: Option<KevSnapshot>,
+    ) -> Self {
+        let mut advisories = Vec::new();
+        let mut digests = Vec::new();
+
+        if let Some(snapshot) = osv {
+            digests.push(snapshot.digest.clone());
+            advisories.extend(snapshot.advisories);
+        }
+
+        if let Some(snapshot) = kev {
+            digests.push(snapshot.digest.clone());
+            for entry in &snapshot.entries {
+                advisories.push(Advisory {
+                    id: entry.cve_id.clone(),
+                    ecosystem: String::new(),
+                    package: String::new(),
+                    affected_range: "*".to_owned(),
+                    severity: "critical".to_owned(),
+                    is_kev: true,
+                });
+            }
+        }
+
+        let snapshot_digest = compute_combined_digest(&digests);
+        let inner = DepVulnDetector::new(advisories, snapshot_digest);
+
+        Self {
+            config,
+            inner,
+            vex_statements: Vec::new(),
+        }
+    }
+
+    /// Attaches VEX statements for severity downgrade evaluation.
+    #[must_use]
+    pub fn with_vex_statements(mut self, statements: Vec<VexStatement>) -> Self {
+        self.vex_statements = statements;
+        self
+    }
+
+    /// Returns the combined snapshot digest for receipt recording.
+    #[must_use]
+    pub fn snapshot_digest(&self) -> Sha256Digest {
+        self.inner.snapshot_digest()
+    }
+
+    /// Returns `true` if the detector is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    /// Returns the VEX status for a given vulnerability ID, if any.
+    fn vex_status_for(&self, vulnerability_id: &str) -> Option<VexStatus> {
+        self.vex_statements
+            .iter()
+            .find(|stmt| {
+                stmt.vulnerability
+                    .as_str()
+                    .eq_ignore_ascii_case(vulnerability_id)
+            })
+            .map(|stmt| stmt.status)
+    }
+
+    /// Downgrades severity by one level if a VEX statement asserts
+    /// `fixed` or `not_affected` for the advisory.
+    fn apply_vex_downgrade(&self, advisory_id: &str, severity: Severity) -> Severity {
+        match self.vex_status_for(advisory_id) {
+            Some(VexStatus::Fixed | VexStatus::NotAffected) => match severity {
+                Severity::Critical => Severity::High,
+                Severity::High => Severity::Medium,
+                Severity::Medium => Severity::Low,
+                Severity::Low | Severity::Informational => Severity::Informational,
+            },
+            _ => severity,
+        }
+    }
+}
+
+impl Detector for DependencyVulnerabilityDetector {
+    fn metadata(&self) -> DetectorMetadata {
+        DetectorMetadata {
+            id: "dep-vuln".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            supported_artifact_kinds: vec![ArtifactKind::Json, ArtifactKind::GenericText],
+            capabilities: vec!["offline-scan".to_owned(), "vex-aware".to_owned()],
+            is_local: true,
+            may_upload: false,
+            default_timeout_ms: 10_000,
+            is_deterministic: true,
+        }
+    }
+
+    fn provenance(&self) -> Option<DetectorProvenance> {
+        Some(DetectorProvenance {
+            binary_sha256: None,
+            binary_version: None,
+            ruleset_digest: Some(self.snapshot_digest().to_string()),
+        })
+    }
+
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        if !self.config.enabled {
+            tracing::debug!("dep-vuln: detector disabled, skipping");
+            return Ok(Vec::new());
+        }
+
+        let findings = self.inner.analyze(ctx)?;
+        if self.vex_statements.is_empty() {
+            return Ok(findings);
+        }
+
+        Ok(findings
+            .into_iter()
+            .map(|finding| {
+                let advisory_id = finding
+                    .references
+                    .iter()
+                    .find_map(|r| r.strip_prefix("https://osv.dev/vulnerability/"))
+                    .unwrap_or(&finding.id);
+                let downgraded = self.apply_vex_downgrade(advisory_id, finding.severity);
+                Finding {
+                    severity: downgraded,
+                    ..finding
+                }
+            })
+            .collect())
+    }
+}
+
+/// Reads a snapshot file from disk with size validation.
+fn read_snapshot_file(path: &Path) -> Result<Vec<u8>, DetectorError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        DetectorError::Resource(format!("snapshot file metadata error: {error}"))
+    })?;
+    let file_size = usize::try_from(metadata.len()).map_err(|_| {
+        DetectorError::Resource(format!(
+            "snapshot file size {} exceeds usize on this platform",
+            metadata.len()
+        ))
+    })?;
+    if file_size > MAX_SNAPSHOT_FILE_SIZE {
+        return Err(DetectorError::Resource(format!(
+            "snapshot file size {file_size} exceeds limit {MAX_SNAPSHOT_FILE_SIZE}"
+        )));
+    }
+    std::fs::read(path)
+        .map_err(|error| DetectorError::Resource(format!("snapshot file read error: {error}")))
+}
+
+/// Computes a combined digest from multiple snapshot digests.
+fn compute_combined_digest(digests: &[Sha256Digest]) -> Sha256Digest {
+    if digests.is_empty() {
+        return Sha256Digest::new([0; 32]);
+    }
+    if digests.len() == 1 {
+        return digests[0].clone();
+    }
+    let mut hasher = Sha256::new();
+    for digest in digests {
+        hasher.update(digest.as_bytes());
+    }
+    Sha256Digest::new(hasher.finalize().into())
 }
 
 /// Dependency vulnerability detector with an offline OSV/KEV snapshot.
