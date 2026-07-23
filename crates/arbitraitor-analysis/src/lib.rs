@@ -7,9 +7,12 @@
 
 pub mod dep_vuln;
 pub mod mandatory;
+pub mod payload_graph;
 pub mod pyjs;
 pub mod tirith;
 pub mod url_discovery;
+
+pub use payload_graph::{PayloadEdge, PayloadEdgeType, PayloadGraph, PayloadGraphError};
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
@@ -34,7 +37,6 @@ use arbitraitor_model::finding::{
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 use arbitraitor_shell::{ParserConfig, ShellParser, detect, detect_system_threats, normalize};
-use mandatory::MandatoryDetectorRegistry;
 use sha2::{Digest, Sha256};
 
 const ARTIFACT_DETECTOR_ID: &str = "arbitraitor-analysis.artifact";
@@ -266,7 +268,6 @@ pub struct AnalysisCoordinator {
     detectors: Vec<Arc<dyn Detector>>,
     metrics_enabled: bool,
     budget: AnalysisBudget,
-    registry: MandatoryDetectorRegistry,
 }
 
 impl AnalysisCoordinator {
@@ -290,7 +291,6 @@ impl AnalysisCoordinator {
             detectors,
             metrics_enabled: true,
             budget: AnalysisBudget::default(),
-            registry: MandatoryDetectorRegistry::new(),
         }
     }
 
@@ -330,6 +330,7 @@ impl AnalysisCoordinator {
         let scan_started = Instant::now();
         let classification = classify(artifact_bytes);
         let artifact_sha256 = digest(artifact_bytes);
+        let sha256_for_mandatory = artifact_sha256.clone();
         let ctx = OwnedAnalysisContext {
             artifact_bytes: artifact_bytes.to_vec(),
             classification: classification.clone(),
@@ -359,14 +360,12 @@ impl AnalysisCoordinator {
             detector_results.push(execution.result);
         }
 
-        // Spec §9 invariant 1: validate that all mandatory detectors ran
-        // for this artifact class. Missing detectors produce Critical findings
-        // that force Verdict::Block (invariant 6 — fail closed).
-        findings.extend(self.registry.validate_coverage(
+        let mandatory_findings = mandatory::MandatoryDetectorRegistry::new().validate_coverage(
             &artifact_kind,
             &detector_results,
-            &ctx.artifact_sha256,
-        ));
+            &sha256_for_mandatory,
+        );
+        findings.extend(mandatory_findings);
 
         let verdict = derive_verdict(&findings, &detector_results);
         let metrics = self.metrics_enabled.then(|| {
