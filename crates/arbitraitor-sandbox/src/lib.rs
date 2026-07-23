@@ -17,7 +17,9 @@ pub use observed::{FileOperation, OBSERVED_EVENT_SCHEMA_VERSION, ObservedEvent, 
 pub use resource_limits::{ProcessResourceLimits, configure_resource_limits};
 pub use seccomp::configure_network_isolation;
 
-pub use linux_adapters::{probe_io_uring_available, probe_userns_available};
+pub use linux_adapters::{
+    ContainerRuntime, probe_container_runtime, probe_io_uring_available, probe_userns_available,
+};
 pub mod linux_adapters;
 mod observed;
 pub mod windows_adapters;
@@ -206,7 +208,7 @@ pub enum ControlState {
 /// matrix. Use [`EffectiveControls::is_fully_contained`] and
 /// [`EffectiveControls::has_unavailable`] to drive fail-closed decisions
 /// at the enforcement boundary.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EffectiveControls {
     /// Filesystem access is restricted to an explicit allowlist
     /// (Landlock on Linux, App Sandbox on macOS, etc.).
@@ -244,6 +246,14 @@ pub struct EffectiveControls {
     /// or `AppArmor` restricts user namespaces. `None` means unavailable probe
     /// data (non-Linux or missing/unknown sysctl state).
     pub userns_available: Option<bool>,
+    /// Container runtime version probed from the host (spec §27.3).
+    ///
+    /// `Some` when a container runtime (`runc` or `containerd`) is detected
+    /// on the host; `None` on non-Linux platforms or when no runtime binary
+    /// is found. The [`ContainerRuntime::cve_vulnerable`] flag is `true` when
+    /// the `runc` version falls below the patched floor for the 2025-11-05
+    /// container-escape CVE cluster.
+    pub container_runtime: Option<ContainerRuntime>,
 }
 
 impl EffectiveControls {
@@ -263,6 +273,7 @@ impl EffectiveControls {
             landlock_abi_version: None,
             io_uring_available: None,
             userns_available: None,
+            container_runtime: None,
         }
     }
 
@@ -282,6 +293,7 @@ impl EffectiveControls {
             landlock_abi_version: None,
             io_uring_available: None,
             userns_available: None,
+            container_runtime: None,
         }
     }
 
@@ -402,6 +414,7 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
         controls.landlock_abi_version = probe_landlock_abi_version();
         controls.io_uring_available = probe_io_uring_available();
         controls.userns_available = probe_userns_available();
+        controls.container_runtime = probe_container_runtime();
         controls
     } else if platform.eq_ignore_ascii_case("macos") || platform.eq_ignore_ascii_case("darwin") {
         // ADR-0024: macOS containment ADR deferred — no primitive wired up.
