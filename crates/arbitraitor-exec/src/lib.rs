@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arbitraitor_core::config::ExecutionConfig;
 use arbitraitor_model::operation::{GrantedCapabilities, OperationPlan};
 use arbitraitor_model::verdict::AssuranceLevel;
-use arbitraitor_sandbox::LandlockAbiVersion;
+use arbitraitor_sandbox::{ContainerRuntime, LandlockAbiVersion};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
@@ -830,6 +830,14 @@ pub struct EffectiveControls {
     /// consumers should recommend `sysctl kernel.unprivileged_userns_clone=0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub userns_available: Option<bool>,
+    /// Container runtime version probed from the host (spec §27.3).
+    ///
+    /// `Some` when a container runtime (`runc` or `containerd`) is detected.
+    /// When `cve_vulnerable` is `true`, receipt consumers should refuse
+    /// `filesystem_isolation` claims for the 2025-11-05 runc container-escape
+    /// CVE cluster (CVE-2025-31133, CVE-2025-52565, CVE-2025-52881).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_runtime: Option<ContainerRuntime>,
 }
 
 /// Proofs supplied to the builder that each containment control is active.
@@ -857,6 +865,8 @@ pub struct ControlProofs {
     pub io_uring_available: Option<bool>,
     /// Whether unprivileged user namespaces are available without host restriction.
     pub userns_available: Option<bool>,
+    /// Container runtime version probed from the host (spec §27.3).
+    pub container_runtime: Option<ContainerRuntime>,
 }
 
 impl ControlProofs {
@@ -885,6 +895,18 @@ impl ControlProofs {
                  recommend: sysctl kernel.unprivileged_userns_clone=0"
             );
         }
+        if let Some(ref runtime) = self.container_runtime
+            && runtime.cve_vulnerable
+        {
+            tracing::warn!(
+                name = %runtime.name,
+                version = %runtime.version,
+                "container runtime version is vulnerable to the 2025-11-05 \
+                 container-escape CVE cluster (CVE-2025-31133, CVE-2025-52565, \
+                 CVE-2025-52881); upgrade to runc 1.2.8 / 1.3.3 / 1.4.0-rc.3 \
+                 or later"
+            );
+        }
         Ok(EffectiveControls {
             filesystem_isolation: Some(Self::require(
                 self.filesystem_isolation,
@@ -904,6 +926,7 @@ impl ControlProofs {
             landlock_abi_version: self.landlock_abi_version,
             io_uring_available: self.io_uring_available,
             userns_available: self.userns_available,
+            container_runtime: self.container_runtime,
         })
     }
 }

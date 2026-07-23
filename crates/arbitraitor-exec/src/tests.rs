@@ -523,6 +523,7 @@ fn all_control_proofs() -> ControlProofs {
         landlock_abi_version: Some(arbitraitor_sandbox::LandlockAbiVersion::V7),
         io_uring_available: Some(false),
         userns_available: Some(false),
+        container_runtime: None,
     }
 }
 
