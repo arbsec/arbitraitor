@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Analysis
+
+- Dependency vulnerability detector coverage (spec §18.5, issue #509). The
+  `arbitraitor-analysis` crate now includes a `DependencyVulnerabilityDetector`
+  that scans lockfiles against a local OSV/KEV snapshot. The detector is
+  offline-first: snapshots are loaded from disk via `OsvSnapshot` and
+  `KevSnapshot` structs, each carrying a `Sha256Digest` for receipt provenance.
+  `DepVulnConfig` controls enablement (`enabled = true` required per spec;
+  `enabled = "auto"` is forbidden) and update mode (`offline_only`,
+  `hash_only`, `online_with_redaction`). VEX interaction: when a `VexStatement`
+  with status `fixed` or `not_affected` matches a finding's advisory ID, the
+  severity is downgraded by one level. The combined snapshot digest is exposed
+  via `DetectorProvenance::ruleset_digest` for receipt recording.
+
 #### Fetch
 
 - Decoded child artifact creation for archive payloads (spec §41.4.2, issue

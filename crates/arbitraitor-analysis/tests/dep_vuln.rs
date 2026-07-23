@@ -1,6 +1,9 @@
 //! Tests for the dependency vulnerability detector (spec §18.5).
 
-use arbitraitor_analysis::dep_vuln::{Advisory, DepVulnDetector, LockfileFormat};
+use arbitraitor_analysis::dep_vuln::{
+    Advisory, DepVulnConfig, DepVulnDetector, DepVulnUpdateMode, DependencyVulnerabilityDetector,
+    KevEntry, KevSnapshot, LockfileFormat, OsvSnapshot,
+};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::Severity;
 
@@ -235,6 +238,424 @@ mod end_to_end {
         let findings = detector.analyze(&ctx(npm_lock()))?;
         assert_eq!(findings.len(), 1);
         assert!(findings[0].id.contains("lodash"));
+        Ok(())
+    }
+}
+
+mod snapshot_loading {
+    use super::*;
+
+    #[test]
+    fn osv_snapshot_loads_from_json() -> Result<(), Box<dyn std::error::Error>> {
+        let advisories = vec![advisory(
+            "GHSA-TEST",
+            "crates.io",
+            "serde",
+            ">=1.0.0",
+            "high",
+            false,
+        )];
+        let json = serde_json::to_vec(&advisories)?;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("osv.json");
+        std::fs::write(&path, &json)?;
+
+        let snapshot = OsvSnapshot::load_from_path(&path)?;
+        assert_eq!(snapshot.advisories.len(), 1);
+        assert_eq!(snapshot.advisories[0].id, "GHSA-TEST");
+        assert_ne!(snapshot.digest, Sha256Digest::new([0; 32]));
+        Ok(())
+    }
+
+    #[test]
+    fn kev_snapshot_loads_from_json() -> Result<(), Box<dyn std::error::Error>> {
+        let entries = vec![KevEntry {
+            cve_id: "CVE-2026-1234".to_owned(),
+            vendor: "vendor".to_owned(),
+            product: "product".to_owned(),
+            vulnerability_name: "test vuln".to_owned(),
+            date_added: Some("2026-01-01".to_owned()),
+            known_ransomware_use: false,
+        }];
+        let json = serde_json::to_vec(&entries)?;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("kev.json");
+        std::fs::write(&path, &json)?;
+
+        let snapshot = KevSnapshot::load_from_path(&path)?;
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].cve_id, "CVE-2026-1234");
+        Ok(())
+    }
+
+    #[test]
+    fn osv_snapshot_rejects_missing_file() {
+        let result = OsvSnapshot::load_from_path(std::path::Path::new("/nonexistent/osv.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn osv_snapshot_rejects_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, b"not json")?;
+        let result = OsvSnapshot::load_from_path(&path);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn osv_snapshot_from_advisories_computes_digest() {
+        let advisories = vec![advisory("GHSA-1", "npm", "pkg", "*", "high", false)];
+        let snapshot = OsvSnapshot::from_advisories(advisories);
+        assert_ne!(snapshot.digest, Sha256Digest::new([0; 32]));
+        assert_eq!(snapshot.advisories.len(), 1);
+    }
+
+    #[test]
+    fn kev_entry_to_advisory_marks_kev() {
+        let entry = KevEntry {
+            cve_id: "CVE-2026-9999".to_owned(),
+            vendor: "v".to_owned(),
+            product: "p".to_owned(),
+            vulnerability_name: "n".to_owned(),
+            date_added: None,
+            known_ransomware_use: true,
+        };
+        let adv = entry.to_advisory("npm", "pkg", "*");
+        assert!(adv.is_kev);
+        assert_eq!(adv.id, "CVE-2026-9999");
+        assert_eq!(adv.severity, "critical");
+    }
+}
+
+mod config_and_detector {
+    use super::*;
+    use arbitraitor_analysis::{AnalysisContext, Detector};
+    use arbitraitor_artifact::classify;
+    use sha2::{Digest, Sha256};
+
+    fn ctx(bytes: &[u8]) -> AnalysisContext<'_> {
+        AnalysisContext {
+            artifact_bytes: bytes,
+            classification: classify(bytes),
+            retrieval: None,
+            artifact_sha256: Sha256Digest::new(Sha256::digest(bytes).into()),
+        }
+    }
+
+    fn enabled_config() -> DepVulnConfig {
+        DepVulnConfig {
+            enabled: true,
+            update_mode: DepVulnUpdateMode::OfflineOnly,
+            osv_snapshot_path: None,
+            kev_snapshot_path: None,
+        }
+    }
+
+    #[test]
+    fn disabled_detector_produces_no_findings() -> Result<(), Box<dyn std::error::Error>> {
+        let config = DepVulnConfig::default();
+        assert!(!config.enabled);
+
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            config,
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-X",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "high",
+                false,
+            )])),
+            None,
+        );
+        assert!(!detector.is_enabled());
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert!(findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_detector_matches_advisory() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-MATCH",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "high",
+                false,
+            )])),
+            None,
+        );
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::High);
+        Ok(())
+    }
+
+    #[test]
+    fn detector_exposes_snapshot_digest() {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-1", "npm", "pkg", "*", "high", false,
+            )])),
+            None,
+        );
+        let digest = detector.snapshot_digest();
+        assert_ne!(digest, Sha256Digest::new([0; 32]));
+    }
+
+    #[test]
+    fn detector_provenance_records_ruleset_digest() {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-1", "npm", "pkg", "*", "high", false,
+            )])),
+            None,
+        );
+        let provenance = detector.provenance();
+        assert!(provenance.is_some_and(|p| p.ruleset_digest.is_some()));
+    }
+
+    #[test]
+    fn detector_metadata_has_vex_aware_capability() {
+        let detector =
+            DependencyVulnerabilityDetector::with_snapshots(enabled_config(), None, None);
+        let meta = detector.metadata();
+        assert!(meta.capabilities.contains(&"vex-aware".to_owned()));
+        assert!(meta.is_local);
+        assert!(!meta.may_upload);
+        assert!(meta.is_deterministic);
+    }
+
+    #[test]
+    fn from_config_loads_osv_snapshot_from_disk() -> Result<(), Box<dyn std::error::Error>> {
+        let advisories = vec![advisory(
+            "GHSA-CONFIG",
+            "crates.io",
+            "serde",
+            ">=1.0.0",
+            "high",
+            false,
+        )];
+        let json = serde_json::to_vec(&advisories)?;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("osv.json");
+        std::fs::write(&path, &json)?;
+
+        let config = DepVulnConfig {
+            enabled: true,
+            update_mode: DepVulnUpdateMode::OfflineOnly,
+            osv_snapshot_path: Some(path),
+            kev_snapshot_path: None,
+        };
+        let detector = DependencyVulnerabilityDetector::from_config(config)?;
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].id.contains("GHSA-CONFIG"));
+        Ok(())
+    }
+}
+
+mod vex_interaction {
+    use super::*;
+    use arbitraitor_analysis::{AnalysisContext, Detector};
+    use arbitraitor_artifact::classify;
+    use arbitraitor_model::vex::{
+        VexFormatVersion, VexIssuer, VexJustification, VexProductId, VexStatement, VexStatus,
+        VexVulnerabilityId,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn ctx(bytes: &[u8]) -> AnalysisContext<'_> {
+        AnalysisContext {
+            artifact_bytes: bytes,
+            classification: classify(bytes),
+            retrieval: None,
+            artifact_sha256: Sha256Digest::new(Sha256::digest(bytes).into()),
+        }
+    }
+
+    fn vex_statement(vuln_id: &str, status: VexStatus) -> VexStatement {
+        VexStatement {
+            format_version: VexFormatVersion::OpenVex0_2_0,
+            issuer: VexIssuer::new("pkg:github/owner/repo"),
+            subject: VexProductId::new("pkg:crates.io/serde"),
+            vulnerability: VexVulnerabilityId::new(vuln_id),
+            status,
+            justification: Some(VexJustification::VulnerableCodeNotPresent),
+            statement: None,
+            timestamp: Some(1_700_000_000),
+        }
+    }
+
+    fn enabled_config() -> DepVulnConfig {
+        DepVulnConfig {
+            enabled: true,
+            update_mode: DepVulnUpdateMode::OfflineOnly,
+            osv_snapshot_path: None,
+            kev_snapshot_path: None,
+        }
+    }
+
+    #[test]
+    fn vex_fixed_downgrades_severity() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-VEX-1",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "high",
+                false,
+            )])),
+            None,
+        )
+        .with_vex_statements(vec![vex_statement("GHSA-VEX-1", VexStatus::Fixed)]);
+
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].severity,
+            Severity::Medium,
+            "high should downgrade to medium when VEX says fixed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vex_not_affected_downgrades_severity() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-VEX-2",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "critical",
+                false,
+            )])),
+            None,
+        )
+        .with_vex_statements(vec![vex_statement("GHSA-VEX-2", VexStatus::NotAffected)]);
+
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].severity,
+            Severity::High,
+            "critical should downgrade to high when VEX says not_affected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vex_affected_does_not_downgrade() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-VEX-3",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "high",
+                false,
+            )])),
+            None,
+        )
+        .with_vex_statements(vec![vex_statement("GHSA-VEX-3", VexStatus::Affected)]);
+
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].severity,
+            Severity::High,
+            "severity should not change when VEX says affected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vex_for_different_advisory_does_not_downgrade() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-VEX-4",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "high",
+                false,
+            )])),
+            None,
+        )
+        .with_vex_statements(vec![vex_statement("GHSA-OTHER", VexStatus::Fixed)]);
+
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].severity,
+            Severity::High,
+            "severity should not change when VEX is for a different advisory"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_vex_statements_preserves_severity() -> Result<(), Box<dyn std::error::Error>> {
+        let detector = DependencyVulnerabilityDetector::with_snapshots(
+            enabled_config(),
+            Some(OsvSnapshot::from_advisories(vec![advisory(
+                "GHSA-NOVEX",
+                "crates.io",
+                "serde",
+                ">=1.0.0",
+                "high",
+                false,
+            )])),
+            None,
+        );
+
+        let findings = detector.analyze(&ctx(cargo_lock()))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::High);
+        Ok(())
+    }
+}
+
+mod update_mode {
+    use super::*;
+
+    #[test]
+    fn default_is_offline_only() {
+        assert_eq!(DepVulnUpdateMode::default(), DepVulnUpdateMode::OfflineOnly);
+    }
+
+    #[test]
+    fn config_default_is_disabled() {
+        let config = DepVulnConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.update_mode, DepVulnUpdateMode::OfflineOnly);
+        assert!(config.osv_snapshot_path.is_none());
+        assert!(config.kev_snapshot_path.is_none());
+    }
+
+    #[test]
+    fn config_serializes_with_snake_case_update_mode() -> Result<(), Box<dyn std::error::Error>> {
+        let config = DepVulnConfig {
+            enabled: true,
+            update_mode: DepVulnUpdateMode::OnlineWithRedaction,
+            osv_snapshot_path: None,
+            kev_snapshot_path: None,
+        };
+        let json = serde_json::to_string(&config)?;
+        assert!(json.contains("\"online_with_redaction\""));
         Ok(())
     }
 }
