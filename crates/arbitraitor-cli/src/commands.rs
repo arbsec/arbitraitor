@@ -536,7 +536,7 @@ pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
     writeln!(
         stdout,
         "Artifact: {}",
-        sanitize_for_agent(&receipt.artifact_sha256)
+        sanitize_for_agent(&receipt.artifact.sha256)
     )
     .into_diagnostic()?;
     writeln!(stdout, "Verdict: {:?}", receipt.verdict.verdict).into_diagnostic()?;
@@ -1287,7 +1287,7 @@ pub(crate) fn approve(command: &ApproveCommand, _config: &Config) -> Result<()> 
     let receipt_bytes = std::fs::read(&command.receipt).into_diagnostic()?;
     let receipt: Receipt = serde_json::from_slice(&receipt_bytes)
         .map_err(|e| miette::miette!("invalid receipt file: {e}"))?;
-    let sha = &receipt.artifact_sha256;
+    let sha = &receipt.artifact.sha256;
     let verdict = receipt.verdict.verdict;
 
     let mut stderr = std::io::stderr().lock();
@@ -1328,17 +1328,18 @@ fn write_approval_for_receipt(
         .map_or(0, |d| d.as_secs());
     let expiry = now + 300;
 
-    let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::from_str(&receipt.artifact_sha256)
+    let artifact_sha256 = arbitraitor_model::ids::Sha256Digest::from_str(&receipt.artifact.sha256)
         .map_err(|e| miette::miette!("invalid SHA-256 in receipt: {e}"))?;
     let plan_inputs = crate::approval::ExecutionPlanInputs {
         artifact_sha256,
         network_isolated: true,
         policy_snapshot_digest: receipt
+            .policy
             .policy_digest
             .clone()
             .unwrap_or_else(|| "unset".to_owned()),
         detector_snapshot_digest: receipt
-            .detector_versions
+            .detectors
             .iter()
             .map(|d| format!("{}:{}", d.id, d.version))
             .collect::<Vec<_>>()

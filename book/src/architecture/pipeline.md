@@ -173,31 +173,46 @@ Every pipeline run produces a receipt regardless of verdict. Receipts are:
 
 ```json
 {
-  "receipt_version": "1.0",
-  "artifact_digest": "sha256:7c1a...",
-  "source": {
-    "url": "https://example.com/install.sh",
-    "final_url": "https://example.com/install.sh",
-    "ip": "93.184.216.34",
-    "tls_cert": {
-      "subject": "example.com",
-      "issuer": "Let's Encrypt",
-      "fingerprint": "sha256:3b2a..."
-    }
+  "schema_version": 2,
+  "request": {
+    "arbitraitor_version": "0.1.0"
   },
-  "content_type": "application/x-shellscript",
+  "artifact": {
+    "sha256": "7c1a...",
+    "size": 4096,
+    "artifact_type": "shell-script"
+  },
+  "retrieval": {
+    "requested_url": "https://example.com/install.sh",
+    "final_url": "https://example.com/install.sh",
+    "status_code": 200,
+    "content_type": "application/x-shellscript",
+    "byte_count": 4096,
+    "tls_version": "TLSv1.3"
+  },
+  "provenance": {},
+  "payload_graph": null,
+  "detectors": [],
   "findings": [
     {
-      "detector": "shell",
       "id": "network:curl",
+      "category": "suspicious_script_behavior",
       "severity": "high",
+      "confidence": "high",
       "title": "Downloads content via curl"
     }
   ],
-  "verdict": "warn",
-  "assurance_level": "inspect",
-  "policy_snapshot_digest": "sha256:91ab...",
-  "timestamp": "2026-06-23T12:00:00Z"
+  "policy": {},
+  "verdict": {
+    "verdict": "warn",
+    "deciding_rule": null,
+    "policy_trace": []
+  },
+  "release": null,
+  "timestamps": {
+    "created": "2026-06-23T12:00:00Z",
+    "modified": "2026-06-23T12:00:00Z"
+  }
 }
 ```
 

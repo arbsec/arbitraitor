@@ -47,7 +47,7 @@ impl FromStr for SigningMethod {
 
 /// A receipt signature produced by a [`ReceiptSigner`].
 ///
-/// Stored in [`Receipt::signatures`](crate::Receipt::signatures) and serialized
+/// Stored in [`Receipt::provenance`](crate::Receipt::provenance) and serialized
 /// as part of the receipt JSON. The signature is computed over the RFC 8785
 /// JCS canonical bytes of the receipt with all signature fields cleared
 /// (ADR-0014).

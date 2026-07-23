@@ -409,9 +409,9 @@ impl ArbitraitorApi {
                 continue;
             }
             summaries.push(ReceiptSummary {
-                sha256: receipt.artifact_sha256.clone(),
+                sha256: receipt.artifact.sha256.clone(),
                 verdict: receipt.verdict.verdict,
-                size_bytes: receipt.artifact_size,
+                size_bytes: receipt.artifact.size,
                 created_at,
                 findings_count: receipt.findings.len(),
             });

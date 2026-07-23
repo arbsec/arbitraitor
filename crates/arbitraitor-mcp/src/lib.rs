@@ -555,7 +555,7 @@ impl InMemoryReceiptStore {
     /// `artifact_sha256` is not a valid 64-character hex string, or
     /// [`ReceiptLookupError::Poisoned`] when the internal lock is poisoned.
     pub fn record(&self, receipt: Receipt) -> Result<Sha256Digest, ReceiptLookupError> {
-        let digest: Sha256Digest = receipt.artifact_sha256.parse().map_err(
+        let digest: Sha256Digest = receipt.artifact.sha256.parse().map_err(
             |error: arbitraitor_model::ids::Sha256DigestParseError| {
                 ReceiptLookupError::InvalidDigest(error.to_string())
             },

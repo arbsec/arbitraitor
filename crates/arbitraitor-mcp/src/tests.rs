@@ -358,11 +358,11 @@ fn query_receipt_returns_known_receipt() {
     assert_eq!(json["release_performed"], false);
     assert_eq!(json["found"], true);
     assert_eq!(json["sha256"], digest.to_string());
-    assert_eq!(json["receipt"]["schema_version"], 1);
+    assert_eq!(json["receipt"]["schema_version"], 2);
     assert!(
-        json["receipt"]["artifact_sha256"]
+        json["receipt"]["artifact"]["sha256"]
             .as_str()
-            .is_some_and(|value| value.contains(&receipt.artifact_sha256))
+            .is_some_and(|value| value.contains(&receipt.artifact.sha256))
     );
     assert!(json["agent_identity"].is_object());
 }

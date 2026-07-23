@@ -1,10 +1,19 @@
 //! Immutable scan receipt generation and verification
 //!
 //! See `docs/spec/` for the full specification.
+//!
+//! ## Schema v2 — top-level envelope (spec §31.1)
+//!
+//! Starting with schema version 2, the receipt JSON uses a top-level envelope
+//! structure with grouped buckets: `request`, `artifact`, `retrieval`,
+//! `provenance`, `payload_graph`, `detectors`, `findings`, `policy`,
+//! `verdict`, `release`, and `timestamps`. Use [`Receipt::parse`] to read
+//! receipts that may use either v1 (flat) or v2 (envelope) schema.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod migration;
 pub mod signing;
 pub use signing::{
     MinisignSigner, ReceiptSigner, Signature, SignerError, SigningMethod, StubSigner,
@@ -25,66 +34,94 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-/// Current receipt schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Current receipt schema version (spec §31.1 envelope structure).
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
-/// Tamper-evident audit record for an inspected artifact.
+/// Legacy v1 receipt schema version (flat structure, pre-envelope).
+pub const V1_SCHEMA_VERSION: u32 = 1;
+
+/// Tamper-evident audit record for an inspected artifact (spec §31.1).
+///
+/// Schema v2 groups fields into top-level envelope buckets:
+/// `request`, `artifact`, `retrieval`, `provenance`, `payload_graph`,
+/// `detectors`, `findings`, `policy`, `verdict`, `release`, `timestamps`.
+///
+/// Use [`Receipt::parse`] to deserialize JSON that may be either v1 (flat)
+/// or v2 (envelope) format.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
-    /// Receipt schema version. Currently [`CURRENT_SCHEMA_VERSION`].
+    /// Receipt schema version. Currently [`CURRENT_SCHEMA_VERSION`] (2).
     pub schema_version: u32,
+    /// Request metadata: Arbitraitor version and configuration digest.
+    pub request: RequestInfo,
+    /// Artifact identity: SHA-256 digest, size, and optional type label.
+    pub artifact: ArtifactInfo,
+    /// Optional redacted retrieval metadata.
+    pub retrieval: Option<RetrievalInfo>,
+    /// Provenance: verifier identity, detector binary provenance, and signatures.
+    pub provenance: ProvenanceInfo,
+    /// Payload graph recording artifacts and their relationships (spec §20).
+    /// `None` when no recursive payload discovery was performed.
+    pub payload_graph: Option<PayloadGraph>,
+    /// Detector versions that contributed to this receipt.
+    pub detectors: Vec<DetectorVersion>,
+    /// Finding summaries included in the receipt.
+    pub findings: Vec<FindingSummary>,
+    /// Policy metadata: policy digest, allow-rule metadata, and audit trail.
+    pub policy: PolicyInfo,
+    /// Final policy verdict information.
+    pub verdict: VerdictInfo,
+    /// Optional release information including approval and effective controls.
+    pub release: Option<ReleaseInfo>,
+    /// Receipt creation and update timestamps.
+    pub timestamps: ReceiptTimestamps,
+}
+
+/// Request metadata bucket (spec §31.1 `request`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestInfo {
     /// Arbitraitor version that produced the receipt.
     pub arbitraitor_version: String,
     /// Digest of the effective configuration snapshot, when available.
-    pub config_digest: Option<String>,
-    /// Digest of the effective policy snapshot, when available.
-    pub policy_digest: Option<String>,
-    /// SHA-256 digest of the inspected artifact as lowercase hexadecimal.
-    pub artifact_sha256: String,
-    /// Size of the inspected artifact in bytes.
-    pub artifact_size: u64,
-    /// Optional artifact type label.
-    pub artifact_type: Option<String>,
-    /// Optional redacted retrieval metadata.
-    pub retrieval: Option<RetrievalInfo>,
-    /// Finding summaries included in the receipt.
-    pub findings: Vec<FindingSummary>,
-    /// Final policy verdict information.
-    pub verdict: VerdictInfo,
-    /// Optional release information.
-    pub release: Option<ReleaseInfo>,
-    /// Detector versions that contributed to this receipt.
-    pub detector_versions: Vec<DetectorVersion>,
-    /// Security-relevant operator decisions recorded for audit.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub audit_trail: Vec<AuditEvent>,
-    /// Binary provenance for subprocess detectors (sha256, version, ruleset digest).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub detector_provenance: Vec<DetectorProvenance>,
-    /// Receipt creation and update timestamps.
-    pub timestamps: ReceiptTimestamps,
-    /// Per-control effective-controls matrix (ADR-0007). Present only for
-    /// contained execution contexts; `None` for inspect/mediated.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub effective_controls: Option<EffectiveControls>,
-    /// Metadata from allow rules that authorized release.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow_rule_metadata: Vec<AllowRuleMetadata>,
-    /// Plan-bound approval and override binding metadata, when execution used approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval: Option<ApprovalInfo>,
+    pub config_digest: Option<String>,
+}
+
+/// Artifact identity bucket (spec §31.1 `artifact`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactInfo {
+    /// SHA-256 digest of the inspected artifact as lowercase hexadecimal.
+    pub sha256: String,
+    /// Size of the inspected artifact in bytes.
+    pub size: u64,
+    /// Optional artifact type label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+}
+
+/// Provenance bucket (spec §31.1 `provenance`).
+///
+/// Holds verifier identity, detector binary provenance, and receipt
+/// signatures. The signature fields are cleared by
+/// [`Receipt::unsigned_canonical_bytes`] before canonicalization so
+/// signatures are not self-referential (ADR-0014).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceInfo {
     /// Identity of the verifier that accepted a Sigstore bundle (ADR-0014,
     /// issue #457). Records the cosign/sigstore-rust version used for
     /// verification so downstream consumers can audit which verifier accepted
     /// the attestation. `None` when no Sigstore verification was performed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_identity: Option<String>,
-    /// Payload graph recording artifacts and their relationships (spec §20,
-    /// issue #517). `None` when no recursive payload discovery was performed.
+    /// Binary provenance for subprocess detectors (sha256, version, ruleset digest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detector_provenance: Vec<DetectorProvenance>,
+    /// Optional detached minisign signature over the canonical unsigned receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_graph: Option<PayloadGraph>,
-    /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
     /// Signatures produced by [`ReceiptSigner`] adapters (spec §31.3).
     ///
@@ -94,6 +131,21 @@ pub struct Receipt {
     /// self-referential (ADR-0014).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signatures: Vec<Signature>,
+}
+
+/// Policy metadata bucket (spec §31.1 `policy`).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyInfo {
+    /// Digest of the effective policy snapshot, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_digest: Option<String>,
+    /// Metadata from allow rules that authorized release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_rule_metadata: Vec<AllowRuleMetadata>,
+    /// Security-relevant operator decisions recorded for audit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit_trail: Vec<AuditEvent>,
 }
 
 /// Metadata from an allow rule recorded in the receipt audit trail.
@@ -155,15 +207,16 @@ impl Receipt {
     /// Return canonical bytes with the signature field cleared.
     ///
     /// This is the exact payload signed by [`sign_receipt`] and verified by
-    /// [`verify_receipt`], preventing recursive signatures.
+    /// [`verify_receipt`], preventing recursive signatures. In schema v2,
+    /// signatures live under `provenance.signature` and `provenance.signatures`.
     ///
     /// # Errors
     ///
     /// Returns an error if serialization fails.
     pub fn unsigned_canonical_bytes(&self) -> Result<Vec<u8>, ReceiptError> {
         let mut unsigned = self.clone();
-        unsigned.signature = None;
-        unsigned.signatures.clear();
+        unsigned.provenance.signature = None;
+        unsigned.provenance.signatures.clear();
         unsigned.canonical_bytes()
     }
 
@@ -179,7 +232,8 @@ impl Receipt {
     /// fails.
     pub fn to_intoto_statement(&self) -> Result<IntotoStatement, ReceiptError> {
         let artifact_sha256 = self
-            .artifact_sha256
+            .artifact
+            .sha256
             .parse::<Sha256Digest>()
             .map_err(ReceiptError::InvalidArtifactDigest)?;
         let predicate = serde_json::to_value(self).map_err(ReceiptError::Canonicalize)?;
@@ -194,6 +248,66 @@ impl Receipt {
             predicate_type: "https://arbitraitor.dev/verdict/v1".to_owned(),
             predicate,
         })
+    }
+
+    /// Parse a receipt from JSON, accepting either v1 (flat) or v2 (envelope)
+    /// schema (spec §31.1). v1 receipts are automatically migrated to v2.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReceiptError::Parse`] if the JSON cannot be parsed as either
+    /// v1 or v2 format.
+    pub fn parse(json: &str) -> Result<Self, ReceiptError> {
+        match serde_json::from_str::<Self>(json) {
+            Ok(receipt) => Ok(receipt),
+            Err(v2_error) => match serde_json::from_str::<migration::ReceiptV1>(json) {
+                Ok(v1) => Ok(Self::from_v1(v1)),
+                Err(v1_error) => Err(ReceiptError::Parse { v2_error, v1_error }),
+            },
+        }
+    }
+
+    /// Migrate a legacy v1 (flat) receipt to the current v2 envelope schema.
+    #[must_use]
+    pub fn from_v1(v1: migration::ReceiptV1) -> Self {
+        let release = v1.release.map(|r| ReleaseInfo {
+            method: r.method,
+            destination: r.destination,
+            sha256_verified: r.sha256_verified,
+            timestamp: r.timestamp,
+            approval: v1.approval.clone(),
+            effective_controls: v1.effective_controls.clone(),
+        });
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            request: RequestInfo {
+                arbitraitor_version: v1.arbitraitor_version,
+                config_digest: v1.config_digest,
+            },
+            artifact: ArtifactInfo {
+                sha256: v1.artifact_sha256,
+                size: v1.artifact_size,
+                artifact_type: v1.artifact_type,
+            },
+            retrieval: v1.retrieval,
+            provenance: ProvenanceInfo {
+                verifier_identity: v1.verifier_identity,
+                detector_provenance: v1.detector_provenance,
+                signature: v1.signature,
+                signatures: v1.signatures,
+            },
+            payload_graph: v1.payload_graph,
+            detectors: v1.detector_versions,
+            findings: v1.findings,
+            policy: PolicyInfo {
+                policy_digest: v1.policy_digest,
+                allow_rule_metadata: v1.allow_rule_metadata,
+                audit_trail: v1.audit_trail,
+            },
+            verdict: v1.verdict,
+            release,
+            timestamps: v1.timestamps,
+        }
     }
 }
 
@@ -422,8 +536,11 @@ pub struct VerdictInfo {
     pub policy_trace: Vec<String>,
 }
 
-/// Release information included when an artifact is released.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Release information included when an artifact is released (spec §31.1 `release`).
+///
+/// In schema v2, `approval` and `effective_controls` are nested inside
+/// `release` rather than at the top level.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseInfo {
     /// Release method.
@@ -434,6 +551,15 @@ pub struct ReleaseInfo {
     pub sha256_verified: bool,
     /// Release timestamp.
     pub timestamp: String,
+    /// Plan-bound approval and override binding metadata, when execution used
+    /// approval (moved from top-level in v1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalInfo>,
+    /// Per-control effective-controls matrix (ADR-0007). Present only for
+    /// contained execution contexts; `None` for inspect/mediated (moved from
+    /// top-level in v1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_controls: Option<EffectiveControls>,
 }
 
 /// Supported artifact release methods.
@@ -502,6 +628,8 @@ pub struct SignedReceipt {
 #[derive(Clone, Debug)]
 pub struct ReceiptBuilder {
     receipt: Receipt,
+    pending_approval: Option<ApprovalInfo>,
+    pending_effective_controls: Option<EffectiveControls>,
 }
 
 impl ReceiptBuilder {
@@ -517,49 +645,48 @@ impl ReceiptBuilder {
         Self {
             receipt: Receipt {
                 schema_version: CURRENT_SCHEMA_VERSION,
-                arbitraitor_version: arbitraitor_version.into(),
-                config_digest: None,
-                policy_digest: None,
-                artifact_sha256: artifact_sha256.into(),
-                artifact_size,
-                artifact_type: None,
+                request: RequestInfo {
+                    arbitraitor_version: arbitraitor_version.into(),
+                    config_digest: None,
+                },
+                artifact: ArtifactInfo {
+                    sha256: artifact_sha256.into(),
+                    size: artifact_size,
+                    artifact_type: None,
+                },
                 retrieval: None,
+                provenance: ProvenanceInfo::default(),
+                payload_graph: None,
+                detectors: Vec::new(),
                 findings: Vec::new(),
+                policy: PolicyInfo::default(),
                 verdict,
                 release: None,
-                detector_versions: Vec::new(),
-                audit_trail: Vec::new(),
-                detector_provenance: Vec::new(),
                 timestamps,
-                effective_controls: None,
-                allow_rule_metadata: Vec::new(),
-                approval: None,
-                verifier_identity: None,
-                payload_graph: None,
-                signature: None,
-                signatures: Vec::new(),
             },
+            pending_approval: None,
+            pending_effective_controls: None,
         }
     }
 
     /// Set the configuration digest.
     #[must_use]
     pub fn config_digest(mut self, digest: impl Into<String>) -> Self {
-        self.receipt.config_digest = Some(digest.into());
+        self.receipt.request.config_digest = Some(digest.into());
         self
     }
 
     /// Set the policy digest.
     #[must_use]
     pub fn policy_digest(mut self, digest: impl Into<String>) -> Self {
-        self.receipt.policy_digest = Some(digest.into());
+        self.receipt.policy.policy_digest = Some(digest.into());
         self
     }
 
     /// Set the artifact type label.
     #[must_use]
     pub fn artifact_type(mut self, artifact_type: impl Into<String>) -> Self {
-        self.receipt.artifact_type = Some(artifact_type.into());
+        self.receipt.artifact.artifact_type = Some(artifact_type.into());
         self
     }
 
@@ -587,9 +714,16 @@ impl ReceiptBuilder {
         self
     }
 
-    /// Set release metadata.
+    /// Set release metadata. Pending approval and effective controls set via
+    /// [`Self::approval`] or [`Self::effective_controls`] are merged into the
+    /// release info.
     #[must_use]
-    pub fn release(mut self, release: ReleaseInfo) -> Self {
+    pub fn release(mut self, mut release: ReleaseInfo) -> Self {
+        release.approval = self.pending_approval.take().or(release.approval);
+        release.effective_controls = self
+            .pending_effective_controls
+            .take()
+            .or(release.effective_controls);
         self.receipt.release = Some(release);
         self
     }
@@ -597,28 +731,33 @@ impl ReceiptBuilder {
     /// Add detector version metadata.
     #[must_use]
     pub fn detector_version(mut self, detector_version: DetectorVersion) -> Self {
-        self.receipt.detector_versions.push(detector_version);
+        self.receipt.detectors.push(detector_version);
         self
     }
 
     /// Add a security audit event.
     #[must_use]
     pub fn audit_event(mut self, event: AuditEvent) -> Self {
-        self.receipt.audit_trail.push(event);
+        self.receipt.policy.audit_trail.push(event);
         self
     }
 
     /// Add detector binary provenance metadata (subprocess detectors).
     #[must_use]
     pub fn detector_provenance(mut self, provenance: DetectorProvenance) -> Self {
-        self.receipt.detector_provenance.push(provenance);
+        self.receipt.provenance.detector_provenance.push(provenance);
         self
     }
 
-    /// Set the per-control effective-controls matrix (ADR-0007).
+    /// Set the per-control effective-controls matrix (ADR-0007). Stored
+    /// pending until [`Self::release`] is set, then merged into the release.
     #[must_use]
     pub fn effective_controls(mut self, controls: EffectiveControls) -> Self {
-        self.receipt.effective_controls = Some(controls);
+        if let Some(release) = &mut self.receipt.release {
+            release.effective_controls = Some(controls);
+        } else {
+            self.pending_effective_controls = Some(controls);
+        }
         self
     }
 
@@ -628,14 +767,19 @@ impl ReceiptBuilder {
     where
         I: IntoIterator<Item = AllowRuleMetadata>,
     {
-        self.receipt.allow_rule_metadata.extend(metadata);
+        self.receipt.policy.allow_rule_metadata.extend(metadata);
         self
     }
 
-    /// Set plan-bound approval metadata.
+    /// Set plan-bound approval metadata. Stored pending until
+    /// [`Self::release`] is set, then merged into the release.
     #[must_use]
     pub fn approval(mut self, approval: ApprovalInfo) -> Self {
-        self.receipt.approval = Some(approval);
+        if let Some(release) = &mut self.receipt.release {
+            release.approval = Some(approval);
+        } else {
+            self.pending_approval = Some(approval);
+        }
         self
     }
 
@@ -643,7 +787,7 @@ impl ReceiptBuilder {
     /// issue #457).
     #[must_use]
     pub fn verifier_identity(mut self, identity: impl Into<String>) -> Self {
-        self.receipt.verifier_identity = Some(identity.into());
+        self.receipt.provenance.verifier_identity = Some(identity.into());
         self
     }
 
@@ -657,13 +801,22 @@ impl ReceiptBuilder {
     /// Add a receipt signature (spec §31.3).
     #[must_use]
     pub fn signature(mut self, signature: Signature) -> Self {
-        self.receipt.signatures.push(signature);
+        self.receipt.provenance.signatures.push(signature);
         self
     }
 
-    /// Finish the receipt.
+    /// Finish the receipt. Merges any pending approval and effective controls
+    /// into the release info if one was set.
     #[must_use]
-    pub fn build(self) -> Receipt {
+    pub fn build(mut self) -> Receipt {
+        if let Some(release) = &mut self.receipt.release {
+            if release.approval.is_none() {
+                release.approval = self.pending_approval.take();
+            }
+            if release.effective_controls.is_none() {
+                release.effective_controls = self.pending_effective_controls.take();
+            }
+        }
         self.receipt
     }
 }
@@ -683,6 +836,14 @@ pub enum ReceiptError {
     /// Receipt artifact digest was not valid SHA-256 hex.
     #[error("receipt artifact SHA-256 is invalid: {0}")]
     InvalidArtifactDigest(Sha256DigestParseError),
+    /// Receipt JSON could not be parsed as either v1 or v2 schema.
+    #[error("receipt parsing failed (v2: {v2_error}; v1: {v1_error})")]
+    Parse {
+        /// Error when parsing as v2 envelope schema.
+        v2_error: serde_json::Error,
+        /// Error when parsing as v1 flat schema.
+        v1_error: serde_json::Error,
+    },
 }
 
 /// Errors produced while verifying signed receipts.
@@ -730,7 +891,7 @@ pub fn sign_receipt(
     })?;
 
     let mut signed_receipt = receipt.clone();
-    signed_receipt.signature = Some(ReceiptSignature {
+    signed_receipt.provenance.signature = Some(ReceiptSignature {
         algorithm: "minisign-ed25519-blake2b-prehashed".to_owned(),
         key_id: hex_upper(key.pk.keynum()),
         signature_bytes: signature.to_bytes(),
@@ -753,6 +914,7 @@ pub fn verify_receipt(
 ) -> Result<(), VerifyError> {
     let signature = signed
         .receipt
+        .provenance
         .signature
         .as_ref()
         .ok_or(VerifyError::MissingSignature)?;
@@ -774,6 +936,9 @@ pub fn verify_receipt(
             ReceiptError::Sign { reason } => VerifyError::InvalidSignature { reason },
             ReceiptError::InvalidArtifactDigest(error) => VerifyError::InvalidSignature {
                 reason: error.to_string(),
+            },
+            ReceiptError::Parse { v1_error, .. } => VerifyError::InvalidSignature {
+                reason: v1_error.to_string(),
             },
         })?;
 
@@ -880,6 +1045,8 @@ mod tests {
             destination: Some("/tmp/install.sh".to_owned()),
             sha256_verified: true,
             timestamp: "2026-06-17T00:00:01Z".to_owned(),
+            approval: None,
+            effective_controls: None,
         })
         .detector_version(DetectorVersion {
             id: "detector.shell".to_owned(),
@@ -939,6 +1106,14 @@ mod tests {
                 modified: "2026-06-17T00:00:00Z".to_owned(),
             },
         )
+        .release(ReleaseInfo {
+            method: ReleaseMethod::Execute,
+            destination: None,
+            sha256_verified: true,
+            timestamp: "2026-06-17T00:00:00Z".to_owned(),
+            approval: None,
+            effective_controls: None,
+        })
         .approval(sample_approval(Some(0)))
         .build();
 
@@ -947,7 +1122,11 @@ mod tests {
 
         assert_eq!(decoded, receipt);
         assert_eq!(
-            decoded.approval.as_ref().and_then(|info| info.exit_status),
+            decoded
+                .release
+                .as_ref()
+                .and_then(|r| r.approval.as_ref())
+                .and_then(|info| info.exit_status),
             Some(0)
         );
         Ok(())
@@ -983,7 +1162,7 @@ mod tests {
         let json = serde_json::to_string(&receipt)?;
         let decoded: Receipt = serde_json::from_str(&json)?;
 
-        assert_eq!(decoded.allow_rule_metadata, vec![metadata]);
+        assert_eq!(decoded.policy.allow_rule_metadata, vec![metadata]);
         Ok(())
     }
 
@@ -993,7 +1172,10 @@ mod tests {
 
         let decoded: Receipt = serde_json::from_str(&json)?;
 
-        assert_eq!(decoded.approval, None);
+        assert_eq!(
+            decoded.release.as_ref().and_then(|r| r.approval.as_ref()),
+            None
+        );
         Ok(())
     }
 
@@ -1019,7 +1201,10 @@ mod tests {
         let json = serde_json::to_string(&receipt)?;
         let decoded: Receipt = serde_json::from_str(&json)?;
 
-        assert_eq!(decoded.verifier_identity.as_deref(), Some("cosign 3.0.5"));
+        assert_eq!(
+            decoded.provenance.verifier_identity.as_deref(),
+            Some("cosign 3.0.5")
+        );
         Ok(())
     }
 
@@ -1032,7 +1217,7 @@ mod tests {
             "verifier_identity must be omitted when None"
         );
         let decoded: Receipt = serde_json::from_str(&json)?;
-        assert_eq!(decoded.verifier_identity, None);
+        assert_eq!(decoded.provenance.verifier_identity, None);
         Ok(())
     }
 
@@ -1089,12 +1274,16 @@ mod tests {
     #[test]
     fn payload_graph_absent_when_not_set() -> Result<(), Box<dyn std::error::Error>> {
         let receipt = sample_receipt();
-        let json = serde_json::to_string(&receipt)?;
+        let json = serde_json::to_value(&receipt)?;
         assert!(
-            !json.contains("payload_graph"),
-            "payload_graph must be omitted when None"
+            json.get("payload_graph").is_some(),
+            "payload_graph key must always be present in envelope (spec §31.1)"
         );
-        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert!(
+            json["payload_graph"].is_null(),
+            "payload_graph must be null when not set"
+        );
+        let decoded: Receipt = serde_json::from_value(json)?;
         assert_eq!(decoded.payload_graph, None);
         Ok(())
     }
@@ -1104,19 +1293,26 @@ mod tests {
     {
         let receipt = sample_receipt();
         let mut value = serde_json::to_value(&receipt)?;
-        let object = value
-            .as_object_mut()
-            .ok_or("receipt JSON must be an object")?;
-        object.insert("approval".to_owned(), serde_json::Value::Null);
+        let release = value
+            .get_mut("release")
+            .and_then(|v| v.as_object_mut())
+            .ok_or("receipt JSON must have a release object")?;
+        release.insert("approval".to_owned(), serde_json::Value::Null);
         let decoded: Receipt = serde_json::from_value(value)?;
 
-        assert_eq!(decoded.approval, None);
+        assert_eq!(
+            decoded.release.as_ref().and_then(|r| r.approval.as_ref()),
+            None
+        );
         assert_eq!(decoded.canonical_bytes()?, receipt.canonical_bytes()?);
+        let decoded_json = serde_json::to_value(&decoded)?;
+        let release_json = decoded_json
+            .get("release")
+            .and_then(|v| v.as_object())
+            .ok_or("receipt JSON must have a release object")?;
         assert!(
-            !serde_json::to_value(&decoded)?
-                .as_object()
-                .ok_or("receipt JSON must be an object")?
-                .contains_key("approval")
+            !release_json.contains_key("approval"),
+            "approval must be omitted when None"
         );
         Ok(())
     }
@@ -1152,7 +1348,7 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_rejects_extra_fields() {
-        let json = r#"{"schema_version":1,"arbitraitor_version":"0.1.0","config_digest":null,"policy_digest":null,"artifact_sha256":"abababababababababababababababababababababababababababababababab","artifact_size":1,"artifact_type":null,"retrieval":null,"findings":[],"verdict":{"verdict":"pass","deciding_rule":null,"policy_trace":[]},"release":null,"detector_versions":[],"timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},"signature":null,"extra":true}"#;
+        let json = r#"{"schema_version":2,"request":{"arbitraitor_version":"0.1.0"},"artifact":{"sha256":"abababababababababababababababababababababababababababababababab","size":1},"retrieval":null,"provenance":{},"payload_graph":null,"detectors":[],"findings":[],"policy":{},"verdict":{"verdict":"pass","deciding_rule":null,"policy_trace":[]},"release":null,"timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},"extra":true}"#;
         assert!(serde_json::from_str::<Receipt>(json).is_err());
     }
 
@@ -1226,6 +1422,14 @@ mod tests {
                 modified: "2026-06-17T00:00:00Z".to_owned(),
             },
         )
+        .release(ReleaseInfo {
+            method: ReleaseMethod::Execute,
+            destination: None,
+            sha256_verified: true,
+            timestamp: "2026-06-17T00:00:00Z".to_owned(),
+            approval: None,
+            effective_controls: None,
+        })
         .effective_controls(controls.clone())
         .build();
 
@@ -1243,7 +1447,13 @@ mod tests {
             "serialized receipt must include user namespace availability"
         );
         let decoded: Receipt = serde_json::from_str(&json)?;
-        assert_eq!(decoded.effective_controls, Some(controls));
+        assert_eq!(
+            decoded
+                .release
+                .as_ref()
+                .and_then(|r| r.effective_controls.as_ref()),
+            Some(&controls)
+        );
         Ok(())
     }
 
@@ -1295,7 +1505,7 @@ mod tests {
         verify_receipt(&signed, &key.pk)?;
 
         let mut tampered = signed.clone();
-        tampered.receipt.artifact_size += 1;
+        tampered.receipt.artifact.size += 1;
         assert!(matches!(
             verify_receipt(&tampered, &key.pk),
             Err(VerifyError::InvalidSignature { .. })
@@ -1334,9 +1544,12 @@ mod tests {
         let json = serde_json::to_string(&receipt)?;
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded, receipt);
-        assert_eq!(decoded.signatures.len(), 2);
-        assert_eq!(decoded.signatures[0].method, SigningMethod::Minisign);
-        assert_eq!(decoded.signatures[1].method, SigningMethod::Tpm);
+        assert_eq!(decoded.provenance.signatures.len(), 2);
+        assert_eq!(
+            decoded.provenance.signatures[0].method,
+            SigningMethod::Minisign
+        );
+        assert_eq!(decoded.provenance.signatures[1].method, SigningMethod::Tpm);
         Ok(())
     }
 
@@ -1486,11 +1699,11 @@ mod tests {
 
         assert_eq!(
             json["subject"][0]["name"],
-            format!("sha256:{}", receipt.artifact_sha256)
+            format!("sha256:{}", receipt.artifact.sha256)
         );
         assert_eq!(
             json["subject"][0]["digest"]["sha256"],
-            receipt.artifact_sha256
+            receipt.artifact.sha256
         );
         Ok(())
     }
@@ -1502,6 +1715,396 @@ mod tests {
         let statement = receipt.to_intoto_statement()?;
 
         assert_eq!(statement.predicate, serde_json::to_value(receipt)?);
+        Ok(())
+    }
+
+    #[test]
+    fn envelope_has_all_twelve_top_level_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_value(sample_receipt())?;
+        let obj = json
+            .as_object()
+            .ok_or("receipt must serialize to a JSON object")?;
+        let expected_keys = [
+            "schema_version",
+            "request",
+            "artifact",
+            "retrieval",
+            "provenance",
+            "payload_graph",
+            "detectors",
+            "findings",
+            "policy",
+            "verdict",
+            "release",
+            "timestamps",
+        ];
+        for key in &expected_keys {
+            assert!(
+                obj.contains_key(*key),
+                "envelope must contain top-level key '{key}' (spec §31.1)"
+            );
+        }
+        assert_eq!(obj.len(), expected_keys.len(), "no extra top-level keys");
+        Ok(())
+    }
+
+    #[test]
+    fn envelope_has_correct_schema_version() {
+        let receipt = sample_receipt();
+        assert_eq!(receipt.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(receipt.schema_version, 2);
+    }
+
+    #[test]
+    fn envelope_request_bucket_contains_version_and_config() {
+        let receipt = sample_receipt();
+        assert_eq!(receipt.request.arbitraitor_version, "0.1.0");
+        assert_eq!(receipt.request.config_digest.as_deref(), Some("config:01"));
+    }
+
+    #[test]
+    fn envelope_artifact_bucket_contains_sha256_and_size() {
+        let receipt = sample_receipt();
+        assert_eq!(receipt.artifact.sha256, "ab".repeat(32));
+        assert_eq!(receipt.artifact.size, 12);
+        assert_eq!(
+            receipt.artifact.artifact_type.as_deref(),
+            Some("shell-script")
+        );
+    }
+
+    #[test]
+    fn envelope_provenance_bucket_contains_signatures() {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xab).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .verifier_identity("cosign 3.0.5")
+        .signature(Signature {
+            method: SigningMethod::Minisign,
+            key_id: Some("ABCD".to_owned()),
+            signature: vec![1, 2, 3],
+        })
+        .build();
+
+        assert_eq!(
+            receipt.provenance.verifier_identity.as_deref(),
+            Some("cosign 3.0.5")
+        );
+        assert_eq!(receipt.provenance.signatures.len(), 1);
+        assert!(receipt.provenance.signature.is_none());
+    }
+
+    #[test]
+    fn envelope_policy_bucket_contains_digest_and_audit_trail() {
+        let receipt = sample_receipt();
+        assert_eq!(receipt.policy.policy_digest.as_deref(), Some("policy:01"));
+        assert!(receipt.policy.audit_trail.is_empty());
+        assert!(receipt.policy.allow_rule_metadata.is_empty());
+    }
+
+    #[test]
+    fn envelope_release_bucket_contains_approval_and_controls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let release = receipt
+            .release
+            .as_ref()
+            .ok_or("sample receipt must have release")?;
+        assert!(release.approval.is_none());
+        assert!(release.effective_controls.is_none());
+        assert_eq!(release.method, ReleaseMethod::File);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_accepts_v1_flat_receipt_and_migrates_to_v2() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": "config:01",
+            "policy_digest": "policy:01",
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": "shell-script",
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "detector_versions": [],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(receipt.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(receipt.request.arbitraitor_version, "0.1.0");
+        assert_eq!(receipt.request.config_digest.as_deref(), Some("config:01"));
+        assert_eq!(receipt.artifact.sha256, "ab".repeat(32));
+        assert_eq!(receipt.artifact.size, 12);
+        assert_eq!(
+            receipt.artifact.artifact_type.as_deref(),
+            Some("shell-script")
+        );
+        assert_eq!(receipt.policy.policy_digest.as_deref(), Some("policy:01"));
+        assert_eq!(receipt.verdict.verdict, Verdict::Pass);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_accepts_v2_envelope_receipt() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let json = serde_json::to_string(&receipt)?;
+        let parsed = Receipt::parse(&json)?;
+        assert_eq!(parsed, receipt);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_rejects_invalid_json() {
+        assert!(Receipt::parse("not valid json").is_err());
+        assert!(Receipt::parse("{}").is_err());
+    }
+
+    #[test]
+    fn v1_receipt_with_approval_migrates_into_release() -> Result<(), Box<dyn std::error::Error>> {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "prompt", "deciding_rule": null, "policy_trace": []},
+            "release": {"method": "execute", "destination": null, "sha256_verified": true, "timestamp": "2026-06-17T00:00:00Z"},
+            "detector_versions": [],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "approval": {"plan_digest": "1111111111111111111111111111111111111111111111111111111111111111", "artifact_digest": "abababababababababababababababababababababababababababababababab", "expiry": null, "nonce": "test-nonce", "bound_capabilities": [], "override_reason": null, "override_scope": null, "exit_status": 0},
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(receipt.schema_version, CURRENT_SCHEMA_VERSION);
+        let release = receipt.release.as_ref().ok_or("release must be present")?;
+        let approval = release
+            .approval
+            .as_ref()
+            .ok_or("approval must be in release")?;
+        assert_eq!(approval.nonce, "test-nonce");
+        assert_eq!(approval.exit_status, Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn v1_receipt_with_effective_controls_migrates_into_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": {"method": "execute", "destination": null, "sha256_verified": true, "timestamp": "2026-06-17T00:00:00Z"},
+            "detector_versions": [],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "effective_controls": {"filesystem_isolation": null, "network_isolation": null, "process_tree_control": null, "privilege_suppression": null, "syscall_filtering": null, "resource_limits": null},
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        let release = receipt.release.as_ref().ok_or("release must be present")?;
+        assert!(release.effective_controls.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn v1_receipt_with_detector_provenance_migrates_into_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "detector_versions": [],
+            "detector_provenance": [{"binary_sha256": "sha256:abcd", "binary_version": "tirith 0.4.1", "ruleset_digest": "sha256:rules"}],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(receipt.provenance.detector_provenance.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_receipt_with_verifier_identity_migrates_into_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "detector_versions": [],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "verifier_identity": "cosign 3.0.5",
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(
+            receipt.provenance.verifier_identity.as_deref(),
+            Some("cosign 3.0.5")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v1_receipt_with_allow_rule_metadata_migrates_into_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "detector_versions": [],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "allow_rule_metadata": [{"rule_id": "allow-1", "expiry": null, "scope": "project", "creator": null, "reason": "test"}],
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(receipt.policy.allow_rule_metadata.len(), 1);
+        assert_eq!(receipt.policy.allow_rule_metadata[0].rule_id, "allow-1");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_receipt_with_audit_trail_migrates_into_policy() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "detector_versions": [],
+            "audit_trail": [{"kind": "override", "detail": "manual override"}],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(receipt.policy.audit_trail.len(), 1);
+        assert_eq!(receipt.policy.audit_trail[0].kind, "override");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_receipt_with_payload_graph_migrates_to_top_level()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v1_json = r#"{
+            "schema_version": 1,
+            "arbitraitor_version": "0.1.0",
+            "config_digest": null,
+            "policy_digest": null,
+            "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+            "artifact_size": 12,
+            "artifact_type": null,
+            "retrieval": null,
+            "findings": [],
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "detector_versions": [],
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"},
+            "payload_graph": null,
+            "signature": null
+        }"#;
+
+        let receipt = Receipt::parse(v1_json)?;
+        assert_eq!(receipt.payload_graph, None);
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_canonical_bytes_clears_provenance_signatures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xab).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .signature(Signature {
+            method: SigningMethod::Minisign,
+            key_id: Some("ABCD".to_owned()),
+            signature: vec![1, 2, 3],
+        })
+        .build();
+
+        let canonical = receipt.unsigned_canonical_bytes()?;
+        let canonical_str = std::str::from_utf8(&canonical)?;
+        assert!(
+            !canonical_str.contains("signatures"),
+            "canonical bytes must not contain signatures field"
+        );
+        assert!(
+            !canonical_str.contains("\"signature\""),
+            "canonical bytes must not contain signature field"
+        );
         Ok(())
     }
 }
@@ -1668,7 +2271,7 @@ impl Receipt {
                                 artifact_location: SarifArtifactLocation {
                                     uri: format!(
                                         "sha256:{}:line:{}",
-                                        self.artifact_sha256, loc.line
+                                        self.artifact.sha256, loc.line
                                     ),
                                 },
                                 region: Some(SarifRegion {
