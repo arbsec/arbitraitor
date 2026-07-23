@@ -58,6 +58,7 @@ supersede it.
 | [0034](0034-apple-containerization-ga-strategy.md) | Apple Containerization GA strategy for macOS 26+ | Proposed | #475 |
 | [0035](0035-lnk-argument-padding-cve-2025-9491.md) | LNK argument padding detection (CVE-2025-9491) | Accepted | #473 |
 | [0036](0036-run-pipeline-content-type-execution-gate.md) | `run` pipeline content-type execution gate | Accepted | #612 |
+| [0037](0037-wasmtime-cve-risk-register.md) | Wasmtime CVE risk register | Accepted | #463 |
 
 ## Format
 
