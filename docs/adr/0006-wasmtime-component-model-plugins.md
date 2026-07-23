@@ -80,8 +80,8 @@ output/memory limits, no shell interpolation.
 
 ## References
 
-- `.spec/arbitraitor-tech-stack.md` §10 (Plugin runtime)
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-04 (Wasmtime
+- `docs/spec/tech-stack.md` §10 (Plugin runtime)
+- `docs/spec/spec.md` H-04 (Wasmtime
   limits and blocked host calls)
 - [ADR 0011](0011-plugin-trust-classification.md) — Plugin trust classification
 - [Wasmtime interruption docs](https://docs.wasmtime.dev/examples-interrupting-wasm.html)

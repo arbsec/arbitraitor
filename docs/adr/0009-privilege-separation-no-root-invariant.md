@@ -82,7 +82,7 @@ arbitraitor fetch + inspect package artifact
 
 ## References
 
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §9.16 (No elevated analysis),
+- `docs/spec/spec.md` §9.16 (No elevated analysis),
   §26.6 (Privilege boundary)
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` C-04
+- `docs/spec/spec.md` C-04
 - [ADR 0008](0008-execution-context-security-profile.md) — Execution context

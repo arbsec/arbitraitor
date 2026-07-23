@@ -132,8 +132,8 @@ of dangerous content.
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-02
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §25.0 (Untrusted presentation
+- `docs/spec/spec.md` H-02
+- `docs/spec/spec.md` §25.0 (Untrusted presentation
   boundary)
 - [UTS #39 — Unicode Security Mechanisms](https://www.unicode.org/reports/tr39/)
 - [UTS #9 — Unicode Bidirectional Algorithm](https://www.unicode.org/reports/tr9/)

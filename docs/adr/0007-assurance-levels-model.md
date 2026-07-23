@@ -126,7 +126,7 @@ The label **"safe"** is prohibited. Recommended labels: `low observed risk`,
 
 ## References
 
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §3.11 (Assurance levels)
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` §2 (Recommended
+- `docs/spec/spec.md` §3.11 (Assurance levels)
+- `docs/spec/spec.md` §2 (Recommended
   assurance model), C-01, C-02
-- `.spec/arbitraitor-tech-stack.md` §9 (Execution-context security)
+- `docs/spec/tech-stack.md` §9 (Execution-context security)

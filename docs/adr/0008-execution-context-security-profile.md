@@ -178,8 +178,8 @@ patterns = []
 
 ## References
 
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §26 (Release and execution),
+- `docs/spec/spec.md` §26 (Release and execution),
   §26.5 (Environment controls)
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` C-01, C-02
+- `docs/spec/spec.md` C-01, C-02
 - [ADR 0007](0007-assurance-levels-model.md) — Assurance levels
 - [ADR 0009](0009-privilege-separation-no-root-invariant.md) — Privilege separation

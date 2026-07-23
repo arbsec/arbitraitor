@@ -119,9 +119,9 @@ Update metadata depends on time for expiration and freshness:
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` C-06
-- `.spec/arbitraitor-tech-stack.md` §13.1 (TUF metadata)
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §34 (Update security)
+- `docs/spec/spec.md` C-06
+- `docs/spec/tech-stack.md` §13.1 (TUF metadata)
+- `docs/spec/spec.md` §34 (Update security)
 - [AWS Security Bulletin 2026-019](https://aws.amazon.com/security/security-bulletins/2026-019-aws/)
 - [TUF Security](https://theupdateframework.io/docs/security/)
 - [TUF FAQ](https://theupdateframework.io/docs/faq/)

@@ -790,4 +790,4 @@ These are flagged for the spec draft but not answered in this research:
 
 ## Arbitraitor spec (relevant sections)
 
-- `.spec/arbitraitor-comprehensive-spec.md` — §39.1 design objective, §39.2 plugin classes, §39.2.3 package-manager wrapper plugins, §39.3 distribution classes, §39.5 normalized operation plan, §39.8 invocation and interception modes, §39.11 Homebrew adapter, §39.12 Arch community adapter, §39.13 lifecycle mediation coverage values.
+- `docs/spec/spec.md` — §39.1 design objective, §39.2 plugin classes, §39.2.3 package-manager wrapper plugins, §39.3 distribution classes, §39.5 normalized operation plan, §39.8 invocation and interception modes, §39.11 Homebrew adapter, §39.12 Arch community adapter, §39.13 lifecycle mediation coverage values.

@@ -56,5 +56,5 @@ deterministic evaluation, and simplifies explainability.
 
 ## References
 
-- `.spec/arbitraitor-tech-stack.md` §6.1 (TOML for human-authored configuration)
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §23 (Policy engine)
+- `docs/spec/tech-stack.md` §6.1 (TOML for human-authored configuration)
+- `docs/spec/spec.md` §23 (Policy engine)

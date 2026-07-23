@@ -5,7 +5,7 @@
 //! installed plugins. The registry owns metadata only — it never executes
 //! plugin code.
 //!
-//! See `.spec/` §39.19 (Plugin registry) and ADR 0011 for the trust model.
+//! See `docs/spec/` §39.19 (Plugin registry) and ADR 0011 for the trust model.
 
 #![forbid(unsafe_code)]
 

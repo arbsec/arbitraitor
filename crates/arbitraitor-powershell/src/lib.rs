@@ -1,6 +1,6 @@
 //! PowerShell script static analysis
 //!
-//! See `.spec/` for the full specification.
+//! See `docs/spec/` for the full specification.
 //!
 //! # Known limitations
 //!

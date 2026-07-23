@@ -3,7 +3,7 @@
 //! This crate exposes the subprocess protocol layer and a sandboxed subprocess
 //! executor for native plugin fallback adapters.
 //!
-//! See `.spec/` for the full specification.
+//! See `docs/spec/` for the full specification.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

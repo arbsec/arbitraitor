@@ -33,7 +33,9 @@ book/book/
 # mdBook ADR build artifacts (copied from docs/adr/ by docs.yml)
 book/src/adr/
 
-# Private specs (not part of the repo)
+# Spec files now live in docs/spec/ and are part of the public repo.
+# The old .spec/ path was removed; references in ADRs have been updated.
+# If .spec/ reappears for private scratch notes, it remains ignored here.
 .spec/
 .serena/
 # Arbitraitor runtime artifacts (config.toml can be project-local)

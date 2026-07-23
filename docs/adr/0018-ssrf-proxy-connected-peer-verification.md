@@ -154,9 +154,9 @@ when a proxy does.
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-03
-- `.spec/arbitraitor-tech-stack.md` §4.4 (Redirects and credentials), §4.5
+- `docs/spec/spec.md` H-03
+- `docs/spec/tech-stack.md` §4.4 (Redirects and credentials), §4.5
   (SSRF and DNS rebinding)
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §11.2 (HTTP behavior)
+- `docs/spec/spec.md` §11.2 (HTTP behavior)
 - [rustls-platform-verifier](https://github.com/rustls/rustls-platform-verifier)
 - [ADR 0003](0003-reqwest-behind-fetcher-trait.md) — Fetcher trait

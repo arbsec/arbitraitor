@@ -7,7 +7,7 @@
 //! level, detecting containment cycles, and bounding recursion depth.
 //!
 //! Extraction happens into process memory only (never the final destination);
-//! every level is bounded by [`ArchiveLimits`]. See `.spec/` §20.1 for the full
+//! every level is bounded by [`ArchiveLimits`]. See `docs/spec/` §20.1 for the full
 //! specification.
 
 use arbitraitor_artifact::{ArtifactType, ClassificationResult, classify};

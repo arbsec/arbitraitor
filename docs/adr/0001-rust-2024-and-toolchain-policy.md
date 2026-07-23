@@ -47,6 +47,6 @@ dependency compatibility, and CI correctness.
 
 ## References
 
-- `.spec/arbitraitor-tech-stack.md` §2 (Language and toolchain policy)
+- `docs/spec/tech-stack.md` §2 (Language and toolchain policy)
 - `rust-toolchain.toml`
 - `Cargo.toml` workspace section

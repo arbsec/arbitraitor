@@ -1,6 +1,6 @@
 //! Threat intelligence feed management.
 //!
-//! See `.spec/` for the full specification.
+//! See `docs/spec/` for the full specification.
 //!
 //! Feed retrieval is delegated to [`arbitraitor_fetch::Fetcher`]; no reqwest
 //! types cross this crate boundary (see ADR 0003).
