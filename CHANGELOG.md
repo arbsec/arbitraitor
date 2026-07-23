@@ -366,6 +366,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case changed from "child exited before reading stdin" to "child
   produced stderr without an exit code" — the `None` exit-code also
   covers signal termination and wait failure, not just early exit.
+- `ScriptExecution::execute` now returns `Ok(ExecutionResult)` when the
+  child exits before consuming all script stdin (`BrokenPipe` + known exit
+  code), instead of `Err(ExecError::ScriptIo)`. Early script stdin close
+  is the script's own result (success or failure by exit code), not a
+  broker I/O error. Signal death (no exit code) and non-pipe I/O failures
+  still return `Err(ScriptIo)`. Closes #620.
 
 ### Added
 
