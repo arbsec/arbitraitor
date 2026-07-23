@@ -143,10 +143,10 @@ fn cli_policy_override_with_audit_override_is_allowed_and_audited()
     .map_err(|error| format!("receipt build failed: {error:?}"))?;
 
     // Then: the receipt records the override.
-    assert_eq!(receipt.audit_trail.len(), 1);
-    assert_eq!(receipt.audit_trail[0].kind, "cli-policy-override");
+    assert_eq!(receipt.policy.audit_trail.len(), 1);
+    assert_eq!(receipt.policy.audit_trail[0].kind, "cli-policy-override");
     assert!(
-        receipt.audit_trail[0]
+        receipt.policy.audit_trail[0]
             .detail
             .contains("CLI policy override")
     );

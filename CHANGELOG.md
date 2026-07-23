@@ -155,6 +155,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Receipt
+
+- **BREAKING:** Receipt schema v2 — top-level envelope structure (spec §31.1,
+  issue #492). The flat `Receipt` struct is reorganized into grouped buckets:
+  `request`, `artifact`, `retrieval`, `provenance`, `payload_graph`,
+  `detectors`, `findings`, `policy`, `verdict`, `release`, `timestamps`.
+  `schema_version` bumped from 1 to 2. Fields moved:
+  - `arbitraitor_version`, `config_digest` → `request.*`
+  - `artifact_sha256` → `artifact.sha256`
+  - `artifact_size` → `artifact.size`
+  - `artifact_type` → `artifact.artifact_type`
+  - `policy_digest`, `allow_rule_metadata`, `audit_trail` → `policy.*`
+  - `verifier_identity`, `detector_provenance`, `signature`, `signatures` → `provenance.*`
+  - `detector_versions` → `detectors`
+  - `approval`, `effective_controls` → `release.*` (nested inside `ReleaseInfo`)
+  - `Receipt::parse()` accepts both v1 (flat) and v2 (envelope) JSON,
+    automatically migrating v1 receipts to v2.
+  - `ReceiptBuilder` API is unchanged — builder methods set nested fields
+    internally.
+  - `unsigned_canonical_bytes()` clears `provenance.signature` and
+    `provenance.signatures` (previously top-level).
+  - in-toto Statement export (`to_intoto_statement()`) and SARIF export
+    (`to_sarif()`) updated to read from nested `artifact.sha256`.
+
 #### Documentation
 
 - `book/src/cli/wrappers.md` — full rewrite. Previous page documented a

@@ -436,6 +436,8 @@ pub(super) fn build_run_receipt(
         destination: Some(format!("exit-code={:?}", output.exit_code)),
         sha256_verified: true,
         timestamp: now,
+        approval: None,
+        effective_controls: None,
     });
     for detector in &artifact.detector_versions {
         builder = builder.detector_version(detector.clone());
