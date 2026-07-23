@@ -16,6 +16,8 @@ arbitraitor-artifact = { workspace = true }
 arbitraitor-model = { workspace = true }
 bzip2 = { workspace = true }
 flate2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
 thiserror = { workspace = true }
@@ -27,3 +29,4 @@ arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = { workspace = true }

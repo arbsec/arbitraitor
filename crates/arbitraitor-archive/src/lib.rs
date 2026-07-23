@@ -25,11 +25,17 @@ use xz2::read::XzDecoder;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
+mod companion;
 mod payload;
 
 pub use payload::{
     ArtifactNode, ArtifactOrigin, DEFAULT_MAX_PAYLOAD_DEPTH, NodeStatus, PayloadError,
     PayloadIssue, PayloadNode, discover_payloads, is_archive_type, walk_payloads,
+};
+
+pub use companion::{
+    CompanionArtifact, ParsedCompanion, discover_companion_artifacts, parse_companion,
+    vex_can_suppress_finding,
 };
 
 const DEFAULT_MAX_DEPTH: u32 = 5;
