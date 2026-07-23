@@ -1,7 +1,7 @@
 use super::{
     Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
     emit_wrapper_output, parse_cli_from_args, pipeline::parse_fetch_source, query_daemon_status,
-    wrapper_output_destination, wrapper_url_argument, write_status_text,
+    wrapper_output_destination, wrapper_url_argument, wrapper_url_arguments, write_status_text,
 };
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_fetch::FetchSource;
@@ -1201,6 +1201,109 @@ fn wrap_command_requires_tool() {
     let result = Cli::try_parse_from(["arbitraitor", "wrap"]);
 
     assert!(result.is_err());
+}
+
+#[test]
+fn wrap_command_parses_multiple_urls() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from([
+        "arbitraitor",
+        "wrap",
+        "curl",
+        "--",
+        "-fsSL",
+        "https://example.com/a",
+        "https://example.com/b",
+        "https://example.com/c",
+    ])?;
+
+    match cli.command {
+        Command::Wrap(command) => {
+            assert_eq!(command.tool, "curl");
+            assert_eq!(
+                command.args,
+                [
+                    "-fsSL",
+                    "https://example.com/a",
+                    "https://example.com/b",
+                    "https://example.com/c"
+                ]
+            );
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn wrapper_url_arguments_extracts_multiple_curl_urls() {
+    let args: Vec<String> = [
+        "-fsSL",
+        "https://example.com/a",
+        "https://example.com/b",
+        "https://example.com/c",
+    ]
+    .iter()
+    .map(std::string::ToString::to_string)
+    .collect();
+
+    let urls = wrapper_url_arguments(Some("curl"), &args);
+
+    assert_eq!(
+        urls,
+        [
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c"
+        ]
+    );
+}
+
+#[test]
+fn wrapper_url_arguments_extracts_multiple_wget_urls() {
+    let args: Vec<String> = ["-q", "https://example.com/a", "https://example.com/b"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let urls = wrapper_url_arguments(Some("wget"), &args);
+
+    assert_eq!(urls, ["https://example.com/a", "https://example.com/b"]);
+}
+
+#[test]
+fn wrapper_url_arguments_returns_empty_when_no_url() {
+    let args: Vec<String> = ["-fsSL"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let urls = wrapper_url_arguments(Some("curl"), &args);
+
+    assert!(urls.is_empty(), "no URL in args should yield empty vec");
+}
+
+#[test]
+fn wrapper_url_arguments_returns_empty_for_unknown_tool() {
+    let args: Vec<String> = ["https://example.com/a"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let urls = wrapper_url_arguments(Some("bash"), &args);
+
+    assert!(urls.is_empty(), "unknown tool should yield empty vec");
+}
+
+#[test]
+fn wrapper_url_arguments_single_url() {
+    let args: Vec<String> = ["https://example.com/only"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let urls = wrapper_url_arguments(Some("curl"), &args);
+
+    assert_eq!(urls, ["https://example.com/only"]);
 }
 
 #[test]
