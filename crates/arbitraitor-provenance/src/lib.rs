@@ -37,6 +37,10 @@ mod crates_io;
 
 pub use crates_io::{CratesIoAttestationVerifier, CratesIoVerification};
 
+mod sigstore_bundle;
+
+pub use sigstore_bundle::{SigstoreBundleError, SigstoreBundlePolicy, TlogPolicy};
+
 /// Result type for provenance operations.
 pub type Result<T, E = ProvenanceError> = std::result::Result<T, E>;
 
@@ -256,6 +260,12 @@ pub enum ProvenanceError {
     Pep740RegistryNotAccepted {
         /// The rejected registry identifier.
         registry: String,
+    },
+    /// Sigstore Bundle policy enforcement failed (spec §14.2.1, issue #513).
+    #[error("Sigstore Bundle policy violation: {reason}")]
+    SigstoreBundlePolicy {
+        /// Safe diagnostic reason for the policy violation.
+        reason: String,
     },
 }
 
@@ -800,15 +810,47 @@ pub fn verify_minisign(
 
 /// Verify a Sigstore/cosign bundle over artifact bytes by invoking `cosign verify-blob`.
 ///
+/// Uses the default [`SigstoreBundlePolicy`] (spec §14.2.1): all three media
+/// types, all three forms, require inclusion proofs, accept RFC 3161 timestamps,
+/// offline verification. For custom policy, use [`verify_cosign_with_policy`].
+///
 /// # Errors
 ///
 /// Returns an error when `cosign` is unavailable, verification fails, the
-/// subprocess times out, or the temporary artifact file cannot be prepared.
+/// subprocess times out, the temporary artifact file cannot be prepared, or
+/// the bundle violates the default Sigstore Bundle policy (spec §14.2.1).
 pub fn verify_cosign(
     artifact_bytes: &[u8],
     bundle_path: &Path,
     identity: &str,
     issuer: &str,
+) -> Result<SignatureVerification, ProvenanceError> {
+    verify_cosign_with_policy(
+        artifact_bytes,
+        bundle_path,
+        identity,
+        issuer,
+        &SigstoreBundlePolicy::new(),
+    )
+}
+
+/// Verify a Sigstore/cosign bundle with an explicit bundle policy (spec §14.2.1).
+///
+/// After `cosign verify-blob` succeeds, the bundle is validated against the
+/// supplied [`SigstoreBundlePolicy`]. This enforces media-type, verification
+/// material form, and transparency-log evidence requirements per spec §14.2.1.
+///
+/// # Errors
+///
+/// Returns an error when `cosign` is unavailable, verification fails, the
+/// subprocess times out, the temporary artifact file cannot be prepared, or
+/// the bundle violates the supplied policy.
+pub fn verify_cosign_with_policy(
+    artifact_bytes: &[u8],
+    bundle_path: &Path,
+    identity: &str,
+    issuer: &str,
+    policy: &SigstoreBundlePolicy,
 ) -> Result<SignatureVerification, ProvenanceError> {
     let mut temp = NamedTempFile::new().map_err(|source| ProvenanceError::Io {
         stage: "create-temp",
@@ -825,6 +867,20 @@ pub fn verify_cosign(
     })?;
 
     verify_cosign_subprocess(temp.path(), bundle_path, identity, issuer)?;
+
+    // Enforce Sigstore Bundle policy (spec §14.2.1, issue #513) after cosign
+    // succeeds. Cosign performs cryptographic verification; this policy layer
+    // enforces media-type, form, and tlog evidence requirements.
+    let bundle_bytes = fs::read(bundle_path).map_err(|source| ProvenanceError::Io {
+        stage: "read-bundle",
+        source,
+    })?;
+    policy
+        .validate_bundle_bytes(&bundle_bytes)
+        .map_err(|error| ProvenanceError::SigstoreBundlePolicy {
+            reason: error.to_string(),
+        })?;
+
     let bundle_metadata = parse_bundle_metadata(bundle_path, identity, issuer);
     let verifier_identity = cosign_version();
     Ok(SignatureVerification {
@@ -943,7 +999,7 @@ fn parse_bundle_metadata(
 }
 
 /// Determines the verification material form from the bundle JSON.
-fn determine_material_form(bundle: &serde_json::Value) -> VerificationMaterialForm {
+pub(crate) fn determine_material_form(bundle: &serde_json::Value) -> VerificationMaterialForm {
     let content = bundle
         .get("verificationMaterial")
         .and_then(|m| m.get("content"));
