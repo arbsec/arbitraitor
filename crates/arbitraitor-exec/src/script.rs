@@ -14,7 +14,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use arbitraitor_model::ids::{ArtifactId, OperationId, Sha256Digest};
 use arbitraitor_model::operation::{
@@ -278,25 +278,21 @@ impl ScriptExecution {
                 // waiting for stdout/stderr EOF while the child waits for
                 // stdin EOF that never arrives = deadlock.
                 drop(stdin);
-                let (child_exit_code, _, child_stderr) =
-                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
-                return Err(ExecError::script_io(
-                    "write-script-stdin",
+                return resolve_stdin_write_failure(
                     source,
-                    child_exit_code,
-                    child_stderr,
-                ));
+                    "write-script-stdin",
+                    &mut child,
+                    self.output_limit(),
+                );
             }
             if let Err(source) = stdin.flush() {
                 drop(stdin);
-                let (child_exit_code, _, child_stderr) =
-                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
-                return Err(ExecError::script_io(
-                    "flush-script-stdin",
+                return resolve_stdin_write_failure(
                     source,
-                    child_exit_code,
-                    child_stderr,
-                ));
+                    "flush-script-stdin",
+                    &mut child,
+                    self.output_limit(),
+                );
             }
         }
 
@@ -364,6 +360,44 @@ impl ScriptExecution {
         command.args(self.environment.arguments());
         command
     }
+}
+
+/// Resolves a stdin write/flush failure into either a script result (early
+/// close) or a broker I/O error (issue #620).
+///
+/// When the child exited before consuming all script bytes — signalled by
+/// `BrokenPipe` on the write/flush and a known child exit code — the child's
+/// exit code and captured output ARE the script's result. The script ran and
+/// exited on its own terms; it simply did not drain every stdin byte. This is
+/// success (exit code 0) or script failure (non-zero), not a broker I/O error.
+/// Returning `Ok` lets callers act on the real exit code instead of a
+/// misleading "script input I/O failure" error.
+///
+/// When the write failed for other reasons (e.g. the child was killed by a
+/// signal, leaving no exit code), the failure is a genuine broker I/O error
+/// and is returned as `Err(ExecError::ScriptIo)` with the best-effort
+/// captured child state for diagnostics.
+fn resolve_stdin_write_failure(
+    source: std::io::Error,
+    stage: &'static str,
+    child: &mut Child,
+    output_limit: u64,
+) -> Result<ExecutionResult, ExecError> {
+    let (child_exit_code, child_stdout, child_stderr) =
+        crate::spawn::best_effort_capture(child, output_limit);
+    if source.kind() == std::io::ErrorKind::BrokenPipe && child_exit_code.is_some() {
+        return Ok(ExecutionResult {
+            exit_code: child_exit_code,
+            stdout: child_stdout,
+            stderr: child_stderr,
+        });
+    }
+    Err(ExecError::script_io(
+        stage,
+        source,
+        child_exit_code,
+        child_stderr,
+    ))
 }
 
 fn landlock_rules_for_script_execution(
@@ -826,23 +860,17 @@ mod tests {
         assert!(paths.iter().any(|p| p == &Path::new("/tmp")));
     }
 
-    /// Regression test for #612 (Fix B): when bash exits before consuming
-    /// all streamed script bytes, `ScriptExecution::execute` must:
-    ///
-    /// 1. Return `ExecError::ScriptIo { stage: "write-script-stdin", ... }`
-    ///    (or `"flush-script-stdin"`).
-    /// 2. Populate `child_exit_code` with the early-exit code.
-    /// 3. Populate `child_stderr` with whatever bash printed before dying.
-    /// 4. Render the captured stderr into the `Display` representation so
-    ///    the CLI-level failure message identifies the real root cause.
-    ///
-    /// Before the fix, the function returned at `write_all` failure without
-    /// ever reading the child's captured stderr — leaving the user with a
-    /// generic "script input I/O failure during write-script-stdin" message
-    /// and no clue that bash had rejected the input as a parse error.
+    /// Regression test for #620: when bash exits before consuming all
+    /// streamed script bytes, `ScriptExecution::execute` must return
+    /// `Ok(ExecutionResult)` carrying the child's real exit code and
+    /// captured stderr — NOT `Err(ExecError::ScriptIo)`. The early close
+    /// is the script's own result (success or failure), not a broker I/O
+    /// error. Before #620, the function returned `Err(ScriptIo)` which
+    /// masked the real exit code behind a generic "script input I/O
+    /// failure" message.
     #[test]
-    fn execute_preserves_child_stderr_when_bash_exits_early()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn execute_returns_child_result_when_bash_exits_early() -> Result<(), Box<dyn std::error::Error>>
+    {
         if !Path::new("/bin/bash").exists() {
             return Ok(());
         }
@@ -851,74 +879,46 @@ mod tests {
         // pipe, reads line 2 (`exit 1`), and exits. By that point the parent
         // is still blocked in `write_all` on the 256 KB stdin pipe (Linux
         // pipe buffers are ~64 KB) — closing the read end on bash exit
-        // causes `write_all` to fail with EPIPE, exercising the regression
-        // path from issue #612. The 256 KiB padding exceeds the pipe buffer
-        // so write_all cannot drain before bash exits.
+        // causes `write_all` to fail with EPIPE. The 256 KiB padding exceeds
+        // the pipe buffer so write_all cannot drain before bash exits.
         let mut script_bytes = b"echo expected-diagnostic >&2\nexit 1\n".to_vec();
         script_bytes.resize(256 * 1024, b'\n');
-        let error = match script.execute(&script_bytes) {
-            Err(err) => err,
-            Ok(result) => {
+        let result = match script.execute(&script_bytes) {
+            Ok(result) => result,
+            Err(err) => {
                 return Err(format!(
-                    "expected execute() to fail (early child exit), but it succeeded: {result:?}"
+                    "expected execute() to return Ok (early child exit is the script's result per #620), but got error: {err}"
                 )
                 .into());
             }
         };
-        let ExecError::ScriptIo {
-            stage,
-            ref child_exit_code,
-            ref child_stderr,
-            ..
-        } = error
-        else {
-            return Err(format!(
-                "expected ScriptIo variant, got {error:?} — pipeline is no longer surfacing child-exit failure as ScriptIo"
-            )
-            .into());
-        };
-        let child_exit_code = *child_exit_code;
-        let child_stderr = child_stderr.clone();
-        assert!(
-            stage == "write-script-stdin" || stage == "flush-script-stdin",
-            "stage should be a script-stdin write/flush failure, got {stage:?}"
+        assert_eq!(
+            result.exit_code,
+            Some(1),
+            "early-close exit code should be 1 (exit 1); got {:?}",
+            result.exit_code
         );
-        let stderr_text = String::from_utf8_lossy(&child_stderr);
+        let stderr_text = String::from_utf8_lossy(&result.stderr);
         assert!(
             stderr_text.contains("expected-diagnostic"),
-            "child_stderr must be captured even when write_all failed; got {stderr_text:?}"
-        );
-        assert_eq!(
-            child_exit_code,
-            Some(1),
-            "child_exit_code should be 1 (exit 1); got {child_exit_code:?}"
-        );
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains("write-script-stdin") || rendered.contains("flush-script-stdin"),
-            "rendered error should name the stage; got {rendered:?}"
-        );
-        assert!(
-            rendered.contains("expected-diagnostic"),
-            "rendered error should include the captured stderr so users can see the real root cause; got {rendered:?}"
-        );
-        assert!(
-            rendered.contains("child exited 1"),
-            "rendered error should mention the child exit code; got {rendered:?}"
+            "child_stderr must be captured in the result even when write_all failed; got {stderr_text:?}"
         );
         Ok(())
     }
 
-    /// Regression test for #612 acceptance criterion (c): reproduction of
+    /// Regression test for #620 acceptance criterion: reproduction of
     /// the unshare-denied path. When the kernel or container runtime denies
     /// `unshare --user --map-current-user --net` (e.g.
     /// `/proc/sys/kernel/unprivileged_userns_clone=0`, a seccomp filter
     /// blocking `CLONE_NEWUSER`, or a container runtime that doesn't allow
     /// userns), unshare writes `unshare: ... Operation not permitted` to
     /// stderr and exits before consuming the parent's stdin script bytes.
-    /// Before Fix B, the user saw a generic
-    /// `script input I/O failure during write-script-stdin` message with no
-    /// hint that userns was the actual blocker.
+    ///
+    /// After #620, early child exit returns `Ok(ExecutionResult)` carrying
+    /// the child's exit code and stderr — the user sees exit code 1 and the
+    /// unshare diagnostic in the result, not a generic "script input I/O
+    /// failure" error. This lets the caller distinguish "kernel denied
+    /// userns" (exit 1 + unshare stderr) from a genuine broker pipe error.
     ///
     /// Reproducing the real unshare-denied failure mode requires a
     /// system/container where `unshare --user` is actually denied. CI
@@ -928,13 +928,9 @@ mod tests {
     /// `unshare: unshare failed: Operation not permitted` message to
     /// stderr, exit 1, never read stdin) and runs it through the same
     /// `ScriptExecution::execute` code path that the real unshare-wrapped
-    /// bash invocation would hit. The Fix B machinery (`best_effort_capture`
-    /// plus `ExecError::script_io` plus `script_io_detail` rendering) is
-    /// identical whether the early-exiting child is the real unshare or this
-    /// fake — the same `write_all` EPIPE then capture then render path is
-    /// exercised in both cases.
+    /// bash invocation would hit.
     #[test]
-    fn execute_surfaces_unshare_denied_diagnostic_when_child_exits_early()
+    fn execute_returns_unshare_denied_result_when_child_exits_early()
     -> Result<(), Box<dyn std::error::Error>> {
         if !Path::new("/bin/sh").exists() {
             return Ok(());
@@ -970,63 +966,119 @@ mod tests {
         .with_network_isolated(false);
         // 256 KiB padding guarantees `write_all` cannot drain before the
         // fake-unshare exits; the parent's `write_all` then fails with
-        // EPIPE, exercising the same Fix B path the real unshare-denied
-        // case would exercise.
+        // EPIPE, exercising the same early-close path the real
+        // unshare-denied case would exercise.
+        let mut script_bytes: Vec<u8> = Vec::with_capacity(256 * 1024);
+        script_bytes.resize(256 * 1024, b'\n');
+        let result = match execution.execute(&script_bytes) {
+            Ok(result) => result,
+            Err(err) => {
+                std::fs::remove_dir_all(&fake_unshare_dir).ok();
+                return Err(format!(
+                    "expected execute() to return Ok (early child exit is the script's result per #620), but got error: {err}"
+                )
+                .into());
+            }
+        };
+        assert_eq!(
+            result.exit_code,
+            Some(1),
+            "early-close exit code should be 1 (unshare exits 1 on denial); got {:?}",
+            result.exit_code
+        );
+        let stderr_text = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr_text.contains("unshare failed") && stderr_text.contains("not permitted"),
+            "result.stderr must capture the unshare-denied diagnostic for issue #620; got {stderr_text:?}"
+        );
+        std::fs::remove_dir_all(&fake_unshare_dir).ok();
+        Ok(())
+    }
+
+    /// Early close with exit code 0: the script ran, succeeded, and exited
+    /// before draining all stdin. `execute` must return `Ok` with
+    /// `exit_code: Some(0)` — the early close is the script's success, not a
+    /// broker I/O error (issue #620).
+    #[test]
+    fn execute_returns_ok_when_script_exits_zero_before_draining_stdin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new("/bin/bash").exists() {
+            return Ok(());
+        }
+        let script = bash_or_skip()?;
+        let mut script_bytes = b"exit 0\n".to_vec();
+        script_bytes.resize(256 * 1024, b'\n');
+        let result = script.execute(&script_bytes)?;
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "early close with exit 0 should return Ok with exit_code 0"
+        );
+        Ok(())
+    }
+
+    /// Early close with a distinct non-zero exit code: the script ran, failed,
+    /// and exited before draining all stdin. `execute` must return `Ok` with
+    /// the script's real exit code — the early close is the script's failure,
+    /// not a broker I/O error (issue #620).
+    #[test]
+    fn execute_returns_nonzero_exit_code_when_script_exits_early()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new("/bin/bash").exists() {
+            return Ok(());
+        }
+        let script = bash_or_skip()?;
+        let mut script_bytes = b"exit 42\n".to_vec();
+        script_bytes.resize(256 * 1024, b'\n');
+        let result = script.execute(&script_bytes)?;
+        assert_eq!(
+            result.exit_code,
+            Some(42),
+            "early close with exit 42 should return Ok with exit_code 42"
+        );
+        Ok(())
+    }
+
+    /// Signal death (no exit code): when the child is killed by a signal
+    /// before draining stdin, `execute` must return `Err(ExecError::ScriptIo)`
+    /// — this is a genuine broker I/O error, not a script result, because the
+    /// child has no exit code to report (issue #620).
+    #[test]
+    fn execute_returns_io_error_when_child_killed_by_signal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new("/bin/sh").exists() {
+            return Ok(());
+        }
+        let fake_dir = std::env::temp_dir().join(format!("arb-fake-kill-{}", std::process::id()));
+        std::fs::remove_dir_all(&fake_dir).ok();
+        std::fs::create_dir_all(&fake_dir)?;
+        let fake_path = fake_dir.join("fake-kill-self");
+        std::fs::write(&fake_path, b"#!/bin/sh\nkill -KILL $$\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let execution =
+            ScriptExecution::new(fake_path.clone(), std::iter::empty::<&'static str>())?
+                .with_network_isolated(false);
         let mut script_bytes: Vec<u8> = Vec::with_capacity(256 * 1024);
         script_bytes.resize(256 * 1024, b'\n');
         let error = match execution.execute(&script_bytes) {
             Err(err) => err,
             Ok(result) => {
-                std::fs::remove_dir_all(&fake_unshare_dir).ok();
+                std::fs::remove_dir_all(&fake_dir).ok();
                 return Err(format!(
-                    "expected execute() to fail via fake-unshare early exit, but it succeeded: {result:?}"
+                    "expected Err(ScriptIo) for signal death (no exit code), but got Ok: {result:?}"
                 )
                 .into());
             }
         };
-        let ExecError::ScriptIo {
-            stage,
-            ref child_exit_code,
-            ref child_stderr,
-            ..
-        } = error
-        else {
-            std::fs::remove_dir_all(&fake_unshare_dir).ok();
-            return Err(format!(
-                "expected ScriptIo variant for unshare-denied path, got {error:?}"
-            )
-            .into());
-        };
-        let child_exit_code = *child_exit_code;
-        let child_stderr = child_stderr.clone();
+        std::fs::remove_dir_all(&fake_dir).ok();
         assert!(
-            stage == "write-script-stdin" || stage == "flush-script-stdin",
-            "stage should be a script-stdin write/flush failure for the unshare-denied path, got {stage:?}"
+            matches!(error, ExecError::ScriptIo { .. }),
+            "signal death (no exit code) should return Err(ScriptIo), got {error:?}"
         );
-        let stderr_text = String::from_utf8_lossy(&child_stderr);
-        assert!(
-            stderr_text.contains("unshare failed") && stderr_text.contains("not permitted"),
-            "child_stderr must capture the unshare-denied diagnostic for issue #612 acceptance (c); got {stderr_text:?}"
-        );
-        assert_eq!(
-            child_exit_code,
-            Some(1),
-            "child_exit_code should be 1 (unshare exits 1 on denial); got {child_exit_code:?}"
-        );
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains("unshare failed"),
-            "rendered error must surface the unshare-denied diagnostic so the user can distinguish 'kernel denied userns' from 'I fed bash junk'; got {rendered:?}"
-        );
-        assert!(
-            rendered.contains("not permitted"),
-            "rendered error must include 'not permitted' from unshare's diagnostic; got {rendered:?}"
-        );
-        assert!(
-            rendered.contains("child exited 1"),
-            "rendered error should mention the child exit code; got {rendered:?}"
-        );
-        std::fs::remove_dir_all(&fake_unshare_dir).ok();
         Ok(())
     }
 }
