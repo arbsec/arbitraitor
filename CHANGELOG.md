@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Plugin Host
+
+- Wasmtime Component Model plugin execution (spec §41.9.1, issue #535).
+  `WasmPlugin::analyze_artifact` now instantiates the guest component, calls
+  the `analyze` export, and converts WIT findings to `arbitraitor-model::Finding`.
+  Host imports (`get-artifact-bytes`, `get-artifact-size`, `log`) are implemented
+  via `DetectorImports` trait with ADR-0006 deadline enforcement. Fuel and epoch
+  interruption are enforced by `WasmEngine`. Traps, OOM, and fuel exhaustion return
+  `WasmPluginError::Trap` — the sandbox boundaries hold. The `DetectorPlugin::analyze`
+  trait impl calls `analyze_artifact` and returns empty findings on error (fail-safe).
+  WIT bindings generated via `wasmtime::component::bindgen!` from the workspace WIT.
+  Test fixtures compiled with `wasm-tools component embed` + `component new`.
+
 #### Wrapper
 
 - Multi-URL handling for `arbitraitor wrap` (spec §39.9, issue #531).
