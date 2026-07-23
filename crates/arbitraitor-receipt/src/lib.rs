@@ -5,6 +5,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod signing;
+pub use signing::{
+    MinisignSigner, ReceiptSigner, Signature, SignerError, SigningMethod, StubSigner,
+};
+
 use std::fmt::Write as _;
 use std::io::Cursor;
 use std::time::SystemTime;
@@ -70,6 +75,14 @@ pub struct Receipt {
     pub approval: Option<ApprovalInfo>,
     /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
+    /// Signatures produced by [`ReceiptSigner`] adapters (spec §31.3).
+    ///
+    /// Multiple signatures may be attached when more than one signing method
+    /// is requested. The canonical bytes exclude this field (see
+    /// [`Receipt::unsigned_canonical_bytes`]) so signatures are not
+    /// self-referential (ADR-0014).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<Signature>,
 }
 
 /// Metadata from an allow rule recorded in the receipt audit trail.
@@ -139,6 +152,7 @@ impl Receipt {
     pub fn unsigned_canonical_bytes(&self) -> Result<Vec<u8>, ReceiptError> {
         let mut unsigned = self.clone();
         unsigned.signature = None;
+        unsigned.signatures.clear();
         unsigned.canonical_bytes()
     }
 
@@ -510,6 +524,7 @@ impl ReceiptBuilder {
                 allow_rule_metadata: Vec::new(),
                 approval: None,
                 signature: None,
+                signatures: Vec::new(),
             },
         }
     }
@@ -608,6 +623,13 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn approval(mut self, approval: ApprovalInfo) -> Self {
         self.receipt.approval = Some(approval);
+        self
+    }
+
+    /// Add a receipt signature (spec §31.3).
+    #[must_use]
+    pub fn signature(mut self, signature: Signature) -> Self {
+        self.receipt.signatures.push(signature);
         self
     }
 
@@ -1146,6 +1168,111 @@ mod tests {
             verify_receipt(&tampered, &key.pk),
             Err(VerifyError::InvalidSignature { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_with_signatures_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xab).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .signature(Signature {
+            method: SigningMethod::Minisign,
+            key_id: Some("ABCD1234".to_owned()),
+            signature: vec![0_u8, 1, 2, 3],
+        })
+        .signature(Signature {
+            method: SigningMethod::Tpm,
+            key_id: None,
+            signature: vec![0xFF; 16],
+        })
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded, receipt);
+        assert_eq!(decoded.signatures.len(), 2);
+        assert_eq!(decoded.signatures[0].method, SigningMethod::Minisign);
+        assert_eq!(decoded.signatures[1].method, SigningMethod::Tpm);
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_without_signatures_omits_field() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let json = serde_json::to_string(&receipt)?;
+        assert!(
+            !json.contains("signatures"),
+            "empty signatures must be omitted from JSON"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_canonical_bytes_clears_signatures() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xab).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .signature(Signature {
+            method: SigningMethod::Minisign,
+            key_id: Some("ABCD".to_owned()),
+            signature: vec![1, 2, 3],
+        })
+        .build();
+
+        let canonical = receipt.unsigned_canonical_bytes()?;
+        let canonical_str = std::str::from_utf8(&canonical)?;
+        assert!(
+            !canonical_str.contains("signatures"),
+            "canonical bytes must not contain signatures field"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_signer_trait_minisign_signs_canonical_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = minisign::KeyPair::generate_unencrypted_keypair()?;
+        let signer = MinisignSigner::new(key.clone());
+        let receipt = sample_receipt();
+        let canonical = receipt.unsigned_canonical_bytes()?;
+        let signature = signer.sign(&canonical)?;
+
+        assert_eq!(signature.method, SigningMethod::Minisign);
+        assert_eq!(signature.key_id, Some(signer.key_id()));
+
+        let signature_text = std::str::from_utf8(&signature.signature)?;
+        let signature_box = minisign::SignatureBox::from_string(signature_text)?;
+        minisign::verify(
+            &key.pk,
+            &signature_box,
+            Cursor::new(&canonical),
+            true,
+            false,
+            false,
+        )?;
         Ok(())
     }
 
