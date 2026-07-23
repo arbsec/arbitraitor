@@ -18,6 +18,25 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+mod pep740;
+
+pub use pep740::{
+    DsseEnvelope, DsseSignature, PEP740_KNOWN_PREDICATE_TYPES, PEP740_PROVENANCE_PREDICATE_TYPE,
+    PEP740_PUBLISH_PREDICATE_TYPE, Pep740Attestation, Pep740AttestationBundle, Pep740Digest,
+    Pep740SigstoreBundle, Pep740Statement, Pep740Subject, Pep740Verification, Pep740Verifier,
+};
+
+mod attestation;
+
+pub use attestation::{
+    AttestationRegistry, AttestationRevocationList, AttestationVerifierPolicy, RevocationEntry,
+    RevocationStatus, VerifierIdentity,
+};
+
+mod crates_io;
+
+pub use crates_io::{CratesIoAttestationVerifier, CratesIoVerification};
+
 /// Result type for provenance operations.
 pub type Result<T, E = ProvenanceError> = std::result::Result<T, E>;
 
@@ -201,6 +220,38 @@ pub enum ProvenanceError {
         threshold: u32,
         /// Unique verified signatures from authorized keys.
         verified: u32,
+    },
+    /// PEP 740 attestation document was malformed (issue #469).
+    #[error("PEP 740 attestation is malformed: {reason}")]
+    Pep740Malformed {
+        /// Safe diagnostic reason.
+        reason: String,
+    },
+    /// PEP 740 attestation subject digest did not match the artifact (issue #469).
+    #[error("PEP 740 attestation subject digest mismatch: expected {expected}, got {actual}")]
+    Pep740SubjectMismatch {
+        /// Expected artifact digest.
+        expected: String,
+        /// Actual subject digest from the attestation.
+        actual: String,
+    },
+    /// PEP 740 attestation predicate type was not accepted by verifier policy (issue #469).
+    #[error("PEP 740 attestation predicate type not accepted: {predicate_type}")]
+    Pep740PredicateNotAccepted {
+        /// The rejected predicate type URI.
+        predicate_type: String,
+    },
+    /// PEP 740 attestation signer was revoked (issue #469).
+    #[error("PEP 740 attestation signer revoked: {key_id}")]
+    Pep740SignerRevoked {
+        /// The revoked signer key identifier.
+        key_id: String,
+    },
+    /// PEP 740 attestation registry was not accepted by verifier policy (issue #469).
+    #[error("PEP 740 attestation registry not accepted: {registry}")]
+    Pep740RegistryNotAccepted {
+        /// The rejected registry identifier.
+        registry: String,
     },
 }
 
