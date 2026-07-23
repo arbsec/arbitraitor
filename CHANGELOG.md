@@ -117,6 +117,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the unresolved expression so operators can inspect the construction
   logic manually.
 
+#### Tests
+
+- End-to-end CLI tests for `wrappers init --install` / `--uninstall`
+  lifecycle (issue #614). New integration test file
+  `crates/arbitraitor-cli/tests/cli_wrappers_init.rs` spawns the
+  `arbitraitor` binary against a temp `HOME` directory and verifies the
+  marker-block lifecycle: first install writes the block, second install
+  is idempotent (content unchanged), `--dry-run` does not modify the
+  file, `--uninstall` removes the block and preserves foreign content,
+  double-uninstall is a no-op, backup file creation by default and
+  skipped with `--no-backup`, multi-shell support (bash + zsh), unknown
+  shell name exits non-zero, and `--detect-shell` prints the detected
+  shell and rcfile path.
+
 ### Changed
 
 #### Documentation
