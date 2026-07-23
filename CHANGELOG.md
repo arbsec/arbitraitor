@@ -897,6 +897,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Daemon in-process `release()` now requires a prior inspection receipt and a release-permitting verdict, and routes publication through ADR-0015's `release_artifact` safe-release primitive instead of `std::fs::write`
 - Tirith subprocess detector now records detector binary provenance in receipts and hardens subprocess execution with seccomp, Landlock, and pre-exec resource limits where available
 - `Detector::analyze` trait method now returns `Result<Vec<Finding>, DetectorError>` — detectors that cannot complete analysis return `Err`, which the coordinator maps to `DetectorStatus::Error` → `Verdict::Incomplete`; previously a detector failure (e.g. subprocess crash, invalid output, timeout) silently produced zero findings and a `Pass` verdict (#434)
+- Shebang parser in `arbitraitor-artifact::classify` now uses the first interpreter token instead of `.last()`, fixing misclassification of `#!/usr/bin/env python3 sh` as `ShellScript(Posix)` instead of `PythonScript`; the bug allowed non-shell artifacts to bypass the ADR-0036 content-type execution gate and be piped to bash (#627)
 
 ### Security
 

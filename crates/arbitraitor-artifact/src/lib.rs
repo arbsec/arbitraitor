@@ -321,7 +321,7 @@ fn extract_shebang(data: &[u8]) -> Option<String> {
 
 fn detect_shebang(shebang: &str) -> Option<ArtifactType> {
     let interpreter = normalized_interpreter_tokens(shebang);
-    let name = interpreter.last()?;
+    let name = interpreter.first()?;
 
     match name.as_str() {
         "sh" | "dash" | "ash" | "busybox" => Some(ArtifactType::ShellScript(ShellKind::Posix)),
@@ -334,19 +334,25 @@ fn detect_shebang(shebang: &str) -> Option<ArtifactType> {
     }
 }
 
+/// Extracts the interpreter token list from a shebang line for classification.
+///
+/// Strips the `#!` prefix, splits on whitespace, drops option flags (tokens
+/// starting with `-`), reduces each remaining token to its basename
+/// (`/usr/bin/env` → `env`), and finally drops the `env` wrapper token.
+///
+/// The **first** remaining token is the interpreter — never `.last()`.
+/// Using `.last()` caused `#!/usr/bin/env python3 sh` to classify as
+/// `ShellScript(Posix)` (matching `sh`) instead of `PythonScript`
+/// (matching `python3`), bypassing the ADR-0036 content-type execution
+/// gate. See issue #627.
 fn normalized_interpreter_tokens(shebang: &str) -> Vec<String> {
-    let mut tokens = shebang
+    shebang
         .trim_start_matches("#!")
         .split_whitespace()
         .filter(|token| !token.starts_with('-'))
         .map(interpreter_name)
         .filter(|token| token != "env")
-        .collect::<Vec<_>>();
-
-    if tokens.first().is_some_and(|token| token == "busybox") && tokens.len() > 1 {
-        tokens.remove(0);
-    }
-    tokens
+        .collect()
 }
 
 fn interpreter_name(token: &str) -> String {
@@ -710,6 +716,138 @@ mod tests {
     fn detects_python_shebang() {
         let result = classify(b"#!/usr/bin/env python3\nprint('hello')\n");
         assert_eq!(result.artifact_type, ArtifactType::PythonScript);
+    }
+
+    #[test]
+    fn shebang_direct_paths_select_first_token() {
+        assert_eq!(
+            classify(b"#!/bin/sh\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Posix)
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/bash\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Bash)
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/zsh\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Zsh)
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/python3\nprint('ok')\n").artifact_type,
+            ArtifactType::PythonScript
+        );
+        assert_eq!(
+            classify(b"#!/usr/local/bin/node\nconsole.log('ok')\n").artifact_type,
+            ArtifactType::JavaScript
+        );
+    }
+
+    #[test]
+    fn shebang_env_form_strips_env_and_options() {
+        assert_eq!(
+            classify(b"#!/usr/bin/env bash\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Bash)
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/env -S bash -euo pipefail\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Bash)
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/env -S /usr/bin/bash --noprofile\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Bash)
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/env python3\nprint('ok')\n").artifact_type,
+            ArtifactType::PythonScript
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/env pwsh\nWrite-Host ok\n").artifact_type,
+            ArtifactType::PowerShellScript
+        );
+    }
+
+    #[test]
+    fn shebang_env_with_arg_does_not_misclassify_regression_627() {
+        // The core bug: .last() picked "sh" instead of "python3".
+        assert_eq!(
+            classify(b"#!/usr/bin/env python3 sh\nprint('ok')\n").artifact_type,
+            ArtifactType::PythonScript
+        );
+        // Direct interpreter path with extra args — interpreter is python3, not sh.
+        assert_eq!(
+            classify(b"#!/usr/bin/python3 /bin/sh\nprint('ok')\n").artifact_type,
+            ArtifactType::PythonScript
+        );
+        // Node with trailing args should be JavaScript, not shell.
+        assert_eq!(
+            classify(b"#!/usr/bin/env node --inspect\nconsole.log('ok')\n").artifact_type,
+            ArtifactType::JavaScript
+        );
+    }
+
+    #[test]
+    fn shebang_busybox_applet_classifies_as_posix() {
+        // busybox is the interpreter; "sh" is the applet argument.
+        // .first() returns "busybox" which matches the Posix arm.
+        assert_eq!(
+            classify(b"#!/usr/bin/env busybox sh\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Posix)
+        );
+        assert_eq!(
+            classify(b"#!/bin/busybox sh\necho ok\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Posix)
+        );
+    }
+
+    #[test]
+    fn shebang_unrecognized_interpreter_returns_none() {
+        // Ruby, Perl, Lua, Awk are not in the match arms — classify falls
+        // through to text detection, not ShellScript.
+        assert_eq!(
+            classify(b"#!/usr/bin/env ruby\nputs 'ok'\n").artifact_type,
+            ArtifactType::GenericText
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/perl\nprint 'ok'\n").artifact_type,
+            ArtifactType::GenericText
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/env lua\nprint('ok')\n").artifact_type,
+            ArtifactType::GenericText
+        );
+        assert_eq!(
+            classify(b"#!/usr/bin/awk -f\n{print}\n").artifact_type,
+            ArtifactType::GenericText
+        );
+    }
+
+    #[test]
+    fn shebang_missing_or_malformed_does_not_classify() {
+        // No shebang at all.
+        assert_eq!(
+            classify(b"echo ok\n").artifact_type,
+            ArtifactType::GenericText
+        );
+        // Empty input.
+        assert_eq!(classify(b"").artifact_type, ArtifactType::Unknown);
+        // Shebang with no interpreter.
+        assert_eq!(
+            classify(b"#!\nhello\n").artifact_type,
+            ArtifactType::GenericText
+        );
+        // Shebang with only env and options.
+        assert_eq!(
+            classify(b"#!/usr/bin/env -S\nhello\n").artifact_type,
+            ArtifactType::GenericText
+        );
+    }
+
+    #[test]
+    fn shebang_crlf_line_ending_is_handled() {
+        assert_eq!(
+            classify(b"#!/bin/bash\r\necho ok\r\n").artifact_type,
+            ArtifactType::ShellScript(ShellKind::Bash)
+        );
     }
 
     fn tar_bytes() -> Vec<u8> {
