@@ -110,6 +110,7 @@ arbitraitor inspect <URL or file path> [flags]
 | `--cosign-issuer <ISSUER>` | cosign certificate issuer (repeatable) |
 | `--explain` | Show an explainability report for detected findings |
 | `--format <FORMAT>` | Output format for explainability: `text`, `shellcheck` (implies `--explain`) |
+| `--sign-receipt <METHOD>` | Sign the receipt with the specified method (spec §31.3): `minisign`, `cosign`, `enterprisekey`, `tpm` |
 
 ```sh
 # Basic inspection
@@ -221,6 +222,7 @@ arbitraitor run <URL or file path> [flags]
 | `--non-interactive` | Skip interactive approval prompts (block if approval needed) |
 | `--network` | Allow network access during execution (default: isolated) |
 | `--policy <PATH>` | Policy file path |
+| `--sign-receipt <METHOD>` | Sign the receipt with the specified method (spec §31.3): `minisign`, `cosign`, `enterprisekey`, `tpm` |
 
 ### Examples
 
@@ -540,6 +542,7 @@ Runs system health diagnostics. The default output is human-readable; `--json` e
 |------|-------------|
 | `--cas-dir <DIR>` | Override the CAS directory to check |
 | `--rules <DIR>` | Path to rule packs directory |
+| `--receipt-signing-key <PATH>` | Path to the receipt signing key file (spec §31.3) |
 | `--json` | Emit structured JSON with each check status as `pass`, `fail`, `warn`, or `skipped` |
 
 ### Checks

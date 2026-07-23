@@ -36,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
 
+#### Receipt
+
+- Receipt signing trait and adapters (spec §31.3). The `ReceiptSigner` trait
+  abstracts over signing backends: `MinisignSigner` (default, Ed25519 +
+  BLAKE2b prehash), `StubSigner` for `cosign`, `enterprisekey`, and `tpm`
+  (not yet implemented). The `Signature` struct and `SigningMethod` enum are
+  added to `arbitraitor-receipt`. Receipts now carry a `signatures` field
+  (`Vec<Signature>`) per ADR-0014; canonical bytes exclude this field to
+  prevent self-referential signatures.
+- `--sign-receipt <METHOD>` CLI flag added to `arbitraitor inspect` and
+  `arbitraitor run` commands. Methods: `minisign` (default), `cosign`,
+  `enterprisekey`, `tpm`.
+- `--receipt-signing-key <PATH>` CLI flag added to `arbitraitor doctor` to
+  probe the configured receipt signing key for existence and readability.
+
 ### Changed
 
 #### Documentation

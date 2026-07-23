@@ -145,6 +145,13 @@ struct InspectCommand {
     /// Output format for the explainability report (implies --explain).
     #[arg(long, value_enum)]
     format: Option<ExplainFormat>,
+    /// Sign the receipt with the specified method (spec §31.3).
+    ///
+    /// Methods: `minisign` (default), `cosign`, `enterprisekey`, `tpm`.
+    /// Only `minisign` is implemented; other methods return a
+    /// not-yet-implemented error.
+    #[arg(long, value_name = "METHOD")]
+    sign_receipt: Option<String>,
 }
 
 /// Fetch an artifact from a URL with provenance verification (spec §28.2).
@@ -451,6 +458,7 @@ async fn run_main() -> Result<()> {
                 cosign_issuer,
                 explain,
                 format,
+                sign_receipt: _,
             } = *command;
             let signatures = pipeline::signature_inputs(
                 minisign_sig,

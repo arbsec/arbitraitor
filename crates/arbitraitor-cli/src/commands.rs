@@ -98,6 +98,9 @@ pub struct DoctorCommand {
     pub cas_dir: Option<PathBuf>,
     #[arg(long, value_name = "DIR")]
     pub rules: Option<PathBuf>,
+    /// Path to the receipt signing key file (spec §31.3).
+    #[arg(long, value_name = "PATH")]
+    pub receipt_signing_key: Option<PathBuf>,
     /// Output JSON instead of human-readable format.
     #[arg(long)]
     pub json: bool,
@@ -698,6 +701,9 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     let mut checker = HealthChecker::new()
         .with_store(cas_dir.clone())
         .with_shim_dir(shim_dir.clone());
+    if let Some(key_path) = &command.receipt_signing_key {
+        checker = checker.with_receipt_signing_key(key_path.clone());
+    }
     if let Some(policy_file) = &config.policy.policy_file {
         checker = checker.with_policy_file(policy_file.clone());
     }
