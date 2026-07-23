@@ -9,16 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Fetch
+#### Provenance
 
-- User-supplied request headers (spec §11.2). `FetchRequest` now accepts
-  non-credential headers via `with_header(name, value)`. On cross-origin
-  redirects, all user-supplied headers are stripped unless
-  `forward_authorization_cross_origin` is `true`. Header **names** (never
-  values) are recorded in `FetchMetadata.request_header_names` for audit.
-  Ambient credential stores (cookie jar, netrc, credential helpers) remain
-  disabled by default per ADR-0018 — the `cookies` reqwest feature is not
-  enabled.
+- PEP 740 PyPI attestation verification (spec §31.3.1, §41.12, issue #469).
+  The `arbitraitor-provenance` crate now includes a `Pep740Verifier` that
+  verifies PyPI package attestations: parses the attestation document,
+  extracts the in-toto Statement from the DSSE envelope, checks the statement
+  subject digest against the artifact, and evaluates the signer identity
+  against the verifier policy. Cryptographic signature verification is
+  delegated to the existing cosign integration; no network calls are made.
+- `AttestationVerifierPolicy` — a verifier-side attestation policy that is
+  deliberately separate from the publisher-side `VerificationPolicy` (spec
+  §14.3). The publisher policy governs which signer identities are trusted to
+  have produced an artifact; the verifier policy governs which attestation
+  types, registries, and revocation states are accepted when evaluating
+  provenance evidence.
+- `RevocationStatus` enum (`Valid`, `Revoked`, `Withdrawn`, `Unknown`) with a
+  CRL (certificate revocation list) check path via `AttestationRevocationList`.
+  Extends the binary Active/Revoked model from `arbitraitor-plugin-host` with
+  `Withdrawn` (publisher-initiated) and `Unknown` (CRL unavailable or not
+  checked).
+- `CratesIoAttestationVerifier` stub for Cargo RFC #3724 (spec §41.12). The
+  RFC was accepted Q4 2025 and is rolling to GA Q3-Q4 2026. The stub provides
+  a policy-side opt-in flag (`recognize_crates_io`) so policy authors can
+  recognize crates.io Rekor tiles before the implementation is complete.
+  Returns `NotImplemented` until sigstore-rust 0.11+ integration lands.
+- `VerifierIdentity` newtype recorded in the receipt so downstream consumers
+  can audit which verifier accepted an attestation.
+- `AttestationRegistry` newtype to prevent confusing registry identities with
+  signer identities or verifier identities.
 
 #### Policy
 
@@ -35,21 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sysctl kernel.io_uring_disabled=1` (or `=2` for full disable) because
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
-
-#### Receipt
-
-- Receipt signing trait and adapters (spec §31.3). The `ReceiptSigner` trait
-  abstracts over signing backends: `MinisignSigner` (default, Ed25519 +
-  BLAKE2b prehash), `StubSigner` for `cosign`, `enterprisekey`, and `tpm`
-  (not yet implemented). The `Signature` struct and `SigningMethod` enum are
-  added to `arbitraitor-receipt`. Receipts now carry a `signatures` field
-  (`Vec<Signature>`) per ADR-0014; canonical bytes exclude this field to
-  prevent self-referential signatures.
-- `--sign-receipt <METHOD>` CLI flag added to `arbitraitor inspect` and
-  `arbitraitor run` commands. Methods: `minisign` (default), `cosign`,
-  `enterprisekey`, `tpm`.
-- `--receipt-signing-key <PATH>` CLI flag added to `arbitraitor doctor` to
-  probe the configured receipt signing key for existence and readability.
 
 ### Changed
 
