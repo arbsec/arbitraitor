@@ -72,6 +72,7 @@
   - [ADR 0035: LNK argument padding detection (CVE-2025-9491)](./adr/0035-lnk-argument-padding-cve-2025-9491.md)
   - [ADR 0036: `run` pipeline content-type execution gate](./adr/0036-run-pipeline-content-type-execution-gate.md)
   - [ADR 0037: Wasmtime CVE risk register](./adr/0037-wasmtime-cve-risk-register.md)
+  - [ADR 0038: Pipeline engine crate extraction and naming](./adr/0038-pipeline-engine-crate-extraction.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)
