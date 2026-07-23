@@ -137,6 +137,24 @@ Plugins declare capabilities in their WIT interface and cannot exceed them at ru
 | Execution fuel | Bounded (1B instructions default) |
 | Host calls | Bounded by count and deadline |
 
+### Component Model execution (ADR-0006, spec §41.9.1)
+
+`WasmPlugin` loads a `.wasm` Component Model binary, instantiates it inside the
+sandboxed Wasmtime engine, and calls the `analyze` export. Host bindings are
+generated at compile time via `wasmtime::component::bindgen!` from the workspace
+WIT file (`wit/arbitraitor-plugin.wit`), selecting the `detector` world.
+
+The three host imports (`get-artifact-bytes`, `get-artifact-size`, `log`) are
+implemented on `DetectorStore`, which enforces the ADR-0006 wall-clock deadline
+on every host call. Fuel and epoch interruption bound guest execution; traps,
+OOM, and fuel exhaustion return `WasmPluginError::Trap` — the sandbox boundaries
+hold and the host continues safely.
+
+The `DetectorPlugin::analyze` trait impl calls `analyze_artifact` internally
+and returns empty findings on error (fail-safe per conventions). Callers that
+need typed errors should use `analyze_artifact` directly with a cached
+`WasmEngine` reference.
+
 ### Subprocess controls
 
 | Control | Enforcement |
