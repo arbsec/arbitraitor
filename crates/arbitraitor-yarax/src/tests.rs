@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use arbitraitor_analysis::AnalysisCoordinator;
+use arbitraitor_analysis::{AnalysisCoordinator, ArtifactDetector};
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_model::finding::FindingCategory;
 
@@ -192,7 +192,8 @@ fn unsigned_pack_loads_as_user_local_unsigned() -> Result<(), Box<dyn std::error
 #[test]
 fn shell_script_rule_does_not_match_pe_artifact() -> Result<(), Box<dyn std::error::Error>> {
     let detector = YaraDetector::from_rules(SHELL_ONLY_RULE)?;
-    let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(detector)]);
+    let coordinator =
+        AnalysisCoordinator::with_detectors(vec![Box::new(detector), Box::new(ArtifactDetector)]);
 
     let result = coordinator.analyze(b"MZ\x90\0pe-like bytes");
 

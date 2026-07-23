@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod dep_vuln;
+pub mod mandatory;
 pub mod payload_graph;
 pub mod pyjs;
 pub mod tirith;
@@ -329,6 +330,7 @@ impl AnalysisCoordinator {
         let scan_started = Instant::now();
         let classification = classify(artifact_bytes);
         let artifact_sha256 = digest(artifact_bytes);
+        let sha256_for_mandatory = artifact_sha256.clone();
         let ctx = OwnedAnalysisContext {
             artifact_bytes: artifact_bytes.to_vec(),
             classification: classification.clone(),
@@ -357,6 +359,13 @@ impl AnalysisCoordinator {
             findings.extend(execution.findings);
             detector_results.push(execution.result);
         }
+
+        let mandatory_findings = mandatory::MandatoryDetectorRegistry::new().validate_coverage(
+            &artifact_kind,
+            &detector_results,
+            &sha256_for_mandatory,
+        );
+        findings.extend(mandatory_findings);
 
         let verdict = derive_verdict(&findings, &detector_results);
         let metrics = self.metrics_enabled.then(|| {
