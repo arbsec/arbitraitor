@@ -307,11 +307,14 @@ dependencies = [
 name = "arbitraitor-fetch"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-archive",
+ "arbitraitor-artifact",
  "arbitraitor-model",
  "arbitraitor-testkit",
  "arbitraitor-workspace-hack",
  "async-trait",
  "bytes",
+ "flate2",
  "proptest",
  "reqwest",
  "secrecy",
@@ -320,6 +323,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zip",
 ]
 
 [[package]]

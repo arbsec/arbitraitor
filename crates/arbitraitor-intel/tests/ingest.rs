@@ -79,6 +79,7 @@ impl Fetcher for CannedFetcher {
             sha256: digest,
             bytes_written: u64::try_from(self.bytes.len()).unwrap_or(0),
             metadata: FetchMetadata::default(),
+            child_artifacts: Vec::new(),
         })
     }
 }
