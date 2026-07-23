@@ -11,17 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Analysis
 
-- Dependency vulnerability detector coverage (spec §18.5, issue #509). The
-  `arbitraitor-analysis` crate now includes a `DependencyVulnerabilityDetector`
-  that scans lockfiles against a local OSV/KEV snapshot. The detector is
-  offline-first: snapshots are loaded from disk via `OsvSnapshot` and
-  `KevSnapshot` structs, each carrying a `Sha256Digest` for receipt provenance.
-  `DepVulnConfig` controls enablement (`enabled = true` required per spec;
-  `enabled = "auto"` is forbidden) and update mode (`offline_only`,
-  `hash_only`, `online_with_redaction`). VEX interaction: when a `VexStatement`
-  with status `fixed` or `not_affected` matches a finding's advisory ID, the
-  severity is downgraded by one level. The combined snapshot digest is exposed
-  via `DetectorProvenance::ruleset_digest` for receipt recording.
+- Payload graph with typed edges (spec §20, issue #517). The
+  `arbitraitor-analysis` crate now includes a `PayloadGraph` struct that
+  records artifacts as nodes (SHA-256 digest, name, artifact type) and their
+  relationships as typed directed edges. Seven edge types are defined per the
+  spec: `Downloads`, `DecodesTo`, `Executes`, `Loads`, `Installs`,
+  `References`, and `Verifies`. The graph supports `add_node`, `add_edge`,
+  `children`, `parents`, and `is_complete` for structural integrity checks.
+  The receipt records the graph as `payload_graph: Option<PayloadGraph>` with
+  `#[serde(default, skip_serializing_if = "Option::is_none")]` per ADR-0014,
+  so it is omitted when no recursive payload discovery was performed.
 
 #### Fetch
 
