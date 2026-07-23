@@ -12,6 +12,8 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-archive = { workspace = true }
+arbitraitor-artifact = { workspace = true }
 arbitraitor-model = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -26,4 +28,6 @@ arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace
 
 [dev-dependencies]
 arbitraitor-testkit = { workspace = true }
+flate2 = { workspace = true }
 proptest = { workspace = true }
+zip = { workspace = true }

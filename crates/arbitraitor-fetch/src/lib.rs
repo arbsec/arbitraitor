@@ -507,6 +507,26 @@ pub struct FetchMetadata {
     pub request_header_names: Vec<String>,
 }
 
+/// A decoded child artifact extracted from a fetched archive payload.
+///
+/// When the fetched artifact is an archive or compressed stream (gzip, tar,
+/// zip, xz, bzip2, zstd), each extracted member is recorded as a
+/// `ChildArtifact` with its own SHA-256 digest. This enforces Invariant 2
+/// (immutable identity): the digest the scanner sees matches the digest the
+/// extractor produces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildArtifact {
+    /// SHA-256 digest of the decoded child bytes.
+    pub digest: Sha256Digest,
+    /// Entry name within the parent archive, or `"payload"` for
+    /// single-stream decompression (gzip, xz, bzip2, zstd).
+    pub name: String,
+    /// Ordinal position of the entry within the parent archive (0-based).
+    pub parent_offset: u64,
+    /// Decoded size in bytes.
+    pub decoded_size: u64,
+}
+
 /// Receipt returned after bytes have been streamed into an [`ArtifactSink`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchReceipt {
@@ -518,6 +538,92 @@ pub struct FetchReceipt {
     pub bytes_written: u64,
     /// Transport metadata captured during retrieval.
     pub metadata: FetchMetadata,
+    /// Decoded child artifacts discovered in archive payloads, empty for
+    /// non-archive artifacts. Each child's SHA-256 is computed over the
+    /// exact decoded bytes (Invariant 2: immutable identity).
+    pub child_artifacts: Vec<ChildArtifact>,
+}
+
+impl FetchReceipt {
+    /// Records discovered child artifacts in the receipt.
+    ///
+    /// Call [`discover_child_artifacts`] after fetching to populate this
+    /// field. The receipt is consumed and returned with the children set.
+    #[must_use]
+    pub fn with_child_artifacts(mut self, children: Vec<ChildArtifact>) -> Self {
+        self.child_artifacts = children;
+        self
+    }
+}
+
+/// Discover decoded child artifacts with their extracted bytes.
+///
+/// When the fetched bytes are an archive or compressed stream (tar, zip,
+/// gzip, xz, bzip2, zstd), this function walks the payload graph and
+/// collects each direct child's digest, name, decoded size, and bytes.
+/// Extraction is bounded by `ArchiveLimits::default()` (Invariant 4:
+/// bounded processing).
+///
+/// Returns an empty vector for non-archive artifacts. Callers that need
+/// to store children in CAS should use this function to avoid
+/// re-extraction; callers that only need metadata should use
+/// [`discover_child_artifacts`].
+#[must_use]
+pub fn discover_child_artifacts_with_bytes(bytes: &[u8]) -> Vec<(ChildArtifact, Vec<u8>)> {
+    let classification = arbitraitor_artifact::classify(bytes);
+    if !arbitraitor_archive::is_archive_type(classification.artifact_type) {
+        return Vec::new();
+    }
+    let limits = arbitraitor_archive::ArchiveLimits::default();
+    let mut children: Vec<(ChildArtifact, Vec<u8>)> = Vec::new();
+    let mut offset: u64 = 0;
+    let (_node, _issues) = arbitraitor_archive::walk_payloads(
+        bytes,
+        classification.artifact_type,
+        &limits,
+        arbitraitor_archive::DEFAULT_MAX_PAYLOAD_DEPTH,
+        &mut |node: &arbitraitor_archive::PayloadNode<'_>, node_bytes: &[u8]| {
+            if node.depth != 1 {
+                return;
+            }
+            let name = match node.origin {
+                arbitraitor_archive::ArtifactOrigin::ArchiveEntry { entry_name, .. } => {
+                    entry_name.clone()
+                }
+                arbitraitor_archive::ArtifactOrigin::Root => "payload".to_owned(),
+            };
+            children.push((
+                ChildArtifact {
+                    digest: node.sha256.clone(),
+                    name,
+                    parent_offset: offset,
+                    decoded_size: node.size,
+                },
+                node_bytes.to_vec(),
+            ));
+            offset = offset.saturating_add(1);
+        },
+    );
+    children
+}
+
+/// Discover decoded child artifacts in a fetched payload.
+///
+/// When the fetched bytes are an archive or compressed stream (tar, zip,
+/// gzip, xz, bzip2, zstd), this function walks the payload graph and
+/// collects each direct child's digest, name, and decoded size. Extraction
+/// is bounded by `ArchiveLimits::default()` (Invariant 4: bounded
+/// processing).
+///
+/// Returns an empty vector for non-archive artifacts. Use
+/// [`discover_child_artifacts_with_bytes`] when the decoded bytes are
+/// also needed (e.g., for CAS storage).
+#[must_use]
+pub fn discover_child_artifacts(bytes: &[u8]) -> Vec<ChildArtifact> {
+    discover_child_artifacts_with_bytes(bytes)
+        .into_iter()
+        .map(|(artifact, _)| artifact)
+        .collect()
 }
 
 /// Sink that receives artifact bytes as they arrive.
@@ -1148,6 +1254,7 @@ impl StreamState {
             sha256: digest,
             bytes_written: self.bytes_written,
             metadata,
+            child_artifacts: Vec::new(),
         })
     }
 }
