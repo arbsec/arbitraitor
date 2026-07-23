@@ -302,6 +302,13 @@ pub(crate) fn build_receipt(
         builder = builder.detector_version(rule_pack_version.clone());
     }
 
+    if let Some(identity) = signature_verifications
+        .iter()
+        .find_map(|v| v.verifier_identity.as_deref())
+    {
+        builder = builder.verifier_identity(identity);
+    }
+
     Ok(builder.build())
 }
 
