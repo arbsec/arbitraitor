@@ -8,6 +8,7 @@
 pub mod dep_vuln;
 pub mod pyjs;
 pub mod tirith;
+pub mod url_discovery;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
