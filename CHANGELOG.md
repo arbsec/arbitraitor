@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Fetch
+
+- Decoded child artifact creation for archive payloads (spec §41.4.2, issue
+  #499). When the fetched artifact is an archive or compressed stream (gzip,
+  tar, zip, xz, bzip2, zstd), `FetchReceipt` now records each extracted
+  member as a `ChildArtifact` with its own SHA-256 digest, entry name,
+  ordinal offset, and decoded size. The `discover_child_artifacts` and
+  `discover_child_artifacts_with_bytes` functions walk the payload graph
+  under bounded `ArchiveLimits` (Invariant 4) and return exact-byte child
+  identities (Invariant 2: immutable identity). The CLI inspect pipeline
+  and daemon `fetch_and_store` store each child in CAS; the MCP
+  `fetch_url_once` populates the receipt for agent inspection.
+
 #### Provenance
 
 - PEP 740 PyPI attestation verification (spec §31.3.1, §41.12, issue #469).
