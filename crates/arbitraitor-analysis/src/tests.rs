@@ -649,6 +649,35 @@ impl Detector for RetrievalDetector {
     }
 }
 
+struct SilentDetector {
+    id: &'static str,
+}
+
+impl SilentDetector {
+    const fn new(id: &'static str) -> Self {
+        Self { id }
+    }
+}
+
+impl Detector for SilentDetector {
+    fn metadata(&self) -> DetectorMetadata {
+        DetectorMetadata {
+            id: self.id.to_owned(),
+            version: "test".to_owned(),
+            supported_artifact_kinds: Vec::new(),
+            capabilities: Vec::new(),
+            is_local: true,
+            may_upload: false,
+            default_timeout_ms: 5_000,
+            is_deterministic: true,
+        }
+    }
+
+    fn analyze(&self, _ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        Ok(Vec::new())
+    }
+}
+
 fn test_metadata(id: &str) -> DetectorMetadata {
     DetectorMetadata {
         id: id.to_owned(),
@@ -874,4 +903,77 @@ fn default_pipeline_flags_javascript_persistence() {
                 && f.tags.iter().any(|tag| tag == "persistence-write")),
         "fs.writeFileSync should produce a python-js persistence finding"
     );
+}
+
+// ---- Mandatory detector coverage tests (spec §9 invariant 1) ----
+
+#[test]
+fn mandatory_coverage_passes_when_all_mandatory_detectors_ran() {
+    let coordinator = AnalysisCoordinator::with_detectors(vec![Box::new(SilentDetector::new(
+        "arbitraitor-analysis.shell",
+    ))]);
+    let result = coordinator.analyze(b"#!/bin/sh\necho hello\n");
+
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.id == "mandatory-detector.missing"),
+        "no mandatory-coverage finding when the shell detector ran"
+    );
+    assert_eq!(result.verdict, Verdict::Pass);
+}
+
+#[test]
+fn mandatory_coverage_emits_block_finding_when_detector_missing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let coordinator = AnalysisCoordinator::with_detectors(vec![]);
+    let result = coordinator.analyze(b"#!/bin/sh\necho hello\n");
+
+    let missing = result
+        .findings
+        .iter()
+        .find(|f| f.id == "mandatory-detector.missing")
+        .ok_or("missing mandatory detector should produce a finding")?;
+    assert_eq!(missing.severity, Severity::Critical);
+    assert_eq!(missing.category, FindingCategory::PolicyViolation);
+    assert_eq!(missing.detector, "arbitraitor-analysis.mandatory-coverage");
+    assert!(
+        missing.tags.iter().any(|tag| tag == "invariant-1"),
+        "finding must reference spec invariant 1"
+    );
+    assert_eq!(result.verdict, Verdict::Block);
+    Ok(())
+}
+
+#[test]
+fn mandatory_coverage_skips_classes_without_mandatory_detectors() {
+    let coordinator = AnalysisCoordinator::with_detectors(vec![]);
+    let result = coordinator.analyze(b"plain text\n");
+
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.id == "mandatory-detector.missing"),
+        "GenericText has no mandatory detectors"
+    );
+    assert_eq!(result.verdict, Verdict::Pass);
+}
+
+#[test]
+fn mandatory_coverage_finding_carries_correct_artifact_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = b"#!/bin/sh\necho hello\n";
+    let expected = digest(bytes);
+    let coordinator = AnalysisCoordinator::with_detectors(vec![]);
+    let result = coordinator.analyze(bytes);
+
+    let missing = result
+        .findings
+        .iter()
+        .find(|f| f.id == "mandatory-detector.missing")
+        .ok_or("missing mandatory detector should produce a finding")?;
+    assert_eq!(missing.artifact_sha256, expected);
+    Ok(())
 }
