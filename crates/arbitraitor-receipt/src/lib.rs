@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::io::Cursor;
 use std::time::SystemTime;
 
+use arbitraitor_analysis::PayloadGraph;
 use arbitraitor_exec::EffectiveControls;
 use arbitraitor_model::finding::{DetectorProvenance, Finding, FindingCategory, SourceLocation};
 use arbitraitor_model::ids::{Sha256Digest, Sha256DigestParseError};
@@ -79,6 +80,10 @@ pub struct Receipt {
     /// the attestation. `None` when no Sigstore verification was performed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_identity: Option<String>,
+    /// Payload graph recording artifacts and their relationships (spec §20,
+    /// issue #517). `None` when no recursive payload discovery was performed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_graph: Option<PayloadGraph>,
     /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
     /// Signatures produced by [`ReceiptSigner`] adapters (spec §31.3).
@@ -530,6 +535,7 @@ impl ReceiptBuilder {
                 allow_rule_metadata: Vec::new(),
                 approval: None,
                 verifier_identity: None,
+                payload_graph: None,
                 signature: None,
                 signatures: Vec::new(),
             },
@@ -638,6 +644,13 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn verifier_identity(mut self, identity: impl Into<String>) -> Self {
         self.receipt.verifier_identity = Some(identity.into());
+        self
+    }
+
+    /// Set the payload graph (spec §20, issue #517).
+    #[must_use]
+    pub fn payload_graph(mut self, graph: PayloadGraph) -> Self {
+        self.receipt.payload_graph = Some(graph);
         self
     }
 
@@ -1020,6 +1033,69 @@ mod tests {
         );
         let decoded: Receipt = serde_json::from_str(&json)?;
         assert_eq!(decoded.verifier_identity, None);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_graph_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        use arbitraitor_analysis::{PayloadEdgeType, PayloadGraph, payload_graph::PayloadNode};
+        use arbitraitor_artifact::ArtifactType;
+
+        let mut graph = PayloadGraph::new();
+        let root = graph.add_node(PayloadNode {
+            digest: sample_digest(0x01),
+            name: "install.sh".to_owned(),
+            artifact_type: Some(ArtifactType::ShellScript(
+                arbitraitor_artifact::ShellKind::Bash,
+            )),
+        });
+        let tool = graph.add_node(PayloadNode {
+            digest: sample_digest(0x02),
+            name: "tool.tar.gz".to_owned(),
+            artifact_type: Some(ArtifactType::GzipCompressed),
+        });
+        graph.add_edge(root, tool, PayloadEdgeType::Downloads)?;
+
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0x01).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .payload_graph(graph)
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: Receipt = serde_json::from_str(&json)?;
+
+        let decoded_graph = decoded
+            .payload_graph
+            .as_ref()
+            .ok_or("payload graph missing")?;
+        assert_eq!(decoded_graph.nodes.len(), 2);
+        assert_eq!(decoded_graph.edges.len(), 1);
+        assert_eq!(decoded_graph.edges[0].edge_type, PayloadEdgeType::Downloads);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_graph_absent_when_not_set() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let json = serde_json::to_string(&receipt)?;
+        assert!(
+            !json.contains("payload_graph"),
+            "payload_graph must be omitted when None"
+        );
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded.payload_graph, None);
         Ok(())
     }
 

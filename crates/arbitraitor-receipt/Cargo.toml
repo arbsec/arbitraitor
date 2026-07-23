@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+arbitraitor-analysis = { workspace = true }
 arbitraitor-exec = { workspace = true }
 arbitraitor-model = { workspace = true }
 minisign = { workspace = true } # Receipt signing API; MIT, pure Rust, no network behavior, no native build.
@@ -24,4 +25,5 @@ uuid = { workspace = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 
 [dev-dependencies]
+arbitraitor-artifact = { workspace = true }
 proptest = { workspace = true }

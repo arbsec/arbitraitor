@@ -6,9 +6,12 @@
 #![warn(missing_docs)]
 
 pub mod dep_vuln;
+pub mod payload_graph;
 pub mod pyjs;
 pub mod tirith;
 pub mod url_discovery;
+
+pub use payload_graph::{PayloadEdge, PayloadEdgeType, PayloadGraph, PayloadGraphError};
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
