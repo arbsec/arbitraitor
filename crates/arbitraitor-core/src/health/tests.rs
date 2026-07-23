@@ -7,7 +7,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{ComponentHealth, HealthChecker, HealthReport, HealthStatus, YaraRulesProbe};
+use super::{
+    ComponentHealth, HealthChecker, HealthReport, HealthStatus, YaraRulesProbe,
+    parse_cosign_version, parse_version_tuple,
+};
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -276,4 +279,50 @@ fn remaining_doctor_checks_return_typed_statuses() {
         checker.check_shim_path_order().status,
         HealthStatus::Skipped
     );
+}
+
+#[test]
+fn sigstore_version_check_returns_typed_status() {
+    let checker = HealthChecker::new();
+    let result = checker.check_sigstore_version();
+    assert!(
+        matches!(
+            result.status,
+            HealthStatus::Pass | HealthStatus::Fail | HealthStatus::Warn | HealthStatus::Skipped
+        ),
+        "sigstore_version check must return a valid status, got {:?}",
+        result.status
+    );
+    assert_eq!(result.name, "sigstore_version");
+}
+
+#[test]
+fn parse_cosign_version_handles_v2_gitversion_format() {
+    let output = "N/A\nGitVersion: v2.6.2\nGitCommit: abc123\n";
+    assert_eq!(parse_cosign_version(output), Some("2.6.2".to_owned()));
+}
+
+#[test]
+fn parse_cosign_version_handles_v3_bare_format() {
+    let output = "v3.0.5\n";
+    assert_eq!(parse_cosign_version(output), Some("3.0.5".to_owned()));
+}
+
+#[test]
+fn parse_cosign_version_returns_none_for_garbage() {
+    assert_eq!(parse_cosign_version("not a version\n"), None);
+    assert_eq!(parse_cosign_version(""), None);
+}
+
+#[test]
+fn parse_version_tuple_parses_valid_versions() {
+    assert_eq!(parse_version_tuple("3.0.5"), Some((3, 0, 5)));
+    assert_eq!(parse_version_tuple("v2.6.2"), Some((2, 6, 2)));
+}
+
+#[test]
+fn parse_version_tuple_rejects_invalid_versions() {
+    assert_eq!(parse_version_tuple("3.0"), None);
+    assert_eq!(parse_version_tuple("abc"), None);
+    assert_eq!(parse_version_tuple(""), None);
 }
