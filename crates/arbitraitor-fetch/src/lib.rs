@@ -189,6 +189,19 @@ pub struct FetchRequest {
     pub cancellation: FetchCancellation,
     /// Credential-bearing request headers configured by the caller.
     pub credentials: RequestCredentials,
+    /// User-supplied request headers (spec §11.2).
+    ///
+    /// These are non-credential headers the caller wants attached to the
+    /// outgoing request (e.g. `Accept`, `X-Custom-Header`). Credential
+    /// headers (`Authorization`, `Cookie`) should be set via
+    /// [`Self::with_authorization_header`] / [`Self::with_cookie_header`]
+    /// so they are protected by [`SecretString`].
+    ///
+    /// On cross-origin redirects, all user-supplied headers are stripped
+    /// unless [`FetchPolicy::forward_authorization_cross_origin`] is
+    /// `true`. Header **names** (never values) are recorded in the fetch
+    /// receipt for audit.
+    pub headers: Vec<(String, String)>,
 }
 
 impl FetchRequest {
@@ -201,6 +214,7 @@ impl FetchRequest {
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
             credentials: RequestCredentials::default(),
+            headers: Vec::new(),
         }
     }
 
@@ -213,6 +227,7 @@ impl FetchRequest {
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
             credentials: RequestCredentials::default(),
+            headers: Vec::new(),
         }
     }
 
@@ -225,6 +240,7 @@ impl FetchRequest {
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
             credentials: RequestCredentials::default(),
+            headers: Vec::new(),
         }
     }
 
@@ -274,6 +290,23 @@ impl FetchRequest {
     #[must_use]
     pub fn with_netrc_default_token(mut self, value: SecretString) -> Self {
         self.credentials.netrc_default_token = Some(value);
+        self
+    }
+
+    /// Adds a user-supplied request header (spec §11.2).
+    ///
+    /// Use this for non-credential headers like `Accept` or `X-Custom-Header`.
+    /// For `Authorization` and `Cookie` headers, use
+    /// [`Self::with_authorization_header`] / [`Self::with_cookie_header`]
+    /// so values are protected by [`SecretString`].
+    ///
+    /// Header values are never recorded in logs or receipts — only header
+    /// names are preserved for audit. On cross-origin redirects,
+    /// user-supplied headers are stripped unless
+    /// [`FetchPolicy::forward_authorization_cross_origin`] is `true`.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 }
@@ -376,14 +409,9 @@ pub struct FetchPolicy {
     ///
     /// Fail-closed by default (`false`) per spec §11.2. When `false`, any
     /// redirect that lands on a different origin triggers a forced strip of
-    /// credential-bearing headers from subsequent requests in the chain.
-    /// When `true`, the original headers are preserved.
-    ///
-    /// Note: as of the current MVP, [`execute_request`] sends a bare GET
-    /// with no Authorization header (user-supplied headers are tracked in
-    /// issue #498). The strip logic below is therefore forward-compatible —
-    /// when #498 wires header input, this policy is the gate that prevents
-    /// credential leakage.
+    /// credential-bearing headers and all user-supplied headers from
+    /// subsequent requests in the chain. When `true`, the original headers
+    /// are preserved.
     pub forward_authorization_cross_origin: bool,
     /// Optional proxy URL (spec §11.2, ADR-0018). When `None` (default),
     /// all proxy behavior is disabled via `.no_proxy()`. When `Some`,
@@ -469,6 +497,14 @@ pub struct FetchMetadata {
     pub retriever_version: String,
     /// Cross-protocol redirect credential-secrecy outcome.
     pub redirect_credential_secrecy: RedirectCredentialSecrecy,
+    /// Names of user-supplied request headers (spec §11.2).
+    ///
+    /// Records header **names only** — values are never included — so the
+    /// receipt proves which headers were sent without leaking secrets.
+    /// Populated from [`FetchRequest::headers`] and credential-bearing
+    /// headers set via [`FetchRequest::with_authorization_header`] /
+    /// [`FetchRequest::with_cookie_header`].
+    pub request_header_names: Vec<String>,
 }
 
 /// Receipt returned after bytes have been streamed into an [`ArtifactSink`].
@@ -736,6 +772,7 @@ impl Fetcher for HttpFetcher {
             &request.policy,
             request.expected_sha256.as_ref(),
             &request.credentials,
+            &request.headers,
             sink,
         );
         tokio::time::timeout(request.policy.total_timeout, future)
@@ -751,6 +788,7 @@ impl HttpFetcher {
         policy: &FetchPolicy,
         expected_sha256: Option<&Sha256Digest>,
         credentials: &RequestCredentials,
+        user_headers: &[(String, String)],
         sink: &mut dyn ArtifactSink,
     ) -> Result<FetchReceipt, FetchError> {
         ensure_scheme_allowed(
@@ -762,6 +800,7 @@ impl HttpFetcher {
         let mut visited = HashSet::new();
         let mut redirect_chain = Vec::new();
         let mut headers = credentials.header_map()?;
+        let user_header_names = merge_user_headers(&mut headers, user_headers)?;
 
         for redirect_count in 0..=policy.max_redirects {
             if !visited.insert(current.clone()) {
@@ -785,7 +824,13 @@ impl HttpFetcher {
                 ensure_scheme_allowed(FetchScheme::from_str(next.scheme()), next.scheme(), policy)?;
                 ensure_no_insecure_downgrade(current.scheme(), next.scheme(), policy)?;
                 ensure_cross_origin_allowed(&current, &next, policy)?;
-                strip_credentials_on_cross_origin(&mut headers, &current, &next, policy);
+                strip_credentials_on_cross_origin(
+                    &mut headers,
+                    &current,
+                    &next,
+                    policy,
+                    &user_header_names,
+                );
                 trace!(from = %redact_parsed_url(&current), to = %redact_parsed_url(&next), "following policy-approved redirect");
                 redirect_chain.push(FetchUrl(current));
                 current = next;
@@ -808,6 +853,7 @@ impl HttpFetcher {
                     final_url: FetchUrl(current),
                     redirect_chain,
                     redirect_credential_secrecy: RedirectCredentialSecrecy::Ok,
+                    request_header_names: user_header_names.clone(),
                 },
             )
             .await;
@@ -923,6 +969,10 @@ fn build_http_client(
         .no_zstd()
         .tls_info(true)
         .user_agent(format!("{USER_AGENT_PREFIX}{}", env!("CARGO_PKG_VERSION")));
+    // ADR-0018: ambient credential stores are disabled by feature exclusion.
+    // The `cookies` feature is not enabled in Cargo.toml, so reqwest has no
+    // cookie jar. reqwest has no built-in netrc or credential-helper support.
+    // Proxy is disabled via `.no_proxy()` below unless explicitly configured.
 
     if let Some(ref proxy_url) = policy.proxy_url {
         let proxy = reqwest::Proxy::all(proxy_url).map_err(|error| FetchError::InvalidUrl {
@@ -981,6 +1031,7 @@ async fn stream_response(
         final_url,
         redirect_chain,
         redirect_credential_secrecy,
+        request_header_names,
     } = metadata_input;
     let content_type = header_to_string(response.headers(), CONTENT_TYPE.as_str());
     let content_length = response
@@ -1015,6 +1066,7 @@ async fn stream_response(
             .map(|h| format!("{}://{}", final_url.as_url().scheme(), h)),
         retriever_version: format!("arbitraitor-fetch/{}", env!("CARGO_PKG_VERSION")),
         redirect_credential_secrecy,
+        request_header_names,
     };
 
     let mut state = StreamState::default();
@@ -1043,6 +1095,7 @@ struct ResponseMetadataInput {
     final_url: FetchUrl,
     redirect_chain: Vec<FetchUrl>,
     redirect_credential_secrecy: RedirectCredentialSecrecy,
+    request_header_names: Vec<String>,
 }
 
 async fn stream_reader<R: AsyncRead + Unpin>(
@@ -1414,24 +1467,53 @@ fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port() == b.port()
 }
 
+/// Merges user-supplied headers into the request header map (spec §11.2).
+///
+/// Returns the lowercased header names that were inserted so the redirect
+/// loop can strip them on cross-origin hops. Credential headers
+/// (`Authorization`, `Cookie`) are handled separately by
+/// [`RequestCredentials::header_map`] and are always stripped on
+/// cross-origin redirects regardless of this list.
+///
+/// # Errors
+///
+/// Returns [`FetchError::InvalidHeader`] when a user-supplied header value
+/// is not a valid [`HeaderValue`].
+fn merge_user_headers(
+    headers: &mut HeaderMap,
+    user_headers: &[(String, String)],
+) -> Result<Vec<String>, FetchError> {
+    let mut names = Vec::with_capacity(user_headers.len());
+    for (name, value) in user_headers {
+        let header_name =
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                FetchError::InvalidHeader {
+                    name: "user-supplied",
+                }
+            })?;
+        let header_value = HeaderValue::from_str(value).map_err(|_| FetchError::InvalidHeader {
+            name: "user-supplied",
+        })?;
+        headers.insert(header_name, header_value);
+        names.push(name.to_ascii_lowercase());
+    }
+    Ok(names)
+}
+
 /// Strips credential-bearing headers when the redirect crosses origin
 /// boundaries and the policy does not allow forwarding (spec §11.2).
 ///
 /// When `forward_authorization_cross_origin` is `false`, any redirect
 /// that lands on a different origin (scheme + host + port) triggers
-/// removal of `Authorization` and `Cookie` headers from the header map.
-/// When `true`, headers are preserved unchanged.
-///
-/// Not yet called from the redirect loop because `execute_request`
-/// sends a bare GET with no user-supplied headers (tracked in #498).
-/// When #498 wires header input, this function becomes the gate that
-/// prevents credential leakage on cross-origin redirects.
-#[allow(dead_code)]
+/// removal of `Authorization` and `Cookie` headers from the header map,
+/// plus all user-supplied headers whose names appear in
+/// `user_header_names`. When `true`, headers are preserved unchanged.
 pub(crate) fn strip_credentials_on_cross_origin(
     headers: &mut reqwest::header::HeaderMap,
     from: &Url,
     to: &Url,
     policy: &FetchPolicy,
+    user_header_names: &[String],
 ) {
     if policy.forward_authorization_cross_origin {
         return;
@@ -1441,6 +1523,11 @@ pub(crate) fn strip_credentials_on_cross_origin(
     }
     headers.remove(reqwest::header::AUTHORIZATION);
     headers.remove(reqwest::header::COOKIE);
+    for name in user_header_names {
+        if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+            headers.remove(header_name);
+        }
+    }
 }
 
 fn ensure_cross_protocol_credentials_secret(
@@ -1570,7 +1657,7 @@ mod tests {
     use super::{
         FetchCancellation, FetchError, FetchPolicy, FetchScheme, TlsVerifier, build_http_client,
         ensure_cross_origin_allowed, ensure_no_insecure_downgrade, execute_request,
-        strip_credentials_on_cross_origin, verify_connected_peer,
+        merge_user_headers, strip_credentials_on_cross_origin, verify_connected_peer,
     };
     use url::Url;
 
@@ -1860,7 +1947,7 @@ mod tests {
             reqwest::header::HeaderValue::from_static("session=abc"),
         );
 
-        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy, &[]);
 
         assert!(
             headers.get(reqwest::header::AUTHORIZATION).is_none(),
@@ -1883,7 +1970,7 @@ mod tests {
             reqwest::header::HeaderValue::from_static("Bearer secret123"),
         );
 
-        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy, &[]);
 
         assert!(
             headers.get(reqwest::header::AUTHORIZATION).is_some(),
@@ -1906,11 +1993,94 @@ mod tests {
             reqwest::header::HeaderValue::from_static("Bearer secret123"),
         );
 
-        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy);
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy, &[]);
 
         assert!(
             headers.get(reqwest::header::AUTHORIZATION).is_some(),
             "Authorization MUST be preserved when policy opts in to cross-origin forwarding"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_removes_user_supplied_headers_on_cross_origin() {
+        let policy = FetchPolicy::default();
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://cdn.example.net/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_static("secret-key-value"),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-custom"),
+            reqwest::header::HeaderValue::from_static("custom-value"),
+        );
+        let user_header_names = vec!["x-api-key".to_owned(), "x-custom".to_owned()];
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy, &user_header_names);
+
+        assert!(
+            headers.get("x-api-key").is_none(),
+            "user-supplied X-API-Key MUST be stripped on cross-origin redirect"
+        );
+        assert!(
+            headers.get("x-custom").is_none(),
+            "user-supplied X-Custom MUST be stripped on cross-origin redirect"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_preserves_user_supplied_headers_on_same_origin() {
+        let policy = FetchPolicy::default();
+        let from = Url::parse("https://example.com/a").unwrap();
+        let to = Url::parse("https://example.com/b").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_static("secret-key-value"),
+        );
+        let user_header_names = vec!["x-api-key".to_owned()];
+
+        strip_credentials_on_cross_origin(&mut headers, &from, &to, &policy, &user_header_names);
+
+        assert!(
+            headers.get("x-api-key").is_some(),
+            "user-supplied X-API-Key MUST be preserved on same-origin redirect"
+        );
+    }
+
+    #[test]
+    fn merge_user_headers_inserts_and_returns_lowercased_names() -> Result<(), FetchError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let user_headers = vec![
+            ("X-Custom".to_owned(), "value1".to_owned()),
+            ("Accept".to_owned(), "application/json".to_owned()),
+        ];
+
+        let names = merge_user_headers(&mut headers, &user_headers)?;
+
+        assert_eq!(names, vec!["x-custom", "accept"]);
+        assert_eq!(
+            headers.get("x-custom").and_then(|v| v.to_str().ok()),
+            Some("value1")
+        );
+        assert_eq!(
+            headers.get("accept").and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_user_headers_rejects_invalid_header_name() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let user_headers = vec![("invalid header name".to_owned(), "value".to_owned())];
+
+        let result = merge_user_headers(&mut headers, &user_headers);
+
+        assert!(
+            matches!(result, Err(FetchError::InvalidHeader { .. })),
+            "invalid header name must be rejected: {result:?}"
         );
     }
 

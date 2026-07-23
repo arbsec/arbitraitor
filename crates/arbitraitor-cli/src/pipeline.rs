@@ -89,6 +89,7 @@ pub(crate) async fn inspect(
         expected_sha256,
         cancellation: arbitraitor_fetch::FetchCancellation::new(),
         credentials: arbitraitor_fetch::RequestCredentials::default(),
+        headers: Vec::new(),
     };
     let mut fetch_sink = VecSink::new();
     let fetch_receipt = match &request.source {
