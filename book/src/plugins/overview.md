@@ -161,3 +161,13 @@ See [WIT Interfaces](./wit.md) for the detector world definition and [Subprocess
 - WASM plugins are memory-isolated from the host process
 - Subprocess plugins are killed if they exceed resource limits
 - No plugin can bypass the approval flow
+
+### Wasmtime CVE risk register
+
+The Wasmtime runtime is tracked against known CVEs in
+<!-- markdownlint-disable-next-line MD057 -->
+[ADR 0037](../adr/0037-wasmtime-cve-risk-register.md). The risk register
+catalogs all advisories from the Bytecode Alliance GitHub Security Advisories
+and the RustSec database, and records whether the pinned version is affected.
+The `cargo-deny` advisories check in CI automatically fails if a new
+advisory affects the pinned `wasmtime` version.

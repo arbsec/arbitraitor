@@ -873,6 +873,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Wasmtime CVE risk register (ADR-0037, #463):** cataloged all 21 known
+  Wasmtime security advisories from official sources (GitHub Security
+  Advisories, RustSec, NVD/CVE) into a versioned risk register. The pinned
+  `wasmtime 46.0.1` is above the fix version `43.0.1` for all April 2026
+  advisories, including the two Critical sandbox-escape CVEs
+  (CVE-2026-34971 Cranelift aarch64, CVE-2026-34987 Winch backend). The
+  Winch compiler backend is not enabled. `cargo-deny` advisories check in CI
+  enforces the baseline automatically.
 - Tar archive inspection now checks for parser-smelting PAX `size=` desync
   patterns and records `parser_differential` findings that refuse release;
   `arbitraitor doctor` verifies the locked `tar` crate is at the patched
