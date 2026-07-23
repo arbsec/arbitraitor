@@ -180,6 +180,7 @@ dependencies = [
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
  "infer",
+ "serde",
  "sha2 0.11.0",
  "thiserror 2.0.19",
 ]
@@ -471,6 +472,8 @@ dependencies = [
 name = "arbitraitor-receipt"
 version = "0.1.0"
 dependencies = [
+ "arbitraitor-analysis",
+ "arbitraitor-artifact",
  "arbitraitor-exec",
  "arbitraitor-model",
  "arbitraitor-workspace-hack",

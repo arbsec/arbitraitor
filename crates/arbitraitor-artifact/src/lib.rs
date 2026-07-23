@@ -8,6 +8,7 @@
 use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use thiserror::Error;
@@ -24,7 +25,7 @@ const MAX_SHEBANG_BYTES: usize = 256;
 const LNK_HEADER_SIZE: u32 = 0x0000_004C;
 
 /// Shell interpreter family identified from a script shebang.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShellKind {
     /// POSIX `sh` or compatible shell.
     Posix,
@@ -35,7 +36,7 @@ pub enum ShellKind {
 }
 
 /// Initial artifact content type identified from immutable artifact bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArtifactType {
     /// Shell script with a detected shell kind.
     ShellScript(ShellKind),
