@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Returns `NotImplemented` until sigstore-rust 0.11+ integration lands.
 - `VerifierIdentity` newtype recorded in the receipt so downstream consumers
   can audit which verifier accepted an attestation.
+- `Receipt.verifier_identity` field (ADR-0014, issue #457) records the cosign
+  version used for Sigstore bundle verification. Populated by `verify_cosign`
+  via a best-effort `cosign version` probe; `None` for non-Sigstore systems.
+- `HealthChecker::check_sigstore_version()` doctor check verifies the installed
+  cosign binary meets the minimum v3.0.5 floor for CVE-2026-22703 and
+  CVE-2026-24122. Returns `Skipped` when cosign is not on PATH.
 - `AttestationRegistry` newtype to prevent confusing registry identities with
   signer identities or verifier identities.
 
@@ -850,6 +856,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server, and plugin host now refuse to run as root before any untrusted content
   is touched. A new `--allow-root` global CLI flag provides a diagnostic bypass
   for the `doctor` command and integration tests.
+- **Cosign CVE pin + verifier_identity audit trail (#457):** the doctor check
+  now verifies the installed cosign version against the minimum v3.0.5 that
+  addresses CVE-2026-22703 (Rekor entry body mismatch, patched in v2.6.2 /
+  v3.0.4) and CVE-2026-24122 (CA expiry bypass, patched in v3.0.5). Receipts
+  now record a `verifier_identity` field (ADR-0014) capturing the cosign
+  version used for Sigstore bundle verification, so downstream consumers can
+  audit which verifier accepted an attestation.
 
 ## [0.1.0-alpha] — 2026-06-23
 
