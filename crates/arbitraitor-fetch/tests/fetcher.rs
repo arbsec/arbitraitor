@@ -449,3 +449,231 @@ fn temp_file_path() -> Result<PathBuf, std::time::SystemTimeError> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     Ok(std::env::temp_dir().join(format!("arbitraitor-fetch-test-{nanos}.bin")))
 }
+
+// ---------------------------------------------------------------------------
+// User-supplied headers (spec §11.2, issue #498)
+// ---------------------------------------------------------------------------
+
+async fn header_capture_server(
+    body: &[u8],
+) -> Result<(String, JoinHandle<Result<String, std::io::Error>>), std::io::Error> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
+    let body = body.to_vec();
+    let handle = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(&body).await?;
+        stream.shutdown().await?;
+        Ok(String::from_utf8_lossy(&request).to_ascii_lowercase())
+    });
+    Ok((format!("http://{addr}/artifact"), handle))
+}
+
+async fn redirect_server(target_url: String) -> Result<String, std::io::Error> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    });
+    Ok(format!("http://{addr}/redirect"))
+}
+
+#[tokio::test]
+async fn user_headers_applied_to_request() -> Result<(), Box<dyn std::error::Error>> {
+    let body = b"header test";
+    let (url, request_handle) = header_capture_server(body).await?;
+
+    let mut sink = VecSink::new();
+    let receipt = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_policy())
+                .with_header("X-Custom-Header", "custom-value")
+                .with_header("Accept", "application/json"),
+            &mut sink,
+        )
+        .await?;
+
+    let captured = request_handle.await??;
+    assert!(
+        captured.contains("x-custom-header: custom-value"),
+        "user-supplied X-Custom-Header must be sent: {captured}"
+    );
+    assert!(
+        captured.contains("accept: application/json"),
+        "user-supplied Accept must be sent: {captured}"
+    );
+    assert_eq!(sink.as_bytes(), body);
+    assert_eq!(receipt.bytes_written, u64::try_from(body.len())?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn user_headers_stripped_on_cross_origin_redirect() -> Result<(), Box<dyn std::error::Error>>
+{
+    let body = b"cross-origin";
+    let (capture_url, request_handle) = header_capture_server(body).await?;
+    let redirect_url = redirect_server(capture_url).await?;
+
+    let mut policy = http_policy();
+    policy.max_redirects = 1;
+    let mut sink = VecSink::new();
+
+    let receipt = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&redirect_url)?, policy)
+                .with_header("X-Custom-Header", "secret-value")
+                .with_header("X-API-Key", "api-secret"),
+            &mut sink,
+        )
+        .await?;
+
+    let captured = request_handle.await??;
+    assert!(
+        !captured.contains("secret-value"),
+        "user-supplied header value MUST NOT be forwarded to cross-origin redirect target: {captured}"
+    );
+    assert!(
+        !captured.contains("api-secret"),
+        "user-supplied API key value MUST NOT be forwarded to cross-origin redirect target: {captured}"
+    );
+    assert!(
+        !captured.contains("x-custom-header"),
+        "user-supplied X-Custom-Header MUST be stripped on cross-origin redirect: {captured}"
+    );
+    assert!(
+        !captured.contains("x-api-key"),
+        "user-supplied X-API-Key MUST be stripped on cross-origin redirect: {captured}"
+    );
+    assert_eq!(sink.as_bytes(), body);
+    assert_eq!(receipt.bytes_written, u64::try_from(body.len())?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn user_headers_preserved_on_same_origin_redirect() -> Result<(), Box<dyn std::error::Error>>
+{
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{addr}");
+    let redirect_target = format!("{base_url}/final");
+    let capture_handle = tokio::spawn(async move {
+        let mut captured_second = String::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request_str = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            if request_str.contains("/final") {
+                captured_second = request_str;
+                let response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = stream.write_all(response.as_bytes()).await;
+            } else {
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {redirect_target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+            let _ = stream.shutdown().await;
+        }
+        Ok::<String, std::io::Error>(captured_second)
+    });
+
+    let mut policy = http_policy();
+    policy.max_redirects = 1;
+    let mut sink = VecSink::new();
+
+    HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&format!("{base_url}/start"))?, policy)
+                .with_header("X-Custom-Header", "preserve-me"),
+            &mut sink,
+        )
+        .await?;
+
+    let captured = capture_handle.await??;
+    assert!(
+        captured.contains("x-custom-header: preserve-me"),
+        "user-supplied header MUST be preserved on same-origin redirect: {captured}"
+    );
+    assert_eq!(sink.as_bytes(), b"ok");
+    Ok(())
+}
+
+#[tokio::test]
+async fn header_values_not_in_receipt() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let url = server.binary_response(b"receipt test", "text/plain").await;
+    let secret_value = "super-secret-api-key-value-498";
+
+    let mut sink = VecSink::new();
+    let receipt = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_policy())
+                .with_header("X-API-Key", secret_value)
+                .with_header("X-Custom", "custom-data"),
+            &mut sink,
+        )
+        .await?;
+
+    assert!(
+        receipt
+            .metadata
+            .request_header_names
+            .contains(&"x-api-key".to_owned()),
+        "receipt must record X-API-Key header name: {:?}",
+        receipt.metadata.request_header_names
+    );
+    assert!(
+        receipt
+            .metadata
+            .request_header_names
+            .contains(&"x-custom".to_owned()),
+        "receipt must record X-Custom header name: {:?}",
+        receipt.metadata.request_header_names
+    );
+    let receipt_debug = format!("{receipt:?}");
+    assert!(
+        !receipt_debug.contains(secret_value),
+        "receipt debug output MUST NOT contain header values: {receipt_debug}"
+    );
+    assert!(
+        !receipt_debug.contains("custom-data"),
+        "receipt debug output MUST NOT contain header values: {receipt_debug}"
+    );
+    Ok(())
+}

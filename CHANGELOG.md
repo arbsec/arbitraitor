@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Fetch
+
+- User-supplied request headers (spec §11.2). `FetchRequest` now accepts
+  non-credential headers via `with_header(name, value)`. On cross-origin
+  redirects, all user-supplied headers are stripped unless
+  `forward_authorization_cross_origin` is `true`. Header **names** (never
+  values) are recorded in `FetchMetadata.request_header_names` for audit.
+  Ambient credential stores (cookie jar, netrc, credential helpers) remain
+  disabled by default per ADR-0018 — the `cookies` reqwest feature is not
+  enabled.
+
 #### Policy
 
 - Allow rules now accept `expiry`, `scope`, `creator`, and `reason` metadata;
