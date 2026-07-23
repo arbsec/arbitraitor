@@ -696,29 +696,7 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
 async fn wrap(command: WrapCommand, config: &Config) -> Result<()> {
     match WrapperTarget::from_binary_name(&command.tool) {
         Some(WrapperTarget::Curl | WrapperTarget::Wget) => {
-            let fetch = FetchCommand {
-                tool: Some(command.tool),
-                args: command.args,
-                output: None,
-                sha256: None,
-                signature: Vec::new(),
-                cosign_bundle: Vec::new(),
-                identity: Vec::new(),
-                issuer: Vec::new(),
-                expected_type: None,
-                expected_content_type: None,
-                max_bytes: None,
-                header: Vec::new(),
-                policy: None,
-                recursive: false,
-                sandbox: false,
-                non_interactive: false,
-                json: false,
-                sarif: false,
-                receipt: None,
-                no_cache: false,
-            };
-            wrapper_fetch(&fetch, config).await?;
+            wrap_downloader(&command, config).await?;
         }
         None if command.tool == "bash" => {
             wrap_bash(&command, config).await?;
@@ -733,6 +711,89 @@ async fn wrap(command: WrapCommand, config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fetches and inspects each URL independently per spec §39.9.
+async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
+    let tool = Some(command.tool.as_str());
+    let target = wrapper_fetch_target(tool)?;
+
+    if matches!(target, Some(WrapperTarget::Curl)) {
+        let parsed = parse_curl_args(&command.args).into_diagnostic()?;
+        if !parsed.unsupported_options.is_empty() {
+            miette::bail!(
+                "unsupported curl wrapper option: {}",
+                parsed.unsupported_options.join(", ")
+            );
+        }
+    }
+
+    let urls = wrapper_url_arguments(tool, &command.args);
+    if urls.is_empty() {
+        miette::bail!("curl/wget wrapper requires at least one http:// or https:// URL argument");
+    }
+
+    let (output_path, remote_name) = wrapper_output_destination(tool, &command.args);
+
+    if urls.len() > 1 && output_path.is_some() && !remote_name {
+        miette::bail!(
+            "multiple URLs with a single --output would concatenate responses; \
+             use --remote-name (-O) for each URL or fetch them separately"
+        );
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    for url in &urls {
+        match wrap_fetch_single(url, config).await {
+            Ok(outcome) => {
+                let emit_remote = remote_name || urls.len() > 1;
+                let emit_path = if urls.len() > 1 {
+                    None
+                } else {
+                    output_path.as_deref()
+                };
+                if let Err(error) = emit_wrapper_output(&outcome.bytes, emit_path, emit_remote, url)
+                {
+                    errors.push(format!("{url}: {error}"));
+                }
+            }
+            Err(error) => {
+                errors.push(format!("{url}: {error}"));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        miette::bail!(
+            "wrap failed for {} URL(s): {}",
+            errors.len(),
+            errors.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+async fn wrap_fetch_single(url: &str, config: &Config) -> Result<pipeline::InspectOutcome> {
+    let signatures =
+        pipeline::signature_inputs(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+
+    let outcome = pipeline::inspect(url, None, None, None, None, signatures, config, None).await?;
+
+    if outcome.verdict != Verdict::Pass {
+        miette::bail!("fetch rejected artifact with verdict {:?}", outcome.verdict);
+    }
+
+    let recomputed = Sha256Digest::new(Sha256::digest(&outcome.bytes).into());
+    if recomputed != outcome.sha256 {
+        miette::bail!(
+            "pre-release digest mismatch: stored={}, recomputed={}",
+            outcome.sha256,
+            recomputed
+        );
+    }
+
+    Ok(outcome)
 }
 
 async fn wrap_bash(command: &WrapCommand, config: &Config) -> Result<()> {
@@ -826,6 +887,18 @@ fn wrapper_url_argument<'a>(tool: Option<&str>, args: &'a [String]) -> Option<&'
         Some(WrapperTarget::Curl) => curl_url_argument(args),
         Some(WrapperTarget::Wget) => wget_url_argument(args),
         None => curl_url_argument(args).or_else(|| wget_url_argument(args)),
+    }
+}
+
+fn wrapper_url_arguments(tool: Option<&str>, args: &[String]) -> Vec<String> {
+    match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl) => parse_curl_args(args)
+            .map(|parsed| parsed.urls)
+            .unwrap_or_default(),
+        Some(WrapperTarget::Wget) => translate_wget_args(args)
+            .map(|parsed| parsed.urls)
+            .unwrap_or_default(),
+        None => Vec::new(),
     }
 }
 

@@ -137,6 +137,9 @@ instead of PATH shims:
 arbitraitor wrap curl -- -fsSL https://example.com/install.sh
 arbitraitor wrap wget -- -qO- https://example.com/install.sh
 arbitraitor wrap bash -- ./approved-script.sh
+
+# Multiple URLs — each inspected independently (spec §39.9)
+arbitraitor wrap curl -- -O https://example.com/a.sh https://example.com/b.sh
 ```
 
 ### Scan a local file or stdin

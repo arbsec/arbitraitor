@@ -30,8 +30,14 @@ const WGET_NO_CHECK_CERTIFICATE_FINDING_ID: &str = "wget-no-check-certificate";
 /// Parsed wget arguments translated to Arbitraitor's fetch model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WgetRequest {
-    /// URL to retrieve.
+    /// First URL to retrieve.
     pub url: String,
+    /// All positional URLs observed on the command line (spec §39.9).
+    ///
+    /// Multi-URL invocations must create independent artifact identities and
+    /// verdicts. The first entry mirrors `url`; subsequent entries are
+    /// additional URLs that wget would fetch independently.
+    pub urls: Vec<String>,
     /// Output file path from `-O` / `--output-document`.
     pub output_path: Option<PathBuf>,
     /// Custom request headers from repeatable `--header` flags.
@@ -81,6 +87,7 @@ struct WgetParser<'a> {
     args: &'a [String],
     index: usize,
     url: Option<String>,
+    urls: Vec<String>,
     output_path: Option<PathBuf>,
     headers: Vec<(String, String)>,
     user_agent: Option<String>,
@@ -97,6 +104,7 @@ impl<'a> WgetParser<'a> {
             args,
             index,
             url: None,
+            urls: Vec::new(),
             output_path: None,
             headers: Vec::new(),
             user_agent: None,
@@ -124,7 +132,8 @@ impl<'a> WgetParser<'a> {
         let url = self.url.clone().ok_or(WrapperError::MissingUrl)?;
         let findings = build_findings(&self);
         Ok(WgetRequest {
-            url,
+            url: url.clone(),
+            urls: self.urls,
             output_path: self.output_path,
             headers: self.headers,
             user_agent: self.user_agent,
@@ -143,10 +152,9 @@ impl<'a> WgetParser<'a> {
 
     fn set_url(&mut self, token: String) {
         if self.url.is_none() {
-            self.url = Some(token);
+            self.url = Some(token.clone());
         }
-        // Additional positionals are ignored: wget supports multiple URLs but
-        // Arbitraitor's fetch model processes one artifact at a time.
+        self.urls.push(token);
     }
 
     fn parse_long_option(&mut self, body: &str) -> Result<(), WrapperError> {
@@ -511,6 +519,7 @@ mod tests {
     fn to_fetch_request_produces_correct_output() {
         let request = WgetRequest {
             url: "https://example.com/file".to_owned(),
+            urls: vec!["https://example.com/file".to_owned()],
             output_path: None,
             headers: vec![("accept".to_owned(), "application/json".to_owned())],
             user_agent: Some("TestAgent/1".to_owned()),
@@ -592,6 +601,36 @@ mod tests {
 
         let result = parse(&["wget", "-T30", "https://example.com"])?;
         assert_eq!(result.timeout_secs, Some(30));
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_urls_are_collected_not_ignored() -> Result<(), WrapperError> {
+        let result = parse(&[
+            "wget",
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ])?;
+
+        assert_eq!(result.url, "https://example.com/a");
+        assert_eq!(
+            result.urls,
+            [
+                "https://example.com/a",
+                "https://example.com/b",
+                "https://example.com/c"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn single_url_populates_both_url_and_urls() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "https://example.com/only"])?;
+
+        assert_eq!(result.url, "https://example.com/only");
+        assert_eq!(result.urls, ["https://example.com/only"]);
         Ok(())
     }
 }

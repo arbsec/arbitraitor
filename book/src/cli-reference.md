@@ -199,11 +199,30 @@ decide the final verdict and does not release content directly.
 used by PATH shims. `bash` inspects a local script path when one is present;
 other tools currently emit a warning and release nothing.
 
+### Multi-URL handling (spec §39.9)
+
+When `curl` or `wget` is invoked with multiple URLs, each URL is fetched and
+inspected independently — producing separate artifact identities (SHA-256)
+and verdicts. Responses are never concatenated into one executable stream.
+A failure on one URL does not prevent inspection of the remaining URLs, but
+the command exits non-zero if any verdict is not `Pass`.
+
+A single `--output` (`-o`) with multiple URLs is rejected because it would
+concatenate responses. Use `--remote-name` (`-O`) for per-URL file output,
+or fetch URLs in separate invocations.
+
 ### Examples
 
 ```sh
+# Single URL
 arbitraitor wrap curl -- -fsSL https://example.com/install.sh
 arbitraitor wrap wget -- -qO- https://example.com/install.sh
+
+# Multiple URLs — each inspected independently (spec §39.9)
+arbitraitor wrap curl -- -O https://example.com/a.sh https://example.com/b.sh
+arbitraitor wrap wget -- https://example.com/a https://example.com/b
+
+# Non-downloader tools
 arbitraitor wrap bash -- ./approved-script.sh
 arbitraitor wrap brew -- install example
 ```

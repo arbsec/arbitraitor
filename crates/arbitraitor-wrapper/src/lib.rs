@@ -24,8 +24,14 @@ use thiserror::Error;
 )]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CurlArgs {
-    /// URL to retrieve.
+    /// First URL to retrieve (backward-compatible single-URL accessor).
     pub url: Option<String>,
+    /// All positional URLs observed on the command line (spec §39.9).
+    ///
+    /// Multi-URL invocations must create independent artifact identities and
+    /// verdicts. The first entry mirrors `url`; subsequent entries are
+    /// additional URLs that curl would fetch independently.
+    pub urls: Vec<String>,
     /// Output path from `-o` or `--output`.
     pub output: Option<String>,
     /// Whether redirects are followed (`-L`, `--location`).
@@ -405,10 +411,9 @@ impl<'a> CurlParser<'a> {
 
     fn set_positional_url(&mut self, token: String) {
         if self.args.url.is_none() {
-            self.args.url = Some(token);
-        } else {
-            self.args.unsupported_options.push("extra-url".to_owned());
+            self.args.url = Some(token.clone());
         }
+        self.args.urls.push(token);
     }
 }
 
@@ -647,6 +652,44 @@ mod tests {
         let args = parse(&["curl", "--", "-not-an-option"])?;
 
         assert_eq!(args.url.as_deref(), Some("-not-an-option"));
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_urls_are_collected_not_rejected() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "-fsSL",
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ])?;
+
+        assert_eq!(args.url.as_deref(), Some("https://example.com/a"));
+        assert_eq!(
+            args.urls,
+            [
+                "https://example.com/a",
+                "https://example.com/b",
+                "https://example.com/c"
+            ]
+        );
+        assert!(
+            !args
+                .unsupported_options
+                .iter()
+                .any(|opt| opt == "extra-url"),
+            "multi-URL must not surface as unsupported option"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn single_url_populates_both_url_and_urls() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "https://example.com/only"])?;
+
+        assert_eq!(args.url.as_deref(), Some("https://example.com/only"));
+        assert_eq!(args.urls, ["https://example.com/only"]);
         Ok(())
     }
 
