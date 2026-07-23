@@ -226,3 +226,39 @@ Recursion depth and total extracted size are bounded to prevent zip bombs and si
 | Detector panic | Catch, log, verdict: `incomplete` |
 | Timeout exceeded | Kill, verdict: `incomplete` |
 | CAS read failure | Verdict: `incomplete`, block re-execution |
+
+## Sigstore Bundle policy enforcement
+
+Sigstore Bundle consumption is policy-enforced per spec §14.2.1.
+After `cosign verify-blob` succeeds cryptographically, the bundle is validated
+against a `SigstoreBundlePolicy` that enforces:
+
+- **Media type**: the `mediaType` field must be one of the accepted version
+  strings (`application/vnd.dev.sigstore.bundle+json;version=0.1`, `0.2`, `0.3`).
+  Unknown or missing media types are rejected.
+- **Verification material form**: the bundle must contain a
+  `verificationMaterial` field with one of three accepted forms:
+  `x509CertificateChain` (form 1), `publicKey` (form 2), or `x509Certificate`
+  (form 3, required for v0.3 keyless). All three forms are accepted by default.
+- **Signature payload**: the bundle must contain either a `messageSignature` or
+  a `dsseEnvelope`. Bundles missing both are rejected.
+- **Transparency-log evidence**: controlled by `TlogPolicy`:
+
+  | Policy | Requirement |
+  |--------|-------------|
+  | `RequireInclusionProof` (default) | Each tlog entry must carry an `inclusionProof` (Merkle proof) |
+  | `RequireInclusionPromise` | Each tlog entry must carry an `inclusionPromise` (signed by Rekor) |
+  | `RequireBoth` | Each tlog entry must carry both proof and promise |
+  | `Optional` | Tlog entries not required; bundle may rely on RFC 3161 timestamps alone |
+
+- **RFC 3161 timestamps**: accepted as signing-time evidence when Rekor is
+  unreachable (air-gapped hosts, SSRF-restricted networks).
+- **Online vs offline mode**: offline verification is the default. Online Rekor
+  search is opt-in and never produces a stronger verdict than offline
+  inclusion-proof verification.
+
+Identity/issuer binding is **not** inferred from the Bundle — it is supplied by
+local policy via `--identity` and `--issuer`.
+
+A Bundle without an inclusion proof and without an RFC 3161 timestamp is
+recorded as `unverified` and must not be treated as a valid signature.

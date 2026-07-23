@@ -69,6 +69,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CVE-2026-24122. Returns `Skipped` when cosign is not on PATH.
 - `AttestationRegistry` newtype to prevent confusing registry identities with
   signer identities or verifier identities.
+- Sigstore Bundle media-type/form/tlog policy enforcement (spec §14.2.1, issue
+  #513). `SigstoreBundlePolicy` validates bundles against configurable policy:
+  accepted media types (0.1/0.2/0.3), verification material forms
+  (`X509CertificateChain`, `PublicKey`, `X509Certificate`), and transparency-log
+  evidence (`TlogPolicy::RequireInclusionProof` default, `RequireInclusionPromise`,
+  `RequireBoth`, `Optional`). `verify_cosign` now enforces the default policy
+  after cosign succeeds; `verify_cosign_with_policy` accepts an explicit policy.
+  Bundles missing `mediaType`, `verificationMaterial`, or both `messageSignature`
+  and `dsseEnvelope` are rejected. A bundle without tlog entries is accepted only
+  under `TlogPolicy::Optional` (offline-only mode per spec §14.2.1).
 
 #### Policy
 
