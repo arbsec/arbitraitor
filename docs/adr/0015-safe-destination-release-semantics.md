@@ -100,8 +100,8 @@ rename is impossible. Arbitraitor:
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-01
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §26.2 (Exact-byte and
+- `docs/spec/spec.md` H-01
+- `docs/spec/spec.md` §26.2 (Exact-byte and
   destination-safe release)
-- `.spec/arbitraitor-tech-stack.md` §5 (Filesystem and content-addressed store)
+- `docs/spec/tech-stack.md` §5 (Filesystem and content-addressed store)
 - [ADR 0010](0010-platform-provenance-preservation.md) — Provenance markers

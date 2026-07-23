@@ -1,6 +1,6 @@
 //! Plugin ABI traits, capability declarations, and WIT-adjacent model types.
 //!
-//! See `.spec/` for the full specification.
+//! See `docs/spec/` for the full specification.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

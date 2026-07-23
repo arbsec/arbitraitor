@@ -123,7 +123,7 @@ restrictions are rejected by `deny_unknown_fields` validation.
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-10
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §9.24 (Monotonic project
+- `docs/spec/spec.md` H-10
+- `docs/spec/spec.md` §9.24 (Monotonic project
   configuration), §30.3 (Configuration trust boundaries)
 - [ADR 0004](0004-toml-for-configuration-and-policy.md) — TOML format

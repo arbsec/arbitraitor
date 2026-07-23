@@ -113,8 +113,8 @@ Arbitraitor publishes official canonicalization test vectors covering:
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-06
-- `.spec/arbitraitor-tech-stack.md` §6.4 (Signed receipt canonicalization)
+- `docs/spec/spec.md` H-06
+- `docs/spec/tech-stack.md` §6.4 (Signed receipt canonicalization)
 - [RFC 8785 — JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html)
 - [RFC 8259 — The JSON Data Interchange Syntax](https://www.rfc-editor.org/rfc/rfc8259)
 - [I-JSON (RFC 7493)](https://www.rfc-editor.org/rfc/rfc7493.html)

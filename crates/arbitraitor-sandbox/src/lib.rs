@@ -1,6 +1,6 @@
 //! Platform sandbox adapters for contained execution
 //!
-//! See `.spec/` for the full specification.
+//! See `docs/spec/` for the full specification.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

@@ -1,6 +1,6 @@
 //! Microsoft Defender command-line adapter.
 //!
-//! See `.spec/` §18 for the antivirus integration specification. This adapter
+//! See `docs/spec/` §18 for the antivirus integration specification. This adapter
 //! is intentionally separate from the byte-oriented [`crate::AntivirusAdapter`]
 //! trait: Defender's CLI scans a file *path* rather than an inbound byte stream,
 //! so it exposes a path-oriented API and degrades gracefully when the binary is

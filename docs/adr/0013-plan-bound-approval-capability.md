@@ -125,7 +125,7 @@ CI workflows).
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` C-08, H-11
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §25.3 (Approval), §33 (AI agent
+- `docs/spec/spec.md` C-08, H-11
+- `docs/spec/spec.md` §25.3 (Approval), §33 (AI agent
   and MCP integration)
 - [ADR 0007](0007-assurance-levels-model.md) — Assurance levels

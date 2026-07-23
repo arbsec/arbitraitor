@@ -99,8 +99,8 @@ platform behavior. Propagation limitations are documented:
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` C-05
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §9.20 (Platform provenance
+- `docs/spec/spec.md` C-05
+- `docs/spec/spec.md` §9.20 (Platform provenance
   preservation)
 - [macOS quarantine properties](https://developer.apple.com/documentation/foundation/urlresourcevalues/quarantineproperties)
 - [Windows Zone.Identifier](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/6e3f7352-d11c-4d76-8c39-2516a9df36e8)

@@ -1185,7 +1185,7 @@ all = []
 // ---------------------------------------------------------------------------
 
 /// Verbatim copy of the spec §23.3 example policy (lines 1828-1897 of
-/// `.spec/spec.md`). Used to assert the engine loads the documented
+/// `docs/spec/spec.md`). Used to assert the engine loads the documented
 /// example without parse or validation errors. Adding a new operator,
 /// field, or top-level section to the spec example requires extending
 /// this constant alongside the schema change so accidental drift is
@@ -1262,7 +1262,7 @@ all = [
 "#;
 
 /// Verbatim copy of the spec §23.1.1 example policy (lines 1793-1813 of
-/// `.spec/spec.md`). Exercises the `not_in` operator and `caller_origin.*`
+/// `docs/spec/spec.md`). Exercises the `not_in` operator and `caller_origin.*`
 /// nested field access.
 const SPEC_SECTION_23_1_1_EXAMPLE_POLICY: &str = r#"
 version = 1

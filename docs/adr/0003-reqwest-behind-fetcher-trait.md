@@ -70,6 +70,6 @@ full redirect, SSRF, and proxy semantics.
 
 ## References
 
-- `.spec/arbitraitor-tech-stack.md` §4 (HTTP and transport stack)
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §11 (Retrieval subsystem)
+- `docs/spec/tech-stack.md` §4 (HTTP and transport stack)
+- `docs/spec/spec.md` §11 (Retrieval subsystem)
 - [ADR 0018](0018-ssrf-proxy-connected-peer-verification.md) — SSRF and proxy

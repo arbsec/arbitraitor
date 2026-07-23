@@ -149,7 +149,7 @@ conformance suite for that command shape.
 
 ## References
 
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` C-03
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §39 (Plugin, wrapper, and
+- `docs/spec/spec.md` C-03
+- `docs/spec/spec.md` §39 (Plugin, wrapper, and
   adapter system)
 - [ADR 0006](0006-wasmtime-component-model-plugins.md) — Plugin runtime

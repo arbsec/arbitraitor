@@ -1,6 +1,6 @@
 //! Detector coordination for the analysis pipeline
 //!
-//! See `.spec/` for the full specification.
+//! See `docs/spec/` for the full specification.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -898,7 +898,7 @@ fn rewrite_artifact_digest(
         .collect()
 }
 
-const COMPANION_REFERENCE: &str = "https://github.com/arbsec/arbitraitor/blob/main/.spec/arbitraitor-comprehensive-spec.md#195-companion-artifact-consumption-sbom-vex";
+const COMPANION_REFERENCE: &str = "https://github.com/arbsec/arbitraitor/blob/main/docs/spec/spec.md#195-companion-artifact-consumption-sbom-vex";
 
 fn discover_companion_findings(
     entries: &[arbitraitor_archive::ArchiveEntry],

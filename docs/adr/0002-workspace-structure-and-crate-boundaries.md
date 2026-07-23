@@ -78,6 +78,6 @@ the plugin SDK will be published before 1.0.
 
 ## References
 
-- `.spec/arbitraitor-tech-stack.md` §3 (Workspace and crate boundaries)
-- `.spec/arbitraitor-comprehensive-spec-v0.4.md` §38.1 (Rust workspace layout)
+- `docs/spec/tech-stack.md` §3 (Workspace and crate boundaries)
+- `docs/spec/spec.md` §38.1 (Rust workspace layout)
 - `Cargo.toml` workspace members

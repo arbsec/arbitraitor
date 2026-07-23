@@ -79,8 +79,8 @@ for key-value lookups.
 
 ## References
 
-- `.spec/arbitraitor-tech-stack.md` §5 (Filesystem and content-addressed store)
-- `.spec/arbitraitor-adversarial-review-and-gap-analysis.md` H-05 (Metadata as
+- `docs/spec/tech-stack.md` §5 (Filesystem and content-addressed store)
+- `docs/spec/spec.md` H-05 (Metadata as
   authorization oracle)
 - [ADR 0013](0013-plan-bound-approval-capability.md) — Approval binds to plan,
   not digest alone
