@@ -74,6 +74,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
 
+#### Analysis
+
+- URL discovery beyond shell literals (spec §20.2, issue #518). The
+  `arbitraitor-analysis` crate now includes a `url_discovery` module that
+  extracts URLs from Python and JavaScript string constants, configuration
+  files (JSON, TOML), and HTML/JSON responses. All extractors are
+  dependency-free (no `regex` crate) — URL schemes are located via byte
+  scanning, consistent with the existing `pyjs` detector approach. Each
+  extractor enforces bounded processing (spec invariant 4): source size
+  (1 MiB), URL count (1000), and individual URL length (2048 bytes) are
+  capped to prevent resource exhaustion.
+- `RetrievalPolicy` enum (spec §20.3) with five modes: `Off`, `Report`,
+  `SameOrigin`, `KnownExecuted`, `AllWithinLimits`. The policy forms a strict
+  escalation ladder governing which discovered URLs are fetched for further
+  analysis.
+- `DynamicUrlExpression` reporting (spec §20.4). URLs containing unresolved
+  template variables (`${...}`, `{{...}}`, `#{...}`) are detected and reported
+  with the unresolved expression so operators can inspect the construction
+  logic manually.
+
 ### Changed
 
 #### Documentation
