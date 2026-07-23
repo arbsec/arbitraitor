@@ -795,6 +795,169 @@ pub fn parse_csaf_vex_with_limits(
     Ok(document)
 }
 
+/// Parses an `OpenVEX` 0.2.0 JSON document and returns **all** statements.
+///
+/// Unlike [`parse_openvex_with_limits`], this does not filter by subject —
+/// every statement in the document is converted to a [`VexStatement`]. The
+/// subject of each statement is the first product identifier found (or an
+/// empty string when the statement has no product identifiers).
+///
+/// # Errors
+///
+/// Returns [`VexParseError`] when JSON is invalid, the document uses an
+/// unsupported `OpenVEX` context, required fields are missing, or any
+/// statement's timestamp is invalid.
+pub fn parse_openvex_all_with_limits(
+    json: &[u8],
+    limits: &VexLimits,
+) -> Result<Vec<VexStatement>, VexParseError> {
+    ensure_len("openvex.bytes", json.len(), limits.max_bytes)?;
+    let document: OpenVexDocument =
+        serde_json::from_slice(json).map_err(|source| VexParseError::Json {
+            stage: "parse OpenVEX",
+            source,
+        })?;
+    document.ensure_supported_context()?;
+    document.validate_limits(limits)?;
+
+    document
+        .statements
+        .iter()
+        .map(|statement| openvex_statement_to_vex(&document, statement))
+        .collect()
+}
+
+/// Converts a parsed [`CsafVexDocument`] into normalized [`VexStatement`]s.
+///
+/// Each vulnerability × product-status combination becomes one statement.
+/// The issuer is derived from the CSAF publisher name, and the timestamp
+/// from `tracking.current_release_date`.
+///
+/// # Errors
+///
+/// Returns [`VexParseError`] when the CSAF format version is unsupported
+/// or the tracking timestamp is invalid.
+pub fn csaf_to_statements(document: &CsafVexDocument) -> Result<Vec<VexStatement>, VexParseError> {
+    let format_version = document.format_version()?;
+    let issuer = VexIssuer::from(document.document.publisher.name.as_str());
+    let timestamp_epoch = parse_iso8601(document.document.tracking.current_release_date.as_str())
+        .ok_or(VexParseError::InvalidTimestamp {
+        timestamp: document.document.tracking.current_release_date.clone(),
+    })?;
+
+    let mut statements = Vec::new();
+    for vulnerability in &document.vulnerabilities {
+        let vuln_id = vulnerability
+            .cve
+            .clone()
+            .unwrap_or_else(|| VexVulnerabilityId::from(""));
+        csaf_push_status(
+            &mut statements,
+            format_version,
+            &issuer,
+            &vuln_id,
+            &vulnerability.product_status.known_not_affected,
+            VexStatus::NotAffected,
+            timestamp_epoch,
+        );
+        csaf_push_status(
+            &mut statements,
+            format_version,
+            &issuer,
+            &vuln_id,
+            &vulnerability.product_status.known_affected,
+            VexStatus::Affected,
+            timestamp_epoch,
+        );
+        csaf_push_status(
+            &mut statements,
+            format_version,
+            &issuer,
+            &vuln_id,
+            &vulnerability.product_status.fixed,
+            VexStatus::Fixed,
+            timestamp_epoch,
+        );
+        csaf_push_status(
+            &mut statements,
+            format_version,
+            &issuer,
+            &vuln_id,
+            &vulnerability.product_status.under_investigation,
+            VexStatus::UnderInvestigation,
+            timestamp_epoch,
+        );
+    }
+    Ok(statements)
+}
+
+/// Builds [`VexStatement`]s for one CSAF product-status bucket.
+fn csaf_push_status(
+    statements: &mut Vec<VexStatement>,
+    format_version: VexFormatVersion,
+    issuer: &VexIssuer,
+    vulnerability: &VexVulnerabilityId,
+    products: &[VexProductId],
+    status: VexStatus,
+    timestamp: i64,
+) {
+    for product in products {
+        statements.push(VexStatement {
+            format_version,
+            issuer: issuer.clone(),
+            subject: product.clone(),
+            vulnerability: vulnerability.clone(),
+            status,
+            justification: None,
+            statement: None,
+            timestamp: Some(timestamp),
+        });
+    }
+}
+
+/// Converts a single [`OpenVexStatement`] into a normalized [`VexStatement`].
+///
+/// The subject is the first product `@id` or identifier value, or an empty
+/// string when the statement has no product identifiers.
+fn openvex_statement_to_vex(
+    document: &OpenVexDocument,
+    statement: &OpenVexStatement,
+) -> Result<VexStatement, VexParseError> {
+    let timestamp = statement
+        .timestamp
+        .as_ref()
+        .unwrap_or(&document.timestamp)
+        .clone();
+    let epoch =
+        parse_iso8601(timestamp.as_str()).ok_or(VexParseError::InvalidTimestamp { timestamp })?;
+
+    let subject = statement
+        .products
+        .first()
+        .and_then(|product| {
+            product
+                .id
+                .clone()
+                .or_else(|| product.identifiers.values().next().cloned())
+        })
+        .unwrap_or_else(|| VexProductId::from(""));
+
+    Ok(VexStatement {
+        format_version: VexFormatVersion::OpenVex0_2_0,
+        issuer: document.author.clone(),
+        subject,
+        vulnerability: statement.vulnerability.name.clone(),
+        status: statement.status,
+        justification: statement.justification,
+        statement: statement
+            .status_notes
+            .clone()
+            .or_else(|| statement.impact_statement.clone())
+            .or_else(|| statement.action_statement.clone()),
+        timestamp: Some(epoch),
+    })
+}
+
 impl OpenVexDocument {
     fn ensure_supported_context(&self) -> Result<(), VexParseError> {
         if self.context.as_str() == OPENVEX_CONTEXT_V0_2_0 {

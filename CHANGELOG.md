@@ -9,18 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Analysis
+#### Archive
 
-- Payload graph with typed edges (spec §20, issue #517). The
-  `arbitraitor-analysis` crate now includes a `PayloadGraph` struct that
-  records artifacts as nodes (SHA-256 digest, name, artifact type) and their
-  relationships as typed directed edges. Seven edge types are defined per the
-  spec: `Downloads`, `DecodesTo`, `Executes`, `Loads`, `Installs`,
-  `References`, and `Verifies`. The graph supports `add_node`, `add_edge`,
-  `children`, `parents`, and `is_complete` for structural integrity checks.
-  The receipt records the graph as `payload_graph: Option<PayloadGraph>` with
-  `#[serde(default, skip_serializing_if = "Option::is_none")]` per ADR-0014,
-  so it is omitted when no recursive payload discovery was performed.
+- SBOM/VEX companion-artifact consumption (spec §19.5, issue #510). The
+  `arbitraitor-archive` crate now includes a `companion` module that
+  discovers SBOM (CycloneDX, SPDX) and VEX (OpenVEX, CSAF) companion
+  artifacts by file extension in a fetched artifact's directory.
+  `discover_companion_artifacts` scans top-level files for `*.cdx.json`,
+  `*.spdx.json`, `*.vex.json`, and `*.csaf.json` extensions.
+  `parse_companion` reads and parses each artifact under bounded
+  `ArchiveLimits` (Invariant 4: max file size, max component count),
+  returning a `ParsedCompanion` with extracted `Component` list and
+  `VexStatement` list. The anti-suppression rule
+  (`vex_can_suppress_finding`) enforces Invariant 6: a VEX
+  `not_affected` statement can never suppress a Critical (Block-level)
+  finding — fail closed, the finding always stands. The `arbitraitor-model`
+  crate gains `parse_openvex_all_with_limits` and `csaf_to_statements`
+  for parsing all VEX statements without subject filtering.
 
 #### Fetch
 
