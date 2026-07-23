@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sysctl kernel.io_uring_disabled=1` (or `=2` for full disable) because
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
+- Container runtime CVE awareness (spec §27.3, issue #458). The sandbox
+  crate now probes `runc --version` (falling back to `containerd --version`)
+  on Linux and records the result in `EffectiveControls.container_runtime`.
+  The `ContainerRuntime` struct carries the runtime name, version, and a
+  `cve_vulnerable` flag that is `true` when the `runc` version falls below
+  the patched floor for the 2025-11-05 container-escape CVE cluster
+  (CVE-2025-31133 `/dev/null` masked-path race, CVE-2025-52565
+  `/dev/console` bind-mount race, CVE-2025-52881 procfs write redirection
+  bypassing LSM labels). Patched in runc 1.2.8 / 1.3.3 / 1.4.0-rc.3. When
+  a vulnerable version is detected, the exec crate emits a `tracing::warn!`
+  recommending upgrade. Non-Linux platforms report `None`.
 
 ### Changed
 

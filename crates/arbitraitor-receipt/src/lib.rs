@@ -1134,6 +1134,7 @@ mod tests {
             landlock_abi_version: Some(serde_json::from_value(serde_json::json!(7))?),
             io_uring_available: Some(false),
             userns_available: Some(true),
+            container_runtime: None,
         };
         let receipt = ReceiptBuilder::new(
             "0.1.0",
@@ -1188,6 +1189,7 @@ mod tests {
         let controls: EffectiveControls = serde_json::from_str(json)?;
         assert_eq!(controls.landlock_abi_version, None);
         assert_eq!(controls.userns_available, None);
+        assert_eq!(controls.container_runtime, None);
         Ok(())
     }
 
