@@ -86,6 +86,10 @@ pub struct SignatureVerification {
     /// Sigstore bundle metadata (spec §14.2.1), present when the bundle
     /// was parsed as JSON to extract v0.3 profile information.
     pub sigstore_bundle: Option<SigstoreBundleMetadata>,
+    /// Verifier identity (cosign version) used for Sigstore verification
+    /// (issue #457). `None` for non-Sigstore systems or when the version
+    /// could not be determined.
+    pub verifier_identity: Option<String>,
 }
 
 /// Sigstore Bundle media types accepted by Arbitraitor (spec §14.2.1).
@@ -790,6 +794,7 @@ pub fn verify_minisign(
         verified: true,
         identity: Some(key_id(public_key)),
         sigstore_bundle: None,
+        verifier_identity: None,
     })
 }
 
@@ -821,12 +826,14 @@ pub fn verify_cosign(
 
     verify_cosign_subprocess(temp.path(), bundle_path, identity, issuer)?;
     let bundle_metadata = parse_bundle_metadata(bundle_path, identity, issuer);
+    let verifier_identity = cosign_version();
     Ok(SignatureVerification {
         system: SignatureSystem::Cosign,
         trusted_identity: Some(identity.to_owned()),
         verified: true,
         identity: Some(identity.to_owned()),
         sigstore_bundle: bundle_metadata,
+        verifier_identity,
     })
 }
 
@@ -836,6 +843,49 @@ pub fn verify_cosign(
 /// output. Each stream is drained independently, so worst-case capture is
 /// `2 * COSIGN_MAX_OUTPUT_BYTES`.
 const COSIGN_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Detects the installed cosign version by invoking `cosign version`.
+///
+/// Returns the version string (e.g. `"3.0.5"`) or `None` when cosign is
+/// unavailable or the version cannot be parsed. This is a best-effort probe
+/// used to populate [`SignatureVerification::verifier_identity`] for audit
+/// trails (issue #457).
+fn cosign_version() -> Option<String> {
+    let output = Command::new("cosign")
+        .arg("version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_cosign_version(&text)
+}
+
+/// Parses the cosign version from `cosign version` output.
+///
+/// Handles both the v2.x format (`GitVersion: v2.6.2`) and the v3.x bare
+/// version format (`v3.0.5`).
+fn parse_cosign_version(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let candidate = trimmed
+            .strip_prefix("GitVersion:")
+            .map_or(trimmed, str::trim);
+        let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+        let parts: Vec<&str> = candidate.split('.').collect();
+        if parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Some(candidate.to_owned());
+        }
+    }
+    None
+}
 
 /// Wall-clock seconds before `cosign` is killed.
 const COSIGN_TIMEOUT_SECS: u64 = 60;

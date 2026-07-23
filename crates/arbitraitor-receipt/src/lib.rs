@@ -73,6 +73,12 @@ pub struct Receipt {
     /// Plan-bound approval and override binding metadata, when execution used approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalInfo>,
+    /// Identity of the verifier that accepted a Sigstore bundle (ADR-0014,
+    /// issue #457). Records the cosign/sigstore-rust version used for
+    /// verification so downstream consumers can audit which verifier accepted
+    /// the attestation. `None` when no Sigstore verification was performed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_identity: Option<String>,
     /// Optional detached signature over the canonical unsigned receipt.
     pub signature: Option<ReceiptSignature>,
     /// Signatures produced by [`ReceiptSigner`] adapters (spec §31.3).
@@ -523,6 +529,7 @@ impl ReceiptBuilder {
                 effective_controls: None,
                 allow_rule_metadata: Vec::new(),
                 approval: None,
+                verifier_identity: None,
                 signature: None,
                 signatures: Vec::new(),
             },
@@ -623,6 +630,14 @@ impl ReceiptBuilder {
     #[must_use]
     pub fn approval(mut self, approval: ApprovalInfo) -> Self {
         self.receipt.approval = Some(approval);
+        self
+    }
+
+    /// Set the verifier identity for Sigstore bundle verification (ADR-0014,
+    /// issue #457).
+    #[must_use]
+    pub fn verifier_identity(mut self, identity: impl Into<String>) -> Self {
+        self.receipt.verifier_identity = Some(identity.into());
         self
     }
 
@@ -966,6 +981,45 @@ mod tests {
         let decoded: Receipt = serde_json::from_str(&json)?;
 
         assert_eq!(decoded.approval, None);
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_identity_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            sample_digest(0xab).to_string(),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .verifier_identity("cosign 3.0.5")
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: Receipt = serde_json::from_str(&json)?;
+
+        assert_eq!(decoded.verifier_identity.as_deref(), Some("cosign 3.0.5"));
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_identity_absent_when_not_set() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = sample_receipt();
+        let json = serde_json::to_string(&receipt)?;
+        assert!(
+            !json.contains("verifier_identity"),
+            "verifier_identity must be omitted when None"
+        );
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded.verifier_identity, None);
         Ok(())
     }
 

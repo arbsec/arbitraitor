@@ -263,6 +263,7 @@ impl Pep740Verifier {
             verified: true,
             identity: Some(key_id.to_owned()),
             sigstore_bundle: None,
+            verifier_identity: None,
         };
 
         Ok(Pep740Verification {

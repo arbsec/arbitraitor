@@ -9,7 +9,7 @@ use super::{
     ProvenanceError, SIGSTORE_BUNDLE_MEDIA_TYPES, SignatureSystem, SigstoreVerificationMode,
     TofuChange, TofuPin, TofuStore, TofuVerification, TufKey, TufRole, TufRoot, TufSignature,
     TufTargets, TufVersionStore, VerificationMaterialForm, determine_material_form,
-    parse_bundle_metadata, verify_cosign, verify_minisign,
+    parse_bundle_metadata, parse_cosign_version, verify_cosign, verify_minisign,
 };
 
 #[test]
@@ -111,6 +111,24 @@ fn cosign_test_is_conditional_on_installed_binary() {
         result,
         Err(ProvenanceError::CosignVerification { .. } | ProvenanceError::Io { .. })
     ));
+}
+
+#[test]
+fn parse_cosign_version_extracts_v2_gitversion() {
+    let output = "N/A\nGitVersion: v2.6.2\nGitCommit: abc\n";
+    assert_eq!(parse_cosign_version(output), Some("2.6.2".to_owned()));
+}
+
+#[test]
+fn parse_cosign_version_extracts_v3_bare() {
+    let output = "v3.0.5\n";
+    assert_eq!(parse_cosign_version(output), Some("3.0.5".to_owned()));
+}
+
+#[test]
+fn parse_cosign_version_returns_none_for_garbage() {
+    assert_eq!(parse_cosign_version("not a version"), None);
+    assert_eq!(parse_cosign_version(""), None);
 }
 
 #[test]

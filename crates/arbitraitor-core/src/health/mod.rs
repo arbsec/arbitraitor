@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_policy::PolicyEngine;
@@ -24,6 +25,12 @@ use store_probe::{count_objects, format_bytes, measure_store_bytes, probe_writab
 
 const FRESHNESS_WINDOW: Duration = Duration::from_hours(168);
 const MIN_CLOCK_EPOCH: u64 = 1_704_067_200;
+
+/// Minimum cosign version that addresses CVE-2026-22703 and CVE-2026-24122
+/// (issue #457). CVE-2026-22703 was patched in v2.6.2 and v3.0.4;
+/// CVE-2026-24122 was patched in v3.0.5. v3.0.5 is the floor that addresses
+/// both CVEs.
+const MIN_COSIGN_VERSION: (u32, u32, u32) = (3, 0, 5);
 
 /// Aggregated health report for all Arbitraitor components.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -308,6 +315,7 @@ impl HealthChecker {
             self.check_clock_skew(),
             self.check_proxy_settings(),
             self.check_receipt_signing_key(),
+            self.check_sigstore_version(),
         ];
         let overall = results.iter().fold(HealthStatus::Pass, |status, result| {
             status.worst(result.status)
@@ -778,6 +786,79 @@ impl HealthChecker {
             "no receipt signing key configured",
         )
     }
+
+    /// Checks the cosign version on PATH against the minimum that addresses
+    /// CVE-2026-22703 and CVE-2026-24122 (issue #457).
+    ///
+    /// Returns `Skipped` when cosign is not installed (Sigstore verification
+    /// is optional), `Pass` when the version is >= v3.0.5, `Fail` when below
+    /// the floor, and `Warn` when the version cannot be determined.
+    #[must_use]
+    pub fn check_sigstore_version(&self) -> HealthCheckResult {
+        if !command_exists("cosign") {
+            return HealthCheckResult::skipped(
+                "sigstore_version",
+                "cosign is not installed; Sigstore verification unavailable",
+            );
+        }
+        let output = match Command::new("cosign")
+            .arg("version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) => {
+                return HealthCheckResult::new(
+                    "sigstore_version",
+                    HealthStatus::Warn,
+                    format!("cosign version probe failed: {error}"),
+                );
+            }
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(version) = parse_cosign_version(&text) else {
+            return HealthCheckResult::new(
+                "sigstore_version",
+                HealthStatus::Warn,
+                "cosign is installed but version could not be determined",
+            );
+        };
+        let Some(parsed) = parse_version_tuple(&version) else {
+            return HealthCheckResult::new(
+                "sigstore_version",
+                HealthStatus::Warn,
+                format!("cosign version '{version}' is not a recognized semver"),
+            );
+        };
+        if parsed >= MIN_COSIGN_VERSION {
+            HealthCheckResult::new(
+                "sigstore_version",
+                HealthStatus::Pass,
+                format!(
+                    "cosign v{version} meets minimum v{}",
+                    version_tuple_str(MIN_COSIGN_VERSION)
+                ),
+            )
+            .with_details(serde_json::json!({
+                "version": version,
+                "minimum": version_tuple_str(MIN_COSIGN_VERSION),
+            }))
+        } else {
+            HealthCheckResult::new(
+                "sigstore_version",
+                HealthStatus::Fail,
+                format!(
+                    "cosign v{version} is below minimum v{} (CVE-2026-22703, CVE-2026-24122)",
+                    version_tuple_str(MIN_COSIGN_VERSION)
+                ),
+            )
+            .with_details(serde_json::json!({
+                "version": version,
+                "minimum": version_tuple_str(MIN_COSIGN_VERSION),
+            }))
+        }
+    }
 }
 
 fn readable_key_check(name: &str, path: Option<&Path>, skipped: &str) -> HealthCheckResult {
@@ -924,4 +1005,40 @@ fn valid_proxy_value(value: &str) -> bool {
         || value.starts_with("https://")
         || value.starts_with("socks5://")
         || value.starts_with("socks5h://")
+}
+
+fn parse_cosign_version(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let candidate = trimmed
+            .strip_prefix("GitVersion:")
+            .map_or(trimmed, str::trim);
+        let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+        let parts: Vec<&str> = candidate.split('.').collect();
+        if parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Some(candidate.to_owned());
+        }
+    }
+    None
+}
+
+fn parse_version_tuple(version: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = version.trim_start_matches('v').split('.').collect();
+    if parts.len() == 3 {
+        Some((
+            parts[0].parse().ok()?,
+            parts[1].parse().ok()?,
+            parts[2].parse().ok()?,
+        ))
+    } else {
+        None
+    }
+}
+
+fn version_tuple_str(tuple: (u32, u32, u32)) -> String {
+    format!("{}.{}.{}", tuple.0, tuple.1, tuple.2)
 }
