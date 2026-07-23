@@ -468,6 +468,11 @@ impl ArbitraitorApi {
             content_type.clone(),
             RetentionMode::Cache,
         )?;
+        let children = arbitraitor_fetch::discover_child_artifacts_with_bytes(&bytes);
+        for (_artifact, child_bytes) in children {
+            self.store
+                .store_with_metadata(child_bytes, None, None, RetentionMode::Cache)?;
+        }
         Ok((digest, size, content_type, final_url, bytes))
     }
 

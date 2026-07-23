@@ -1754,10 +1754,10 @@ fn fetch_url_once(request: FetchRequest) -> Result<FetchedArtifact, InspectUrlEr
                         .map_err(|error| InspectUrlError::Fetch {
                             message: error.to_string(),
                         })?;
-                Ok(FetchedArtifact {
-                    bytes: sink.into_bytes(),
-                    receipt,
-                })
+                let bytes = sink.into_bytes();
+                let children = arbitraitor_fetch::discover_child_artifacts(&bytes);
+                let receipt = receipt.with_child_artifacts(children);
+                Ok(FetchedArtifact { bytes, receipt })
             })
         })();
         let _ = tx.send(result);

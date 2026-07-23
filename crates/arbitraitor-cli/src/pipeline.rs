@@ -12,7 +12,8 @@ use arbitraitor_analysis::{
 };
 use arbitraitor_core::config::Config;
 use arbitraitor_fetch::{
-    FetchPolicy, FetchRequest, FetchSource, FetchUrl, Fetcher, FileFetcher, HttpFetcher, VecSink,
+    ChildArtifact, FetchPolicy, FetchRequest, FetchSource, FetchUrl, Fetcher, FileFetcher,
+    HttpFetcher, VecSink, discover_child_artifacts_with_bytes,
 };
 use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::ids::Sha256Digest;
@@ -135,6 +136,9 @@ pub(crate) async fn inspect(
             artifact_sha256
         );
     }
+
+    let child_artifacts = discover_and_store_children(&store, &bytes)?;
+    let fetch_receipt = fetch_receipt.with_child_artifacts(child_artifacts);
 
     let signature_verifications = verify_signatures(&bytes, &signatures)?;
 
@@ -446,4 +450,27 @@ pub(crate) fn timestamp() -> String {
             error.duration().subsec_nanos()
         ),
     }
+}
+
+/// Discover, extract, and store child artifacts in CAS.
+///
+/// When the fetched bytes are an archive or compressed stream, extracts
+/// each direct child, stores it in CAS, and returns the child artifact
+/// metadata for the receipt. Extraction is bounded by
+/// `ArchiveLimits::default()` (Invariant 4: bounded processing).
+fn discover_and_store_children(store: &ContentStore, bytes: &[u8]) -> Result<Vec<ChildArtifact>> {
+    let children_with_bytes = discover_child_artifacts_with_bytes(bytes);
+    let mut child_artifacts = Vec::with_capacity(children_with_bytes.len());
+    for (artifact, child_bytes) in children_with_bytes {
+        store
+            .store_with_metadata(
+                child_bytes,
+                None,
+                None,
+                arbitraitor_store::RetentionMode::Cache,
+            )
+            .into_diagnostic()?;
+        child_artifacts.push(artifact);
+    }
+    Ok(child_artifacts)
 }
