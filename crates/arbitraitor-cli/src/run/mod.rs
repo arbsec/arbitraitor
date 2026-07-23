@@ -66,6 +66,14 @@ pub struct RunCommand {
     #[arg(long, value_name = "PATH")]
     pub approve: Option<PathBuf>,
 
+    /// Sign the receipt with the specified method (spec §31.3).
+    ///
+    /// Methods: `minisign` (default), `cosign`, `enterprisekey`, `tpm`.
+    /// Only `minisign` is implemented; other methods return a
+    /// not-yet-implemented error.
+    #[arg(long, value_name = "METHOD")]
+    pub sign_receipt: Option<String>,
+
     #[command(flatten)]
     pub(super) compatibility: DeprecatedRunAliases,
 }

@@ -539,6 +539,7 @@ fn command(native: bool, non_interactive: bool) -> RunCommand {
         allow_env: Vec::new(),
         sandbox: None,
         approve: None,
+        sign_receipt: None,
         compatibility: DeprecatedRunAliases {
             network: false,
             policy: None,
