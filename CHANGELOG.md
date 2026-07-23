@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Wrapper
+
+- Multi-URL handling for `arbitraitor wrap` (spec §39.9, issue #531).
+  `arbitraitor wrap curl -- URL1 URL2 URL3` now fetches and inspects each
+  URL independently, producing separate artifact identities (SHA-256) and
+  verdicts per URL. Responses are never concatenated into one executable
+  stream. A single `--output` with multiple URLs is rejected (would
+  concatenate); use `--remote-name` (`-O`) for per-URL file output. The
+  `CurlArgs.urls` and `WgetRequest.urls` fields expose all positional URLs
+  to downstream consumers. Previously, curl treated extra URLs as
+  unsupported options and wget silently ignored them.
+
 #### Analysis
 
 - Mandatory detector coverage per artifact class (spec §9 invariant 1, issue
