@@ -392,6 +392,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Build
+
+- Cargo.lock contained a duplicate `wasmparser` 0.254.0 entry (introduced by
+  Dependabot PR #670), making `cargo metadata` fail with "package `wasmparser`
+  is specified twice in the lockfile". All CI workflows (Code, Security,
+  Invariants) failed as a result. Removed the redundant second entry, keeping
+  the one with the complete dependency set.
+
 #### Exec
 
 - `ExecError::script_io_detail` is now panic-safe when the captured child
