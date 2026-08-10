@@ -2,9 +2,11 @@
 //!
 //! Converts a subset of the wget command-line interface into Arbitraitor's
 //! fetch model. Only retrieval-relevant flags are translated. Output-control
-//! flags that Arbitraitor owns (`-q`/`--quiet`, `-v`/`--verbose`) are ignored,
-//! and any flag outside the supported subset is rejected so that semantically
-//! significant options cannot silently change download behavior.
+//! flags that Arbitraitor owns (`-q`/`--quiet`, `-v`/`--verbose`) are ignored.
+//! Unknown flags are collected into [`WgetRequest::unsupported_options`] so
+//! callers can reject security-critical options (via
+//! [`is_critical_wget_option`]) while passing through non-critical ones with
+//! reduced confidence.
 //!
 //! Per spec §39.9, flags that disable transport safety guarantees (currently
 //! `--no-check-certificate`) are surfaced as [`arbitraitor_model::Finding`]
@@ -26,6 +28,43 @@ pub const WGET_WRAPPER_DETECTOR: &str = "arbitraitor-wrapper";
 
 /// Stable finding identifier for `--no-check-certificate` detections.
 const WGET_NO_CHECK_CERTIFICATE_FINDING_ID: &str = "wget-no-check-certificate";
+
+/// Returns `true` if an unsupported wget option is security-critical — i.e. it
+/// can bypass the inspection boundary (proxy redirection, config file reads,
+/// credential injection, TLS trust store manipulation, etc.).
+///
+/// Callers use this to decide whether to hard-reject an invocation instead of
+/// allowing the option to pass through with reduced confidence.
+#[must_use]
+pub fn is_critical_wget_option(option: &str) -> bool {
+    matches!(
+        option,
+        // Post data / upload semantics
+        "--post-data"
+            | "--post-file"
+            // Credentials
+            | "--http-user"
+            | "--http-password"
+            | "--ftp-user"
+            | "--ftp-password"
+            // Proxy / routing bypass
+            | "-e"
+            | "--execute"
+            | "--no-proxy"
+            | "--input-file"
+            // Config / trust store manipulation
+            | "--config"
+            | "--load-cookies"
+            | "--save-cookies"
+            | "--ca-certificate"
+            | "--ca-directory"
+            | "--crl-file"
+            | "--certificate"
+            | "--private-key"
+            | "--random-file"
+            | "--egd-file"
+    )
+}
 
 /// Parsed wget arguments translated to Arbitraitor's fetch model.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +92,10 @@ pub struct WgetRequest {
     /// Findings produced during argv translation (spec §39.9). Callers must
     /// surface these so dangerous flags cannot be silently dropped.
     pub findings: Vec<Finding>,
+    /// Unsupported options observed while parsing. Non-critical options are
+    /// collected here so callers can decide whether to reject or pass through
+    /// with reduced confidence.
+    pub unsupported_options: Vec<String>,
 }
 
 /// Translates wget CLI arguments into an Arbitraitor fetch request.
@@ -62,9 +105,10 @@ pub struct WgetRequest {
 /// # Errors
 ///
 /// Returns [`WrapperError::MissingUrl`] when no positional URL is present,
-/// [`WrapperError::UnsupportedFlag`] for flags outside the supported subset,
-/// and [`WrapperError::InvalidValue`] when a value-taking flag is missing its
+/// or [`WrapperError::InvalidValue`] when a value-taking flag is missing its
 /// value or receives a non-numeric value where a number is required.
+/// Unsupported flags are collected into [`WgetRequest::unsupported_options`]
+/// instead of returning an error.
 pub fn translate_wget_args(args: &[String]) -> Result<WgetRequest, WrapperError> {
     WgetParser::new(args).parse()
 }
@@ -95,6 +139,7 @@ struct WgetParser<'a> {
     max_redirect: Option<u32>,
     no_check_certificate: bool,
     after_separator: bool,
+    unsupported_options: Vec<String>,
 }
 
 impl<'a> WgetParser<'a> {
@@ -112,6 +157,7 @@ impl<'a> WgetParser<'a> {
             max_redirect: None,
             no_check_certificate: false,
             after_separator: false,
+            unsupported_options: Vec::new(),
         }
     }
 
@@ -125,7 +171,7 @@ impl<'a> WgetParser<'a> {
                 self.parse_long_option(body)?;
             } else if token.len() > 1 && token.starts_with('-') {
                 self.parse_short_options(&token[1..])?;
-            } else {
+            } else if looks_like_url(&token) {
                 self.set_url(token);
             }
         }
@@ -141,6 +187,7 @@ impl<'a> WgetParser<'a> {
             max_redirect: self.max_redirect,
             no_check_certificate: self.no_check_certificate,
             findings,
+            unsupported_options: self.unsupported_options,
         })
     }
 
@@ -190,9 +237,13 @@ impl<'a> WgetParser<'a> {
             }
             "quiet" | "verbose" => {
                 reject_inline_value(&canonical, inline_value)?;
-                // Ignored: Arbitraitor owns output verbosity.
             }
-            _ => return Err(WrapperError::UnsupportedFlag(canonical)),
+            _ => {
+                self.unsupported_options.push(canonical);
+                if inline_value.is_none() {
+                    self.consume_unknown_value();
+                }
+            }
         }
         Ok(())
     }
@@ -216,13 +267,26 @@ impl<'a> WgetParser<'a> {
                     self.timeout_secs = Some(parse_u64("-T", &value)?);
                     return Ok(());
                 }
-                'q' | 'v' => {
-                    // Ignored: Arbitraitor owns output verbosity.
+                'q' | 'v' => {}
+                other => {
+                    self.unsupported_options.push(format!("-{other}"));
+                    if rest.is_empty() {
+                        self.consume_unknown_value();
+                    }
+                    return Ok(());
                 }
-                other => return Err(WrapperError::UnsupportedFlag(format!("-{other}"))),
             }
         }
         Ok(())
+    }
+
+    fn consume_unknown_value(&mut self) {
+        if let Some(next) = self.args.get(self.index)
+            && !is_flag_like(next)
+            && !looks_like_url(next)
+        {
+            let _ = self.next_token();
+        }
     }
 
     fn consume_short_value(&mut self, flag: &str, rest: &str) -> Result<String, WrapperError> {
@@ -253,6 +317,17 @@ fn parse_header(raw: &str) -> (String, String) {
         Some((name, value)) => (name.trim().to_ascii_lowercase(), value.trim().to_owned()),
         None => (raw.trim().to_ascii_lowercase(), String::new()),
     }
+}
+
+fn looks_like_url(token: &str) -> bool {
+    token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("ftp://")
+        || token.starts_with("ftps://")
+}
+
+fn is_flag_like(token: &str) -> bool {
+    token.starts_with('-') && token != "-"
 }
 
 /// Parses a non-negative integer, returning a safe error on failure.
@@ -336,7 +411,9 @@ fn no_check_certificate_finding() -> Finding {
 mod tests {
     use std::path::Path;
 
-    use super::{WgetRequest, WrapperError, to_fetch_request, translate_wget_args};
+    use super::{
+        WgetRequest, WrapperError, is_critical_wget_option, to_fetch_request, translate_wget_args,
+    };
     use arbitraitor_model::{
         finding::FindingCategory,
         ids::Sha256Digest,
@@ -527,6 +604,7 @@ mod tests {
             max_redirect: Some(5),
             no_check_certificate: true,
             findings: Vec::new(),
+            unsupported_options: Vec::new(),
         };
         let (url, headers) = to_fetch_request(&request);
         assert_eq!(url, "https://example.com/file");
@@ -540,15 +618,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_flag() {
-        assert_eq!(
-            parse(&["wget", "--post-data=secret", "https://example.com"]),
-            Err(WrapperError::UnsupportedFlag("--post-data".to_owned()))
+    fn unsupported_flags_are_collected_not_rejected() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "--post-data=secret", "https://example.com"])?;
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--post-data".to_owned())
         );
-        assert_eq!(
-            parse(&["wget", "-x", "https://example.com"]),
-            Err(WrapperError::UnsupportedFlag("-x".to_owned()))
+        assert!(
+            result
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_wget_option(opt))
         );
+
+        let result = parse(&["wget", "-x", "https://example.com"])?;
+        assert!(result.unsupported_options.contains(&"-x".to_owned()));
+
+        let result = parse(&["wget", "--unknown-flag", "val", "https://example.com"])?;
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--unknown-flag".to_owned())
+        );
+        assert_eq!(result.url, "https://example.com");
+        assert!(!result.urls.contains(&"val".to_owned()));
+        Ok(())
     }
 
     #[test]
@@ -631,6 +726,103 @@ mod tests {
 
         assert_eq!(result.url, "https://example.com/only");
         assert_eq!(result.urls, ["https://example.com/only"]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_long_option_value_not_treated_as_url() -> Result<(), WrapperError> {
+        let result = parse(&[
+            "wget",
+            "--unknown-flag",
+            "not-a-url",
+            "https://example.com/file",
+        ])?;
+
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--unknown-flag".to_owned())
+        );
+        assert_eq!(result.url, "https://example.com/file");
+        assert!(!result.urls.contains(&"not-a-url".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_short_option_consumes_value() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "-z", "value", "https://example.com/file"])?;
+
+        assert!(result.unsupported_options.contains(&"-z".to_owned()));
+        assert_eq!(result.url, "https://example.com/file");
+        assert!(!result.urls.contains(&"value".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn critical_wget_options_are_flagged() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "--post-data=secret", "https://example.com/file"])?;
+
+        assert!(
+            result
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_wget_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_critical_wget_options_are_passthrough() -> Result<(), WrapperError> {
+        let result = parse(&[
+            "wget",
+            "--unknown-option",
+            "val",
+            "https://example.com/file",
+        ])?;
+
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--unknown-option".to_owned())
+        );
+        assert!(
+            !result
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_wget_option(opt))
+        );
+        assert_eq!(result.url, "https://example.com/file");
+        Ok(())
+    }
+
+    #[test]
+    fn critical_wget_option_consumes_value() -> Result<(), WrapperError> {
+        let result = parse(&[
+            "wget",
+            "--http-user",
+            "admin",
+            "--http-password",
+            "secret",
+            "https://example.com/file",
+        ])?;
+
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--http-user".to_owned())
+        );
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--http-password".to_owned())
+        );
+        assert!(
+            result
+                .unsupported_options
+                .iter()
+                .all(|opt| { !opt.contains("admin") && !opt.contains("secret") })
+        );
+        assert_eq!(result.url, "https://example.com/file");
         Ok(())
     }
 }
