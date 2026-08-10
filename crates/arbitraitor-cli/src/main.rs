@@ -38,7 +38,7 @@ use arbitraitor_wrapper::shim::{
 };
 use arbitraitor_wrapper::{
     is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
-    wget::translate_wget_args,
+    wget::{is_critical_wget_option, translate_wget_args},
 };
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -637,23 +637,24 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
             })?;
         let (output_path, remote_name) =
             wrapper_output_destination(command.tool.as_deref(), &command.args);
-        if matches!(target, Some(WrapperTarget::Curl)) {
-            let parsed = parse_curl_args(&command.args).into_diagnostic()?;
-            let critical: Vec<_> = parsed
-                .unsupported_options
-                .iter()
-                .filter(|opt| is_critical_unsupported_option(opt))
-                .collect();
-            if !critical.is_empty() {
-                miette::bail!(
-                    "curl option cannot be safely proxied: {}",
-                    critical
+        match target {
+            Some(WrapperTarget::Curl) => {
+                let parsed = parse_curl_args(&command.args).into_diagnostic()?;
+                bail_on_critical(
+                    "curl",
+                    &parsed
+                        .unsupported_options
                         .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                        .filter(|opt| is_critical_unsupported_option(opt))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )?;
             }
+            Some(WrapperTarget::Wget) => {
+                let parsed = translate_wget_args(&command.args).into_diagnostic()?;
+                bail_on_critical("wget", &parsed.unsupported_options)?;
+            }
+            None => {}
         }
         (url.to_string(), output_path, remote_name)
     } else {
@@ -730,23 +731,24 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
     let tool = Some(command.tool.as_str());
     let target = wrapper_fetch_target(tool)?;
 
-    if matches!(target, Some(WrapperTarget::Curl)) {
-        let parsed = parse_curl_args(&command.args).into_diagnostic()?;
-        let critical: Vec<_> = parsed
-            .unsupported_options
-            .iter()
-            .filter(|opt| is_critical_unsupported_option(opt))
-            .collect();
-        if !critical.is_empty() {
-            miette::bail!(
-                "curl option cannot be safely proxied: {}",
-                critical
+    match target {
+        Some(WrapperTarget::Curl) => {
+            let parsed = parse_curl_args(&command.args).into_diagnostic()?;
+            bail_on_critical(
+                "curl",
+                &parsed
+                    .unsupported_options
                     .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+                    .filter(|opt| is_critical_unsupported_option(opt))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
         }
+        Some(WrapperTarget::Wget) => {
+            let parsed = translate_wget_args(&command.args).into_diagnostic()?;
+            bail_on_critical("wget", &parsed.unsupported_options)?;
+        }
+        None => {}
     }
 
     let urls = wrapper_url_arguments(tool, &command.args);
@@ -884,6 +886,31 @@ fn wrapper_fetch_target(tool: Option<&str>) -> Result<Option<WrapperTarget>> {
             .ok_or_else(|| miette::miette!("unsupported wrapper target: {name}"))
     })
     .transpose()
+}
+
+fn bail_on_critical(tool: &str, unsupported: &[String]) -> Result<()> {
+    let critical = match tool {
+        "curl" => unsupported
+            .iter()
+            .filter(|opt| is_critical_unsupported_option(opt))
+            .collect::<Vec<_>>(),
+        "wget" => unsupported
+            .iter()
+            .filter(|opt| is_critical_wget_option(opt))
+            .collect::<Vec<_>>(),
+        _ => return Ok(()),
+    };
+    if !critical.is_empty() {
+        miette::bail!(
+            "{tool} option cannot be safely proxied: {}",
+            critical
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn wrapper_output_destination(tool: Option<&str>, args: &[String]) -> (Option<String>, bool) {

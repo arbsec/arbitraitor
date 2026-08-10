@@ -9,15 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Unknown curl flag passthrough for curl/wget shims. The wrapper no longer
-  hard-rejects curl invocations that use flags it does not model (e.g.
+- Unknown curl and wget flag passthrough for curl/wget shims. The wrappers no
+  longer hard-reject invocations that use flags they do not model (e.g.
   `-w`/`--write-out`, `--max-time`, `--connect-timeout`, `--retry-delay`).
-  Only security-critical options that can bypass the inspection boundary
-  (`--proxy`, `--config`, `--user`, `--form`, `--upload-file`, `--connect-to`,
-  `--resolve`, `--interface`, `--unix-socket`) are hard-rejected. The parser
-  also no longer misidentifies unknown flag values (e.g. `%{http_code}`, `5`)
-  as download URLs — only tokens with a URL scheme (`://`) are treated as
-  positional URLs.
+  Only security-critical options that can bypass the inspection boundary are
+  hard-rejected. For curl: `--proxy`, `--config`, `--user`, `--form`,
+  `--upload-file`, `--connect-to`, `--resolve`, `--interface`, `--unix-socket`,
+  `-x`/`-K`/`-U`/`-E`, `--cacert`, `--socks5*`, `--proxy-*` family. For wget:
+  `--post-data`, `--post-file`, `--http-user`/`--http-password`,
+  `--ftp-user`/`--ftp-password`, `--config`, `--ca-certificate`, `--certificate`,
+  `--private-key`, `--input-file`, `--load-cookies`. The parsers also no longer
+  misidentify unknown flag values (e.g. `%{http_code}`, `5`) as download URLs —
+  only tokens with a URL scheme (`http://`, `https://`, `ftp://`, `ftps://`)
+  are treated as positional URLs.
 
 #### Plugin Host
 
