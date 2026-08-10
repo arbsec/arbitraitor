@@ -171,20 +171,56 @@ fn opaque_reason(args: &CurlArgs) -> Option<String> {
         .map(|option| format!("critical unsupported option {option}"))
 }
 
-fn is_critical_unsupported_option(option: &str) -> bool {
+/// Returns `true` if an unsupported curl option is security-critical — i.e. it
+/// can bypass the inspection boundary (proxy redirection, config file reads,
+/// credential injection, socket binding, etc.).
+///
+/// Callers use this to decide whether to hard-reject an invocation instead of
+/// allowing the option to pass through with reduced confidence.
+#[must_use]
+pub fn is_critical_unsupported_option(option: &str) -> bool {
     matches!(
         option,
+        // Upload / state-changing semantics
         "-F" | "--form"
             | "-T"
             | "--upload-file"
+            // Credentials
             | "-u"
             | "--user"
+            | "-U"
+            | "--proxy-user"
+            // Proxy / routing bypass
+            | "-x"
             | "--proxy"
+            | "--preproxy"
+            | "--proxy1.0"
+            | "--socks5"
+            | "--socks5-hostname"
+            | "--socks4"
+            | "--socks4a"
+            | "--proxy-header"
             | "--connect-to"
             | "--resolve"
             | "--interface"
             | "--unix-socket"
+            | "--abstract-unix-socket"
+            // Config / trust store manipulation
+            | "-K"
             | "--config"
+            | "--cacert"
+            | "--capath"
+            | "--crlfile"
+            | "-E"
+            | "--cert"
+            | "--key"
+            | "--pass"
+            | "--proxy-cacert"
+            | "--proxy-capath"
+            | "--proxy-cert"
+            | "--proxy-key"
+            | "--proxy-pass"
+            | "--proxy-crlfile"
     )
 }
 fn request_headers(args: &CurlArgs) -> Vec<(String, String)> {
@@ -292,7 +328,7 @@ impl<'a> CurlParser<'a> {
                 self.parse_long_option(&token)?;
             } else if token.starts_with('-') && token != "-" {
                 self.parse_short_options(&token)?;
-            } else {
+            } else if looks_like_url(&token) {
                 self.set_positional_url(token);
             }
         }
@@ -333,14 +369,47 @@ impl<'a> CurlParser<'a> {
             "--compressed" => self.args.compressed = true,
             "--request" => self.args.request_method = Some(self.option_value(name, inline_value)?),
             "--url" => self.args.url = Some(self.option_value(name, inline_value)?),
-            "--form" | "--upload-file" | "--user" | "--proxy" | "--connect-to" | "--resolve"
-            | "--interface" | "--unix-socket" | "--config" => {
+            "--form"
+            | "--upload-file"
+            | "--user"
+            | "--proxy"
+            | "--connect-to"
+            | "--resolve"
+            | "--interface"
+            | "--unix-socket"
+            | "--config"
+            | "--preproxy"
+            | "--proxy1.0"
+            | "--socks5"
+            | "--socks5-hostname"
+            | "--socks4"
+            | "--socks4a"
+            | "--proxy-header"
+            | "--proxy-user"
+            | "--abstract-unix-socket"
+            | "--cacert"
+            | "--capath"
+            | "--crlfile"
+            | "--cert"
+            | "--key"
+            | "--pass"
+            | "--proxy-cacert"
+            | "--proxy-capath"
+            | "--proxy-cert"
+            | "--proxy-key"
+            | "--proxy-pass"
+            | "--proxy-crlfile" => {
                 self.args.unsupported_options.push(name.to_owned());
                 if inline_value.is_none() {
                     let _ = self.next_token();
                 }
             }
-            _ => self.args.unsupported_options.push(name.to_owned()),
+            _ => {
+                self.args.unsupported_options.push(name.to_owned());
+                if inline_value.is_none() {
+                    self.consume_unknown_option_value();
+                }
+            }
         }
         Ok(())
     }
@@ -357,7 +426,7 @@ impl<'a> CurlParser<'a> {
         let mut chars = token[1..].char_indices().peekable();
         while let Some((offset, flag)) = chars.next() {
             match flag {
-                'o' | 'H' | 'A' | 'd' | 'X' | 'F' | 'T' | 'u' => {
+                'o' | 'H' | 'A' | 'd' | 'X' | 'F' | 'T' | 'u' | 'x' | 'U' | 'K' | 'E' => {
                     let value = if let Some((next_offset, _)) = chars.peek().copied() {
                         token[(next_offset + 1)..].to_owned()
                     } else {
@@ -372,7 +441,12 @@ impl<'a> CurlParser<'a> {
                 'f' => self.args.fail = true,
                 'k' => self.args.insecure = true,
                 'O' => self.args.remote_name = true,
-                _ => self.args.unsupported_options.push(format!("-{flag}")),
+                _ => {
+                    self.args.unsupported_options.push(format!("-{flag}"));
+                    if chars.peek().is_none() {
+                        self.consume_unknown_option_value();
+                    }
+                }
             }
             let _ = offset;
         }
@@ -386,8 +460,19 @@ impl<'a> CurlParser<'a> {
             'A' => self.args.user_agent = Some(value),
             'd' => self.args.data = Some(value),
             'X' => self.args.request_method = Some(value),
-            'F' | 'T' | 'u' => self.args.unsupported_options.push(format!("-{flag}")),
+            'F' | 'T' | 'u' | 'x' | 'U' | 'K' | 'E' => {
+                self.args.unsupported_options.push(format!("-{flag}"));
+            }
             _ => {}
+        }
+    }
+
+    fn consume_unknown_option_value(&mut self) {
+        if let Some(next) = self.argv.get(self.index)
+            && !is_flag_like(next)
+            && !looks_like_url(next)
+        {
+            let _ = self.next_token();
         }
     }
 
@@ -423,6 +508,17 @@ fn split_long_option(token: &str) -> (&str, Option<&str>) {
         .map_or((token, None), |(name, value)| (name, Some(value)))
 }
 
+fn looks_like_url(token: &str) -> bool {
+    token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("ftp://")
+        || token.starts_with("ftps://")
+}
+
+fn is_flag_like(token: &str) -> bool {
+    token.starts_with('-') && token != "-"
+}
+
 fn parse_header(header: &str) -> (String, String) {
     header.split_once(':').map_or_else(
         || (header.trim().to_owned(), String::new()),
@@ -432,7 +528,8 @@ fn parse_header(header: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurlArgs, WrapperError, curl_to_operation_plan, parse_curl_args, remote_name_from_url,
+        CurlArgs, WrapperError, curl_to_operation_plan, is_critical_unsupported_option,
+        parse_curl_args, remote_name_from_url,
     };
     use arbitraitor_plugin_api::{
         FilesystemCapability, NetworkCapability, PlannedOperation, SemanticConfidence,
@@ -690,6 +787,177 @@ mod tests {
 
         assert_eq!(args.url.as_deref(), Some("https://example.com/only"));
         assert_eq!(args.urls, ["https://example.com/only"]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_short_flag_value_not_treated_as_url() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "http://127.0.0.1:4200/",
+        ])?;
+
+        assert!(args.silent);
+        assert_eq!(args.output.as_deref(), Some("/dev/null"));
+        assert!(args.unsupported_options.contains(&"-w".to_owned()));
+        assert!(args.unsupported_options.contains(&"--max-time".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("http://127.0.0.1:4200/"));
+        assert_eq!(args.urls, ["http://127.0.0.1:4200/"]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_long_option_value_not_treated_as_url() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "5",
+            "https://example.com/file",
+        ])?;
+
+        assert!(
+            args.unsupported_options
+                .contains(&"--connect-timeout".to_owned())
+        );
+        assert!(args.unsupported_options.contains(&"--max-time".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("https://example.com/file"));
+        assert_eq!(args.urls, ["https://example.com/file"]);
+        Ok(())
+    }
+
+    #[test]
+    fn non_critical_unsupported_options_are_passthrough() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--verbose",
+            "--write-out",
+            "fmt",
+            "https://example.com/",
+        ])?;
+
+        assert!(args.unsupported_options.contains(&"--verbose".to_owned()));
+        assert!(args.unsupported_options.contains(&"--write-out".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("https://example.com/"));
+        assert!(
+            !args
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn critical_unsupported_options_are_flagged() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--proxy",
+            "http://proxy:3128",
+            "https://example.com/",
+        ])?;
+
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_long_option_url_value_collected_as_url() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--some-unknown-proxy",
+            "http://decoy.example.com",
+            "https://real.example.com",
+        ])?;
+
+        assert!(
+            args.unsupported_options
+                .contains(&"--some-unknown-proxy".to_owned())
+        );
+        assert!(
+            !args
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        assert_eq!(
+            args.urls,
+            ["http://decoy.example.com", "https://real.example.com"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn short_proxy_flag_consumes_value_not_treated_as_url() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "-x",
+            "http://proxy:3128",
+            "https://example.com/file",
+        ])?;
+
+        assert!(args.unsupported_options.contains(&"-x".to_owned()));
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        assert_eq!(args.url.as_deref(), Some("https://example.com/file"));
+        assert!(!args.urls.contains(&"http://proxy:3128".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn short_config_flag_is_critical() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "-K", "curlrc", "https://example.com/"])?;
+
+        assert!(args.unsupported_options.contains(&"-K".to_owned()));
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tls_cert_option_is_critical() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--cacert",
+            "/tmp/evil-ca.pem",
+            "https://example.com/",
+        ])?;
+
+        assert!(args.unsupported_options.contains(&"--cacert".to_owned()));
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_short_flag_in_cluster_does_not_consume() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "-vw", "fmt", "https://example.com/"])?;
+
+        assert!(args.unsupported_options.contains(&"-v".to_owned()));
+        assert!(args.unsupported_options.contains(&"-w".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("https://example.com/"));
+        assert!(!args.urls.contains(&"fmt".to_owned()));
         Ok(())
     }
 

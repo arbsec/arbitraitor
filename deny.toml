@@ -13,11 +13,15 @@ yanked = "deny"
 # It is a transitive dependency via yara-x which we cannot remove without
 # upstream changes. Tracked for resolution when yara-x drops bincode or we
 # migrate to an alternative YARA runtime.
+# RUSTSEC-2026-0222 affects wasmtime 43.0.2 via yara-x (^43.0.2); we upgraded
+# our direct wasmtime 47.0.2 → 47.0.3, but the 43.x copy cannot be bumped
+# without upstream yara-x releasing a version with a newer wasmtime dep.
 ignore = [
     "RUSTSEC-2025-0141",
     "RUSTSEC-2026-0185",
     "RUSTSEC-2026-0186",
     "RUSTSEC-2026-0190",
+    "RUSTSEC-2026-0222",
 ]
 
 [licenses]
