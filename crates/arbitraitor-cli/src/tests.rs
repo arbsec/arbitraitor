@@ -1522,6 +1522,27 @@ fn wrapper_url_argument_consumes_unsupported_curl_option_values()
     assert_eq!(url, "https://example.test/install.sh");
     Ok(())
 }
+
+#[test]
+fn wrapper_url_argument_extracts_url_past_unknown_flag_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let args = [
+        "-s".to_owned(),
+        "-o".to_owned(),
+        "/dev/null".to_owned(),
+        "-w".to_owned(),
+        "%{http_code}".to_owned(),
+        "--max-time".to_owned(),
+        "5".to_owned(),
+        "http://127.0.0.1:4200/".to_owned(),
+    ];
+
+    let url = wrapper_url_argument(Some("curl"), &args).ok_or("missing wrapper URL")?;
+
+    assert_eq!(url, "http://127.0.0.1:4200/");
+    Ok(())
+}
+
 #[test]
 fn wrapper_output_destination_curl_stdout() {
     let args: Vec<String> = ["curl", "-fsSL", "https://example.test/install.sh"]

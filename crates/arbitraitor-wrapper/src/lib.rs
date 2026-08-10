@@ -171,7 +171,14 @@ fn opaque_reason(args: &CurlArgs) -> Option<String> {
         .map(|option| format!("critical unsupported option {option}"))
 }
 
-fn is_critical_unsupported_option(option: &str) -> bool {
+/// Returns `true` if an unsupported curl option is security-critical — i.e. it
+/// can bypass the inspection boundary (proxy redirection, config file reads,
+/// credential injection, socket binding, etc.).
+///
+/// Callers use this to decide whether to hard-reject an invocation instead of
+/// allowing the option to pass through with reduced confidence.
+#[must_use]
+pub fn is_critical_unsupported_option(option: &str) -> bool {
     matches!(
         option,
         "-F" | "--form"
@@ -292,9 +299,13 @@ impl<'a> CurlParser<'a> {
                 self.parse_long_option(&token)?;
             } else if token.starts_with('-') && token != "-" {
                 self.parse_short_options(&token)?;
-            } else {
+            } else if token.contains("://") {
                 self.set_positional_url(token);
             }
+            // Non-URL, non-flag tokens are silently skipped: they are values
+            // of unknown flags that the parser does not model (e.g. `-w`
+            // "%{http_code}", `--max-time 5`). This prevents misidentifying
+            // such values as download URLs.
         }
         Ok(std::mem::take(&mut self.args))
     }
@@ -432,7 +443,8 @@ fn parse_header(header: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurlArgs, WrapperError, curl_to_operation_plan, parse_curl_args, remote_name_from_url,
+        CurlArgs, WrapperError, curl_to_operation_plan, is_critical_unsupported_option,
+        parse_curl_args, remote_name_from_url,
     };
     use arbitraitor_plugin_api::{
         FilesystemCapability, NetworkCapability, PlannedOperation, SemanticConfidence,
@@ -690,6 +702,89 @@ mod tests {
 
         assert_eq!(args.url.as_deref(), Some("https://example.com/only"));
         assert_eq!(args.urls, ["https://example.com/only"]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_short_flag_value_not_treated_as_url() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "http://127.0.0.1:4200/",
+        ])?;
+
+        assert!(args.silent);
+        assert_eq!(args.output.as_deref(), Some("/dev/null"));
+        assert!(args.unsupported_options.contains(&"-w".to_owned()));
+        assert!(args.unsupported_options.contains(&"--max-time".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("http://127.0.0.1:4200/"));
+        assert_eq!(args.urls, ["http://127.0.0.1:4200/"]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_long_option_value_not_treated_as_url() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "5",
+            "https://example.com/file",
+        ])?;
+
+        assert!(
+            args.unsupported_options
+                .contains(&"--connect-timeout".to_owned())
+        );
+        assert!(args.unsupported_options.contains(&"--max-time".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("https://example.com/file"));
+        assert_eq!(args.urls, ["https://example.com/file"]);
+        Ok(())
+    }
+
+    #[test]
+    fn non_critical_unsupported_options_are_passthrough() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--verbose",
+            "--write-out",
+            "fmt",
+            "https://example.com/",
+        ])?;
+
+        assert!(args.unsupported_options.contains(&"--verbose".to_owned()));
+        assert!(args.unsupported_options.contains(&"--write-out".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("https://example.com/"));
+        assert!(
+            !args
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn critical_unsupported_options_are_flagged() -> Result<(), WrapperError> {
+        let args = parse(&[
+            "curl",
+            "--proxy",
+            "http://proxy:3128",
+            "https://example.com/",
+        ])?;
+
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
         Ok(())
     }
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Unknown curl flag passthrough for curl/wget shims. The wrapper no longer
+  hard-rejects curl invocations that use flags it does not model (e.g.
+  `-w`/`--write-out`, `--max-time`, `--connect-timeout`, `--retry-delay`).
+  Only security-critical options that can bypass the inspection boundary
+  (`--proxy`, `--config`, `--user`, `--form`, `--upload-file`, `--connect-to`,
+  `--resolve`, `--interface`, `--unix-socket`) are hard-rejected. The parser
+  also no longer misidentifies unknown flag values (e.g. `%{http_code}`, `5`)
+  as download URLs — only tokens with a URL scheme (`://`) are treated as
+  positional URLs.
+
 #### Plugin Host
 
 - Wasmtime Component Model plugin execution (spec §41.9.1, issue #535).

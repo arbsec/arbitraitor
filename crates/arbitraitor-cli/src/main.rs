@@ -36,7 +36,10 @@ use arbitraitor_wrapper::shim::{
     ShimConfig, ShimError, WrapperTarget, check_shims, generate_shell_init, install_shims,
     uninstall_shims,
 };
-use arbitraitor_wrapper::{parse_curl_args, remote_name_from_url, wget::translate_wget_args};
+use arbitraitor_wrapper::{
+    is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
+    wget::translate_wget_args,
+};
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use sha2::{Digest, Sha256};
@@ -636,10 +639,19 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
             wrapper_output_destination(command.tool.as_deref(), &command.args);
         if matches!(target, Some(WrapperTarget::Curl)) {
             let parsed = parse_curl_args(&command.args).into_diagnostic()?;
-            if !parsed.unsupported_options.is_empty() {
+            let critical: Vec<_> = parsed
+                .unsupported_options
+                .iter()
+                .filter(|opt| is_critical_unsupported_option(opt))
+                .collect();
+            if !critical.is_empty() {
                 miette::bail!(
-                    "unsupported curl wrapper option: {}",
-                    parsed.unsupported_options.join(", ")
+                    "curl option cannot be safely proxied: {}",
+                    critical
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }
@@ -720,10 +732,19 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
 
     if matches!(target, Some(WrapperTarget::Curl)) {
         let parsed = parse_curl_args(&command.args).into_diagnostic()?;
-        if !parsed.unsupported_options.is_empty() {
+        let critical: Vec<_> = parsed
+            .unsupported_options
+            .iter()
+            .filter(|opt| is_critical_unsupported_option(opt))
+            .collect();
+        if !critical.is_empty() {
             miette::bail!(
-                "unsupported curl wrapper option: {}",
-                parsed.unsupported_options.join(", ")
+                "curl option cannot be safely proxied: {}",
+                critical
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
