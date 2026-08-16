@@ -279,6 +279,7 @@ impl AnalysisCoordinator {
             Box::new(ArtifactDetector),
             Box::new(pyjs::PythonJsDetector),
             Box::new(ShellDetector),
+            Box::new(url_discovery::UrlDiscoveryDetector),
         ])
     }
 

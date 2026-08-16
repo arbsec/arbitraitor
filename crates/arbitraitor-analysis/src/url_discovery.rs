@@ -9,10 +9,27 @@
 //! All extractors enforce bounded processing (spec invariant 4): source size,
 //! URL count, and individual URL length are capped to prevent resource
 //! exhaustion through hostile inputs.
+//!
+//! The [`UrlDiscoveryDetector`] implements the [`crate::Detector`] trait so
+//! that HTML and JSON artifacts pass the mandatory-coverage gate (spec §9
+//! invariant 1). Per spec §20.4, the detector reports dynamic URL expressions
+//! — URLs containing unresolved template placeholders — as Medium-severity
+//! findings. Static URLs are not findings; wiring them into the recursive
+//! retrieval policy (spec §20.3) remains future work.
 
 #![forbid(unsafe_code)]
 
+use arbitraitor_artifact::ArtifactType;
+use arbitraitor_model::artifact::ArtifactKind;
+use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
+use arbitraitor_model::verdict::{Confidence, Severity};
+
+use crate::{AnalysisContext, Detector, DetectorError, DetectorMetadata};
+
 use serde_json::Value;
+
+/// Detector ID for the URL discovery detector (spec §20.2).
+pub(crate) const URL_DISCOVERY_DETECTOR_ID: &str = "arbitraitor-analysis.url-discovery";
 
 /// Maximum source size accepted by any extractor (1 MiB).
 const MAX_SOURCE_SIZE: usize = 1_048_576;
@@ -393,6 +410,111 @@ fn line_location(source: &str, offset: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Detector
+// ---------------------------------------------------------------------------
+
+/// Detector that scans HTML and JSON artifacts for dynamic URL expressions
+/// (spec §20.2, §20.4).
+///
+/// Static URLs are not findings — they are discovery data available to the
+/// recursive retrieval policy (§20.3) and receipt generation. Only URLs
+/// containing unresolved template placeholders (e.g. `${HOST}`, `{{base}}`,
+/// `#{var}`) are reported, because they cannot be statically inspected and
+/// may resolve to untrusted second-stage payloads (§20.4).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UrlDiscoveryDetector;
+
+impl Detector for UrlDiscoveryDetector {
+    fn metadata(&self) -> DetectorMetadata {
+        DetectorMetadata {
+            id: URL_DISCOVERY_DETECTOR_ID.to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            supported_artifact_kinds: vec![ArtifactKind::Html, ArtifactKind::Json],
+            capabilities: vec!["url-discovery".to_owned()],
+            is_local: true,
+            may_upload: false,
+            default_timeout_ms: 5_000,
+            is_deterministic: true,
+        }
+    }
+
+    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
+        if ctx.artifact_bytes.len() > MAX_SOURCE_SIZE {
+            return Err(DetectorError::Resource(format!(
+                "artifact exceeds URL discovery size limit ({MAX_SOURCE_SIZE} bytes)"
+            )));
+        }
+
+        let source = std::str::from_utf8(ctx.artifact_bytes)
+            .map_err(|_| DetectorError::ParseError("artifact is not valid UTF-8".to_owned()))?;
+
+        let source_kind = match ctx.classification.artifact_type {
+            ArtifactType::HtmlDocument | ArtifactType::XmlDocument => UrlSource::Html,
+            ArtifactType::JsonDocument => UrlSource::Json,
+            _ => return Ok(Vec::new()),
+        };
+
+        let expressions = detect_dynamic_url_expressions(source, source_kind);
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let mut findings = Vec::new();
+        for expr in expressions {
+            let key = (expr.url.clone(), expr.unresolved_expression.clone());
+            if seen.iter().any(|s| s == &key) {
+                continue;
+            }
+            seen.push(key);
+            findings.push(dynamic_url_finding(
+                ctx,
+                &expr.unresolved_expression,
+                source_kind,
+            ));
+        }
+        Ok(findings)
+    }
+}
+
+fn dynamic_url_finding(
+    ctx: &AnalysisContext<'_>,
+    expression: &str,
+    source_kind: UrlSource,
+) -> Finding {
+    Finding {
+        id: "url-discovery.dynamic-url-expression".to_owned(),
+        detector: URL_DISCOVERY_DETECTOR_ID.to_owned(),
+        category: FindingCategory::SuspiciousScriptBehavior,
+        severity: Severity::Medium,
+        confidence: Confidence::Medium,
+        title: "Dynamic URL expression in artifact".to_owned(),
+        description: format!(
+            "A URL containing an unresolved template expression was discovered in \
+             the artifact. The placeholder '{expression}' prevents static inspection \
+             of the final destination. Per spec §20.4, policy may require sandbox \
+             execution or block unresolved executable downloads."
+        ),
+        evidence: vec![Evidence {
+            kind: EvidenceKind::Other,
+            description: format!("dynamic URL template in {source_kind:?} artifact"),
+            content: Some(expression.to_owned()),
+        }],
+        artifact_sha256: ctx.artifact_sha256.clone(),
+        location: None,
+        remediation: Some(
+            "Resolve the template expression manually or fetch the URL through \
+             Arbitraitor after substituting known values, then inspect the \
+             second-stage payload before release."
+                .to_owned(),
+        ),
+        references: vec!["Arbitraitor spec section 20.4".to_owned()],
+        tags: vec![
+            "url-discovery".to_owned(),
+            "dynamic-url-expression".to_owned(),
+        ],
+        taxonomies: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -697,5 +819,185 @@ url = "https://example.com/api"
             UrlSource::ShellAst,
         ];
         assert_eq!(all.len(), 6);
+    }
+
+    // --- Detector --------------------------------------------------------
+
+    use arbitraitor_artifact::classify;
+    use arbitraitor_model::artifact::ArtifactKind;
+    use arbitraitor_model::ids::Sha256Digest;
+    use sha2::{Digest, Sha256};
+
+    fn test_ctx(bytes: &[u8]) -> AnalysisContext<'_> {
+        AnalysisContext {
+            artifact_bytes: bytes,
+            classification: classify(bytes),
+            retrieval: None,
+            artifact_sha256: Sha256Digest::new(Sha256::digest(bytes).into()),
+        }
+    }
+
+    #[test]
+    fn detector_metadata_is_correct() {
+        let detector = UrlDiscoveryDetector;
+        let meta = detector.metadata();
+        assert_eq!(meta.id, URL_DISCOVERY_DETECTOR_ID);
+        assert!(meta.is_deterministic);
+        assert!(meta.is_local);
+        assert!(!meta.may_upload);
+        assert!(
+            meta.supported_artifact_kinds.contains(&ArtifactKind::Html),
+            "must support Html"
+        );
+        assert!(
+            meta.supported_artifact_kinds.contains(&ArtifactKind::Json),
+            "must support Json"
+        );
+    }
+
+    #[test]
+    fn benign_html_emits_no_findings() {
+        let html = b"<!DOCTYPE html>\n<html><body><a href=\"https://example.com\">link</a></body></html>\n";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html))
+            .expect("detector should analyze benign HTML");
+        assert!(
+            findings.is_empty(),
+            "static URLs in HTML should produce no findings, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn benign_json_emits_no_findings() {
+        let json = br#"{"download": "https://example.com/file.tar.gz"}"#;
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(json))
+            .expect("detector should analyze benign JSON");
+        assert!(
+            findings.is_empty(),
+            "static URLs in JSON should produce no findings, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_url_in_html_emits_finding() {
+        let html = b"<!DOCTYPE html>\n<a href=\"https://${HOST}/install.sh\">link</a>";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html))
+            .expect("detector should analyze HTML with dynamic URL");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
+        assert_eq!(findings[0].id, "url-discovery.dynamic-url-expression");
+        assert!(
+            findings[0]
+                .tags
+                .iter()
+                .any(|t| t == "dynamic-url-expression")
+        );
+    }
+
+    #[test]
+    fn dynamic_url_in_json_emits_finding() {
+        let json = br#"{"url": "https://{{base}}/tool"}"#;
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(json))
+            .expect("detector should analyze JSON with dynamic URL");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
+    }
+
+    #[test]
+    fn non_utf8_input_returns_error() {
+        let bytes: &[u8] = &[0xff, 0xfe, 0xfd];
+        let classification = classify(b"<!DOCTYPE html>\n<html></html>");
+        let ctx = AnalysisContext {
+            artifact_bytes: bytes,
+            classification,
+            retrieval: None,
+            artifact_sha256: Sha256Digest::new(Sha256::digest(bytes).into()),
+        };
+        let result = UrlDiscoveryDetector.analyze(&ctx);
+        assert!(
+            result.is_err(),
+            "non-UTF-8 input should return DetectorError, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn oversize_input_returns_error() {
+        let html = format!(
+            "<!DOCTYPE html>\n<html>{}</html>",
+            "x".repeat(MAX_SOURCE_SIZE)
+        );
+        let result = UrlDiscoveryDetector.analyze(&test_ctx(html.as_bytes()));
+        assert!(
+            result.is_err(),
+            "oversize input should return DetectorError, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn finding_carries_correct_artifact_digest() {
+        let html = b"<!DOCTYPE html>\n<a href=\"https://#{host}/path\">";
+        let expected = Sha256Digest::new(Sha256::digest(html).into());
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html))
+            .expect("detector should analyze HTML with template expression");
+        for finding in &findings {
+            assert_eq!(
+                finding.artifact_sha256, expected,
+                "finding {} has wrong digest",
+                finding.id
+            );
+        }
+    }
+
+    #[test]
+    fn empty_html_emits_no_findings() {
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(b""))
+            .expect("detector should analyze empty input");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn duplicate_dynamic_urls_are_deduped() {
+        let html = b"<!DOCTYPE html>\n<a href=\"https://${HOST}/a\">a</a><a href=\"https://${HOST}/a\">b</a>";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html))
+            .expect("detector should analyze HTML with duplicate dynamic URLs");
+        assert_eq!(
+            findings.len(),
+            1,
+            "duplicate dynamic URL expressions should be deduped, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_dynamic_urls_emit_multiple_findings() {
+        let html = b"<!DOCTYPE html>\n<a href=\"https://${HOST}/a\">a</a><a href=\"https://{{base}}/b\">b</a>";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html))
+            .expect("detector should analyze HTML with multiple dynamic URLs");
+        assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn description_does_not_contain_raw_url() {
+        let html = b"<!DOCTYPE html>\n<a href=\"https://${HOST}/install.sh\">";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html))
+            .expect("detector should analyze");
+        assert_eq!(findings.len(), 1);
+        assert!(
+            !findings[0].description.contains("https://${HOST}"),
+            "raw URL must not appear in description for invariant 10"
+        );
+        assert!(
+            findings[0].description.contains("${HOST}"),
+            "expression placeholder may appear in description"
+        );
     }
 }
