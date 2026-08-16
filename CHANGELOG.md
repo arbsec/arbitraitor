@@ -59,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed). The coverage matrix covers shell scripts, Python/JavaScript, native
   executables (ELF, PE, Mach-O), archives, Windows shortcuts, and HTML/JSON
   documents.
+- `UrlDiscoveryDetector` registered in the default `AnalysisCoordinator`
+  (spec §20.2, §20.4, issue #677). Resolves a 0.1.0 regression where `curl`
+  and `wget` wrappers blocked on HTML/JSON fetches because the mandatory
+  coverage gate required `arbitraitor-analysis.url-discovery` to run but no
+  detector implemented that ID. The detector scans HTML and JSON artifacts
+  for dynamic URL expressions (unresolved template placeholders like
+  `${HOST}`, `{{base}}`) and emits Medium-severity findings per §20.4.
+  Static URLs are not findings; wiring them into the recursive retrieval
+  policy (§20.3) remains future work. Benign HTML/JSON now passes with
+  `Verdict::Pass`.
 
 #### Fetch
 

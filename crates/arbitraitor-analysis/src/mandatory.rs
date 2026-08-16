@@ -20,12 +20,7 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity};
 
 use crate::DetectorResult;
-
-/// Detector ID for the URL discovery detector (spec §20.2).
-///
-/// Not yet registered in the default coordinator. HTML and JSON artifacts
-/// fail closed until a detector with this ID is registered.
-const URL_DISCOVERY_DETECTOR_ID: &str = "arbitraitor-analysis.url-discovery";
+use crate::url_discovery::URL_DISCOVERY_DETECTOR_ID;
 
 /// Detector ID for the mandatory-coverage validator itself.
 const MANDATORY_COVERAGE_DETECTOR_ID: &str = "arbitraitor-analysis.mandatory-coverage";

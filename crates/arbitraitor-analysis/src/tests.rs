@@ -977,3 +977,59 @@ fn mandatory_coverage_finding_carries_correct_artifact_digest()
     assert_eq!(missing.artifact_sha256, expected);
     Ok(())
 }
+
+#[test]
+fn html_artifact_does_not_block_when_url_discovery_registered() {
+    let coordinator = AnalysisCoordinator::new();
+    let html = b"<!DOCTYPE html>\n<html><body><p>hello</p></body></html>\n";
+    let result = coordinator.analyze(html);
+
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.id == "mandatory-detector.missing"),
+        "url-discovery detector should be registered and run for HTML"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Pass,
+        "benign HTML should pass, not Block"
+    );
+}
+
+#[test]
+fn json_artifact_does_not_block_when_url_discovery_registered() {
+    let coordinator = AnalysisCoordinator::new();
+    let json = br#"{"name": "example", "version": "1.0"}"#;
+    let result = coordinator.analyze(json);
+
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.id == "mandatory-detector.missing"),
+        "url-discovery detector should be registered and run for JSON"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Pass,
+        "benign JSON should pass, not Block"
+    );
+}
+
+#[test]
+fn html_with_dynamic_url_expression_emits_warn_not_pass() {
+    let coordinator = AnalysisCoordinator::new();
+    let html = b"<!DOCTYPE html>\n<a href=\"https://${HOST}/install.sh\">link</a>\n";
+    let result = coordinator.analyze(html);
+
+    assert_eq!(result.verdict, Verdict::Warn);
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|f| f.id == "url-discovery.dynamic-url-expression"),
+        "dynamic URL expression should produce a finding"
+    );
+}
