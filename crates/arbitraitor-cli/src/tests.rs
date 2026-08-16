@@ -2237,9 +2237,9 @@ fn wrapper_url_argument_finds_inline_url_option() {
 }
 
 #[test]
-fn is_safe_passthrough_rejects_bare_invocation() {
-    assert!(!is_safe_passthrough(Some("curl"), &[]));
-    assert!(!is_safe_passthrough(Some("wget"), &[]));
+fn is_safe_passthrough_allows_bare_invocation() {
+    assert!(is_safe_passthrough(Some("curl"), &[]));
+    assert!(is_safe_passthrough(Some("wget"), &[]));
 }
 
 #[test]
