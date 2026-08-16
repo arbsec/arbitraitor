@@ -1,4 +1,4 @@
-//! Tests for the `CallerOrigin` type (spec §23.1.1).
+//! Tests for the `CallerOrigin` type.
 
 use arbitraitor_model::origin::CallerOrigin;
 

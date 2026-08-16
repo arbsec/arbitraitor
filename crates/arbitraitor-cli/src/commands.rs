@@ -1,4 +1,4 @@
-//! CLI subcommand handlers added in v0.6 to close the spec §28.1 surface gap.
+//! CLI subcommand handlers added in v0.6 to close the CLI surface gap.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ pub struct ScanCommand {
 pub struct ExplainCommand {
     /// Receipt file path or `sha256:<hex>` to look up the most recent
     /// receipt for an artifact from the Arbitraitor receipts directory
-    /// (spec §28.6).
+    /// from the Arbitraitor receipts directory.
     pub target: String,
 }
 
@@ -98,15 +98,15 @@ pub struct DoctorCommand {
     pub cas_dir: Option<PathBuf>,
     #[arg(long, value_name = "DIR")]
     pub rules: Option<PathBuf>,
-    /// Path to the receipt signing key file (spec §31.3).
+    /// Path to the receipt signing key file.
     #[arg(long, value_name = "PATH")]
     pub receipt_signing_key: Option<PathBuf>,
     /// Output JSON instead of human-readable format.
     #[arg(long)]
     pub json: bool,
     /// Acknowledge that only the 5 built-in MVP detectors are running
-    /// and suppress spec §29 exit code 33 when external layers (YARA
-    /// rule packs, AV adapters, plugins) are absent (spec §9 inv 1, §29).
+    /// and suppress exit code 33 when external layers (YARA
+    /// rule packs, AV adapters, plugins) are absent.
     ///
     /// The `ARBITRAITOR_ALLOW_DEGRADED_DETECTORS` env var is also honored,
     /// accepting truthy values (true, yes, on, 1 — case-insensitive).
@@ -240,11 +240,11 @@ pub struct ReportCommand {
     pub subcommand: ReportSubcommand,
 }
 
-/// Subcommands of `arbitraitor report` (spec §21.7).
+/// Subcommands of `arbitraitor report`.
 #[derive(Subcommand)]
 pub enum ReportSubcommand {
     /// Mark a finding as a false positive so future inspections do not
-    /// re-surface it. Scoped and auditable per spec §21.7.
+    /// re-surface it. Scoped and auditable.
     FalsePositive {
         /// Identifier of the finding (matches `Finding.id` from a receipt).
         finding_id: String,
@@ -252,7 +252,7 @@ pub enum ReportSubcommand {
 }
 
 /// `arbitraitor allow` — record a scoped allow exception for an artifact
-/// digest (spec §21.7). All exceptions are auditable; expiry is mandatory.
+/// digest. All exceptions are auditable; expiry is mandatory.
 #[derive(Args)]
 pub struct AllowCommand {
     /// Artifact SHA-256 in `sha256:<hex>` form.
@@ -269,7 +269,7 @@ pub struct AllowCommand {
     pub reason: String,
 }
 
-/// Allowed scopes for an `allow` exception (spec §21.7).
+/// Allowed scopes for an `allow` exception.
 #[derive(Clone, Copy, Debug, clap::ValueEnum, Eq, PartialEq)]
 pub enum AllowScope {
     User,
@@ -586,7 +586,7 @@ pub(crate) fn explain(command: &ExplainCommand) -> Result<()> {
 }
 
 /// Locates the most recent receipt for an artifact by its SHA-256 hash
-/// (spec §28.6). Receipts are stored as `~/.arbitraitor/receipts/*-<prefix>.json`
+/// from the Arbitraitor receipts directory. Receipts are stored as `~/.arbitraitor/receipts/*-<prefix>.json`
 /// where `<prefix>` is the first 12 chars of the artifact's sha256 hex.
 /// Returns the newest matching file's bytes.
 fn resolve_receipt_by_hash(hash_hex: &str) -> Result<Vec<u8>> {
@@ -723,11 +723,7 @@ fn print_detector_fix_guidance(
     av_adapters_status: HealthStatus,
 ) -> Result<()> {
     writeln!(stdout).into_diagnostic()?;
-    writeln!(
-        stdout,
-        "Fix detector coverage (spec §9 invariant 1, §29 exit code 33):"
-    )
-    .into_diagnostic()?;
+    writeln!(stdout, "Fix detector coverage (exit code 33):").into_diagnostic()?;
     if matches!(detectors_status, HealthStatus::Warn | HealthStatus::Fail) {
         writeln!(
             stdout,
@@ -1000,7 +996,7 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     if all_healthy {
         Ok(())
     } else {
-        // Spec §29 code 33: Required detector unavailable or stale. doctor
+        // Exit code 33: required detector unavailable or stale. doctor
         // is responsible for surfacing detector and configuration health;
         // an unhealthy doctor result is the canonical 33 trigger.
         std::process::exit(33);
@@ -1568,7 +1564,7 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Stub handler for `arbitraitor report <subcommand>` (spec §21.7).
+/// Stub handler for `arbitraitor report <subcommand>`.
 ///
 /// The intel-store backed implementation lands in a follow-up PR. For now
 /// we validate inputs and describe what would be recorded, so users can
@@ -1592,7 +1588,7 @@ pub(crate) fn report(command: &ReportCommand) -> Result<()> {
     Ok(())
 }
 
-/// Stub handler for `arbitraitor allow sha256:<hash> ...` (spec §21.7).
+/// Stub handler for `arbitraitor allow sha256:<hash> ...`.
 ///
 /// All exceptions must be scoped, time-bounded, and have a justification;
 /// we validate those invariants up front so a follow-up PR only needs to

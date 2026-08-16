@@ -6,7 +6,7 @@ Scan a local file or piped stdin content through the full detection pipeline:
 arbitraitor scan ./suspicious.sh
 ```
 
-Exit codes follow the spec §29 convention:
+Exit codes follow the stable convention:
 
 | Code | Meaning |
 |------|---------|

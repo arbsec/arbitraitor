@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Plugin Host
 
-- Wasmtime Component Model plugin execution (spec §41.9.1, issue #535).
+- Wasmtime Component Model plugin execution (issue #535).
   `WasmPlugin::analyze_artifact` now instantiates the guest component, calls
   the `analyze` export, and converts WIT findings to `arbitraitor-model::Finding`.
   Host imports (`get-artifact-bytes`, `get-artifact-size`, `log`) are implemented
@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file reading. For wget, `--no-config` is prepended to disable `~/.wgetrc`.
   This neutralizes config-based URL injection as defense-in-depth while
   preserving expected tool behavior for non-download invocations.
-- Multi-URL handling for `arbitraitor wrap` (spec §39.9, issue #531).
+- Multi-URL handling for `arbitraitor wrap` (issue #531).
   `arbitraitor wrap curl -- URL1 URL2 URL3` now fetches and inspects each
   URL independently, producing separate artifact identities (SHA-256) and
   verdicts per URL. Responses are never concatenated into one executable
@@ -58,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Analysis
 
-- Mandatory detector coverage per artifact class (spec §9 invariant 1, issue
-  #503). `MandatoryDetectorRegistry` maps each `ArtifactKind` to the detector
+- Mandatory detector coverage per artifact class (issue #503).
+  `MandatoryDetectorRegistry` maps each `ArtifactKind` to the detector
   IDs that must execute before any artifact byte is released. After analysis
   completes, `AnalysisCoordinator` validates that all mandatory detectors ran
   for the artifact's class. If a mandatory detector is missing or unavailable,
@@ -68,20 +68,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executables (ELF, PE, Mach-O), archives, Windows shortcuts, and HTML/JSON
   documents.
 - `UrlDiscoveryDetector` registered in the default `AnalysisCoordinator`
-  (spec §20.2, §20.4, issue #677). Resolves a 0.1.0 regression where `curl`
+  (issue #677). Resolves a 0.1.0 regression where `curl`
   and `wget` wrappers blocked on HTML/JSON fetches because the mandatory
   coverage gate required `arbitraitor-analysis.url-discovery` to run but no
   detector implemented that ID. The detector scans HTML and JSON artifacts
   for dynamic URL expressions (unresolved template placeholders like
-  `${HOST}`, `{{base}}`) and emits Medium-severity findings per §20.4.
+  `${HOST}`, `{{base}}`) and emits Medium-severity findings.
   Static URLs are not findings; wiring them into the recursive retrieval
-  policy (§20.3) remains future work. Benign HTML/JSON now passes with
+  policy remains future work. Benign HTML/JSON now passes with
   `Verdict::Pass`.
 
 #### Fetch
 
-- Decoded child artifact creation for archive payloads (spec §41.4.2, issue
-  #499). When the fetched artifact is an archive or compressed stream (gzip,
+- Decoded child artifact creation for archive payloads (issue #499).
+  When the fetched artifact is an archive or compressed stream (gzip,
   tar, zip, xz, bzip2, zstd), `FetchReceipt` now records each extracted
   member as a `ChildArtifact` with its own SHA-256 digest, entry name,
   ordinal offset, and decoded size. The `discover_child_artifacts` and
@@ -93,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Provenance
 
-- PEP 740 PyPI attestation verification (spec §31.3.1, §41.12, issue #469).
+- PEP 740 PyPI attestation verification (issue #469).
   The `arbitraitor-provenance` crate now includes a `Pep740Verifier` that
   verifies PyPI package attestations: parses the attestation document,
   extracts the in-toto Statement from the DSSE envelope, checks the statement
@@ -101,8 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the verifier policy. Cryptographic signature verification is
   delegated to the existing cosign integration; no network calls are made.
 - `AttestationVerifierPolicy` — a verifier-side attestation policy that is
-  deliberately separate from the publisher-side `VerificationPolicy` (spec
-  §14.3). The publisher policy governs which signer identities are trusted to
+  deliberately separate from the publisher-side `VerificationPolicy`. The
+  publisher policy governs which signer identities are trusted to
   have produced an artifact; the verifier policy governs which attestation
   types, registries, and revocation states are accepted when evaluating
   provenance evidence.
@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Extends the binary Active/Revoked model from `arbitraitor-plugin-host` with
   `Withdrawn` (publisher-initiated) and `Unknown` (CRL unavailable or not
   checked).
-- `CratesIoAttestationVerifier` stub for Cargo RFC #3724 (spec §41.12). The
+- `CratesIoAttestationVerifier` stub for Cargo RFC #3724. The
   RFC was accepted Q4 2025 and is rolling to GA Q3-Q4 2026. The stub provides
   a policy-side opt-in flag (`recognize_crates_io`) so policy authors can
   recognize crates.io Rekor tiles before the implementation is complete.
@@ -126,8 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CVE-2026-24122. Returns `Skipped` when cosign is not on PATH.
 - `AttestationRegistry` newtype to prevent confusing registry identities with
   signer identities or verifier identities.
-- Sigstore Bundle media-type/form/tlog policy enforcement (spec §14.2.1, issue
-  #513). `SigstoreBundlePolicy` validates bundles against configurable policy:
+- Sigstore Bundle media-type/form/tlog policy enforcement (issue #513).
+  `SigstoreBundlePolicy` validates bundles against configurable policy:
   accepted media types (0.1/0.2/0.3), verification material forms
   (`X509CertificateChain`, `PublicKey`, `X509Certificate`), and transparency-log
   evidence (`TlogPolicy::RequireInclusionProof` default, `RequireInclusionPromise`,
@@ -135,7 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after cosign succeeds; `verify_cosign_with_policy` accepts an explicit policy.
   Bundles missing `mediaType`, `verificationMaterial`, or both `messageSignature`
   and `dsseEnvelope` are rejected. A bundle without tlog entries is accepted only
-  under `TlogPolicy::Optional` (offline-only mode per spec §14.2.1).
+  under `TlogPolicy::Optional` (offline-only mode).
 
 #### Policy
 
@@ -145,14 +145,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Sandbox
 
-- `io_uring` availability probe (spec §27.3). The sandbox crate now reads
+- `io_uring` availability probe. The sandbox crate now reads
   `/proc/sys/kernel/io_uring_disabled` on Linux 6.6+ and records the result
   in `EffectiveControls.io_uring_available`. When `io_uring` is enabled
   (`disabled=0`), the exec crate emits a `tracing::warn!` recommending
   `sysctl kernel.io_uring_disabled=1` (or `=2` for full disable) because
   `io_uring` queued operations bypass seccomp syscall filtering. Non-Linux
   platforms and kernels < 6.6 report `None` (not applicable).
-- Container runtime CVE awareness (spec §27.3, issue #458). The sandbox
+- Container runtime CVE awareness (issue #458). The sandbox
   crate now probes `runc --version` (falling back to `containerd --version`)
   on Linux and records the result in `EffectiveControls.container_runtime`.
   The `ContainerRuntime` struct carries the runtime name, version, and a
@@ -166,7 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Analysis
 
-- URL discovery beyond shell literals (spec §20.2, issue #518). The
+- URL discovery beyond shell literals (issue #518). The
   `arbitraitor-analysis` crate now includes a `url_discovery` module that
   extracts URLs from Python and JavaScript string constants, configuration
   files (JSON, TOML), and HTML/JSON responses. All extractors are
@@ -175,11 +175,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extractor enforces bounded processing (spec invariant 4): source size
   (1 MiB), URL count (1000), and individual URL length (2048 bytes) are
   capped to prevent resource exhaustion.
-- `RetrievalPolicy` enum (spec §20.3) with five modes: `Off`, `Report`,
+- `RetrievalPolicy` enum with five modes: `Off`, `Report`,
   `SameOrigin`, `KnownExecuted`, `AllWithinLimits`. The policy forms a strict
   escalation ladder governing which discovered URLs are fetched for further
   analysis.
-- `DynamicUrlExpression` reporting (spec §20.4). URLs containing unresolved
+- `DynamicUrlExpression` reporting. URLs containing unresolved
   template variables (`${...}`, `{{...}}`, `#{...}`) are detected and reported
   with the unresolved expression so operators can inspect the construction
   logic manually.
@@ -205,7 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case-insensitive) on the `doctor` subcommand. Acknowledges dev-build
   deployment where only the 5 built-in MVP detectors (archive-hazards,
   artifact, python-js, shell, url-discovery) are running, and suppresses
-  spec §29 exit code 33 when external layers (YARA rule packs, AV
+  exit code 33 when external layers (YARA rule packs, AV
   adapters, plugins, policy file) are at `Warn`. Does NOT suppress exit
   33 for `Fail` — the flag is Warn-only.
 - New "Fix detector coverage" guidance section in `doctor` output, printed
@@ -216,13 +216,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Removed user-facing references to internal spec paragraphs.** Runtime
+  error messages, doc comments, the book, README, and this changelog no
+  longer cite internal `docs/spec/spec.md` paragraphs by section number.
+  External standards (RFC, CVE, CWE, OWASP) and internal ADR/issue
+  references are unaffected. The development-facing
+  `xtask docs-check` mirror comparison is now citation-agnostic so ADR
+  titles with spec citations stay consistent with the book summary.
+
 #### Doctor
 
-- **Doctor now exits 33 on detector-coverage `Warn` (spec §29).**
+- **Doctor now exits 33 on detector-coverage `Warn`.**
   Previously `doctor` only treated `Fail` statuses as unhealthy, so a
   dev build without external YARA rule packs / AV adapters / plugins
   / policy file exited 0 with every Skipped/Warn row rendered as ✓.
-  Per spec §29 ("Required detector unavailable or stale"), exit code 33
+  Exit code 33 ("Required detector unavailable or stale")
   is the canonical trigger when detector posture is degraded. Pass
   `--allow-degraded-detectors` (or set
   `ARBITRAITOR_ALLOW_DEGRADED_DETECTORS=true`) to acknowledge the
@@ -240,22 +248,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that the built-in baseline is running and distinguishes the absent
   external coverage layers (YARA rule packs, AV adapters, plugins) —
   the Warn is preserved so operators know additional layers are
-  recommended for full §9 coverage.
+  recommended for full detector coverage.
 
 ### Fixed
 
 #### Analysis
 
-- **Fail-closed regression in `pipeline::analysis_coordinator(Some(rules_dir))`**
-  (spec §9 invariant 1). When a YARA rules directory was configured
+- **Fail-closed regression in `pipeline::analysis_coordinator(Some(rules_dir))`.**
+  When a YARA rules directory was configured
   (`arbitraitor scan <file> --rules <dir>`, `arbitraitor inspect` with
   `--rules`, doctor with `--rules`), the coordinator was rebuilt as
   `with_detectors([ArtifactDetector, ShellDetector, YaraDetector])`,
   silently dropping `ArchiveHazardDetector`, `PythonJsDetector`, and
   `UrlDiscoveryDetector`. Since `UrlDiscoveryDetector` (id
   `arbitraitor-analysis.url-discovery`) is mandatory for HTML and JSON
-  artifacts per `MandatoryDetectorRegistry::mandatory_detectors`
-  (spec §9 invariant 1), configuring any YARA rules directory caused
+  artifacts per `MandatoryDetectorRegistry::mandatory_detectors`,
+  configuring any YARA rules directory caused
   every HTML/JSON fetch through `arbitraitor wrap curl` and
   `arbitraitor scan <html|json> --rules <dir>` to emit a
   `Severity::Critical` mandatory-coverage finding and fail-closed with
@@ -272,8 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Receipt
 
-- **BREAKING:** Receipt schema v2 — top-level envelope structure (spec §31.1,
-  issue #492). The flat `Receipt` struct is reorganized into grouped buckets:
+- **BREAKING:** Receipt schema v2 — top-level envelope structure (issue #492).
+  The flat `Receipt` struct is reorganized into grouped buckets:
   `request`, `artifact`, `retrieval`, `provenance`, `payload_graph`,
   `detectors`, `findings`, `policy`, `verdict`, `release`, `timestamps`.
   `schema_version` bumped from 1 to 2. Fields moved:
@@ -375,7 +383,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Policy
 
-- `EvalContext` now carries spec §23.1 policy inputs for operation mode,
+- `EvalContext` now carries policy inputs for operation mode,
   artifact identity, redirect chains, provenance, aggregate findings,
   intelligence matches, detector health, recursive graph completeness, and
   execution context. Policy rules can match the new `context.*` fields.
@@ -389,7 +397,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Archive
 
 - `FindingCategory::ParserDifferential` and archive `ParserSmelting` hazard
-  coverage for spec §19.1/§19.3 parser consensus failures (CWE-436).
+  coverage for parser consensus failures (CWE-436).
 
 #### Intel
 
@@ -437,7 +445,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### CLI
 
-- `arbitraitor wrap <tool> -- ...` — first-class spec §28.1 wrapper
+- `arbitraitor wrap <tool> -- ...` — first-class wrapper
   command. `curl` and `wget` delegate to the guarded wrapper-fetch
   pipeline, `bash` inspects a local script path without executing it, and
   unimplemented tools warn without releasing content.
@@ -465,8 +473,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store-only `HealthReport` when the daemon socket is unreachable.
   The flag set gains `--socket <PATH>` to override the daemon socket
   path. JSON output pairs the existing health report with a top-level
-  `daemon` field (`null` when the daemon is not running). Closes #485
-  (spec §28.1).
+  `daemon` field (`null` when the daemon is not running). Closes #485.
 
 ### Changed
 
@@ -562,7 +569,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `arbitraitor-receipt::ApprovalInfo` and `Receipt::approval` now record
   ADR-0013 plan-bound approval metadata (artifact digest, plan digest,
-  expiry, nonce, bound capabilities, override reason/scope) plus the §31.2
+  expiry, nonce, bound capabilities, override reason/scope) plus the
   execution exit status for approved execution receipts.
 - `arbitraitor_model::vex` now models the VEX format matrix for receipt
   companion artifacts: OpenVEX 0.2.0 parsing with the current product and
@@ -576,8 +583,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   VEX category matching is exact, timestamps require RFC 3339 timezone text,
   and parser error display avoids echoing attacker-controlled document fields.
 - `arbitraitor-receipt::Receipt::to_sarif()` — converts findings to a
-  SARIF 2.1.0 report per spec §31.4. Includes rule definitions with
-  multi-taxonomy mappings (CWE, CAPEC, OWASP, ATT&CK) per SARIF §3.59.
+  SARIF 2.1.0 report. Includes rule definitions with
+  multi-taxonomy mappings (CWE, CAPEC, OWASP, ATT&CK) per SARIF.
   Results include artifact hashes in locations for findings inside
   extracted or decoded child artifacts. 12 new public types:
   SarifReport, SarifRun, SarifTool, SarifDriver, SarifRule,
@@ -591,7 +598,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via `LANDLOCK_CREATE_RULESET_VERSION`, exposing the observed ABI in
   contained-execution receipt controls without changing enforcement policy.
 - `arbitraitor-sandbox::windows_adapters` — new public module with five
-  Windows sandbox adapter stubs per spec §27.5: `WindowsSandboxAdapter`,
+  Windows sandbox adapter stubs: `WindowsSandboxAdapter`,
   `AppContainerAdapter`, `JobObjectsAdapter`, `WdacAdapter`,
   `HyperVAdapter`. All `is_available()` methods return `false` on
   non-Windows platforms. 4 tests verify unavailability on Linux.
@@ -606,25 +613,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   netrc credentials are configured; receipts expose the outcome in retrieval
   metadata.
 - `TlsVerifier::{PlatformVerifier, PinnedWebPki}` and
-  `FetchPolicy::tls_verifier` add a policy-selectable TLS verifier type for
-  spec §41.4.3. The default is `PlatformVerifier`; transport behavior is
+  `FetchPolicy::tls_verifier` add a policy-selectable TLS verifier type.
+  The default is `PlatformVerifier`; transport behavior is
   unchanged until pinned WebPKI enforcement is wired separately.
 - `FetchMetadata::tls_cipher_suite` complements the existing TLS protocol
   version and peer leaf-certificate fingerprint metadata. Reqwest 0.13 only
   exposes the peer certificate publicly, so protocol and cipher-suite values
   remain absent when the backend cannot report them. Certificate validity is
   transport metadata, not publisher provenance.
-- `FetchPolicy::proxy_url: Option<String>` — configurable proxy support per
-  spec §11.2 and ADR-0018. When `None` (default), `.no_proxy()` is called
+- `FetchPolicy::proxy_url: Option<String>` — configurable proxy support
+  (ADR-0018). When `None` (default), `.no_proxy()` is called
   to disable all proxy behavior. When `Some`, reqwest is configured with the
   given proxy URL.
 - `FetchPolicy::first_byte_timeout: Option<Duration>` — distinct deadline
-  for time-to-first-byte per spec §41.4.6. Sits alongside `connect_timeout`
+  for time-to-first-byte. Sits alongside `connect_timeout`
   (TCP/TLS only) and `total_timeout` (whole-operation budget) so callers
   can cap slow-but-connected servers without shortening the global budget.
   Defaults to `None`, preserving existing fail-open semantics.
 - `FetchCancellation` — new public type wrapping `Arc<AtomicBool>` for
-  spec §41.4.6 cancellation tokens. Carries `new()`, `is_cancelled(&self)`,
+  cancellation tokens. Carries `new()`, `is_cancelled(&self)`,
   `cancel(&self)`, `Clone`, and `Default`. Clones share state, so any
   handle can signal cancellation that every other handle observes.
 - `FetchRequest::cancellation: FetchCancellation` — new field attached by
@@ -654,7 +661,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Antivirus
 
-- `arbitraitor_av::SignatureFreshness` — new public struct for spec §18.3
+- `arbitraitor_av::SignatureFreshness` — new public struct for
   signature freshness snapshots. Carries `engine_version`, `signature_version`,
   parsed `last_update: Option<SystemTime>`, and `is_stale: bool` so callers can
   layer policy on top without parsing RFC 3339 themselves.
@@ -663,7 +670,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version fields and parses `last_update_time()` as RFC 3339, marking the
   signatures stale when the timestamp exceeds `max_age` or lies in the future.
 - `arbitraitor_av::macos::{read_quarantine_xattr, read_spotlight_metadata}` —
-  new module per spec §41.13 wrapping the stable macOS facilities `xattr(1)`
+  new module wrapping the stable macOS facilities `xattr(1)`
   and `mdfind(1)`. The helpers are `cfg(target_os = "macos")` gated and return
   `None` on any other host. `xattr` returns the trimmed
   `com.apple.quarantine` value when present; `mdfind` returns the first
@@ -672,7 +679,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor_av::AvDetector` — fail-closed integration of signature
   freshness. When `AvPolicy::required` is `true` and
   `max_signature_age_hours` is set, a stale snapshot emits a critical
-  `av.signatures-stale` finding that blocks release per spec §18.3 rather
+  `av.signatures-stale` finding that blocks release rather
   than silently treating the scan as clean.
 
 #### Plugin Host
@@ -681,7 +688,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   REGISTRY_METADATA_SCHEMA_VERSION, SignatureStatus, ProvenanceStatus,
   SecurityAuditStatus, ConformanceStatus, RevocationStatus,
   RevocationEntry, StagedRollout, PermissionDiffStatus}` — new public
-  types for spec §39.20 plugin registry signed metadata, publisher
+  types for plugin registry signed metadata, publisher
   revocation, staged rollout, and permission-diff approval. `RegistryMetadata`
   is the document the registry loader evaluates to decide whether an
   update is admissible: signature status, provenance status, security
@@ -701,7 +708,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Sandbox
 
 - `arbitraitor-sandbox::linux_adapters` — new public module with four
-  Linux sandbox adapters per spec §27.3: `NamespaceAdapter` (user +
+  Linux sandbox adapters: `NamespaceAdapter` (user +
   mount + IPC + PID + network namespaces via `unshare`), `BubblewrapAdapter`
   (bwrap subprocess wrapper), `SystemdRunAdapter` (transient scope with
   PrivateNetwork/NoNewPrivileges), and `EBpfObservationAdapter` (stub,
@@ -712,7 +719,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `arbitraitor_sandbox::observed::{ObservedEvent, ObservedEventLog,
   FileOperation, OBSERVED_EVENT_SCHEMA_VERSION}` — new public types for
-  spec §27.6 dynamic-adapter event reporting. `ObservedEvent` is a
+  dynamic-adapter event reporting. `ObservedEvent` is a
   `serde`-tagged enum covering all ten spec-mandated event classes
   (process tree, file read/write/delete, network connection, DNS
   request, privilege change, persistence creation, credential store
@@ -728,7 +735,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `arbitraitor_yarax::RulePackManager::compile_all_cached` — new method
   that caches compiled `Rules` keyed by a snapshot digest computed from
-  all loaded rule pack namespaces, versions, and rule text (spec §17).
+  all loaded rule pack namespaces, versions, and rule text.
   If the packs haven't changed since the last compile, the cached `Rules`
   are returned without recompilation. Also adds `snapshot_digest()` method
   for receipt-recording and a `CompiledRulesCache` internal struct.
@@ -736,7 +743,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Update
 
 - `arbitraitor_update::manifest::UpdateChannel::BinaryRelease` — new
-  channel variant for binary releases per spec §34.3. Carries SHA-256
+  channel variant for binary releases. Carries SHA-256
   digests, Sigstore bundles, SBOMs, and reproducible-build info.
 - `arbitraitor_update::manifest::ReleaseProvenance` — new struct
   with optional SBOM path, optional Sigstore bundle path, and
@@ -746,10 +753,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Provenance
 
 - TOFU pins now record and compare the final redirect destination and
-  certificate identity, reporting field-level drift for either value per
-  spec §14.4.
-- `SignatureSystem` now enumerates the spec §14.2 platform-native signing
-  families: `OpenPGP` (planned via Sequoia per §41.12.4), `Authenticode`,
+  certificate identity, reporting field-level drift for either value.
+- `SignatureSystem` now enumerates the platform-native signing
+  families: `OpenPGP` (planned via Sequoia), `Authenticode`,
   `AppleCodeSign`, and `LinuxPackage`. Each new variant carries a stable
   lower-case `as_str()` label (`openpgp`, `authenticode`, `apple_code_sign`,
   `linux_package`) for receipts and diagnostics; verification logic for
@@ -759,7 +765,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `arbitraitor-exec::native::PlatformProvenance` — new struct recording
   which platform-native provenance attributes were applied during release
-  per spec §26.4 and ADR-0010. On Linux this is xattr; on macOS it's
+  per ADR-0010. On Linux this is xattr; on macOS it's
   `com.apple.quarantine`; on Windows it's Mark of the Web (Zone.Identifier).
   macOS quarantine function is conditional on `target_os = "macos"`.
   Windows MOTW function is conditional on `target_os = "windows"`.
@@ -767,7 +773,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Intel
 
-- `arbitraitor-intel::FeedAdapter` now exposes the spec §21.5 `name`,
+- `arbitraitor-intel::FeedAdapter` now exposes the `name`,
   `fetch_indicators`, and `source_class` surface. Offline stubs are available
   for ThreatFox, OpenSSF malicious packages, and OSV with CISA KEV; the new
   `AllowDenyListAdapter` reads non-empty, non-comment indicator lines from a
@@ -775,7 +781,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor-intel::redact_url`, `redact_path`, and `redact_env_var` —
   new public helpers that strip credentials, sensitive query parameters,
   home-directory paths, and sensitive environment-variable values from
-  artifacts before inclusion in community reports and feeds (spec §22.6).
+  artifacts before inclusion in community reports and feeds.
   `redact_url` removes userinfo entirely and replaces values whose key
   matches `token`, `secret`, `key`, `password`, `sig`, or `signature`
   (case-insensitive substring match) with `[REDACTED]`. `redact_path`
@@ -783,7 +789,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `redact_env_var` returns `None` for names ending in `_KEY`, `_TOKEN`,
   `_SECRET`, or `_PASSWORD` (case-insensitive) and `Some(value)` otherwise.
 - `arbitraitor-intel::duplicate_collapse` — new function that merges feed
-  entries describing the same indicator (spec §22 anti-abuse control).
+  entries describing the same indicator (anti-abuse control).
   Two entries are duplicates when their `Indicator` (type and value)
   matches; collapse preserves the earliest `first_seen`, the latest
   `last_seen`, the highest `Confidence`, the latest non-`None`
@@ -795,26 +801,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arbitraitor_intel::ModerationAction` — new types for moderator-driven
   add/remove/revoke actions over the feed, with a detached
   `FeedSignature` binding the action to the moderator and timestamp
-  (spec §22 signed moderation actions).
+  (signed moderation actions).
 - `arbitraitor-intel::RevocationEntry` — new public record of an
   indicator revoked from the feed, paired with a `FeedSignature` so the
-  public revocation history is tamper-evident (spec §22 revocation
-  history).
+  public revocation history is tamper-evident (revocation history).
 - `arbitraitor-intel::FeedEntry::source_update_time` — new optional
   RFC 3339 timestamp recording when the originating feed last updated the
-  indicator (spec §21.6 freshness). Distinct from `last_seen`, which tracks
+  indicator (freshness). Distinct from `last_seen`, which tracks
   when Arbitraitor last observed the indicator.
 - `arbitraitor-intel::FeedEntry::is_expired` — new helper that returns
   `true` when the entry has an `expires_at` strictly before the supplied
-  RFC 3339 `now` (spec §21.6 freshness). Replaces `is_expired_at` so the
+  RFC 3339 `now` (freshness). Replaces `is_expired_at` so the
   strict-less-than semantic matches the spec and the existing
   `IntelStore::purge_expired` / `match_indicator` filters stay consistent.
 
 #### Exec
 
 - `arbitraitor-core::config::ExecutionConfig::allow_environment` and
-  `deny_environment_patterns` — new fields implementing spec §26.5
-  (policy-driven environment controls). Defaults match the historical
+  `deny_environment_patterns` — new fields implementing
+  policy-driven environment controls. Defaults match the historical
   hardcoded `EnvAllowlist::default_names()` allowlist and the union
   of the historical `EnvDenyList::mandatory()` exact and prefix lists,
   so existing configurations keep current behavior and operators can
@@ -825,11 +830,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExecutionConfig`.
 - `arbitraitor-exec::ExecutionContextBuilder::environment_from_config` —
   new builder method that replaces the policy's environment allowlist
-  and denylist with values derived from a `ExecutionConfig` (spec
-  §26.5), wireable from any orchestrator that already loads the
+  and denylist with values derived from a `ExecutionConfig`,
+  wireable from any orchestrator that already loads the
   layered TOML config.
 - `arbitraitor-exec::emit_artifact_to_stdout` — new release mode that
-  emits verified CAS bytes to stdout (spec §26.1). Used by
+  emits verified CAS bytes to stdout. Used by
   `scan --emit-on-pass` and wrapper pipe semantics. Bytes are verified
   against the scanned digest before and after emission, preserving
   invariant 2 (immutable identity).
@@ -839,19 +844,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Daemon
 
 - `arbitraitor_daemon::queue::CancellationToken` — shareable,
-  single-shot cancellation flag backed by `Arc<AtomicBool>` (spec §37.1).
+  single-shot cancellation flag backed by `Arc<AtomicBool>`.
   One token is created per `OperationEntry` and cloned into the executing
   task so an external cancellation request becomes observable
   cooperatively. `CancellationToken::cancel()` is idempotent;
   `is_cancelled()` is wait-free.
 - `OperationQueue::cancel_operation(&str) -> bool` and
   `OperationQueue::is_cancelled(&str) -> bool` — string-ID variants of
-  the cancellation API per spec §37.1. `cancel_operation` flips the
+  the cancellation API. `cancel_operation` flips the
   per-operation token and, for queued operations, immediately transitions
   the entry to `OperationStatus::Cancelled` and writes a partial receipt
   when `Config::emit_partial_receipt_on_cancel = true`.
 - `Config::emit_partial_receipt_on_cancel` — new boolean field (default
-  `false`) implementing spec §37.1. When `true`, the operation queue
+  `false`). When `true`, the operation queue
   writes a `<operation-id>.cancelled.json` partial receipt to the
   configured receipts directory for every cancelled operation. The
   schema (`arbitraitor-partial-receipt/v1`) is intentionally distinct
@@ -860,7 +865,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — accessors that allow the operation queue to read the configured
   receipts directory and the partial-receipt flag without taking a
   mutable borrow on the API.
-- `Arbitraitor::builder()` and `ArbitraitorBuilder` provide the spec §40.1
+- `Arbitraitor::builder()` and `ArbitraitorBuilder` provide the
   fluent library construction API with `.config(Config)`,
   `.policy(PolicyEngine)`, and `.build()`. The existing
   `ArbitraitorApi::new(Config)` constructor remains available.
@@ -868,8 +873,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Exec
 
 - `arbitraitor-exec::ReleasePolicy::verdict_max_age` and
-  `verdict_timestamp` — new fields implementing spec §26.2 step 4
-  (freshness invalidation check before release). When set, the release
+  `verdict_timestamp` — new fields implementing the
+  freshness invalidation check before release. When set, the release
   function checks that the verdict was computed within the allowed
   age window. If stale, release fails with `ReleaseError::StaleVerdict`
   — preventing a TOCTOU where policy or intelligence was updated
@@ -878,7 +883,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### CLI
 
 - `arbitraitor explain` now accepts `sha256:<hash>` form in addition to
-  receipt file paths (spec §28.6). When a `sha256:` prefix is detected,
+  receipt file paths. When a `sha256:` prefix is detected,
   the command looks up the most recent receipt for that artifact from
   the `~/.arbitraitor/receipts/` directory.
 
@@ -888,12 +893,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`x86_64`/`aarch64`), Rust toolchain version, build commit (when set
   via `ARBITRAITOR_BUILD_COMMIT` env at compile time), build date (when
   set via `ARBITRAITOR_BUILD_DATE` env at compile time), and build
-  profile (`debug`/`release`). Per spec §28.1.
+  profile (`debug`/`release`).
 
 #### Model
 
 - `arbitraitor_model::exit_code::verdict_to_exit_code` — canonical named
-  mapping point from `Verdict` to `ExitCode` per spec §23.2 + §29 (#553).
+  mapping point from `Verdict` to `ExitCode` (#553).
   Thin wrapper over the existing `From<Verdict>` impl; gives daemon/CLI
   call sites a single, named function to point at when the mapping rule
   changes.
@@ -901,8 +906,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Fetch
 
 - `arbitraitor-fetch::FetchPolicy::allow_cross_origin_redirect` and
-  `forward_authorization_cross_origin` — new fields implementing spec
-  §11.2 (lines 608-612) and §11.4 (lines 644-653) redirect policy:
+  `forward_authorization_cross_origin` — new fields implementing
+  redirect policy:
   - `allow_cross_origin_redirect` (default `true`) controls whether
     redirect chains may cross origin boundaries (scheme + host + port).
     When `false`, cross-origin redirects return
@@ -914,18 +919,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in #498).
 - `arbitraitor-policy::RedirectsConfig::allow_cross_origin` and
   `forward_authorization_cross_origin` — corresponding TOML policy
-  fields per spec §11.4 example.
+  fields.
 
 #### Wrapper
 
 - `arbitraitor-wrapper::wget::WgetRequest` now carries a `findings` field so
   callers can surface transport-safety findings raised during argv
-  translation. Per spec §39.9, `--no-check-certificate` is no longer silently
+  translation. `--no-check-certificate` is no longer silently
   dropped: the wrapper emits a `Finding` with `FindingCategory::Transport`,
   `Severity::High`, `Confidence::High`, detector `arbitraitor-wrapper`, and
   stable id `wget-no-check-certificate`. The flag remains on
   `WgetRequest::no_check_certificate` so existing consumers keep their
-  semantics; the finding is the auditable signal required by spec §39.9.
+  semantics; the finding is the auditable signal required.
 
 #### ADRs
 
@@ -974,21 +979,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor execute` — execute artifact from CAS using approval file
 - `arbitraitor mcp` — start MCP JSON-RPC 2.0 server over stdio
 - `arbitraitor version` — print version, license, repository
-- `arbitraitor pm run --tool npm` — advisory scan of npm projects: resolves the dependency tree via `package-lock.json`, detects lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`/`prepublish`) in root and dependency packages, flags non-registry resolved URLs, and gates `npm install --ignore-scripts` behind the verdict (spec §39.14 Phase 1)
+- `arbitraitor pm run --tool npm` — advisory scan of npm projects: resolves the dependency tree via `package-lock.json`, detects lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`/`prepublish`) in root and dependency packages, flags non-registry resolved URLs, and gates `npm install --ignore-scripts` behind the verdict (Phase 1)
 - Native binary auto-detection from artifact classifier (no manual `--native` needed)
 
 #### Package manager adapters
 
 - `cargo` adapter — Cargo.lock parsing, build.rs analysis, lifecycle policy
 - `uv`/`uvx` adapter — uv.lock parsing, source validation, sandbox-required lifecycle
-- `npm` adapter — package-lock.json parsing, denied-by-default lifecycle, advisory scan with lifecycle-script detection and `PackageManagerReceipt` generation (spec §39.14)
+- `npm` adapter — package-lock.json parsing, denied-by-default lifecycle, advisory scan with lifecycle-script detection and `PackageManagerReceipt` generation
 - `pnpm` adapter — RegistryAdapter trait conformance
 - `yarn` (berry + classic) adapters — trait conformance
 - `bun` adapter — trait conformance
 
 #### Detection
 
-- Python + JavaScript script detector (`arbitraitor_analysis::pyjs::PythonJsDetector`, spec §16.3, #506) — narrow initial coverage for the two dominant scripting ecosystems in untrusted artifact payloads. The detector scans `PythonScript` and `JavaScript` artifact kinds for risky construction patterns (subprocess/shell invocation, eval/exec, arbitrary deserialization, dynamic / native module loading, credential / environment exfiltration, persistence writes, obfuscated / encoded payloads) and emits one finding per match with category, severity, evidence snippet, and a stable tag. Pattern matching uses simple substring scans to keep the crate dependency-free; a future revision may swap in a tokenizer / AST walker once the stub proves out coverage.
+- Python + JavaScript script detector (`arbitraitor_analysis::pyjs::PythonJsDetector`, #506) — narrow initial coverage for the two dominant scripting ecosystems in untrusted artifact payloads. The detector scans `PythonScript` and `JavaScript` artifact kinds for risky construction patterns (subprocess/shell invocation, eval/exec, arbitrary deserialization, dynamic / native module loading, credential / environment exfiltration, persistence writes, obfuscated / encoded payloads) and emits one finding per match with category, severity, evidence snippet, and a stable tag. Pattern matching uses simple substring scans to keep the crate dependency-free; a future revision may swap in a tokenizer / AST walker once the stub proves out coverage.
 - Tirith subprocess detector (external script analysis via bounded subprocess)
 - Dependency vulnerability detector framework
 - CWE taxonomy mapping for shell findings: only `DynamicCodeExecution → CWE-94` is emitted; the other behavioral categories (destructive, credential access, persistence, network, obfuscation, transport, etc.) are intentionally left unmapped because no defensible CWE root-cause mapping exists for them. ATT&CK/CAPEC may be added as separate taxonomies in a future release.
@@ -1014,7 +1019,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `arbitraitor fetch` promoted from hidden wrapper alias to first-class
-  subcommand per spec §28.2. Removed `#[command(hide = true)]` and
+  subcommand. Removed `#[command(hide = true)]` and
   `disable_help_flag`; added the full spec-defined flag surface:
   `-o/--output`, `--sha256`, `--signature`, `--cosign-bundle`, `--identity`,
   `--issuer`, `--expected-type`, `--expected-content-type`, `--max-bytes`,
@@ -1043,7 +1048,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected ADR count in AGENTS.md and README.md from "26 accepted" to "21 accepted, 5 proposed" (ADRs 0022–0026 remain Proposed)
 - Fixed `book/src/cli-reference.md` global flags table: removed `--policy`, `--output`, `--log-level`, `--no-color`, `--quiet` (not implemented); documented actual global flags (`--config`, `--verbose`)
 - Fixed `book/src/cli-reference.md` exit codes to match actual `Verdict`-to-exit-code mapping (0/10/21/30/33/34)
-- Marked `arbitraitor-daemon` and `arbitraitor-package-manager` as experimental in architecture docs (spec §47 excludes both from pre-1.0 scope)
+- Marked `arbitraitor-daemon` and `arbitraitor-package-manager` as experimental in architecture docs (excluded from pre-1.0 scope)
 - Updated CLI subcommand count from 22 to 23 in README.md and book
 - Rcfile installation now uses atomic writes (temp-file + rename) with backup by default
 - `hook init` is deprecated — emits warning recommending `wrappers install` instead; generated trap now respects `ARBITRAITOR_HOOK_DISABLE=1`

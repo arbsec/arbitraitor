@@ -71,9 +71,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Inspect(Box<InspectCommand>),
-    /// Fetch an artifact with provenance verification (spec §28.2).
+    /// Fetch an artifact with provenance verification.
     Fetch(Box<FetchCommand>),
-    /// Wrap an existing tool invocation through Arbitraitor (spec §28.1).
+    /// Wrap an existing tool invocation through Arbitraitor.
     Wrap(WrapCommand),
     Run(Box<run::RunCommand>),
     Daemon(DaemonCommand),
@@ -95,9 +95,9 @@ enum Command {
     Graph(commands::GraphCommand),
     Approve(commands::ApproveCommand),
     Execute(commands::ExecuteCommand),
-    /// Report user feedback on findings (spec §21.7).
+    /// Report user feedback on findings.
     Report(commands::ReportCommand),
-    /// Record a scoped allow exception for an artifact digest (spec §21.7).
+    /// Record a scoped allow exception for an artifact digest.
     Allow(commands::AllowCommand),
     Pm(pm::PmCommand),
     /// Hidden alias of `wrappers init` for discoverability.
@@ -148,7 +148,7 @@ struct InspectCommand {
     /// Output format for the explainability report (implies --explain).
     #[arg(long, value_enum)]
     format: Option<ExplainFormat>,
-    /// Sign the receipt with the specified method (spec §31.3).
+    /// Sign the receipt with the specified method.
     ///
     /// Methods: `minisign` (default), `cosign`, `enterprisekey`, `tpm`.
     /// Only `minisign` is implemented; other methods return a
@@ -157,14 +157,14 @@ struct InspectCommand {
     sign_receipt: Option<String>,
 }
 
-/// Fetch an artifact from a URL with provenance verification (spec §28.2).
+/// Fetch an artifact from a URL with provenance verification.
 ///
 /// When invoked via a wrapper symlink (`curl`/`wget`), `--tool` is set
 /// automatically and `args` carries the passthrough arguments. In
 /// first-class mode the URL is the first positional argument and the
 /// spec-defined flags are parsed normally.
 #[derive(Args)]
-#[allow(clippy::struct_excessive_bools)] // spec §28.2 mandates these boolean flags
+#[allow(clippy::struct_excessive_bools)] // CLI surface intentionally exposes these boolean flags
 struct FetchCommand {
     /// Wrapper tool name (set automatically by symlink invocation).
     #[arg(long, value_name = "curl|wget")]
@@ -259,7 +259,7 @@ struct UnpackCommand {
 /// When the local daemon is running, the report includes daemon process
 /// identity (PID, uptime) and the daemon's recent operations. When no
 /// daemon is reachable, the report falls back to the local-store-only
-/// summary (spec §28.1).
+/// summary.
 #[derive(Args)]
 struct StatusCommand {
     /// Output the full health report as JSON.
@@ -407,7 +407,7 @@ struct InitScriptCommand {}
 async fn main() {
     if let Err(error) = run_main().await {
         let _ = writeln!(std::io::stderr().lock(), "{error:?}");
-        // Spec §29 code 1: General operational error. Distinct from
+        // Exit code 1: general operational error. Distinct from
         // `RequiredDetectorUnavailable` (33, previously used here) which is
         // reserved for cases where a detector marked `required = true` was
         // unavailable or stale at analysis time.
@@ -734,7 +734,7 @@ async fn wrap(command: WrapCommand, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Fetches and inspects each URL independently per spec §39.9.
+/// Fetches and inspects each URL independently.
 async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
     let tool = Some(command.tool.as_str());
     let target = wrapper_fetch_target(tool)?;
@@ -1418,7 +1418,7 @@ async fn status(command: &StatusCommand, config: &Config) -> Result<()> {
 
 /// Queries the daemon for its `Status` snapshot, returning `None` when the
 /// socket is unreachable. Never errors: a missing daemon is a normal
-/// (store-only) status outcome (spec §28.1 fallback).
+/// (store-only) status outcome (fallback).
 pub async fn query_daemon_status(socket: &Path) -> Option<DaemonInfo> {
     let request = DaemonRequest::Status {
         caller_origin: CallerOrigin::HumanTty,

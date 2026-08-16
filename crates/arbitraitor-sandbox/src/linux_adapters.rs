@@ -1,4 +1,4 @@
-//! Linux-specific sandbox adapters (spec §27.3).
+//! Linux-specific sandbox adapters.
 
 use std::process::Command;
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::SandboxConfig;
 
 /// Adapter that composes user + mount + IPC + PID + network namespaces
-/// for process isolation (spec §27.3, "namespaces").
+/// for process isolation ("namespaces").
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NamespaceAdapter;
 
@@ -40,7 +40,7 @@ impl NamespaceAdapter {
 }
 
 /// Adapter that invokes `bubblewrap` (`bwrap`) for unprivileged
-/// sandboxing (spec §27.3, "bubblewrap").
+/// sandboxing ("bubblewrap").
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BubblewrapAdapter;
 
@@ -79,7 +79,7 @@ impl BubblewrapAdapter {
 }
 
 /// Adapter that uses `systemd-run` to create a transient scope
-/// with resource limits and network isolation (spec §27.3).
+/// with resource limits and network isolation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemdRunAdapter;
 
@@ -104,7 +104,7 @@ impl SystemdRunAdapter {
 }
 
 /// Adapter that sets up eBPF observation hooks for runtime monitoring
-/// (spec §27.3, "eBPF-based observation where available").
+/// ("eBPF-based observation where available").
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EBpfObservationAdapter;
 
@@ -117,7 +117,7 @@ impl EBpfObservationAdapter {
 }
 
 /// Probes whether `io_uring` is available on the running Linux kernel
-/// (spec §27.3, "`io_uring` restrictions").
+/// ("`io_uring` restrictions").
 ///
 /// `io_uring` bypasses seccomp because queued operations execute inside the
 /// kernel without traversing the syscall filter. Kernel 6.6+ ships the
@@ -198,7 +198,7 @@ fn parse_userns_available(clone_contents: &str, apparmor_contents: Option<&str>)
     }
 }
 
-/// Container runtime version information probed from the host (spec §27.3).
+/// Container runtime version information probed from the host.
 ///
 /// Records the container runtime name, version, and whether the version falls
 /// below the patched floor for the 2025-11-05 runc container-escape CVE
@@ -231,7 +231,7 @@ struct SemverVersion {
     pre_release: Option<String>,
 }
 
-/// Probes the container runtime version on the running host (spec §27.3).
+/// Probes the container runtime version on the running host.
 ///
 /// Arbitraitor records the container runtime version in receipts so auditors
 /// can verify a contained run did not execute on a runtime vulnerable to the

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
-/// macOS stable-facility helpers per spec §41.13.
+/// macOS stable-facility helpers.
 pub mod macos;
 
 const CLAMAV_ADAPTER_NAME: &str = "clamav";
@@ -62,7 +62,7 @@ pub trait AntivirusAdapter: Send + Sync {
     /// Returns a [`SignatureFreshness`] snapshot marking the adapter's
     /// signatures stale when the most recent update exceeds `max_age`.
     ///
-    /// Per spec §18.3, callers operating under `required = true` policy must
+    /// Callers operating under `required = true` policy must
     /// fail closed on stale signatures rather than treating the scan as
     /// clean. The default implementation reads [`Self::engine_version`],
     /// [`Self::signature_db_version`], and [`Self::last_update_time`]; if
@@ -87,7 +87,7 @@ pub trait AntivirusAdapter: Send + Sync {
     }
 }
 
-/// Snapshot of an AV adapter's signature freshness state (spec §18.3).
+/// Snapshot of an AV adapter's signature freshness state.
 ///
 /// When an adapter is configured as `required = true`, callers must treat
 /// `is_stale == true` as a fail-closed signal rather than silently accepting
@@ -455,7 +455,7 @@ impl AvDetector {
             remediation: Some(
                 "Install or repair the configured antivirus engine before release.".to_owned(),
             ),
-            references: vec!["Arbitraitor spec sections 18.2-18.4".to_owned()],
+            references: Vec::new(),
             tags: vec!["antivirus".to_owned(), "fail-closed".to_owned()],
             taxonomies: Vec::new(),
         }
@@ -479,7 +479,7 @@ impl AvDetector {
                 artifact_sha256: ctx.artifact_sha256.clone(),
                 location: None,
                 remediation: Some("Block release and investigate the artifact source.".to_owned()),
-                references: vec!["Arbitraitor spec sections 18.2-18.3".to_owned()],
+                references: Vec::new(),
                 tags: vec!["antivirus".to_owned(), "malware-signature".to_owned()],
                 taxonomies: Vec::new(),
             }),
@@ -501,7 +501,7 @@ impl AvDetector {
                     "Review the artifact manually or require a clean AV result before release."
                         .to_owned(),
                 ),
-                references: vec!["Arbitraitor spec sections 18.2-18.3".to_owned()],
+                references: Vec::new(),
                 tags: vec!["antivirus".to_owned(), "suspicious".to_owned()],
                 taxonomies: Vec::new(),
             }),
@@ -529,14 +529,14 @@ impl AvDetector {
             artifact_sha256: ctx.artifact_sha256.clone(),
             location: None,
             remediation: Some("Fail closed when AV scanning is required by policy.".to_owned()),
-            references: vec!["Arbitraitor spec sections 18.2-18.4".to_owned()],
+            references: Vec::new(),
             tags: vec!["antivirus".to_owned(), "incomplete-analysis".to_owned()],
             taxonomies: Vec::new(),
         }
     }
 
     /// Builds a critical fail-closed finding when the configured `required =
-    /// true` policy sees stale signatures (spec §18.3).
+    /// true` policy sees stale signatures.
     fn stale_signature_finding(
         &self,
         ctx: &AnalysisContext<'_>,
@@ -575,7 +575,7 @@ impl AvDetector {
             remediation: Some(
                 "Refresh the AV signature database before releasing the artifact.".to_owned(),
             ),
-            references: vec!["Arbitraitor spec section 18.3".to_owned()],
+            references: Vec::new(),
             tags: vec![
                 "antivirus".to_owned(),
                 "fail-closed".to_owned(),
@@ -966,7 +966,7 @@ mod tests {
     }
 
     /// When `required = true` and signatures are stale, the detector emits a
-    /// critical finding that fails closed (spec §18.3).
+    /// critical finding that fails closed.
     #[test]
     fn required_policy_fails_closed_on_stale_signatures() {
         let adapter = MockAdapter::new(true, ScanResult::Clean);

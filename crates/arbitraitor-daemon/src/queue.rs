@@ -4,7 +4,7 @@
 //! asynchronously, bounded by a concurrency semaphore. Callers receive an
 //! [`OperationId`] immediately and poll for completion via
 //! [`OperationQueue::status`]. Mid-flight cancellation propagates through a
-//! shared [`CancellationToken`] (spec §37.1).
+//! shared [`CancellationToken`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -53,7 +53,7 @@ impl fmt::Display for OperationId {
     }
 }
 
-/// Shareable, single-shot cancellation flag (spec §37.1).
+/// Shareable, single-shot cancellation flag.
 ///
 /// The flag is observed cooperatively by the executing task. Flipping it
 /// after the operation has already reached a terminal state is a no-op.
@@ -151,7 +151,7 @@ impl OperationEntry {
 ///
 /// Mid-flight cancellation is exposed via [`OperationQueue::cancel_operation`]
 /// and [`OperationQueue::is_cancelled`], backed by a per-operation
-/// [`CancellationToken`] shared with the executing task (spec §37.1).
+/// [`CancellationToken`] shared with the executing task.
 ///
 /// Instances are cheap to clone-share internally (the operation table and
 /// semaphore are behind `Arc`) and safe to share across tasks via `&self`.
@@ -298,7 +298,7 @@ impl OperationQueue {
         }
     }
 
-    /// Cancels an operation identified by its string-form ID (spec §37.1).
+    /// Cancels an operation identified by its string-form ID.
     ///
     /// Triggers the shared [`CancellationToken`] so a running task observes
     /// the request at its next check. Returns `true` if the operation was
@@ -327,7 +327,7 @@ impl OperationQueue {
     }
 
     /// Returns whether cancellation has been requested for the operation
-    /// identified by its string-form ID (spec §37.1). Returns `false` for
+    /// identified by its string-form ID. Returns `false` for
     /// unknown IDs.
     #[must_use]
     pub async fn is_cancelled(&self, operation_id: &str) -> bool {
@@ -371,7 +371,7 @@ impl OperationQueue {
     }
 }
 
-/// Partial-receipt file body for a cancelled operation (spec §37.1).
+/// Partial-receipt file body for a cancelled operation.
 ///
 /// The schema is intentionally minimal: the inspection never completed, so
 /// there is no artifact digest, verdict, or detector output to attest to.

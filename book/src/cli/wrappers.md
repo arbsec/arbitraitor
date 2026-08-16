@@ -19,7 +19,7 @@ directory. When that directory precedes the real tool's directory on
 is a thin dispatcher: it re-invokes `arbitraitor fetch --tool <curl|wget>`
 with the original arguments. Arbitraitor performs retrieval through its
 own fetch pipeline (SSRF controls, redirect policy, TLS verifier
-selection — see spec §11, ADR-0018), inspects the artifact, and emits
+selection — see ADR-0018), inspects the artifact, and emits
 bytes only on a `Pass` verdict.
 
 The original `curl` or `wget` is not modified. `wrappers status` reports
@@ -52,7 +52,7 @@ intentional:
 
 1. **No silent binary replacement.** A namespaced directory makes the
    shadowing explicit and reversible. Arbitraitor must never silently
-   replace system binaries (spec §28.7 invariant).
+   replace system binaries.
 2. **No collision with user scripts.** Putting `curl`/`wget` shims into
    `~/.local/bin` or `/usr/local/bin` would shadow user-installed scripts
    of the same name without warning.
@@ -313,6 +313,6 @@ ADR-0013).
   avoid collisions; if you override with `--shim-dir ~/.local/bin` or
   another shared path, audit it first.
 - Network access during wrapper execution is controlled by the active
-  policy and the fetch transport policy (spec §11, ADR-0018).
+  policy and the fetch transport policy (ADR-0018).
 - Every intercepted download is recorded in the Arbitraitor audit trail
   and contributes to the operation receipt.

@@ -1,4 +1,4 @@
-//! Observed-event types for spec §27.6 dynamic-adapter event reporting.
+//! Observed-event types for dynamic-adapter event reporting.
 //!
 //! A [`SandboxMode::Observe`] run records what the artifact *did* during
 //! execution — process tree, file reads/writes, registry modifications,
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub const OBSERVED_EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// Class of file-system access recorded in a [`ObservedEvent::FileAccess`]
-/// entry (spec §27.6).
+/// entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileOperation {
@@ -30,8 +30,7 @@ pub enum FileOperation {
     Delete,
 }
 
-/// A single observation event recorded during a sandboxed run
-/// (spec §27.6).
+/// A single observation event recorded during a sandboxed run.
 ///
 /// The enum is intentionally open at the variant level but closed at the
 /// schema level: each variant maps to one of the ten event classes mandated
@@ -141,7 +140,7 @@ pub enum ObservedEvent {
 }
 
 /// Ordered, append-only log of [`ObservedEvent`]s collected during a
-/// sandboxed run (spec §27.6).
+/// sandboxed run.
 ///
 /// The log carries a schema version so downstream auditors can reject
 /// payloads produced by a newer or older adapter than they understand. The
@@ -509,7 +508,7 @@ mod tests {
 
     #[test]
     fn all_event_variants_are_distinct() {
-        // Spec §27.6 enumerates exactly ten event classes; this test fails
+        // The spec enumerates exactly ten event classes; this test fails
         // if a variant is added or removed without updating coverage.
         let one_of_each = vec![
             ObservedEvent::ProcessTree {

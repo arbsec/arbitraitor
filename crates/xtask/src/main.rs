@@ -77,11 +77,35 @@ fn collect_summary_adrs(summary: &str) -> Vec<Adr> {
 }
 
 fn normalize_title(s: &str) -> String {
-    s.replace(['`', '"'], "")
+    strip_spec_citation(s)
+        .replace(['`', '"'], "")
         .replace(" = ", "=")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Remove parenthetical spec-paragraph citations that name an internal
+/// section, so titles in `docs/adr/` and the book SUMMARY compare equal
+/// regardless of whether the internal document section is named.
+/// Citations are stripped from user-facing surfaces; this keeps the mirror
+/// check focused on the title itself.
+fn strip_spec_citation(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'('
+            && s[i..].starts_with("(spec §")
+            && let Some(close) = s[i..].find(')')
+        {
+            i += close + 1;
+            continue;
+        }
+        let ch = s[i..].chars().next().expect("valid UTF-8");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 fn check_adrs(root: &Path) -> bool {

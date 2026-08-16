@@ -1,4 +1,4 @@
-//! Tests for the dependency vulnerability detector (spec §18.5).
+//! Tests for the dependency vulnerability detector.
 
 use arbitraitor_analysis::dep_vuln::{
     Advisory, DepVulnConfig, DepVulnDetector, DepVulnUpdateMode, DependencyVulnerabilityDetector,

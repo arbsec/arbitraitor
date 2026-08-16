@@ -1,4 +1,4 @@
-//! SBOM/VEX companion-artifact discovery and parsing (spec §19.5).
+//! SBOM/VEX companion-artifact discovery and parsing.
 //!
 //! Companion artifacts (SBOM, VEX) discovered near a fetched artifact are
 //! parsed under bounded resource limits. VEX statements are recorded as
@@ -140,7 +140,7 @@ pub fn parse_companion(
     }
 }
 
-/// Anti-suppression rule (spec §19.5, invariant 6).
+/// Anti-suppression rule.
 ///
 /// A VEX `not_affected` statement can never suppress a Critical severity
 /// finding (which produces a Block verdict). Fail closed: the finding

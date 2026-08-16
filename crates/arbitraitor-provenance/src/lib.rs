@@ -51,7 +51,7 @@ pub enum SignatureSystem {
     Minisign,
     /// Sigstore/cosign bundle verification.
     Cosign,
-    /// `OpenPGP` detached signature (spec §14.2, planned via Sequoia per §41.12.4).
+    /// `OpenPGP` detached signature (planned via Sequoia).
     OpenPGP,
     /// Microsoft Authenticode embedded PE signature.
     Authenticode,
@@ -87,7 +87,7 @@ pub struct SignatureVerification {
     pub verified: bool,
     /// Identity observed or bound by the signature verification, if applicable.
     pub identity: Option<String>,
-    /// Sigstore bundle metadata (spec §14.2.1), present when the bundle
+    /// Sigstore bundle metadata, present when the bundle
     /// was parsed as JSON to extract v0.3 profile information.
     pub sigstore_bundle: Option<SigstoreBundleMetadata>,
     /// Verifier identity (cosign version) used for Sigstore verification
@@ -96,7 +96,7 @@ pub struct SignatureVerification {
     pub verifier_identity: Option<String>,
 }
 
-/// Sigstore Bundle media types accepted by Arbitraitor (spec §14.2.1).
+/// Sigstore Bundle media types accepted by Arbitraitor.
 pub const SIGSTORE_BUNDLE_MEDIA_TYPES: &[&str] = &[
     "application/vnd.dev.sigstore.bundle+json;version=0.1",
     "application/vnd.dev.sigstore.bundle+json;version=0.2",
@@ -115,7 +115,7 @@ pub enum VerificationMaterialForm {
     X509Certificate,
 }
 
-/// The verification mode used for the bundle (spec §14.2.1).
+/// The verification mode used for the bundle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SigstoreVerificationMode {
@@ -125,7 +125,7 @@ pub enum SigstoreVerificationMode {
     Online,
 }
 
-/// Metadata extracted from a Sigstore Bundle per spec §14.2.1.
+/// Metadata extracted from a Sigstore Bundle.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigstoreBundleMetadata {
@@ -261,7 +261,7 @@ pub enum ProvenanceError {
         /// The rejected registry identifier.
         registry: String,
     },
-    /// Sigstore Bundle policy enforcement failed (spec §14.2.1, issue #513).
+    /// Sigstore Bundle policy enforcement failed (issue #513).
     #[error("Sigstore Bundle policy violation: {reason}")]
     SigstoreBundlePolicy {
         /// Safe diagnostic reason for the policy violation.
@@ -810,7 +810,7 @@ pub fn verify_minisign(
 
 /// Verify a Sigstore/cosign bundle over artifact bytes by invoking `cosign verify-blob`.
 ///
-/// Uses the default [`SigstoreBundlePolicy`] (spec §14.2.1): all three media
+/// Uses the default [`SigstoreBundlePolicy`]: all three media
 /// types, all three forms, require inclusion proofs, accept RFC 3161 timestamps,
 /// offline verification. For custom policy, use [`verify_cosign_with_policy`].
 ///
@@ -818,7 +818,7 @@ pub fn verify_minisign(
 ///
 /// Returns an error when `cosign` is unavailable, verification fails, the
 /// subprocess times out, the temporary artifact file cannot be prepared, or
-/// the bundle violates the default Sigstore Bundle policy (spec §14.2.1).
+/// the bundle violates the default Sigstore Bundle policy.
 pub fn verify_cosign(
     artifact_bytes: &[u8],
     bundle_path: &Path,
@@ -834,11 +834,11 @@ pub fn verify_cosign(
     )
 }
 
-/// Verify a Sigstore/cosign bundle with an explicit bundle policy (spec §14.2.1).
+/// Verify a Sigstore/cosign bundle with an explicit bundle policy.
 ///
 /// After `cosign verify-blob` succeeds, the bundle is validated against the
 /// supplied [`SigstoreBundlePolicy`]. This enforces media-type, verification
-/// material form, and transparency-log evidence requirements per spec §14.2.1.
+/// material form, and transparency-log evidence requirements.
 ///
 /// # Errors
 ///
@@ -868,7 +868,7 @@ pub fn verify_cosign_with_policy(
 
     verify_cosign_subprocess(temp.path(), bundle_path, identity, issuer)?;
 
-    // Enforce Sigstore Bundle policy (spec §14.2.1, issue #513) after cosign
+    // Enforce Sigstore Bundle policy (issue #513) after cosign
     // succeeds. Cosign performs cryptographic verification; this policy layer
     // enforces media-type, form, and tlog evidence requirements.
     let bundle_bytes = fs::read(bundle_path).map_err(|source| ProvenanceError::Io {
@@ -946,7 +946,7 @@ fn parse_cosign_version(output: &str) -> Option<String> {
 /// Wall-clock seconds before `cosign` is killed.
 const COSIGN_TIMEOUT_SECS: u64 = 60;
 
-/// Parses a Sigstore Bundle JSON file to extract metadata per spec §14.2.1.
+/// Parses a Sigstore Bundle JSON file to extract metadata.
 ///
 /// This function reads the bundle file, determines the media type,
 /// verification material form, counts transparency log entries and RFC 3161
@@ -1203,34 +1203,34 @@ fn key_id(public_key: &minisign::PublicKey) -> String {
     output
 }
 
-/// Provenance verification policy (spec §14.3).
+/// Provenance verification policy.
 ///
 /// Defines the requirements that must be met for an artifact to be
 /// considered properly verified. Each field corresponds to one of the
-/// policy fields listed in spec §14.3 (lines 899-912).
+/// policy fields listed in the spec.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct VerificationPolicy {
-    /// Required signer identities (spec §14.3 line 904). If non-empty,
+    /// Required signer identities. If non-empty,
     /// at least one of the listed identities must match the verified
     /// signature.
     pub required_signer_identities: Vec<String>,
-    /// Required Sigstore certificate issuers (spec §14.3 line 905).
+    /// Required Sigstore certificate issuers.
     /// Fulcio OIDC issuer URLs that are accepted.
     pub required_certificate_issuers: Vec<String>,
-    /// Trusted minisign public key IDs (spec §14.3 line 906).
+    /// Trusted minisign public key IDs.
     pub trusted_minisign_keys: Vec<String>,
-    /// Accepted `OpenPGP` key fingerprints (spec §14.3 line 907).
+    /// Accepted `OpenPGP` key fingerprints.
     pub accepted_openpgp_fingerprints: Vec<String>,
-    /// Whether transparency-log inclusion is required (spec §14.3 line 908).
+    /// Whether transparency-log inclusion is required.
     pub require_transparency_log: bool,
     /// Maximum age of a signature in seconds before it's considered stale
-    /// (spec §14.3 line 909). `None` means no age limit.
+    /// `None` means no age limit.
     pub max_signature_age_secs: Option<u64>,
-    /// Required number of independent signatures (spec §14.3 line 912).
+    /// Required number of independent signatures.
     /// Default 1.
     pub min_signatures: u32,
-    /// Whether downgrade prevention is enabled (spec §14.3 line 913).
+    /// Whether downgrade prevention is enabled.
     /// When true, a previously signed source becoming unsigned produces
     /// a finding.
     pub prevent_downgrade: bool,

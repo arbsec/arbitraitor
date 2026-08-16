@@ -174,11 +174,7 @@ fn collect_entry(
         stats.retained_locked += 1;
         return Ok(());
     }
-    let MetadataEntry {
-        sha256,
-        size_bytes: _,
-        ..
-    } = entry;
+    let MetadataEntry { sha256, .. } = entry;
     let digest = Sha256Digest::from_str(&sha256).map_err(|source| StoreError::Index {
         stage: "gc-parse-digest",
         message: source.to_string(),

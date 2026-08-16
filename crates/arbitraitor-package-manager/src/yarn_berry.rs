@@ -1,6 +1,6 @@
 //! Yarn Berry adapter — JavaScript package manager (yarn v2+).
 //!
-//! Implements spec §39.14.1 yarn berry row. Yarn Berry has
+//! Implements the yarn berry row. Yarn Berry has
 //! `enableHardenedMode` and `npmMinimalAgeGate` settings. Arbitraitor
 //! extends via registry proxy and post-install scanning.
 
@@ -11,7 +11,7 @@ use crate::recipe::{
     RegistryTool,
 };
 
-/// Yarn Berry (v2+) registry adapter (spec §39.14.1).
+/// Yarn Berry (v2+) registry adapter.
 #[derive(Clone, Debug)]
 pub struct YarnBerryAdapter;
 

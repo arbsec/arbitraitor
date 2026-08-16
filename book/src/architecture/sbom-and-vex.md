@@ -1,6 +1,6 @@
 # SBOM and VEX ingestion
 
-Arbitraitor consumes SBOM and VEX documents from upstream producers but never produces, signs, or republishes them. The ingestion surface lives at the policy and provenance boundary (spec §19.5, §19.7) and is read-only.
+Arbitraitor consumes SBOM and VEX documents from upstream producers but never produces, signs, or republishes them. The ingestion surface lives at the policy and provenance boundary and is read-only.
 
 > **Stability: Unstable.** Verified against commit `7cb6906`. Field expectations may change between minor versions until the CISA 2025 minimum elements stabilize across the four supported formats.
 

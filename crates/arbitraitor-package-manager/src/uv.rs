@@ -1,6 +1,6 @@
 //! uv/uvx adapter — Python package manager integration.
 //!
-//! Implements spec §39.14.1 uv row. uv ships `UV_MALWARE_CHECK=1`
+//! Implements the uv row. uv ships `UV_MALWARE_CHECK=1`
 //! (OSV-backed) — Arbitraitor extends, not duplicates. This adapter combines:
 //!
 //! - **Lockfile pre-scan** (primary): parse `uv.lock` (TOML v1), verify hashes
@@ -18,7 +18,7 @@ use crate::recipe::{
     RegistryTool,
 };
 
-/// uv registry adapter (spec §39.14.1).
+/// uv registry adapter.
 #[derive(Clone, Debug)]
 pub struct UvAdapter;
 

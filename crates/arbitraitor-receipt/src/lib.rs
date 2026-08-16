@@ -2,7 +2,7 @@
 //!
 //! See `docs/spec/` for the full specification.
 //!
-//! ## Schema v2 — top-level envelope (spec §31.1)
+//! ## Schema v2 — top-level envelope
 //!
 //! Starting with schema version 2, the receipt JSON uses a top-level envelope
 //! structure with grouped buckets: `request`, `artifact`, `retrieval`,
@@ -34,13 +34,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-/// Current receipt schema version (spec §31.1 envelope structure).
+/// Current receipt schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Legacy v1 receipt schema version (flat structure, pre-envelope).
 pub const V1_SCHEMA_VERSION: u32 = 1;
 
-/// Tamper-evident audit record for an inspected artifact (spec §31.1).
+/// Tamper-evident audit record for an inspected artifact.
 ///
 /// Schema v2 groups fields into top-level envelope buckets:
 /// `request`, `artifact`, `retrieval`, `provenance`, `payload_graph`,
@@ -61,7 +61,7 @@ pub struct Receipt {
     pub retrieval: Option<RetrievalInfo>,
     /// Provenance: verifier identity, detector binary provenance, and signatures.
     pub provenance: ProvenanceInfo,
-    /// Payload graph recording artifacts and their relationships (spec §20).
+    /// Payload graph recording artifacts and their relationships.
     /// `None` when no recursive payload discovery was performed.
     pub payload_graph: Option<PayloadGraph>,
     /// Detector versions that contributed to this receipt.
@@ -78,7 +78,7 @@ pub struct Receipt {
     pub timestamps: ReceiptTimestamps,
 }
 
-/// Request metadata bucket (spec §31.1 `request`).
+/// Request metadata bucket.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestInfo {
@@ -89,7 +89,7 @@ pub struct RequestInfo {
     pub config_digest: Option<String>,
 }
 
-/// Artifact identity bucket (spec §31.1 `artifact`).
+/// Artifact identity bucket.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactInfo {
@@ -102,7 +102,7 @@ pub struct ArtifactInfo {
     pub artifact_type: Option<String>,
 }
 
-/// Provenance bucket (spec §31.1 `provenance`).
+/// Provenance bucket.
 ///
 /// Holds verifier identity, detector binary provenance, and receipt
 /// signatures. The signature fields are cleared by
@@ -123,7 +123,7 @@ pub struct ProvenanceInfo {
     /// Optional detached minisign signature over the canonical unsigned receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ReceiptSignature>,
-    /// Signatures produced by [`ReceiptSigner`] adapters (spec §31.3).
+    /// Signatures produced by [`ReceiptSigner`] adapters.
     ///
     /// Multiple signatures may be attached when more than one signing method
     /// is requested. The canonical bytes exclude this field (see
@@ -133,7 +133,7 @@ pub struct ProvenanceInfo {
     pub signatures: Vec<Signature>,
 }
 
-/// Policy metadata bucket (spec §31.1 `policy`).
+/// Policy metadata bucket.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyInfo {
@@ -220,11 +220,11 @@ impl Receipt {
         unsigned.canonical_bytes()
     }
 
-    /// Exports the receipt as an in-toto Statement envelope (spec §31.3.1,
-    /// ADR-0023). The canonical on-disk receipt format (RFC 8785 JCS) is
+    /// Exports the receipt as an in-toto Statement envelope (ADR-0023). The
+    /// canonical on-disk receipt format (RFC 8785 JCS) is
     /// NOT changed. This is a derived, optional export format for
     /// interoperability with supply-chain tools like GUAC, Sigstore, and
-    /// in-toto verifylib (spec §21.9).
+    /// in-toto verifylib.
     ///
     /// # Errors
     ///
@@ -251,7 +251,7 @@ impl Receipt {
     }
 
     /// Parse a receipt from JSON, accepting either v1 (flat) or v2 (envelope)
-    /// schema (spec §31.1). v1 receipts are automatically migrated to v2.
+    /// schema. v1 receipts are automatically migrated to v2.
     ///
     /// # Errors
     ///
@@ -311,7 +311,7 @@ impl Receipt {
     }
 }
 
-/// in-toto Statement v1 envelope (spec §31.3.1, ADR-0023).
+/// in-toto Statement v1 envelope (ADR-0023).
 ///
 /// Derived from the canonical RFC 8785 JCS receipt. The Statement is
 /// signed with the same key/capability as the canonical receipt and the
@@ -536,7 +536,7 @@ pub struct VerdictInfo {
     pub policy_trace: Vec<String>,
 }
 
-/// Release information included when an artifact is released (spec §31.1 `release`).
+/// Release information included when an artifact is released.
 ///
 /// In schema v2, `approval` and `effective_controls` are nested inside
 /// `release` rather than at the top level.
@@ -791,14 +791,14 @@ impl ReceiptBuilder {
         self
     }
 
-    /// Set the payload graph (spec §20, issue #517).
+    /// Set the payload graph (issue #517).
     #[must_use]
     pub fn payload_graph(mut self, graph: PayloadGraph) -> Self {
         self.receipt.payload_graph = Some(graph);
         self
     }
 
-    /// Add a receipt signature (spec §31.3).
+    /// Add a receipt signature.
     #[must_use]
     pub fn signature(mut self, signature: Signature) -> Self {
         self.receipt.provenance.signatures.push(signature);
@@ -1277,7 +1277,7 @@ mod tests {
         let json = serde_json::to_value(&receipt)?;
         assert!(
             json.get("payload_graph").is_some(),
-            "payload_graph key must always be present in envelope (spec §31.1)"
+            "payload_graph key must always be present in envelope"
         );
         assert!(
             json["payload_graph"].is_null(),
@@ -1741,7 +1741,7 @@ mod tests {
         for key in &expected_keys {
             assert!(
                 obj.contains_key(*key),
-                "envelope must contain top-level key '{key}' (spec §31.1)"
+                "envelope must contain top-level key '{key}'"
             );
         }
         assert_eq!(obj.len(), expected_keys.len(), "no extra top-level keys");
@@ -2110,10 +2110,10 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// SARIF output (spec §31.4)
+// SARIF output
 // ---------------------------------------------------------------------------
 
-/// SARIF 2.1.0 report root (spec §31.4).
+/// SARIF 2.1.0 report root.
 #[derive(Clone, Debug, Serialize)]
 pub struct SarifReport {
     /// Fixed schema version.
@@ -2152,7 +2152,7 @@ pub struct SarifDriver {
     pub rules: Vec<SarifRule>,
 }
 
-/// A SARIF rule definition with taxonomy (spec §3.59).
+/// A SARIF rule definition with taxonomy.
 #[derive(Clone, Debug, Serialize)]
 pub struct SarifRule {
     /// Rule identifier.
@@ -2166,7 +2166,7 @@ pub struct SarifRule {
     pub taxonomy: Vec<SarifTaxonomyEntry>,
 }
 
-/// SARIF taxonomy entry per rule (spec §3.59).
+/// SARIF taxonomy entry per rule.
 #[derive(Clone, Debug, Serialize)]
 pub struct SarifTaxonomyEntry {
     /// Taxonomy name (e.g. "CWE", "CAPEC").
@@ -2227,7 +2227,7 @@ pub struct SarifRegion {
 }
 
 impl Receipt {
-    /// Converts the receipt's findings to a SARIF 2.1.0 report (spec §31.4).
+    /// Converts the receipt's findings to a SARIF 2.1.0 report.
     #[must_use]
     pub fn to_sarif(&self, tool_name: &str, tool_version: &str) -> SarifReport {
         let rules: Vec<SarifRule> = self

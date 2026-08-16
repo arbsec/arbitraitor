@@ -76,10 +76,10 @@ impl DetectorHealth {
 #[derive(Debug, Clone, Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "EvalContext mirrors spec §23.1 policy input booleans for direct context.* field resolution"
+    reason = "EvalContext mirrors policy input booleans for direct context.* field resolution"
 )]
 pub struct EvalContext {
-    /// Operation mode being evaluated (spec §23.1.1).
+    /// Operation mode being evaluated.
     pub operation_mode: OperationMode,
 
     /// Artifact SHA-256 digest, when identity is known.
@@ -131,7 +131,7 @@ pub struct EvalContext {
     /// network.
     pub is_private_network: bool,
 
-    /// Origin class of the operation request (spec §23.1.1). Defaults to
+    /// Origin class of the operation request. Defaults to
     /// [`CallerOrigin::Unknown`] — the lowest trust class.
     pub caller_origin: CallerOrigin,
 }
@@ -175,7 +175,7 @@ impl EvalContext {
         self
     }
 
-    /// Sets the caller-origin class (spec §23.1.1).
+    /// Sets the caller-origin class.
     #[must_use]
     pub fn with_caller_origin(mut self, origin: CallerOrigin) -> Self {
         self.caller_origin = origin;

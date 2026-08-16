@@ -27,11 +27,11 @@ pub mod windows_adapters;
 use std::io;
 use std::process::Command;
 
-/// Sandbox containment mode per spec §27.2.
+/// Sandbox containment mode.
 ///
 /// The mode declares the *intent* of the runtime sandbox envelope. It is a
 /// declarative policy knob, not an enforcement claim: the actual capability
-/// matrix for a given run is recorded in the receipt (§27.7) so downstream
+/// matrix for a given run is recorded in the receipt so downstream
 /// auditors can verify which controls were effective.
 ///
 /// Modes are ordered by strength of containment. `None` performs no
@@ -42,7 +42,7 @@ pub enum SandboxMode {
     /// No sandbox envelope is constructed. The artifact runs in the
     /// inherited process context with the inherited environment.
     ///
-    /// Spec §27.2 mode 1. Equivalent to running the artifact directly.
+    /// Mode 1. Equivalent to running the artifact directly.
     /// No containment capability is claimed.
     None,
 
@@ -51,7 +51,7 @@ pub enum SandboxMode {
     /// process-tree, file-access, and network events without blocking any
     /// operation.
     ///
-    /// Spec §27.2 mode 2. No enforcement capability is claimed because
+    /// Mode 2. No enforcement capability is claimed because
     /// observation is not a containment boundary. Receipts record the
     /// mode so auditors know the run was supervised, not contained.
     Observe,
@@ -62,7 +62,7 @@ pub enum SandboxMode {
     /// closing, and `rlimit`-based resource limits). On macOS this
     /// degrades to mediated execution per ADR-0024.
     ///
-    /// Spec §27.2 mode 3. Enforces filesystem, network, syscall,
+    /// Mode 3. Enforces filesystem, network, syscall,
     /// privilege, and resource controls but does *not* discard the
     /// filesystem image after the run — the host filesystem persists.
     Restricted,
@@ -72,7 +72,7 @@ pub enum SandboxMode {
     /// artifact sees an isolated, throwaway root that cannot observe or
     /// mutate any host state outside its allowlisted mount points.
     ///
-    /// Spec §27.2 mode 4. Strongest guarantees: even if every other
+    /// Mode 4. Strongest guarantees: even if every other
     /// control is bypassed, the attacker cannot reach durable host
     /// storage.
     Disposable,
@@ -83,8 +83,8 @@ impl SandboxMode {
     ///
     /// These are *declared* capabilities — what the mode is *supposed* to
     /// enforce. The actually-effective capabilities are a property of the
-    /// platform and the runtime; they are recorded in the receipt per
-    /// spec §27.7. Callers must not collapse this struct into a single
+    /// platform and the runtime; they are recorded in the receipt. Callers
+    /// must not collapse this struct into a single
     /// `sandboxed: bool` (ADR-0007).
     #[must_use]
     pub const fn capabilities(&self) -> SandboxCapabilities {
@@ -127,7 +127,7 @@ impl SandboxMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "spec §27.2 + ADR-0007 mandate this exact per-control matrix shape; collapsing booleans into enums would break the receipt schema"
+    reason = "ADR-0007 mandates this exact per-control matrix shape; collapsing booleans into enums would break the receipt schema"
 )]
 pub struct SandboxCapabilities {
     /// Filesystem access is restricted to an explicit allowlist
@@ -170,7 +170,7 @@ impl SandboxCapabilities {
 }
 
 /// State of an individual containment control as actually in effect at
-/// runtime (spec §27.7).
+/// runtime.
 ///
 /// A sandbox pass is not proof of safety: the `SandboxMode` declares an
 /// *intent* (see [`SandboxMode::capabilities`]), and [`EffectiveControls`]
@@ -180,8 +180,7 @@ impl SandboxCapabilities {
 ///
 /// A requested `Restricted` or `Disposable` mode that reports any control
 /// as [`ControlState::Unavailable`] MUST fail closed at the enforcement
-/// boundary — `Unavailable` is a containment gap, not a degraded guarantee
-/// (ADR-0007).
+/// boundary — `Unavailable` is a containment gap, not a degraded guarantee.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ControlState {
     /// The control is fully active for the child process on this platform.
@@ -194,8 +193,7 @@ pub enum ControlState {
     Unavailable,
 }
 
-/// Per-control effective-controls matrix recorded in receipts per
-/// spec §27.7.
+/// Per-control effective-controls matrix recorded in receipts.
 ///
 /// Every field is reported independently — never collapse into a single
 /// `sandboxed: bool` (ADR-0007). This struct answers the question "what
@@ -232,7 +230,7 @@ pub struct EffectiveControls {
     pub resource_limits: ControlState,
     /// Effective Landlock ABI version observed for Linux filesystem isolation.
     pub landlock_abi_version: Option<LandlockAbiVersion>,
-    /// Whether `io_uring` is available on the host kernel (spec §27.3).
+    /// Whether `io_uring` is available on the host kernel.
     ///
     /// `Some(true)` means `io_uring` is enabled and bypasses seccomp;
     /// `Some(false)` means it is disabled via sysctl; `None` means the
@@ -246,7 +244,7 @@ pub struct EffectiveControls {
     /// or `AppArmor` restricts user namespaces. `None` means unavailable probe
     /// data (non-Linux or missing/unknown sysctl state).
     pub userns_available: Option<bool>,
-    /// Container runtime version probed from the host (spec §27.3).
+    /// Container runtime version probed from the host.
     ///
     /// `Some` when a container runtime (`runc` or `containerd`) is detected
     /// on the host; `None` on non-Linux platforms or when no runtime binary
@@ -319,7 +317,7 @@ impl EffectiveControls {
 
     /// Returns `true` if any control is `Unavailable`. A `Restricted` or
     /// `Disposable` request that yields this result MUST fail closed
-    /// (spec §27.7).
+    /// (ADR-0007).
     #[must_use]
     pub fn has_unavailable(&self) -> bool {
         [
@@ -355,7 +353,7 @@ impl EffectiveControls {
 }
 
 /// Compute the per-control effective-controls matrix for the given
-/// sandbox mode and target platform string (spec §27.7).
+/// sandbox mode and target platform string.
 ///
 /// This function answers: "If we attempted to execute a child process in
 /// `mode` on `platform`, which containment controls would actually be
@@ -390,7 +388,7 @@ pub fn compute_effective_controls(mode: SandboxMode, platform: &str) -> Effectiv
 
         // `Disposable` differs from `Restricted` only by the ephemeral
         // root, which is tracked in `SandboxCapabilities::ephemeral_filesystem`
-        // and is not one of the seven effective-controls fields in spec §27.7.
+        // and is not one of the seven effective-controls fields.
         SandboxMode::Restricted | SandboxMode::Disposable => {
             effective_restricted_controls(platform)
         }
@@ -754,7 +752,7 @@ mod tests {
 
     #[test]
     fn sandbox_mode_variants_are_distinct() {
-        // Spec §27.2 enumerates exactly four modes; this test fails if a
+        // The spec enumerates exactly four modes; this test fails if a
         // variant is added or removed without updating coverage.
         let modes = [
             SandboxMode::None,
@@ -988,7 +986,7 @@ mod tests {
     #[test]
     fn compute_effective_controls_restricted_and_disposable_produce_identical_matrix() {
         // The ephemeral root is tracked in `SandboxCapabilities::ephemeral_filesystem`
-        // and is not one of the seven spec §27.7 effective-controls fields.
+        // and is not one of the seven effective-controls fields.
         // Restricted and Disposable must therefore produce identical
         // `EffectiveControls` matrices on every platform.
         for platform in ["linux", "macos", "windows", "freebsd"] {

@@ -1,4 +1,4 @@
-//! Plan-bound approval capability file (spec §28.5, ADR-0013).
+//! Plan-bound approval capability file (ADR-0013).
 //!
 //! The CLI `approve` command writes an [`ApprovalFile`] that binds every
 //! material execution-plan dimension. The `execute` command recomputes the
@@ -45,7 +45,7 @@ pub enum ApprovalError {
     },
 }
 
-/// Plan-bound approval capability file (spec §28.5, ADR-0013).
+/// Plan-bound approval capability file (ADR-0013).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalFile {

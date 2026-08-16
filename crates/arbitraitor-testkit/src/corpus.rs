@@ -2,7 +2,7 @@
 //!
 //! Provides structured access to synthetic test samples organized by
 //! detection category. All samples are safe, synthetic, and committed
-//! to the repository — no real malware is stored. Per spec §43.9.
+//! to the repository — no real malware is stored.
 
 use std::io::{Cursor, Write};
 

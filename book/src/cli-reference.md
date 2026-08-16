@@ -7,8 +7,8 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | Command | Description |
 |---------|-------------|
 | `arbitraitor inspect` | Retrieve and analyze an artifact without executing it |
-| `arbitraitor fetch` | Fetch an artifact with provenance verification (spec §28.2) |
-| `arbitraitor wrap` | Wrap an existing tool invocation through Arbitraitor (spec §28.1) |
+| `arbitraitor fetch` | Fetch an artifact with provenance verification |
+| `arbitraitor wrap` | Wrap an existing tool invocation through Arbitraitor |
 | `arbitraitor run` | Execute the full pipeline with approval flow |
 | `arbitraitor scan` | Scan a local file or stdin without retrieval |
 | `arbitraitor explain` | Explain a verdict from a receipt file |
@@ -29,8 +29,8 @@ The `arbitraitor` CLI provides commands for inspection, execution, wrapper manag
 | `arbitraitor graph` | Render payload containment tree for archives |
 | `arbitraitor approve` | Approve execution from a receipt file |
 | `arbitraitor execute` | Execute an artifact from CAS using an approval file |
-| `arbitraitor report` | Report user feedback on findings (e.g. false positive, spec §21.7) |
-| `arbitraitor allow` | Record a scoped allow exception for an artifact digest (spec §21.7) |
+| `arbitraitor report` | Report user feedback on findings (e.g. false positive) |
+| `arbitraitor allow` | Record a scoped allow exception for an artifact digest |
 | `arbitraitor pm` | Run a package manager through advisory scan (npm) |
 | `arbitraitor mcp` | Start MCP JSON-RPC 2.0 server over stdio |
 | `arbitraitor version` | Print version, license, and repository |
@@ -60,7 +60,7 @@ These flags apply to all commands:
 
 ## Exit codes
 
-Arbitraitor uses the stable exit codes defined in spec §29. Each code
+Arbitraitor uses a stable set of exit codes. Each code
 encodes a distinct policy decision or operational condition so CI
 pipelines, shell scripts, and process supervisors can react precisely.
 Machine consumers should prefer `--json` or `--sarif` output for full
@@ -93,7 +93,7 @@ renumbered.
 also when `detectors` or `av_adapters` is at `Warn` — i.e. the 5 built-in
 MVP detectors (archive-hazards, artifact, python-js, shell, url-discovery)
 are running but external layers (YARA rule packs, AV adapters, plugins,
-policy file) are absent (spec §9 invariant 1, §29). Pass
+policy file) are absent. Pass
 `--allow-degraded-detectors` (or set
 `ARBITRAITOR_ALLOW_DEGRADED_DETECTORS=true` / `=1` / `=yes` / `=on`) when
 acknowledging a dev-build MVP baseline; `Fail` still triggers 33 regardless
@@ -117,7 +117,7 @@ The `Detectors` row distinguishes the always-running built-in MVP detector
 baseline (archive-hazards, artifact, python-js, shell, url-discovery) from
 external coverage layers (YARA rule packs, AV adapters, plugins). When
 external layers are absent, the row is `Warn` (analysis still runs on every
-fetch via `AnalysisCoordinator::new()`), and `doctor` exits 33 per spec §29
+fetch via `AnalysisCoordinator::new()`), and `doctor` exits 33
 unless `--allow-degraded-detectors` acknowledges the dev-build baseline.
 
 `--allow-degraded-detectors` (env var
@@ -146,7 +146,7 @@ arbitraitor inspect <URL or file path> [flags]
 | `--cosign-issuer <ISSUER>` | cosign certificate issuer (repeatable) |
 | `--explain` | Show an explainability report for detected findings |
 | `--format <FORMAT>` | Output format for explainability: `text`, `shellcheck` (implies `--explain`) |
-| `--sign-receipt <METHOD>` | Sign the receipt with the specified method (spec §31.3): `minisign`, `cosign`, `enterprisekey`, `tpm` |
+| `--sign-receipt <METHOD>` | Sign the receipt with the specified method: `minisign`, `cosign`, `enterprisekey`, `tpm` |
 
 ```sh
 # Basic inspection
@@ -235,7 +235,7 @@ decide the final verdict and does not release content directly.
 used by PATH shims. `bash` inspects a local script path when one is present;
 other tools currently emit a warning and release nothing.
 
-### Multi-URL handling (spec §39.9)
+### Multi-URL handling
 
 When `curl` or `wget` is invoked with multiple URLs, each URL is fetched and
 inspected independently — producing separate artifact identities (SHA-256)
@@ -254,7 +254,7 @@ or fetch URLs in separate invocations.
 arbitraitor wrap curl -- -fsSL https://example.com/install.sh
 arbitraitor wrap wget -- -qO- https://example.com/install.sh
 
-# Multiple URLs — each inspected independently (spec §39.9)
+# Multiple URLs — each inspected independently
 arbitraitor wrap curl -- -O https://example.com/a.sh https://example.com/b.sh
 arbitraitor wrap wget -- https://example.com/a https://example.com/b
 
@@ -277,7 +277,7 @@ arbitraitor run <URL or file path> [flags]
 | `--non-interactive` | Skip interactive approval prompts (block if approval needed) |
 | `--network` | Allow network access during execution (default: isolated) |
 | `--policy <PATH>` | Policy file path |
-| `--sign-receipt <METHOD>` | Sign the receipt with the specified method (spec §31.3): `minisign`, `cosign`, `enterprisekey`, `tpm` |
+| `--sign-receipt <METHOD>` | Sign the receipt with the specified method: `minisign`, `cosign`, `enterprisekey`, `tpm` |
 
 ### Examples
 
@@ -437,7 +437,7 @@ arbitraitor status [flags]
 `status` reports Arbitraitor component health, daemon-process identity
 (PID, uptime, last operation), and the bounded recent-operations ring
 buffer when a local daemon is running. Falls back to a store-only
-summary when the daemon socket is unreachable (spec §28.1).
+summary when the daemon socket is unreachable.
 
 ### Flags
 
@@ -597,7 +597,7 @@ Runs system health diagnostics. The default output is human-readable; `--json` e
 |------|-------------|
 | `--cas-dir <DIR>` | Override the CAS directory to check |
 | `--rules <DIR>` | Path to rule packs directory |
-| `--receipt-signing-key <PATH>` | Path to the receipt signing key file (spec §31.3) |
+| `--receipt-signing-key <PATH>` | Path to the receipt signing key file |
 | `--json` | Emit structured JSON with each check status as `pass`, `fail`, `warn`, or `skipped` |
 
 ### Checks
@@ -877,7 +877,7 @@ arbitraitor shim status
 arbitraitor pm run --tool <TOOL> [-- <ARGS>...]
 ```
 
-Runs a package manager tool through Arbitraitor's advisory scan (spec §39.14 Phase 1), then executes it if the verdict allows. Currently supports `npm`.
+Runs a package manager tool through Arbitraitor's advisory scan, then executes it if the verdict allows. Currently supports `npm`.
 
 ### Advisory scan flow (npm)
 
@@ -990,7 +990,7 @@ uses a separate release path).
 arbitraitor report <SUBCOMMAND>
 ```
 
-Records user feedback on findings (spec §21.7). All reported feedback is
+Records user feedback on findings. All reported feedback is
 scoped and auditable.
 
 ### Subcommands
@@ -1011,8 +1011,8 @@ arbitraitor report false-positive SHELL-EVAL-001
 arbitraitor allow sha256:<HEX> --scope <SCOPE> --expires <DURATION> --reason <TEXT>
 ```
 
-Records a scoped, time-bounded allow exception for an artifact digest
-(spec §21.7). Every exception requires a scope, an expiry, and a written
+Records a scoped, time-bounded allow exception for an artifact digest.
+Every exception requires a scope, an expiry, and a written
 justification for audit.
 
 ### Flags

@@ -50,8 +50,6 @@ const SINGLE_FILE_ENTRY_NAME: &str = "payload";
 const TAR_MAGIC_OFFSET: usize = 257;
 const TAR_MAGIC: &[u8] = b"ustar";
 const DETECTOR_ID: &str = "arbitraitor-archive.hazards";
-const ARCHIVE_HAZARD_REFERENCE: &str = "Arbitraitor spec section 19.3";
-const PARSER_DIFFERENTIAL_REFERENCE: &str = "Arbitraitor spec section 19.1";
 const CWE_436_URL: &str = "https://cwe.mitre.org/data/definitions/436.html";
 const TAR_BLOCK_SIZE: usize = 512;
 const TAR_NAME_RANGE: std::ops::Range<usize> = 0..100;
@@ -110,7 +108,7 @@ pub struct ArchiveEntry {
     pub is_encrypted: bool,
 }
 
-/// Spec §19.3 archive hazard type.
+/// Archive hazard type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveHazardType {
     /// Archive member paths or links escape the extraction root.
@@ -123,35 +121,34 @@ pub enum ArchiveHazardType {
 
 /// Resource limits applied while listing and extracting archives.
 ///
-/// Defaults follow spec §19.2. Callers that need looser limits (e.g. an
+/// Defaults follow the spec. Callers that need looser limits (e.g. an
 /// enterprise-internal scan of a trusted release bundle that legitimately
 /// contains many symlinks) must do so explicitly via
 /// [`ArchiveLimits::default`] field overrides — never by ignoring the limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveLimits {
-    /// Maximum path depth allowed for an entry. Default `5` per spec §19.2.
+    /// Maximum path depth allowed for an entry. Default `5`.
     pub max_depth: u32,
     /// Maximum number of entries allowed in one archive operation.
-    /// Default `10_000` per spec §19.2.
+    /// Default `10_000`.
     pub max_files: u32,
     /// Maximum total unpacked bytes allowed in one archive operation.
-    /// Default `1 GiB` per spec §19.2.
+    /// Default `1 GiB`.
     pub max_total_unpacked_bytes: u64,
     /// Maximum unpacked bytes allowed for a single file entry.
-    /// Default `256 MiB` per spec §19.2.
+    /// Default `256 MiB`.
     pub max_single_file_bytes: u64,
     /// Maximum allowed uncompressed-to-compressed size ratio.
-    /// Default `200` per spec §19.2.
+    /// Default `200`.
     pub max_compression_ratio: u32,
     /// Maximum number of symbolic-link entries permitted in one archive
-    /// operation. Default `0` per spec §19.2 — any symlink triggers a
+    /// operation. Default `0` — any symlink triggers a
     /// `LimitExceeded { limit: "max_symlinks" }` error. This enforces
-    /// spec invariant 15 (no archive path escape via symlinks) at the
-    /// extraction gate; the per-entry `symlink_target_escapes` check
-    /// remains as defense-in-depth.
+    /// no archive path escape via symlinks at the extraction gate; the
+    /// per-entry `symlink_target_escapes` check remains as defense-in-depth.
     pub max_symlinks: u32,
     /// Maximum wall-clock processing time allowed in one archive operation.
-    /// Default `60 s` per spec §19.2.
+    /// Default `60 s`.
     pub max_processing_time: Duration,
 }
 
@@ -1119,7 +1116,7 @@ fn parser_differential_finding(
         artifact_sha256: Sha256Digest::new([0_u8; 32]),
         location: None,
         remediation: Some("Refuse release until the tar stream is rebuilt without parser-dependent extension-header state and all parsers agree on the member set.".to_owned()),
-        references: vec![PARSER_DIFFERENTIAL_REFERENCE.to_owned()],
+        references: Vec::new(),
         tags: vec!["archive-hazard".to_owned(), "parser-smelting".to_owned()],
         taxonomies: vec![TaxonomyRef {
             name: TaxonomyName::Cwe,
@@ -1327,7 +1324,7 @@ fn hazard_finding(
         artifact_sha256: Sha256Digest::new([0_u8; 32]),
         location: None,
         remediation: Some("Do not extract or release this archive until the hazardous entries are removed or policy explicitly handles them under containment.".to_owned()),
-        references: vec![ARCHIVE_HAZARD_REFERENCE.to_owned()],
+        references: Vec::new(),
         tags: vec!["archive-hazard".to_owned(), tag.to_owned()],
         taxonomies: Vec::new(),
     }

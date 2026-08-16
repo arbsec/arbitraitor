@@ -1,4 +1,4 @@
-//! Tests for the `TaxonomyRef` and `TaxonomyName` types (spec §15.2).
+//! Tests for the `TaxonomyRef` and `TaxonomyName` types.
 
 use arbitraitor_model::finding::{Evidence, EvidenceKind, Finding, FindingCategory};
 use arbitraitor_model::ids::Sha256Digest;

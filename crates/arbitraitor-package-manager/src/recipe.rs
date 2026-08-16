@@ -1,4 +1,4 @@
-//! Adapter trait and recipe types per spec §39.14.
+//! Adapter trait and recipe types per the spec.
 
 use std::fmt::Debug;
 
@@ -57,7 +57,7 @@ pub enum LockfileFormat {
     BunLock,
 }
 
-/// The hybrid integration patterns from spec §39.14.1.
+/// The hybrid integration patterns from the spec.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InspectionPattern {
     /// Arbitraitor acts as the configured registry URL.
@@ -71,7 +71,7 @@ pub enum InspectionPattern {
 }
 
 /// The per-tool recipe mapping a tool to its primary and secondary
-/// inspection patterns (spec §39.14.1). Every adapter MUST combine
+/// inspection patterns. Every adapter MUST combine
 /// multiple patterns — no single pattern covers all threat surfaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterRecipe {
@@ -81,7 +81,7 @@ pub struct AdapterRecipe {
 
 impl AdapterRecipe {
     /// Creates a new recipe. The secondary list must be non-empty
-    /// per spec §39.14.1 (\"each adapter MUST combine multiple patterns\").
+    /// per the spec (\"each adapter MUST combine multiple patterns\").
     ///
     /// # Panics
     ///
@@ -90,7 +90,7 @@ impl AdapterRecipe {
     pub fn new(primary: InspectionPattern, secondary: Vec<InspectionPattern>) -> Self {
         assert!(
             !secondary.is_empty(),
-            "AdapterRecipe secondary must be non-empty per spec §39.14.1"
+            "AdapterRecipe secondary must be non-empty"
         );
         Self { primary, secondary }
     }
@@ -108,7 +108,7 @@ impl AdapterRecipe {
     }
 }
 
-/// Lifecycle-script enforcement policy per spec §39.14.3.
+/// Lifecycle-script enforcement policy per the spec.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleScriptPolicy {
     /// Scripts denied entirely (`--ignore-scripts`).

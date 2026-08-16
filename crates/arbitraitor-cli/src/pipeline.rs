@@ -225,7 +225,7 @@ pub(crate) fn analysis_coordinator(
     let rule_pack_versions = manager.pack_versions();
     let scanner = manager.compile_all().into_diagnostic()?;
     let detector = YaraDetector::from_scanner(&scanner).into_diagnostic()?;
-    // Preserve the 5 built-in MVP detectors alongside YARA (spec §9 inv 1).
+    // Preserve the 5 built-in MVP detectors alongside YARA.
     // The previous construction replaced built-ins with `[Artifact, Shell,
     // Yara]`, dropping ArchiveHazard, PythonJs, and UrlDiscovery — and
     // UrlDiscovery is mandatory for HTML/JSON per

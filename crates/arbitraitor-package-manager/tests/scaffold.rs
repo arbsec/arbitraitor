@@ -43,7 +43,7 @@ fn cargo_adapter_metadata_matches_spec_recipe() {
     assert_eq!(recipe.primary(), InspectionPattern::LockfilePrescan);
     assert!(
         !recipe.secondary().is_empty(),
-        "spec §39.14.1 requires non-empty secondary"
+        "requires non-empty secondary"
     );
     assert!(
         recipe

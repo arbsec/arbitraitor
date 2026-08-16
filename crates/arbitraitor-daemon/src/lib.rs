@@ -43,7 +43,7 @@ const PRIVATE_SOCKET_MODE: u32 = 0o600;
 /// Request accepted by the local daemon protocol.
 ///
 /// Each variant carries caller-origin classification and an optional
-/// capability token (spec §40.2). The daemon overrides the wire-supplied
+/// capability token. The daemon overrides the wire-supplied
 /// `caller_origin` to [`CallerOrigin::DaemonLocal`] after authenticating the
 /// Unix-socket peer; the wire value is preserved for diagnostics so callers
 /// cannot impersonate a higher-trust origin class through the daemon.
@@ -114,7 +114,7 @@ pub enum DaemonRequest {
         capability_token: Option<String>,
     },
     /// Report daemon process identity (PID, uptime), the embedded health
-    /// report, and the bounded ring of recent operations (spec §28.1).
+    /// report, and the bounded ring of recent operations.
     Status {
         /// Caller-origin class asserted by the client. Overridden by the
         /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
@@ -209,7 +209,7 @@ pub struct RecentOperation {
     pub error: Option<String>,
 }
 
-/// Daemon-process snapshot returned by `Status` (spec §28.1).
+/// Daemon-process snapshot returned by `Status`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonInfo {
@@ -261,7 +261,7 @@ const LOCKS_SUBDIR: &str = "locks";
 
 /// Recovers the content-addressed store from a previous unclean shutdown.
 ///
-/// Implements the cleanup half of spec §37.2 (crash recovery):
+/// Implements the cleanup half of crash recovery:
 ///
 /// - Removes orphaned temporary files from the `staging/` directory left by
 ///   downloads that did not finish committing before the previous process
@@ -440,7 +440,7 @@ impl Daemon {
 
     /// Runs the daemon until a shutdown request or termination signal is received.
     ///
-    /// Before accepting requests, the daemon performs spec §37.2 crash
+    /// Before accepting requests, the daemon performs crash
     /// recovery on the configured CAS root to ensure no orphaned temp files
     /// or stale locks from a prior session can block or corrupt incoming
     /// writes.
@@ -458,7 +458,7 @@ impl Daemon {
             stale_locks_cleared = recovery.stale_locks_cleared,
             metadata_inconsistencies = recovery.metadata_inconsistencies,
             cas_root = %self.store_path.display(),
-            "spec §37.2 crash recovery completed before accepting requests",
+            "crash recovery completed before accepting requests",
         );
         prepare_socket_path(&self.socket_path)?;
         let listener = UnixListener::bind(&self.socket_path)?;
@@ -698,7 +698,7 @@ async fn handle_request_with_state(request: DaemonRequest, state: &DaemonState) 
 
 /// Dispatches a [`DaemonRequest`] to the matching handler. Does not record
 /// results — the caller wraps with [`build_recent_record`] when the variant
-/// is meant to surface in the recent-operations list (spec §28.1).
+/// is meant to surface in the recent-operations list.
 async fn dispatch_request(request: DaemonRequest, state: &DaemonState) -> DaemonResponse {
     match request {
         DaemonRequest::Inspect {
@@ -1409,7 +1409,7 @@ mod tests {
     #[test]
     fn daemon_request_deserializes_when_metadata_omitted() -> Result<(), Box<dyn std::error::Error>>
     {
-        // Backwards-compat: callers built before the §40.2 metadata existed
+        // Backwards-compat: callers built before the metadata existed
         // send payloads without caller_origin/capability_token. The daemon
         // must still parse them (caller_origin defaults to Unknown) so the
         // peer can be upgraded in place.
@@ -1520,7 +1520,7 @@ mod tests {
 
     #[test]
     fn recovery_preserves_objects_directory_for_forensic_review() -> io::Result<()> {
-        // Per spec §37.2, complete CAS objects are forensic artifacts that
+        // Complete CAS objects are forensic artifacts that
         // must be retained unless the configured retention policy says
         // otherwise. Crash recovery must never touch them.
         let root = temp_path("recovery-objects")?;

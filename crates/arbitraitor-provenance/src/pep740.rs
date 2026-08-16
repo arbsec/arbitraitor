@@ -1,4 +1,4 @@
-//! PEP 740 `PyPI` attestation verification (spec §31.3.1, §41.12, issue #469).
+//! PEP 740 `PyPI` attestation verification (issue #469).
 //!
 //! PEP 740 defines the attestation format for `PyPI` packages. Each attestation
 //! is a `Sigstore` bundle containing a `DSSE` (Dead Simple Signing Envelope) with
@@ -163,7 +163,7 @@ pub struct Pep740Verification {
 // PEP 740 verifier
 // ---------------------------------------------------------------------------
 
-/// Verifier for PEP 740 `PyPI` package attestations (spec §31.3.1, §41.12).
+/// Verifier for PEP 740 `PyPI` package attestations.
 ///
 /// Implements the verification path for PEP 740 attestations: parsing the
 /// attestation document, extracting the in-toto Statement from the DSSE

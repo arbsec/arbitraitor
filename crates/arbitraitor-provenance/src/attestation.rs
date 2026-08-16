@@ -1,8 +1,8 @@
 //! Shared attestation types used by PEP 740 and crates.io verifiers
-//! (spec §31.3.1, §41.12, issue #469).
+//! (issue #469).
 //!
 //! These types are deliberately separate from the publisher-side
-//! [`VerificationPolicy`](crate::VerificationPolicy) (spec §14.3). See
+//! [`VerificationPolicy`](crate::VerificationPolicy). See
 //! [`AttestationVerifierPolicy`] for the separation rationale.
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 // Registry and verifier identity newtypes
 // ---------------------------------------------------------------------------
 
-/// A package registry that issues attestations (spec §41.12).
+/// A package registry that issues attestations.
 ///
 /// Newtype over `String` to prevent confusing registry identities with signer
 /// identities or verifier identities.
@@ -85,10 +85,10 @@ impl std::fmt::Display for VerifierIdentity {
 // Verifier-side policy (separate from publisher-side VerificationPolicy)
 // ---------------------------------------------------------------------------
 
-/// Verifier-side attestation policy (spec §31.3.1, issue #469).
+/// Verifier-side attestation policy (issue #469).
 ///
 /// This is **separate from the publisher-side
-/// [`VerificationPolicy`](crate::VerificationPolicy)** (spec §14.3). The
+/// [`VerificationPolicy`](crate::VerificationPolicy)**. The
 /// publisher policy governs which signer identities are trusted to have
 /// produced an artifact. The verifier policy governs which attestation types,
 /// registries, and revocation states are accepted by the verifier when
@@ -106,7 +106,7 @@ pub struct AttestationVerifierPolicy {
     pub accepted_predicate_types: Vec<String>,
     /// Accepted registry identities. Empty means all registries are accepted.
     pub accepted_registries: Vec<AttestationRegistry>,
-    /// Whether crates.io attestations are recognized (spec §41.12). Requires
+    /// Whether crates.io attestations are recognized. Requires
     /// policy-side opt-in because Cargo RFC #3724 is GA Q3-Q4 2026.
     pub recognize_crates_io: bool,
     /// Whether to check the revocation list (CRL) before accepting an

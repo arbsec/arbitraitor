@@ -1,6 +1,6 @@
 //! npm adapter — JavaScript package manager integration.
 //!
-//! Implements spec §39.14.1 npm row. npm ships `--ignore-scripts` and
+//! Implements the npm row. npm ships `--ignore-scripts` and
 //! `npm audit` — Arbitraitor extends, not duplicates. This adapter combines:
 //!
 //! - **Lockfile pre-scan** (primary): parse `package-lock.json` (v1-v3)
@@ -17,7 +17,7 @@ use crate::recipe::{
     RegistryTool,
 };
 
-/// npm registry adapter (spec §39.14.1).
+/// npm registry adapter.
 #[derive(Clone, Debug)]
 pub struct NpmAdapter;
 

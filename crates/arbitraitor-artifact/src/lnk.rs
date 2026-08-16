@@ -60,7 +60,7 @@ const FLAG_FORCE_NO_LINK_INFO: u32 = 0x0000_0100;
 const CVE_2025_9491_PADDING_THRESHOLD: usize = 260;
 
 /// Maximum total `StringData` bytes the parser will walk. Bounds untrusted
-/// input per spec invariant 4 (bounded parsing).
+/// input per bounded parsing requirements.
 const MAX_STRING_DATA_BYTES: usize = 64 * 1024;
 
 /// Maximum `LinkInfo` size the parser will accept. Bounds untrusted input.
@@ -141,7 +141,7 @@ pub struct LnkArguments {
 ///
 /// The header magic is the 4-byte little-endian `HeaderSize` field equal to
 /// `0x0000004C` at offset 0. This is the canonical LNK signature per
-/// MS-SHLLINK §2.1.
+/// MS-SHLLINK section 2.1.
 #[must_use]
 pub fn is_lnk(data: &[u8]) -> bool {
     data.len() >= 4
@@ -202,7 +202,7 @@ pub fn parse_arguments(data: &[u8]) -> Result<Option<LnkArguments>, LnkParseErro
 /// Returns a finding when the `COMMAND_LINE_ARGUMENTS` field contains a run
 /// of 260 or more consecutive whitespace characters. The finding references
 /// CVE-2025-9491 and carries the `suspicious-script-behavior` category per
-/// spec §15.3.
+/// the spec.
 ///
 /// Returns an empty vector when the shortcut is clean, has no arguments field,
 /// or does not parse as a valid LNK.

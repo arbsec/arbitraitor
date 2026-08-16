@@ -1,4 +1,4 @@
-//! URL discovery beyond shell literals (spec §20.2).
+//! URL discovery beyond shell literals.
 //!
 //! Extracts URLs from Python and JavaScript string constants, configuration
 //! files (JSON, TOML), and HTML/JSON responses. The extractor is intentionally
@@ -6,16 +6,16 @@
 //! so URL schemes are located via byte scanning, consistent with the
 //! [`crate::pyjs`] detector approach.
 //!
-//! All extractors enforce bounded processing (spec invariant 4): source size,
+//! All extractors enforce bounded processing: source size,
 //! URL count, and individual URL length are capped to prevent resource
 //! exhaustion through hostile inputs.
 //!
 //! The [`UrlDiscoveryDetector`] implements the [`crate::Detector`] trait so
-//! that HTML and JSON artifacts pass the mandatory-coverage gate (spec §9
-//! invariant 1). Per spec §20.4, the detector reports dynamic URL expressions
+//! that HTML and JSON artifacts pass the mandatory-coverage gate. The detector
+//! reports dynamic URL expressions
 //! — URLs containing unresolved template placeholders — as Medium-severity
 //! findings. Static URLs are not findings; wiring them into the recursive
-//! retrieval policy (spec §20.3) remains future work.
+//! retrieval policy remains future work.
 
 #![forbid(unsafe_code)]
 
@@ -28,7 +28,7 @@ use crate::{AnalysisContext, Detector, DetectorError, DetectorMetadata};
 
 use serde_json::Value;
 
-/// Detector ID for the URL discovery detector (spec §20.2).
+/// Detector ID for the URL discovery detector.
 pub(crate) const URL_DISCOVERY_DETECTOR_ID: &str = "arbitraitor-analysis.url-discovery";
 
 /// Maximum source size accepted by any extractor (1 MiB).
@@ -88,7 +88,7 @@ pub enum ConfigFormat {
 }
 
 /// Retrieval policy governing which discovered URLs are fetched for further
-/// analysis (spec §20.3).
+/// analysis.
 ///
 /// The policy forms a strict escalation ladder: each mode retrieves a superset
 /// of the previous mode's URLs, bounded by resource limits.
@@ -108,7 +108,6 @@ pub enum RetrievalPolicy {
 }
 
 /// A dynamic URL expression containing an unresolved template variable
-/// (spec §20.4).
 ///
 /// URLs containing `${...}`, `{{...}}`, or `#{...}` cannot be resolved at
 /// analysis time and are reported so operators can inspect the construction
@@ -229,7 +228,6 @@ pub fn extract_urls_from_config(data: &str, format: ConfigFormat) -> Vec<Discove
 }
 
 /// Detects dynamic URL expressions containing unresolved template variables
-/// (spec §20.4).
 ///
 /// Scans `source` for URL tokens, then checks each for `${...}`, `{{...}}`,
 /// or `#{...}` template syntax. Each match is reported with the unresolved
@@ -414,13 +412,12 @@ fn line_location(source: &str, offset: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// Detector that scans HTML and JSON artifacts for dynamic URL expressions
-/// (spec §20.2, §20.4).
 ///
 /// Static URLs are not findings — they are discovery data available to the
-/// recursive retrieval policy (§20.3) and receipt generation. Only URLs
+/// recursive retrieval policy and receipt generation. Only URLs
 /// containing unresolved template placeholders (e.g. `${HOST}`, `{{base}}`,
 /// `#{var}`) are reported, because they cannot be statically inspected and
-/// may resolve to untrusted second-stage payloads (§20.4).
+/// may resolve to untrusted second-stage payloads.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UrlDiscoveryDetector;
 
@@ -489,7 +486,7 @@ fn dynamic_url_finding(
         description: format!(
             "A URL containing an unresolved template expression was discovered in \
              the artifact. The placeholder '{expression}' prevents static inspection \
-             of the final destination. Per spec §20.4, policy may require sandbox \
+             of the final destination. Policy may require sandbox \
              execution or block unresolved executable downloads."
         ),
         evidence: vec![Evidence {
@@ -505,7 +502,7 @@ fn dynamic_url_finding(
              second-stage payload before release."
                 .to_owned(),
         ),
-        references: vec!["Arbitraitor spec section 20.4".to_owned()],
+        references: Vec::new(),
         tags: vec![
             "url-discovery".to_owned(),
             "dynamic-url-expression".to_owned(),

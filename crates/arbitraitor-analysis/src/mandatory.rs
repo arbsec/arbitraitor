@@ -1,6 +1,6 @@
-//! Mandatory detector coverage per artifact class (spec §9 invariant 1).
+//! Mandatory detector coverage per artifact class.
 //!
-//! Spec §9 invariant 1 requires that no artifact byte is emitted before
+//! Mandatory detector coverage requires that no artifact byte is emitted before
 //! mandatory scanning and policy evaluation complete. Each artifact class has
 //! a defined set of mandatory detectors that must run for coverage to be
 //! considered complete. If a mandatory detector is missing or unavailable,
@@ -25,7 +25,7 @@ use crate::url_discovery::URL_DISCOVERY_DETECTOR_ID;
 /// Detector ID for the mandatory-coverage validator itself.
 const MANDATORY_COVERAGE_DETECTOR_ID: &str = "arbitraitor-analysis.mandatory-coverage";
 
-/// Registry of mandatory detectors per artifact class (spec §9 invariant 1).
+/// Registry of mandatory detectors per artifact class.
 ///
 /// Zero-sized: the coverage matrix is static and encoded in
 /// [`Self::mandatory_detectors`]. The registry is intentionally not
@@ -109,7 +109,7 @@ fn missing_detector_finding(detector_id: &str, artifact_sha256: &Sha256Digest) -
         confidence: Confidence::Confirmed,
         title: format!("Mandatory detector '{detector_id}' did not run"),
         description: format!(
-            "Spec §9 invariant 1 requires mandatory detector '{detector_id}' to complete \
+            "Mandatory detector '{detector_id}' must complete \
              before any artifact byte is released. The detector was not registered or did \
              not run for this artifact class. Per invariant 6 (fail closed), the verdict \
              is Block."
@@ -125,7 +125,7 @@ fn missing_detector_finding(detector_id: &str, artifact_sha256: &Sha256Digest) -
             "Register the '{detector_id}' detector or add it to the analysis coordinator \
              before releasing this artifact."
         )),
-        references: vec!["Arbitraitor spec section 9".to_owned()],
+        references: Vec::new(),
         tags: vec![
             "mandatory-detector".to_owned(),
             "incomplete-analysis".to_owned(),

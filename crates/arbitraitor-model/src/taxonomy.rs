@@ -1,5 +1,5 @@
 //! Taxonomy reference types for multi-category finding classification
-//! per spec v0.5 §15.2.
+//! per the v0.5 specification.
 //!
 //! A finding may carry zero, one, or many taxonomy references (CWE, CAPEC,
 //! OWASP, ATT&CK, or project-specific) so SARIF consumers can roll up

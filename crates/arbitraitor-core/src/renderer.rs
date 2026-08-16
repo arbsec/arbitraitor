@@ -1,4 +1,4 @@
-//! Untrusted-text presentation renderer (spec §25.0, ADR-0016).
+//! Untrusted-text presentation renderer (ADR-0016).
 //!
 //! All URLs, headers, filenames, source text, package metadata, detector
 //! evidence, and plugin messages are untrusted. The renderer must:
@@ -23,7 +23,7 @@ const MAX_OUTPUT_CHARS: usize = 10_000;
 /// Maximum line length before wrapping.
 const MAX_LINE_LENGTH: usize = 512;
 
-/// Renders untrusted text as visible-but-inert output per spec §25.0.
+/// Renders untrusted text as visible-but-inert output.
 ///
 /// Control characters are escaped as `[U+NNNN]` rather than removed, so
 /// reviewers can see that they were present in the source. Non-printing

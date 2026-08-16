@@ -776,7 +776,7 @@ fn entry(indicator_type: IndicatorType, value: &str, source_class: FeedSourceCla
     }
 }
 
-// ---- AnalysisBudget tests (spec §41.16) ----
+// ---- AnalysisBudget tests ----
 
 #[test]
 fn budget_defaults_are_conservative() {
@@ -905,7 +905,7 @@ fn default_pipeline_flags_javascript_persistence() {
     );
 }
 
-// ---- Mandatory detector coverage tests (spec §9 invariant 1) ----
+// ---- Mandatory detector coverage tests ----
 
 #[test]
 fn mandatory_coverage_passes_when_all_mandatory_detectors_ran() {
@@ -940,7 +940,7 @@ fn mandatory_coverage_emits_block_finding_when_detector_missing()
     assert_eq!(missing.detector, "arbitraitor-analysis.mandatory-coverage");
     assert!(
         missing.tags.iter().any(|tag| tag == "invariant-1"),
-        "finding must reference spec invariant 1"
+        "finding must reference invariant 1"
     );
     assert_eq!(result.verdict, Verdict::Block);
     Ok(())

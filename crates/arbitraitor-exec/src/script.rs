@@ -731,10 +731,8 @@ mod tests {
         let result = script.execute(source.as_bytes())?;
         assert_eq!(result.exit_code, Some(0));
 
-        match receiver.recv()? {
-            Ok(bytes) => assert_eq!(&bytes, b"ping"),
-            Err(error) => return Err(error.into()),
-        }
+        let bytes = receiver.recv()??;
+        assert_eq!(&bytes, b"ping");
         accept_thread
             .join()
             .map_err(|_| "loopback accept thread panicked")?;

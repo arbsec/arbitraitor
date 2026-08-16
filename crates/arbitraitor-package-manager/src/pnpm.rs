@@ -1,6 +1,6 @@
 //! pnpm adapter — JavaScript package manager integration via pnpm.
 //!
-//! Implements spec §39.14.1 pnpm row. pnpm has built-in supply-chain features
+//! Implements the pnpm row. pnpm has built-in supply-chain features
 //! (`pnpm audit`, `pnpm install --ignore-scripts`) and a structured lockfile
 //! (`pnpm-lock.yaml`). Arbitraitor extends these with artifact-level inspection.
 
@@ -11,7 +11,7 @@ use crate::recipe::{
     RegistryTool,
 };
 
-/// pnpm registry adapter (spec §39.14.1).
+/// pnpm registry adapter.
 #[derive(Clone, Debug)]
 pub struct PnpmAdapter;
 

@@ -1,4 +1,4 @@
-//! Explanation trace types for policy evaluation (spec §41.14).
+//! Explanation trace types for policy evaluation.
 //!
 //! Every call to [`crate::PolicyEngine::evaluate_with_trace`] returns a
 //! [`PolicyTrace`] alongside the [`Verdict`](arbitraitor_model::verdict::Verdict).

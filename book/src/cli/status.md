@@ -65,7 +65,7 @@ Show store health including disk usage, corruption checks, and garbage collectio
 
 ## Exit codes
 
-`arbitraitor status` follows the stable exit codes defined in spec §29
+`arbitraitor status` follows the stable exit codes
 (see [CLI reference → Exit codes](../cli-reference.md#exit-codes)).
 
 The codes most relevant to `status` are:

@@ -38,34 +38,34 @@ fn zip_lists_and_extracts_multiple_entries() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Locks `ArchiveLimits::default()` to spec §19.2 values. Adding a new
+/// Locks `ArchiveLimits::default()` to documented values. Adding a new
 /// field or changing a default requires extending this test alongside
-/// the spec change so accidental drift is caught at compile-test time.
+/// the documented defaults so accidental drift is caught at compile-test time.
 #[test]
 fn archive_limits_defaults_match_spec_section_19_2() {
     let defaults = ArchiveLimits::default();
-    assert_eq!(defaults.max_depth, 5, "spec §19.2 max_depth = 5");
-    assert_eq!(defaults.max_files, 10_000, "spec §19.2 max_files = 10_000");
+    assert_eq!(defaults.max_depth, 5, "max_depth = 5");
+    assert_eq!(defaults.max_files, 10_000, "max_files = 10_000");
     assert_eq!(
         defaults.max_total_unpacked_bytes, 1_073_741_824,
-        "spec §19.2 max_total_unpacked_bytes = 1 GiB"
+        "max_total_unpacked_bytes = 1 GiB"
     );
     assert_eq!(
         defaults.max_single_file_bytes, 268_435_456,
-        "spec §19.2 max_single_file_bytes = 256 MiB"
+        "max_single_file_bytes = 256 MiB"
     );
     assert_eq!(
         defaults.max_compression_ratio, 200,
-        "spec §19.2 max_compression_ratio = 200"
+        "max_compression_ratio = 200"
     );
     assert_eq!(
         defaults.max_symlinks, 0,
-        "spec §19.2 max_symlinks = 0 (any symlink trips the limit)"
+        "max_symlinks = 0 (any symlink trips the limit)"
     );
     assert_eq!(
         defaults.max_processing_time,
         Duration::from_mins(1),
-        "spec §19.2 max_processing_time = 60 s"
+        "max_processing_time = 60 s"
     );
 }
 

@@ -244,7 +244,7 @@ Recursion depth and total extracted size are bounded to prevent zip bombs and si
 
 ## Sigstore Bundle policy enforcement
 
-Sigstore Bundle consumption is policy-enforced per spec §14.2.1.
+Sigstore Bundle consumption is policy-enforced.
 After `cosign verify-blob` succeeds cryptographically, the bundle is validated
 against a `SigstoreBundlePolicy` that enforces:
 

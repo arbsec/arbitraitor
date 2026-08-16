@@ -119,14 +119,14 @@ Content classification and magic byte detection.
 
 Antivirus adapter trait and implementations.
 
-**Owns:** ClamAV (`clamd` streaming), Microsoft Defender CLI adapter, signature-freshness snapshots (§18.3), macOS stable-facility helpers (`xattr`, `mdfind` per §41.13)
+**Owns:** ClamAV (`clamd` streaming), Microsoft Defender CLI adapter, signature-freshness snapshots, macOS stable-facility helpers (`xattr`, `mdfind`)
 **Must not:** Policy decisions, trust verdicts
 
 ### `arbitraitor-package-manager`
 
 Registry adapter trait and per-tool implementations.
 
-> **Experimental:** This crate is under active development. Adapters provide recipe definitions and lockfile parsing, but full lifecycle enforcement (registry proxy, post-install scan, build sandbox) is not yet wired through the CLI. Per spec §39.14, per-tool adapters should eventually move to first-party plugins. The crate is included for foundational types only.
+> **Experimental:** This crate is under active development. Adapters provide recipe definitions and lockfile parsing, but full lifecycle enforcement (registry proxy, post-install scan, build sandbox) is not yet wired through the CLI. Per-tool adapters should eventually move to first-party plugins. The crate is included for foundational types only.
 
 **Owns:** `RegistryAdapter` trait, cargo/uv/npm/pnpm/yarn/bun adapters, lockfile parsing, build script analysis, lifecycle policy enforcement
 **Must not:** Direct execution, policy override

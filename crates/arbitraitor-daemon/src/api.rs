@@ -73,7 +73,7 @@ pub struct Config {
     /// safe default that prompts on every artifact.
     pub policy_toml: String,
     /// When `true`, the operation queue writes a partial receipt file
-    /// for cancelled operations (spec §37.1). Defaults to `false` so
+    /// for cancelled operations. Defaults to `false` so
     /// deployments that do not need cancellation forensics are
     /// unaffected.
     pub emit_partial_receipt_on_cancel: bool,
@@ -228,7 +228,7 @@ impl ArbitraitorApi {
     }
 
     /// Returns whether the API is configured to emit partial receipts for
-    /// cancelled operations (spec §37.1).
+    /// cancelled operations.
     #[must_use]
     pub fn emit_partial_receipt_on_cancel(&self) -> bool {
         self.emit_partial_receipt_on_cancel

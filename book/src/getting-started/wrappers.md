@@ -71,7 +71,7 @@ Default: `~/.arbitraitor/shims`
 
 This directory is intentionally **not** on any operating system's default
 `PATH`. A namespaced directory avoids silent replacement of system
-binaries (spec §28.7 invariant) and avoids collisions with user-owned
+binaries and avoids collisions with user-owned
 scripts of the same name in `~/.local/bin`.
 
 Override with `--shim-dir`:
