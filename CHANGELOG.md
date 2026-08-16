@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Wrapper
 
+- Passthrough to real binary for help/version invocations (issue #685).
+  When `curl` or `wget` is invoked through the wrapper or shim with only
+  help/version flags (`--help`, `-h`, `--version`, `-V`, `--manual`,
+  `--man`) and no URL argument, Arbitraitor now execs the real binary
+  instead of erroring. Bare invocation without arguments still fails
+  closed because curl/wget read config files (`~/.curlrc`, `~/.wgetrc`)
+  that may specify download URLs. This preserves expected tool behavior
+  for non-download invocations that scripts and shell environments
+  depend on.
 - Multi-URL handling for `arbitraitor wrap` (spec §39.9, issue #531).
   `arbitraitor wrap curl -- URL1 URL2 URL3` now fetches and inspects each
   URL independently, producing separate artifact identities (SHA-256) and

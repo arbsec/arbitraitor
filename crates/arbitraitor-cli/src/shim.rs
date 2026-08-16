@@ -1,5 +1,7 @@
 use std::ffi::OsStr;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use miette::{IntoDiagnostic, Result};
@@ -169,7 +171,11 @@ fn set_shim_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn resolve_real_binary_in_path(tool: &str, shim_dir: &Path, path: &OsStr) -> Result<PathBuf> {
+pub(crate) fn resolve_real_binary_in_path(
+    tool: &str,
+    shim_dir: &Path,
+    path: &OsStr,
+) -> Result<PathBuf> {
     for dir in std::env::split_paths(path) {
         if dir == shim_dir {
             continue;
@@ -201,6 +207,29 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
+}
+
+/// Resolves the real binary for `tool` and execs it with `args`.
+///
+/// Used as a passthrough when the wrapper detects a known-safe
+/// non-networking invocation (e.g. `curl --version`, `curl --help`).
+/// Returns an error only if the real binary cannot be resolved.
+/// On success, this function does not return — the process is replaced.
+#[cfg(unix)]
+pub(crate) fn exec_passthrough(tool: &str, args: &[String]) -> Result<()> {
+    let shim_dir = shim_dir_from_home()?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let real = resolve_real_binary_in_path(tool, &shim_dir, &path)?;
+    let err = std::process::Command::new(&real).args(args).exec();
+    miette::bail!("exec {real:?} failed: {err}");
+}
+
+#[cfg(not(unix))]
+pub(crate) fn exec_passthrough(tool: &str, _args: &[String]) -> Result<()> {
+    miette::bail!(
+        "passthrough for '{tool}' is not supported on non-Unix platforms; \
+         invoke the real binary directly"
+    );
 }
 
 fn shim_statuses(shim_dir: &Path) -> Vec<ShimSlotStatus> {

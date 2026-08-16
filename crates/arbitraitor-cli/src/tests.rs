@@ -1,7 +1,8 @@
 use super::{
     Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
-    emit_wrapper_output, parse_cli_from_args, pipeline::parse_fetch_source, query_daemon_status,
-    wrapper_output_destination, wrapper_url_argument, wrapper_url_arguments, write_status_text,
+    emit_wrapper_output, is_safe_passthrough, parse_cli_from_args, pipeline::parse_fetch_source,
+    query_daemon_status, wrapper_output_destination, wrapper_url_argument, wrapper_url_arguments,
+    write_status_text,
 };
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_fetch::FetchSource;
@@ -2173,4 +2174,115 @@ fn fetch_wrapper_mode_still_parses_tool_and_args() -> Result<(), Box<dyn std::er
         _ => return Err("parsed wrong command".into()),
     }
     Ok(())
+}
+
+#[test]
+fn wrapper_url_argument_returns_none_for_bare_curl() {
+    let args: Vec<String> = Vec::new();
+    let url = wrapper_url_argument(Some("curl"), &args);
+    assert!(
+        url.is_none(),
+        "bare curl with no args should yield None for passthrough"
+    );
+}
+
+#[test]
+fn wrapper_url_argument_returns_none_for_curl_version() {
+    let args: Vec<String> = ["--version"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let url = wrapper_url_argument(Some("curl"), &args);
+    assert!(
+        url.is_none(),
+        "curl --version should yield None for passthrough"
+    );
+}
+
+#[test]
+fn wrapper_url_argument_returns_none_for_curl_help() {
+    let args: Vec<String> = ["--help"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let url = wrapper_url_argument(Some("curl"), &args);
+    assert!(
+        url.is_none(),
+        "curl --help should yield None for passthrough"
+    );
+}
+
+#[test]
+fn wrapper_url_argument_returns_none_for_wget_no_args() {
+    let args: Vec<String> = Vec::new();
+    let url = wrapper_url_argument(Some("wget"), &args);
+    assert!(
+        url.is_none(),
+        "bare wget with no args should yield None for passthrough"
+    );
+}
+
+#[test]
+fn wrapper_url_argument_finds_inline_url_option() {
+    let args: Vec<String> = ["--url=https://example.com/script.sh"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let url = wrapper_url_argument(Some("curl"), &args);
+    assert_eq!(
+        url,
+        Some("https://example.com/script.sh"),
+        "curl --url= must be detected as a URL, not treated as passthrough"
+    );
+}
+
+#[test]
+fn is_safe_passthrough_rejects_bare_invocation() {
+    assert!(!is_safe_passthrough(Some("curl"), &[]));
+    assert!(!is_safe_passthrough(Some("wget"), &[]));
+}
+
+#[test]
+fn is_safe_passthrough_allows_help_and_version() {
+    assert!(is_safe_passthrough(Some("curl"), &["--version".to_owned()]));
+    assert!(is_safe_passthrough(Some("curl"), &["-V".to_owned()]));
+    assert!(is_safe_passthrough(Some("curl"), &["--help".to_owned()]));
+    assert!(is_safe_passthrough(Some("curl"), &["-h".to_owned()]));
+    assert!(is_safe_passthrough(Some("wget"), &["--help".to_owned()]));
+}
+
+#[test]
+fn is_safe_passthrough_rejects_config_file() {
+    assert!(!is_safe_passthrough(
+        Some("curl"),
+        &["--config".to_owned(), "curlrc".to_owned()]
+    ));
+    assert!(!is_safe_passthrough(
+        Some("curl"),
+        &["-K".to_owned(), "curlrc".to_owned()]
+    ));
+    assert!(!is_safe_passthrough(
+        Some("wget"),
+        &["--config".to_owned(), "wgetrc".to_owned()]
+    ));
+    assert!(!is_safe_passthrough(
+        Some("wget"),
+        &["--input-file".to_owned(), "urls.txt".to_owned()]
+    ));
+    assert!(!is_safe_passthrough(
+        Some("wget"),
+        &["-i".to_owned(), "urls.txt".to_owned()]
+    ));
+}
+
+#[test]
+fn is_safe_passthrough_rejects_url_with_unknown_flags() {
+    assert!(!is_safe_passthrough(
+        Some("curl"),
+        &["--url=https://example.com".to_owned()]
+    ));
+    assert!(!is_safe_passthrough(
+        Some("curl"),
+        &["-s".to_owned(), "--version".to_owned()]
+    ));
 }

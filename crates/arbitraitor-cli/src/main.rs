@@ -631,12 +631,14 @@ where
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
     let (url, output_path, remote_name) = if command.tool.is_some() {
         let target = wrapper_fetch_target(command.tool.as_deref())?;
-        let url =
-            wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
-                miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
-            })?;
-        let (output_path, remote_name) =
-            wrapper_output_destination(command.tool.as_deref(), &command.args);
+
+        if is_safe_passthrough(command.tool.as_deref(), &command.args)
+            && wrapper_url_argument(command.tool.as_deref(), &command.args).is_none()
+        {
+            let tool = command.tool.as_deref().unwrap_or("curl");
+            shim::exec_passthrough(tool, &command.args)?;
+        }
+
         match target {
             Some(WrapperTarget::Curl) => {
                 let parsed = parse_curl_args(&command.args).into_diagnostic()?;
@@ -656,7 +658,13 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
             }
             None => {}
         }
-        (url.to_string(), output_path, remote_name)
+        let url =
+            wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
+                miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
+            })?;
+        let (output_path, remote_name) =
+            wrapper_output_destination(command.tool.as_deref(), &command.args);
+        (url.to_owned(), output_path, remote_name)
     } else {
         let url = command
             .args
@@ -730,6 +738,12 @@ async fn wrap(command: WrapCommand, config: &Config) -> Result<()> {
 async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
     let tool = Some(command.tool.as_str());
     let target = wrapper_fetch_target(tool)?;
+
+    if is_safe_passthrough(tool, &command.args)
+        && wrapper_url_arguments(tool, &command.args).is_empty()
+    {
+        shim::exec_passthrough(&command.tool, &command.args)?;
+    }
 
     match target {
         Some(WrapperTarget::Curl) => {
@@ -938,6 +952,24 @@ fn wrapper_url_argument<'a>(tool: Option<&str>, args: &'a [String]) -> Option<&'
     }
 }
 
+/// Returns true if the arguments are a known-safe non-networking invocation
+/// that should passthrough to the real binary.
+///
+/// Only explicit help/version/manual flags are allowed. Bare invocation
+/// (no args) is NOT safe because curl reads `~/.curlrc` and wget reads
+/// `~/.wgetrc` by default, which can specify URLs for download.
+fn is_safe_passthrough(_tool: Option<&str>, args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    args.iter().all(|arg| {
+        matches!(
+            arg.as_str(),
+            "--help" | "-h" | "--version" | "-V" | "--manual" | "--man"
+        )
+    })
+}
+
 fn wrapper_url_arguments(tool: Option<&str>, args: &[String]) -> Vec<String> {
     match tool.and_then(WrapperTarget::from_binary_name) {
         Some(WrapperTarget::Curl) => parse_curl_args(args)
@@ -953,7 +985,13 @@ fn wrapper_url_arguments(tool: Option<&str>, args: &[String]) -> Vec<String> {
 fn curl_url_argument(args: &[String]) -> Option<&str> {
     let parsed = parse_curl_args(args).ok()?;
     let url = parsed.url.as_deref()?;
-    args.iter().map(String::as_str).find(|arg| *arg == url)
+    args.iter()
+        .map(String::as_str)
+        .find(|arg| *arg == url)
+        .or_else(|| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("--url=").filter(|v| *v == url))
+        })
 }
 
 fn wget_url_argument(args: &[String]) -> Option<&str> {
