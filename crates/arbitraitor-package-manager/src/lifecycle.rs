@@ -1,4 +1,4 @@
-//! Lifecycle script extraction from `package.json` (spec §39.14.3).
+//! Lifecycle script extraction from `package.json`.
 //!
 //! Pure parser — no I/O, no subprocess. The advisory scanner feeds it raw
 //! `package.json` bytes (root or registry-fetched) and receives the ordered
@@ -14,7 +14,7 @@ use serde::Deserialize;
 /// `npm install`; `test`, `start`, `build`, etc. are user-invoked and are
 /// NOT lifecycle scripts. Order matches npm's execution order.
 ///
-/// Spec §39.14.3: `preinstall` → `install` → `postinstall` run on each
+/// `preinstall` → `install` → `postinstall` run on each
 /// package during install; `prepare` runs after install on the root and on
 /// packed packages; `prepublish` is deprecated but still executes in some
 /// npm versions for backwards compatibility.

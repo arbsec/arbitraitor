@@ -1,6 +1,6 @@
 //! Bun adapter — JavaScript runtime and package manager.
 //!
-//! Implements spec §39.14.1 bun row. Bun ships a Security Scanner API
+//! Implements the bun row. Bun ships a Security Scanner API
 //! and a `bun.lock` format (YAML since v1.2). Arbitraitor integrates via
 //! registry proxy and post-install scanning.
 
@@ -11,7 +11,7 @@ use crate::recipe::{
     RegistryTool,
 };
 
-/// Bun registry adapter (spec §39.14.1).
+/// Bun registry adapter.
 #[derive(Clone, Debug)]
 pub struct BunAdapter;
 

@@ -5,7 +5,7 @@
 //! installed plugins. The registry owns metadata only — it never executes
 //! plugin code.
 //!
-//! See `docs/spec/` §39.19 (Plugin registry) and ADR 0011 for the trust model.
+//! See `docs/spec/` (Plugin registry) and ADR 0011 for the trust model.
 
 #![forbid(unsafe_code)]
 
@@ -341,8 +341,7 @@ fn home_arbitraitor_dir() -> Option<PathBuf> {
 /// MUST reject unknown schema versions — see [`RegistryMetadata::SCHEMA_VERSION`].
 pub const REGISTRY_METADATA_SCHEMA_VERSION: u32 = 1;
 
-/// Outcome of verifying the publisher's signature over the release metadata
-/// (spec §39.20).
+/// Outcome of verifying the publisher's signature over the release metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignatureStatus {
@@ -354,8 +353,7 @@ pub enum SignatureStatus {
     Invalid,
 }
 
-/// Outcome of verifying a provenance attestation against the release artifact
-/// (spec §39.20).
+/// Outcome of verifying a provenance attestation against the release artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvenanceStatus {
@@ -367,7 +365,7 @@ pub enum ProvenanceStatus {
     Missing,
 }
 
-/// Result of an external security audit of the release (spec §39.20).
+/// Result of an external security audit of the release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityAuditStatus {
@@ -379,8 +377,7 @@ pub enum SecurityAuditStatus {
     Failed,
 }
 
-/// Result of conformance testing against the supported plugin API version
-/// (spec §39.20).
+/// Result of conformance testing against the supported plugin API version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConformanceStatus {
@@ -392,7 +389,7 @@ pub enum ConformanceStatus {
     Pending,
 }
 
-/// Lifecycle state of a release (spec §39.20).
+/// Lifecycle state of a release.
 ///
 /// `Active` releases are eligible for installation. `Revoked` releases MUST be
 /// rejected by the registry loader regardless of any other field.
@@ -405,7 +402,7 @@ pub enum RevocationStatus {
     Revoked,
 }
 
-/// Rollout plan for a staged release (spec §39.20).
+/// Rollout plan for a staged release.
 ///
 /// `percentage` is the fraction of eligible hosts that should receive the
 /// release (0–100 inclusive). `target_audience` names the cohort that should
@@ -442,7 +439,7 @@ impl StagedRollout {
 }
 
 /// State of a permission-diff review between the currently-installed release
-/// and the proposed update (spec §39.20).
+/// and the proposed update.
 ///
 /// The registry loader MUST refuse to install an update while the diff is
 /// `PendingApproval` and MUST refuse to install updates whose diff is
@@ -459,7 +456,7 @@ pub enum PermissionDiffStatus {
     PendingApproval,
 }
 
-/// Recorded publisher or operator revocation of a plugin release (spec §39.20).
+/// Recorded publisher or operator revocation of a plugin release.
 ///
 /// Multiple revocations may exist for the same `(plugin_id, version)` pair —
 /// the most recent entry by `revoked_at` is authoritative.
@@ -478,7 +475,7 @@ pub struct RevocationEntry {
     pub reason: String,
 }
 
-/// Signed metadata describing a published plugin release (spec §39.20).
+/// Signed metadata describing a published plugin release.
 ///
 /// This is the artifact the registry loader evaluates to decide whether an
 /// update is admissible: signature and provenance must verify, revocation

@@ -1,4 +1,4 @@
-//! Python and JavaScript script detectors (spec §16.3).
+//! Python and JavaScript script detectors.
 //!
 //! Narrow initial coverage for the two most prevalent scripting ecosystems in
 //! untrusted artifact payloads. The detector scans source bytes for risky
@@ -23,7 +23,7 @@ use crate::{AnalysisContext, Detector, DetectorError, DetectorMetadata};
 const PYJS_DETECTOR_ID: &str = "arbitraitor-analysis.python-js";
 
 /// Detector that scans Python and JavaScript sources for risky patterns
-/// described in spec §16.3.
+/// described in the spec.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PythonJsDetector;
 
@@ -115,7 +115,7 @@ impl PyJsRule {
                  produce false positives in legitimate automation code."
                     .to_owned(),
             ),
-            references: vec!["Arbitraitor spec section 16.3".to_owned()],
+            references: Vec::new(),
             tags: vec!["python-js".to_owned(), self.tag.to_owned()],
             taxonomies: Vec::new(),
         }

@@ -1,4 +1,4 @@
-//! Community governance controls for the threat-intelligence feed (spec §22).
+//! Community governance controls for the threat-intelligence feed.
 //!
 //! Complements [`crate::submission`], [`crate::review`], and
 //! [`crate::transparency`] with the missing governance pieces called out in
@@ -39,8 +39,7 @@ pub enum ModerationAction {
     Revoke,
 }
 
-/// A moderator-driven action over a feed indicator, signed for audit
-/// (spec §22 community governance).
+/// A moderator-driven action over a feed indicator, signed for audit.
 ///
 /// The detached [`FeedSignature`] attests that the moderator with
 /// `moderator_id` produced the action at `timestamp`. Verifiers can
@@ -62,8 +61,7 @@ pub struct SignedModerationAction {
     pub timestamp: u64,
 }
 
-/// Public record that an indicator has been revoked from the feed
-/// (spec §22 revocation history).
+/// Public record that an indicator has been revoked from the feed.
 ///
 /// Revocation is permanent: a revoked indicator is removed from active
 /// matching and surfaced in the public revocation list. The detached

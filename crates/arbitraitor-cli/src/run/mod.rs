@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use self::run_services::DefaultRunServices;
 use crate::approval::ApprovalFile;
 
-// Spec §29 exit codes. The constants below are kept as private aliases so
+// Exit-code constants. The constants below are kept as private aliases so
 // the historical `i32`-typed call sites in this module can switch to
 // `ExitCode` incrementally without a wide-bore refactor in this PR.
 const EXIT_SUCCESS: i32 = ExitCode::Success.as_i32();
@@ -66,7 +66,7 @@ pub struct RunCommand {
     #[arg(long, value_name = "PATH")]
     pub approve: Option<PathBuf>,
 
-    /// Sign the receipt with the specified method (spec §31.3).
+    /// Sign the receipt with the specified method.
     ///
     /// Methods: `minisign` (default), `cosign`, `enterprisekey`, `tpm`.
     /// Only `minisign` is implemented; other methods return a

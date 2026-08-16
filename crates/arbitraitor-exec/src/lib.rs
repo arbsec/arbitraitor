@@ -679,7 +679,7 @@ pub struct ExecutionPolicy {
 }
 
 /// Builds an [`EnvAllowlist`] from an execution configuration's
-/// `allow_environment` list (spec §26.5).
+/// `allow_environment` list.
 ///
 /// Each entry is matched as an exact variable name. Pre-existing
 /// [`EnvAllowlist::default_names`] behavior is preserved when the
@@ -694,7 +694,7 @@ pub fn env_allowlist_from_config(cfg: &ExecutionConfig) -> Result<EnvAllowlist, 
 }
 
 /// Builds an [`EnvDenyList`] from an execution configuration's
-/// `deny_environment_patterns` list (spec §26.5).
+/// `deny_environment_patterns` list.
 ///
 /// Each entry is treated as a prefix that matches any variable name
 /// starting with that string. Defaults are the union of the historic
@@ -818,7 +818,7 @@ pub struct EffectiveControls {
     /// Effective Landlock ABI version observed when filesystem isolation uses Landlock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landlock_abi_version: Option<LandlockAbiVersion>,
-    /// Whether `io_uring` is available on the host kernel (spec §27.3).
+    /// Whether `io_uring` is available on the host kernel.
     ///
     /// `Some(true)` signals that `io_uring` bypasses seccomp; receipt
     /// consumers should recommend `sysctl kernel.io_uring_disabled=1`.
@@ -830,7 +830,7 @@ pub struct EffectiveControls {
     /// consumers should recommend `sysctl kernel.unprivileged_userns_clone=0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub userns_available: Option<bool>,
-    /// Container runtime version probed from the host (spec §27.3).
+    /// Container runtime version probed from the host.
     ///
     /// `Some` when a container runtime (`runc` or `containerd`) is detected.
     /// When `cve_vulnerable` is `true`, receipt consumers should refuse
@@ -861,11 +861,11 @@ pub struct ControlProofs {
     pub resource_limits: Option<String>,
     /// Effective Landlock ABI version backing the filesystem-isolation proof.
     pub landlock_abi_version: Option<LandlockAbiVersion>,
-    /// Whether `io_uring` is available on the host kernel (spec §27.3).
+    /// Whether `io_uring` is available on the host kernel.
     pub io_uring_available: Option<bool>,
     /// Whether unprivileged user namespaces are available without host restriction.
     pub userns_available: Option<bool>,
-    /// Container runtime version probed from the host (spec §27.3).
+    /// Container runtime version probed from the host.
     pub container_runtime: Option<ContainerRuntime>,
 }
 
@@ -1199,7 +1199,7 @@ impl ExecutionContextBuilder {
     }
 
     /// Replaces the environment allowlist and denylist with values derived
-    /// from the supplied execution configuration (spec §26.5).
+    /// from the supplied execution configuration.
     ///
     /// `cfg.allow_environment` entries are matched as exact variable names.
     /// `cfg.deny_environment_patterns` entries are matched as prefixes

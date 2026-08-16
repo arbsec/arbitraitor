@@ -1,6 +1,6 @@
 //! VEX (Vulnerability Exploitability eXchange) statement model.
 //!
-//! Implements the VEX consumption model from spec §19.5: a discovered VEX
+//! Implements the VEX consumption model: a discovered VEX
 //! statement is parsed into a [`VexStatement`] that records the issuer,
 //! subject, status, and justification. The anti-suppression rules are
 //! enforced by the policy engine, not this module.
@@ -260,7 +260,7 @@ pub enum VexJustification {
 
 /// A parsed VEX statement discovered as a companion artifact.
 ///
-/// Per spec §19.5, VEX statements are recorded as `verifies` edges. The
+/// VEX statements are recorded as `verifies` edges. The
 /// anti-suppression policy (5 binding conditions + invariant 21 exclusions)
 /// is evaluated by the policy engine, not this struct.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +307,7 @@ pub struct CompanionArtifact {
     pub format: CompanionFormat,
 }
 
-/// File extensions that indicate companion artifacts (spec §19.5).
+/// File extensions that indicate companion artifacts.
 /// First-level entries only — deeper entries are ignored.
 const COMPANION_EXTENSIONS: &[(&str, CompanionFormat)] = &[
     (".cdx.json", CompanionFormat::CycloneDx),

@@ -87,7 +87,7 @@ pub struct Finding {
     pub references: Vec<String>,
     /// Machine-readable tags for grouping or policy matching.
     pub tags: Vec<String>,
-    /// Multi-taxonomy references (CWE, CAPEC, OWASP, etc.) per spec §15.2.
+    /// Multi-taxonomy references (CWE, CAPEC, OWASP, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taxonomies: Vec<TaxonomyRef>,
 }

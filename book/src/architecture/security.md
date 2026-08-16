@@ -146,7 +146,7 @@ When Level 3 (Contained) execution is requested, the following controls are veri
 These are reported per-control in the receipt, not as a single boolean.
 Landlock ABI probing and receipt recording are documented in ADR 0028.
 
-## macOS containment (§27.4)
+## macOS containment
 
 macOS `contained` assurance has two complementary paths:
 
@@ -163,7 +163,7 @@ macOS `contained` assurance has two complementary paths:
   requests downgrade to `mediated` (or `block` per policy).
 
 Receipts on macOS 26+ record `containerization_available` alongside the
-other §27.7 effective-controls so auditors can distinguish
+other effective-controls so auditors can distinguish
 `contained-on-containerization` from `contained-on-other-adapter`.
 
 <!-- markdownlint-disable-next-line MD057 -->

@@ -1,5 +1,5 @@
 //! Receipt fields for registry-based package-manager operations
-//! per spec §39.14.5.
+//! per the spec.
 
 use arbitraitor_model::ids::Sha256Digest;
 
@@ -8,7 +8,7 @@ use arbitraitor_model::ids::Sha256Digest;
 pub enum LifecycleScriptStatus {
     /// Scripts were denied (`--ignore-scripts` enforced).
     Denied,
-    /// Scripts ran for policy-approved packages only (§39.14.3).
+    /// Scripts ran for policy-approved packages only.
     PolicyApproved,
     /// Scripts ran inside a sandbox.
     Sandboxed,
@@ -31,7 +31,7 @@ pub enum ProxyMode {
     PostInstallScan,
 }
 
-/// Capability grant recorded per spec §39.14.4.
+/// Capability grant recorded per the spec.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityGrant {
     /// Capability name (e.g. `parse_argv`, `read_lockfile`, `spawn_tool`).
@@ -41,7 +41,7 @@ pub struct CapabilityGrant {
 }
 
 /// Receipt data recorded for each registry-mediated operation
-/// (spec §39.14.5).
+/// in the spec.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageManagerReceipt {
     /// The wrapped tool name.
@@ -62,6 +62,6 @@ pub struct PackageManagerReceipt {
     pub build_sandbox: Option<String>,
     /// The proxy mode used.
     pub proxy_mode: ProxyMode,
-    /// Capability grants exercised by the adapter (§39.14.4).
+    /// Capability grants exercised by the adapter.
     pub capabilities: Vec<CapabilityGrant>,
 }

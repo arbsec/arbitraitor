@@ -1,8 +1,8 @@
-//! Legacy v1 receipt format for migration to the v2 envelope schema
-//! (spec §31.1).
+//! Legacy v1 receipt format for migration to the v2 envelope schema.
 //!
 //! [`ReceiptV1`] mirrors the pre-envelope flat receipt structure
-//! (`schema_version` = 1). It is used by [`crate::Receipt::parse`] to//! transparently migrate v1 JSON receipts to the current v2 envelope
+//! (`schema_version` = 1). It is used by [`crate::Receipt::parse`] to
+//! transparently migrate v1 JSON receipts to the current v2 envelope
 //! structure via [`crate::Receipt::from_v1`].
 
 use arbitraitor_analysis::PayloadGraph;
@@ -27,7 +27,7 @@ pub struct ReleaseInfoV1 {
 /// Legacy v1 receipt format (flat structure, `schema_version` = 1).
 ///
 /// Used by [`crate::Receipt::parse`] to migrate v1 receipts to the current
-/// envelope structure (spec §31.1).
+/// envelope structure.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ReceiptV1 {
     #[allow(dead_code)]

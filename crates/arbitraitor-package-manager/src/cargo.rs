@@ -1,6 +1,6 @@
 //! Cargo adapter — first registry-based package-manager integration.
 //!
-//! Implements spec §39.14.1 cargo row. Cargo has no first-party proxy support;
+//! Implements the cargo row. Cargo has no first-party proxy support;
 //! the binding constraint is `build.rs` executing outside any registry
 //! boundaries. This adapter combines:
 //!
@@ -20,7 +20,7 @@ use crate::recipe::{
     RegistryTool,
 };
 
-/// Cargo registry adapter (spec §39.14.1).
+/// Cargo registry adapter.
 #[derive(Clone, Debug)]
 pub struct CargoAdapter;
 

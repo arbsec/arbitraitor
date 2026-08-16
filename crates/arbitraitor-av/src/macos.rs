@@ -1,4 +1,4 @@
-//! macOS stable-facility helpers (spec §41.13).
+//! macOS stable-facility helpers.
 //!
 //! These helpers wrap the stable macOS CLI utilities `xattr` and `mdfind`
 //! so the AV crate can read quarantine provenance and Spotlight metadata

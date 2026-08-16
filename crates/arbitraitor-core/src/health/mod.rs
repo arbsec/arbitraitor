@@ -46,7 +46,7 @@ pub struct HealthReport {
     pub checks: HashMap<String, ComponentHealth>,
 }
 
-/// Doctor health status serialized in spec §28.8 form.
+/// Doctor health status serialized in the documented form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
@@ -394,7 +394,7 @@ impl HealthChecker {
         }))
     }
 
-    /// Reports detector coverage posture (spec §9 invariant 1, spec §29 code 33).
+    /// Reports detector coverage posture.
     ///
     /// The 5 built-in MVP detectors (archive-hazards, artifact, python-js,
     /// shell, url-discovery) always run via
@@ -403,7 +403,7 @@ impl HealthChecker {
     /// `arbitraitor scan`/`arbitraitor run` invokes them. This check
     /// surfaces the *additional* external coverage layers (YARA rule packs,
     /// explicit detector version probes, AV adapters, plugins, policy file)
-    /// that compose the full §9 boundary. When external coverage is absent,
+    /// that compose the full coverage boundary. When external coverage is absent,
     /// analysis still runs on the built-in baseline, but doctor propagates
     /// the degradation as [`HealthStatus::Warn`] so operators can decide
     /// whether to wire additional layers or rely on the MVP baseline for
@@ -432,7 +432,7 @@ impl HealthChecker {
             HealthStatus::Warn,
             "external detector rule packs and detector probes not configured; \
              5 built-in MVP detectors still run on every fetch (archive-hazards, artifact, \
-             python-js, shell, url-discovery) — wire additional layers for full §9 coverage; \
+             python-js, shell, url-discovery) — wire additional layers for full coverage; \
              see also av_adapters, plugin_manifests, and policy_validity checks",
         )
     }

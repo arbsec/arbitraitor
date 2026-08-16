@@ -61,7 +61,7 @@ pub struct UpdateTarget {
     pub path: TargetPath,
     /// Expected SHA-256 digest encoded as 64 lowercase hex characters.
     pub sha256: Sha256Digest,
-    /// Optional binary release provenance (spec §34.3). Only present on
+    /// Optional binary release provenance. Only present on
     /// the `BinaryRelease` channel — carries SBOM reference, Sigstore
     /// bundle path, and reproducible-build info.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,13 +236,13 @@ pub enum UpdateChannel {
     TrustRoot,
     /// Plugin registry metadata.
     PluginRegistry,
-    /// Binary release channel for Arbitraitor itself (spec §34.3).
+    /// Binary release channel for Arbitraitor itself.
     /// Carries SHA-256 digests, Sigstore bundles, SBOMs, and
     /// reproducible-build information for release artifacts.
     BinaryRelease,
 }
 
-/// Binary release provenance (spec §34.3).
+/// Binary release provenance.
 ///
 /// Carries SBOM reference, Sigstore bundle path, and reproducible-build
 /// information for release artifacts on the `BinaryRelease` channel.
@@ -253,7 +253,7 @@ pub struct ReleaseProvenance {
     pub sbom_path: Option<String>,
     /// Path to the Sigstore bundle artifact relative to the target.
     pub sigstore_bundle_path: Option<String>,
-    /// Whether the build was verified as reproducible (spec §34.3).
+    /// Whether the build was verified as reproducible.
     pub reproducible: bool,
 }
 

@@ -60,7 +60,7 @@ pub struct ReleasePolicy {
     pub final_mode: Option<u32>,
     /// Maximum age of the verdict before release. When set, release will
     /// fail with [`ReleaseError::StaleVerdict`] if the verdict was
-    /// computed more than this duration ago (spec §26.2 step 4).
+    /// computed more than this duration ago.
     pub verdict_max_age: Option<Duration>,
     /// Timestamp when the verdict was computed. Caller populates this
     /// from the verdict result so the release layer can check freshness.
@@ -123,7 +123,7 @@ pub enum ReleaseMethod {
     AtomicRename,
     /// Atomic publication was unavailable and policy approved a non-atomic copy.
     NonAtomicCopy,
-    /// Artifact bytes were emitted to stdout (spec §26.1) — used by
+    /// Artifact bytes were emitted to stdout — used by
     /// `scan --emit-on-pass` and wrapper pipe semantics. The bytes are
     /// still verified against the scanned digest before emission.
     StdoutEmit,
@@ -193,7 +193,7 @@ pub enum ReleaseError {
         /// Safe diagnostic reason.
         reason: String,
     },
-    /// Verdict is too old to safely release (spec §26.2 step 4).
+    /// Verdict is too old to safely release.
     #[error("verdict is stale: computed {verdict_age_secs}s ago, max allowed is {max_age_secs}s")]
     StaleVerdict {
         /// Age of the verdict in seconds.
@@ -249,7 +249,7 @@ pub fn release_artifact_with_provenance(
     )
 }
 
-/// Emits the exact CAS bytes to stdout (spec §26.1).
+/// Emits the exact CAS bytes to stdout.
 ///
 /// Used by `scan --emit-on-pass` and wrapper pipe semantics. The bytes
 /// are verified against `scanned_digest` before emission, preserving
@@ -321,7 +321,7 @@ pub fn emit_artifact_to_stdout(
     })
 }
 
-/// Verifies the verdict is fresh enough to safely release (spec §26.2 step 4).
+/// Verifies the verdict is fresh enough to safely release.
 ///
 /// When `verdict_max_age` is set on the policy and `verdict_timestamp` is
 /// provided, the function checks that the verdict was computed within the

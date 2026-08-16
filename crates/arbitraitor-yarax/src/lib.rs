@@ -358,7 +358,7 @@ impl RulePackManager {
         Ok(YaraScanner::from_rule_packs(self.packs.clone(), rules))
     }
 
-    /// Compiles all packs with a compiled-rule cache (spec §17).
+    /// Compiles all packs with a compiled-rule cache.
     ///
     /// The cache is keyed by a snapshot digest computed from all loaded
     /// rule pack namespaces, versions, and rule text. If the packs haven't

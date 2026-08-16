@@ -47,7 +47,7 @@ const RECURSIVE_PAYLOAD_DETECTOR_ID: &str = "arbitraitor-analysis.recursive-payl
 const PAYLOAD_ORIGIN_ROOT_TAG: &str = "payload-origin:root";
 const PAYLOAD_ORIGIN_ENTRY_TAG: &str = "payload-origin:archive-entry";
 
-/// Global resource budget for analysis operations (spec §41.16).
+/// Global resource budget for analysis operations.
 ///
 /// Bounds recursive graph expansion across bytes, nodes, and depth to
 /// prevent resource exhaustion through hostile archives or deep
@@ -62,8 +62,7 @@ pub struct AnalysisBudget {
     /// Maximum recursion depth in the payload graph.
     pub max_depth: u32,
     /// When true, fixes detector ordering and disables nondeterministic
-    /// concurrency so the same input produces the same receipt bytes
-    /// (spec §41.16).
+    /// concurrency so the same input produces the same receipt bytes.
     pub deterministic_mode: bool,
 }
 
@@ -138,7 +137,7 @@ impl AnalysisBudget {
 /// Distinguishes "no findings found" — the detector completed successfully and
 /// found nothing to report ([`Verdict::Pass`]) — from "could not analyze" — the
 /// detector encountered an error and produced no results ([`Verdict::Incomplete`]).
-/// This preserves security invariant §6 (fail closed): a detector error is never
+/// This preserves the fail-closed security invariant: a detector error is never
 /// "clean."
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum DetectorError {
@@ -285,7 +284,7 @@ impl AnalysisCoordinator {
     /// [`AnalysisCoordinator::with_detectors`] — that path sorts by id and
     /// applies per-detector timeouts uniformly.
     ///
-    /// Dropping any built-in detector here weakens spec §9 invariant 1
+    /// Dropping any built-in detector here weakens mandatory detector coverage
     /// (mandatory coverage); see
     /// [`mandatory::MandatoryDetectorRegistry::mandatory_detectors`]. The
     /// coordinator would emit `Severity::Critical` findings on artifacts
@@ -321,7 +320,7 @@ impl AnalysisCoordinator {
         self
     }
 
-    /// Sets the global analysis budget (spec §41.16).
+    /// Sets the global analysis budget.
     #[must_use]
     pub const fn with_budget(mut self, budget: AnalysisBudget) -> Self {
         self.budget = budget;
@@ -542,7 +541,7 @@ fn issue_to_finding(issue: PayloadIssue) -> Finding {
         remediation: Some(
             "Review the artifact manually or adjust policy limits before release.".to_owned(),
         ),
-        references: vec!["Arbitraitor spec section 20.1".to_owned()],
+        references: Vec::new(),
         tags: vec!["recursive-payload".to_owned(), tag.to_owned()],
         taxonomies: Vec::new(),
     }
@@ -918,8 +917,6 @@ fn rewrite_artifact_digest(
         .collect()
 }
 
-const COMPANION_REFERENCE: &str = "https://github.com/arbsec/arbitraitor/blob/main/docs/spec/spec.md#195-companion-artifact-consumption-sbom-vex";
-
 fn discover_companion_findings(
     entries: &[arbitraitor_archive::ArchiveEntry],
     ctx: &AnalysisContext<'_>,
@@ -950,7 +947,7 @@ fn companion_finding(
         confidence: Confidence::Confirmed,
         title: format!("Discovered {format_name} companion artifact"),
         description: format!(
-            "Archive entry '{}' is a {format_name}. Per spec §19.5, its contents are recorded as evidence — SBOM components become references, VEX statements may downgrade vulnerability severity under anti-suppression rules.",
+            "Archive entry '{}' is a {format_name}. Its contents are recorded as evidence — SBOM components become references, VEX statements may downgrade vulnerability severity under anti-suppression rules.",
             artifact.name
         ),
         evidence: vec![Evidence {
@@ -964,7 +961,7 @@ fn companion_finding(
         artifact_sha256: ctx.artifact_sha256.clone(),
         location: None,
         remediation: None,
-        references: vec![COMPANION_REFERENCE.to_owned()],
+        references: Vec::new(),
         tags: vec![
             "companion-artifact".to_owned(),
             format!("{:?}", artifact.format).to_ascii_lowercase(),

@@ -54,7 +54,7 @@ fn evaluate_root_policy(running_as_root: bool, allow_root: bool) -> RootPolicyOu
 /// Refuses to continue when running as root.
 ///
 /// Writes a clear error to stderr and exits with status code 60
-/// (`InternalInvariantFailure` per spec §29) if the effective user ID is
+/// (`InternalInvariantFailure`) if the effective user ID is
 /// 0. Call this at the very start of every entry point (`main`, daemon
 /// boot, MCP server boot, plugin-host boot) before any untrusted content
 /// is parsed, scanned, or executed.
@@ -101,7 +101,7 @@ fn exit_as_root() -> ! {
          --allow-root for the doctor diagnostic command only."
     );
     let _ = std::io::stderr().flush();
-    // Spec §29 code 60: Internal integrity invariant failure.
+    // Exit code 60: internal integrity invariant failure.
     // Mirrors `arbitraitor_model::exit_code::ExitCode::InternalInvariantFailure`.
     // See the doc comment on `refuse_root` for the rationale on duplicating
     // the constant here instead of taking a model dependency.

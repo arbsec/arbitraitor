@@ -1,4 +1,4 @@
-//! Caller-origin classification for the policy engine per spec §23.1.1.
+//! Caller-origin classification for the policy engine.
 //!
 //! Every operation request carries a caller-origin class. Policy may branch
 //! on this class to express rules such as "an MCP request from server X
@@ -25,15 +25,15 @@ pub enum CallerOrigin {
     /// Request from a pre-configured CI identity (run ID, repository,
     /// environment). Medium trust — binding established at install time.
     Ci,
-    /// Request from an MCP server (transport-bound, see §33). Medium trust
-    /// when local; low when remote until §33.6 is implemented.
+    /// Request from an MCP server (transport-bound). Medium trust when local;
+    /// low when remote until remote transport binding is implemented.
     McpServer,
     /// Request from an agent session (self-reported session ID from a trusted
     /// integrator). Low trust — session IDs are self-reported unless bound to
     /// `HumanTty` approval.
     AgentSession,
     /// Request from the local daemon (Unix-socket peer cred on the daemon
-    /// socket, §40.2). Medium trust — matches the daemon's authenticated local
+    /// socket). Medium trust — matches the daemon's authenticated local
     /// user.
     DaemonLocal,
     /// Default for requests where the origin could not be determined.

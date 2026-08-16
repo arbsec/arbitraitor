@@ -1,4 +1,4 @@
-//! Tirith subprocess detector (spec §46.1).
+//! Tirith subprocess detector.
 //!
 //! Integrates the [Tirith](https://github.com/sheeki03/tirith) terminal-command
 //! security scanner as a subprocess detector. Tirith is AGPL-3.0-only; subprocess

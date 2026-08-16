@@ -135,7 +135,7 @@ impl FetchSource {
 
 /// Shared, thread-safe cancellation flag for a fetch operation.
 ///
-/// Per spec §41.4.6, callers can hand a token to a long-running fetch and
+/// Callers can hand a token to a long-running fetch and
 /// observe or signal cancellation from another thread without taking
 /// ownership of the [`Fetcher`] or the [`FetchRequest`]. The flag is
 /// monotonic: once [`Self::cancel`] has been called, [`Self::is_cancelled`]
@@ -189,7 +189,7 @@ pub struct FetchRequest {
     pub cancellation: FetchCancellation,
     /// Credential-bearing request headers configured by the caller.
     pub credentials: RequestCredentials,
-    /// User-supplied request headers (spec §11.2).
+    /// User-supplied request headers.
     ///
     /// These are non-credential headers the caller wants attached to the
     /// outgoing request (e.g. `Accept`, `X-Custom-Header`). Credential
@@ -293,7 +293,7 @@ impl FetchRequest {
         self
     }
 
-    /// Adds a user-supplied request header (spec §11.2).
+    /// Adds a user-supplied request header.
     ///
     /// Use this for non-credential headers like `Accept` or `X-Custom-Header`.
     /// For `Authorization` and `Cookie` headers, use
@@ -356,12 +356,12 @@ pub enum TlsVerifier {
 /// Transport policy applied by fetchers.
 ///
 /// Each bool field is a documented security policy axis with an explicit
-/// fail-closed or fail-open default tied to a spec section. Clippy's
+/// fail-closed or fail-open default. Clippy's
 /// `struct_excessive_bools` lint is allowed here because converting these
 /// to two-variant enums would obscure the TOML deserialization surface
 /// (a TOML bool is the natural authoring shape for a security policy)
-/// and make the relationship between a policy field and its spec
-/// citation harder to audit.
+/// and make the relationship between a policy field and its documented
+/// behavior harder to audit.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct FetchPolicy {
@@ -392,14 +392,14 @@ pub struct FetchPolicy {
     pub allow_loopback_addresses: bool,
     /// Allows a redirect to downgrade from HTTPS to HTTP.
     ///
-    /// Fail-closed by default (ADR-0018 §Redirect handling). Even when both
+    /// Fail-closed by default (ADR-0018 redirect handling). Even when both
     /// schemes are permitted by [`FetchPolicy::allowed_schemes`], a downgrade
     /// from HTTPS to HTTP strips transport encryption and is blocked unless a
     /// caller explicitly opts in here.
     pub allow_https_to_http_redirect: bool,
     /// Allows redirect chains that cross origin boundaries (scheme/host/port).
     ///
-    /// Defaults to `true` per spec §11.4 — the common case (release artifact
+    /// Defaults to `true` — the common case (release artifact
     /// hosted on a different CDN) legitimately crosses origins. When `false`,
     /// any redirect to a different origin is rejected with
     /// [`FetchError::CrossOriginRedirect`].
@@ -407,25 +407,25 @@ pub struct FetchPolicy {
     /// Allows `Authorization` and `Cookie` headers to be forwarded across
     /// origins during a redirect chain.
     ///
-    /// Fail-closed by default (`false`) per spec §11.2. When `false`, any
+    /// Fail-closed by default (`false`). When `false`, any
     /// redirect that lands on a different origin triggers a forced strip of
     /// credential-bearing headers and all user-supplied headers from
     /// subsequent requests in the chain. When `true`, the original headers
     /// are preserved.
     pub forward_authorization_cross_origin: bool,
-    /// Optional proxy URL (spec §11.2, ADR-0018). When `None` (default),
+    /// Optional proxy URL (ADR-0018). When `None` (default),
     /// all proxy behavior is disabled via `.no_proxy()`. When `Some`,
     /// reqwest is configured with the given proxy URL.
     pub proxy_url: Option<String>,
     /// Whether DNS resolution and target address selection are performed
-    /// by the proxy rather than locally (spec §11.2, ADR-0018). When
+    /// by the proxy rather than locally (ADR-0018). When
     /// `true`, the receipt records that connected-peer verification
     /// observes the proxy, not the actual target.
     pub behind_proxy: bool,
     /// Requires callers to provide an expected SHA-256 digest before fetching.
     pub require_digest: bool,
     /// Maximum time to wait for the first response byte after the request is
-    /// sent (spec §41.4.6). Distinct from `connect_timeout` (TCP/TLS only)
+    /// sent. Distinct from `connect_timeout` (TCP/TLS only)
     /// and `total_timeout` (whole-operation budget). `None` disables the
     /// deadline; callers that need an upper bound on time-to-first-byte for
     /// hung or extremely slow servers set this explicitly.
@@ -484,20 +484,20 @@ pub struct FetchMetadata {
     pub final_url: Option<FetchUrl>,
     /// Redirect chain followed by Arbitraitor policy.
     pub redirect_chain: Vec<FetchUrl>,
-    /// HTTP response status code (spec §11.5). `None` for non-HTTP sources.
+    /// HTTP response status code. `None` for non-HTTP sources.
     pub response_status: Option<u16>,
-    /// Selected response headers (spec §11.5). Only headers safe for
+    /// Selected response headers. Only headers safe for
     /// receipt recording (no Authorization, Cookie, Set-Cookie).
     pub selected_headers: Vec<(String, String)>,
-    /// Transfer encoding as observed by the transport (spec §11.5).
+    /// Transfer encoding as observed by the transport.
     pub transfer_encoding: Option<String>,
-    /// Final origin (scheme + host + port) after all redirects (spec §11.5).
+    /// Final origin (scheme + host + port) after all redirects.
     pub final_origin: Option<String>,
-    /// Retriever version string (spec §11.5).
+    /// Retriever version string.
     pub retriever_version: String,
     /// Cross-protocol redirect credential-secrecy outcome.
     pub redirect_credential_secrecy: RedirectCredentialSecrecy,
-    /// Names of user-supplied request headers (spec §11.2).
+    /// Names of user-supplied request headers.
     ///
     /// Records header **names only** — values are never included — so the
     /// receipt proves which headers were sent without leaking secrets.
@@ -1422,7 +1422,7 @@ fn header_to_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
         .map(str::to_owned)
 }
 
-/// Extracts response headers safe for receipt recording (spec §11.5).
+/// Extracts response headers safe for receipt recording.
 /// Excludes Authorization, Cookie, Set-Cookie, and other credential-bearing headers.
 fn extract_safe_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     const SAFE_HEADER_NAMES: &[&str] = &[
@@ -1480,7 +1480,7 @@ fn ensure_scheme_allowed(
 
 /// Verifies the post-connect peer address matches an approved resolved address.
 ///
-/// ADR-0018 §DNS rebinding defense: after the transport connects, the actual
+/// ADR-0018 DNS rebinding defense: after the transport connects, the actual
 /// peer address (reported via `getpeername` by reqwest) must be one of the
 /// addresses that passed policy validation during resolution. A mismatch
 /// indicates DNS rebinding between resolution and connection.
@@ -1508,7 +1508,7 @@ pub(crate) fn verify_connected_peer(
     Ok(())
 }
 
-/// Enforces HTTPS→HTTP redirect downgrade policy (ADR-0018 §Redirect handling).
+/// Enforces HTTPS→HTTP redirect downgrade policy (ADR-0018 redirect handling).
 ///
 /// A redirect from HTTPS to HTTP removes transport encryption. This is blocked
 /// by default even when both schemes are allowed by policy. Callers must
@@ -1530,8 +1530,7 @@ pub(crate) fn ensure_no_insecure_downgrade(
     Ok(())
 }
 
-/// Enforces cross-origin redirect policy (spec §11.2 lines 608-612, §11.4
-/// lines 644-653).
+/// Enforces cross-origin redirect policy.
 ///
 /// Two URLs are same-origin when scheme, host, and port all match. When
 /// [`FetchPolicy::allow_cross_origin_redirect`] is `false`, any redirect to
@@ -1574,7 +1573,7 @@ fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port() == b.port()
 }
 
-/// Merges user-supplied headers into the request header map (spec §11.2).
+/// Merges user-supplied headers into the request header map.
 ///
 /// Returns the lowercased header names that were inserted so the redirect
 /// loop can strip them on cross-origin hops. Credential headers
@@ -1608,7 +1607,7 @@ fn merge_user_headers(
 }
 
 /// Strips credential-bearing headers when the redirect crosses origin
-/// boundaries and the policy does not allow forwarding (spec §11.2).
+/// boundaries and the policy does not allow forwarding.
 ///
 /// When `forward_authorization_cross_origin` is `false`, any redirect
 /// that lands on a different origin (scheme + host + port) triggers
@@ -1930,7 +1929,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Cross-origin redirect policy (spec §11.2, §11.4)
+    // Cross-origin redirect policy
     // -----------------------------------------------------------------
 
     #[test]
@@ -1938,7 +1937,7 @@ mod tests {
         let policy = FetchPolicy::default();
         assert!(
             policy.allow_cross_origin_redirect,
-            "default policy must allow cross-origin redirects (spec §11.4 default = true; \
+            "default policy must allow cross-origin redirects (default = true; \
              GitHub release → CDN is the common case)"
         );
     }
@@ -1948,7 +1947,7 @@ mod tests {
         let policy = FetchPolicy::default();
         assert!(
             !policy.forward_authorization_cross_origin,
-            "default policy must block cross-origin Authorization forwarding (spec §11.2; \
+            "default policy must block cross-origin Authorization forwarding (\
              fail-closed credential-leak defence)"
         );
     }
@@ -2036,7 +2035,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Credential stripping on cross-origin redirects (spec §11.2)
+    // Credential stripping on cross-origin redirects
     // -----------------------------------------------------------------
 
     #[test]
@@ -2192,7 +2191,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Cancellation tokens (spec §41.4.6)
+    // Cancellation tokens
     // -----------------------------------------------------------------
 
     #[test]
@@ -2247,7 +2246,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // First-byte timeout (spec §41.4.6)
+    // First-byte timeout
     // -----------------------------------------------------------------
 
     #[test]

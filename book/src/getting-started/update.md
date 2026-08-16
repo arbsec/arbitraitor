@@ -1,6 +1,6 @@
 # Verifying Update Manifests
 
-Verify a signed update manifest (spec §34) using a minisign public key:
+Verify a signed update manifest using a minisign public key:
 
 ```sh
 arbitraitor update verify manifest.json --key pubkey.pub

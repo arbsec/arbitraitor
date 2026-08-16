@@ -1,4 +1,4 @@
-//! Rollback protection for the update client (spec §34.4).
+//! Rollback protection for the update client.
 //!
 //! The [`RollbackStore`] persists the latest-seen manifest version per signed
 //! update channel and rejects older snapshots on subsequent fetches. Operators

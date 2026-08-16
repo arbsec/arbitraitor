@@ -115,7 +115,7 @@ pub struct Config {
     pub execution: ExecutionConfig,
     /// Artifact integrity requirements.
     pub integrity: IntegrityConfig,
-    /// Stage-specific timeouts (spec §37.3).
+    /// Stage-specific timeouts.
     pub timeouts: TimeoutConfig,
     /// Metrics collection and structured operation logging settings.
     pub metrics: MetricsConfig,
@@ -127,28 +127,28 @@ pub struct Config {
 pub struct FetchConfig {
     /// Maximum followed redirects.
     pub max_redirects: u32,
-    /// Whole-operation timeout in seconds (spec §37.3).
+    /// Whole-operation timeout in seconds.
     pub total_timeout_secs: u64,
     /// Maximum bytes accepted from transport.
     pub max_bytes: u64,
     /// Whether cross-origin redirects are permitted. Defaults to `true`
-    /// (spec §11.4). When `false`, any redirect to a different scheme,
+    /// When `false`, any redirect to a different scheme,
     /// host, or port is blocked.
     pub allow_cross_origin: bool,
     /// Whether credential-bearing headers (`Authorization`, `Cookie`) may
     /// be forwarded across origins during a redirect chain. Defaults to
-    /// `false` (spec §11.2). When `false`, cross-origin redirects trigger
+    /// `false`. When `false`, cross-origin redirects trigger
     /// a forced strip of credential-bearing headers.
     pub forward_authorization_cross_origin: bool,
-    /// DNS resolution timeout in seconds (spec §37.3). Defaults to 5.
+    /// DNS resolution timeout in seconds. Defaults to 5.
     pub dns_timeout_secs: u64,
-    /// TCP connect timeout in seconds (spec §37.3). Defaults to 10.
+    /// TCP connect timeout in seconds. Defaults to 10.
     pub connect_timeout_secs: u64,
-    /// TLS handshake timeout in seconds (spec §37.3). Defaults to 10.
+    /// TLS handshake timeout in seconds. Defaults to 10.
     pub tls_timeout_secs: u64,
-    /// Response header timeout in seconds (spec §37.3). Defaults to 10.
+    /// Response header timeout in seconds. Defaults to 10.
     pub response_header_timeout_secs: u64,
-    /// Idle read timeout in seconds (spec §37.3). Defaults to 30.
+    /// Idle read timeout in seconds. Defaults to 30.
     pub idle_read_timeout_secs: u64,
 }
 
@@ -169,19 +169,19 @@ impl Default for FetchConfig {
     }
 }
 
-/// Analysis timeout configuration (spec §37.3).
+/// Analysis timeout configuration.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct TimeoutConfig {
-    /// Per-detector timeout in seconds (spec §37.3). Defaults to 30.
+    /// Per-detector timeout in seconds. Defaults to 30.
     pub detector_timeout_secs: u64,
-    /// Archive expansion timeout in seconds (spec §37.3). Defaults to 60.
+    /// Archive expansion timeout in seconds. Defaults to 60.
     pub archive_expansion_timeout_secs: u64,
-    /// Recursive payload graph timeout in seconds (spec §37.3). Defaults to 120.
+    /// Recursive payload graph timeout in seconds. Defaults to 120.
     pub recursive_graph_timeout_secs: u64,
-    /// Sandbox execution timeout in seconds (spec §37.3). Defaults to 30.
+    /// Sandbox execution timeout in seconds. Defaults to 30.
     pub sandbox_execution_timeout_secs: u64,
-    /// External scanner invocation timeout in seconds (spec §37.3). Defaults to 60.
+    /// External scanner invocation timeout in seconds. Defaults to 60.
     pub external_scanner_timeout_secs: u64,
 }
 
@@ -328,8 +328,8 @@ pub struct ExecutionConfig {
     /// Default values are the canonical mediated-execution allowlist
     /// (`LANG`, `LC_ALL`, `TERM`, `PATH`). Override via `arbitraitor.toml`
     /// to tighten (subset) or loosen (superset) what may reach the child.
-    /// Each entry is matched as an exact variable name. Per spec §26.5
-    /// the existing hardcoded constants are preserved as the serde defaults.
+    /// Each entry is matched as an exact variable name. The existing hardcoded
+    /// constants are preserved as the serde defaults.
     #[serde(default = "default_allow_environment")]
     pub allow_environment: Vec<String>,
     /// Environment variable deny patterns.
@@ -339,8 +339,8 @@ pub struct ExecutionConfig {
     /// denylist and the historic prefix denylist (treating every entry as
     /// a prefix is strictly tighter than exact match and safe by default).
     /// Override via `arbitraitor.toml` to customize what is unconditionally
-    /// stripped from the child environment. Per spec §26.5 the existing
-    /// hardcoded constants are preserved as the serde defaults.
+    /// stripped from the child environment. The existing hardcoded constants
+    /// are preserved as the serde defaults.
     #[serde(default = "default_deny_environment_patterns")]
     pub deny_environment_patterns: Vec<String>,
 }
@@ -438,7 +438,7 @@ impl Default for ExecutionConfig {
     }
 }
 
-/// Returns the default mediated-execution environment allowlist (spec §26.5).
+/// Returns the default mediated-execution environment allowlist.
 ///
 /// Mirrors the historical `EnvAllowlist::default_names()` constant in
 /// `arbitraitor-exec`. Kept duplicated here so `arbitraitor-core` does not
@@ -450,8 +450,7 @@ fn default_allow_environment() -> Vec<String> {
         .collect()
 }
 
-/// Returns the default mediated-execution environment deny patterns
-/// (spec §26.5).
+/// Returns the default mediated-execution environment deny patterns.
 ///
 /// Mirrors the historical `EnvDenyList::mandatory()` constant in
 /// `arbitraitor-exec`. Every entry is treated as a prefix by the policy

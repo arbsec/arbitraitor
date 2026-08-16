@@ -1,7 +1,7 @@
 //! Explainability output for shell analysis findings.
 //!
 //! Turns raw [`Finding`] records into human-readable explanations and
-//! actionable recommendations. See spec §16.5 (Explainability).
+//! actionable recommendations. See the spec for explainability.
 
 #![forbid(unsafe_code)]
 

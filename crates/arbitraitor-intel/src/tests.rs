@@ -249,7 +249,7 @@ fn is_expired_is_true_when_expiration_is_in_the_past() {
 
 #[test]
 fn is_expired_uses_strict_inequality_at_boundary() {
-    // Spec §21.6: an entry is expired once `now` is strictly past `expires_at`.
+    // An entry is expired once `now` is strictly past `expires_at`.
     // At the exact expiration timestamp the entry is still considered fresh.
     let mut entry = sample_entry(sample_indicator(IndicatorType::Sha256, &"dd".repeat(32)));
     entry.expires_at = Some("2026-07-20T00:00:00Z".to_owned());

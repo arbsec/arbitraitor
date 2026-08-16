@@ -8,7 +8,7 @@
 //! [`is_critical_wget_option`]) while passing through non-critical ones with
 //! reduced confidence.
 //!
-//! Per spec §39.9, flags that disable transport safety guarantees (currently
+//! Flags that disable transport safety guarantees (currently
 //! `--no-check-certificate`) are surfaced as [`arbitraitor_model::Finding`]
 //! entries on the returned [`WgetRequest`] instead of being silently dropped,
 //! so the wrapper caller can raise the appropriate verdict.
@@ -71,7 +71,7 @@ pub fn is_critical_wget_option(option: &str) -> bool {
 pub struct WgetRequest {
     /// First URL to retrieve.
     pub url: String,
-    /// All positional URLs observed on the command line (spec §39.9).
+    /// All positional URLs observed on the command line.
     ///
     /// Multi-URL invocations must create independent artifact identities and
     /// verdicts. The first entry mirrors `url`; subsequent entries are
@@ -89,7 +89,7 @@ pub struct WgetRequest {
     pub max_redirect: Option<u32>,
     /// Whether `--no-check-certificate` disabled TLS verification.
     pub no_check_certificate: bool,
-    /// Findings produced during argv translation (spec §39.9). Callers must
+    /// Findings produced during argv translation. Callers must
     /// surface these so dangerous flags cannot be silently dropped.
     pub findings: Vec<Finding>,
     /// Unsupported options observed while parsing. Non-critical options are
@@ -363,7 +363,7 @@ fn reject_inline_value(flag: &str, inline: Option<&str>) -> Result<(), WrapperEr
 
 /// Builds the list of [`Finding`]s reported for a parsed invocation.
 ///
-/// Per spec §39.9 the wrapper must surface dangerous transport-affecting flags
+/// The wrapper must surface dangerous transport-affecting flags
 /// instead of silently dropping them. The artifact digest is a zero placeholder
 /// because translation happens before any bytes are retrieved.
 fn build_findings(parser: &WgetParser<'_>) -> Vec<Finding> {

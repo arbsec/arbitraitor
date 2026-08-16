@@ -1,4 +1,4 @@
-//! VEX anti-suppression rules (spec §19.5, invariant 21).
+//! VEX anti-suppression rules.
 //!
 //! A VEX statement may downgrade the severity of a vulnerability finding,
 //! but only when all five binding conditions are met. Only `PackageRisk`
@@ -86,7 +86,7 @@ pub enum VexDenyReason {
 
 /// Validates whether a VEX statement may downgrade a finding's severity.
 ///
-/// Per spec §19.5, all five conditions must be true:
+/// All five conditions must be true:
 /// 1. VEX issuer is in the trust root
 /// 2. VEX subject matches the artifact's digest or coordinate
 /// 3. VEX status is `not_affected` or `fixed`

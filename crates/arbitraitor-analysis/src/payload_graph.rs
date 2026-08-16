@@ -1,4 +1,4 @@
-//! Payload graph for recursive artifact discovery (spec §20).
+//! Payload graph for recursive artifact discovery.
 //!
 //! Each artifact is a node identified by its SHA-256 digest. Edges represent
 //! relationships between artifacts: downloads, decodes-to, executes, loads,
@@ -22,7 +22,7 @@ pub enum PayloadGraphError {
     },
 }
 
-/// Directed edge between two payload graph nodes (spec §20.1).
+/// Directed edge between two payload graph nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadEdgeType {
@@ -67,7 +67,7 @@ pub struct PayloadEdge {
     pub edge_type: PayloadEdgeType,
 }
 
-/// Payload graph recording artifacts and their relationships (spec §20).
+/// Payload graph recording artifacts and their relationships.
 ///
 /// Each node is an artifact identified by its SHA-256 digest. Edges represent
 /// downloads, decodes-to, executes, loads, installs, references, and verifies

@@ -14,7 +14,7 @@ use crate::trace::{PolicyTrace, RuleEvaluation};
 /// network constraint produced the final block.
 const NETWORK_CONSTRAINT_ID: &str = "__network__";
 
-/// Ordered policy precedence level from spec §23.5.
+/// Ordered policy precedence level from the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PolicyPrecedence {
     /// Organization-managed policy.
@@ -177,7 +177,7 @@ impl PolicyEngine {
 
     /// Evaluates findings and context against the policy, producing both a
     /// verdict and a [`PolicyTrace`] explaining which rules were considered
-    /// and why each matched or did not (spec §41.14).
+    /// and why each matched or did not.
     ///
     /// The trace records every rule in source order plus a synthetic
     /// `__network__` entry whenever a hard network constraint produced the
@@ -963,7 +963,7 @@ impl MatchOp {
                 ScalarValue::Bool(_) => false,
             }),
 
-            // --- NotIn (complement of OneOf; spec §23.1.1 example) ---
+            // --- NotIn (complement of OneOf; example) ---
             (MatchOp::NotIn(scalars), FieldValue::Text { canonical, .. }) => {
                 !scalars.iter().any(|s| normalize_scalar(s) == *canonical)
             }
@@ -1215,7 +1215,7 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         "source_url",
         "artifact_type",
     ];
-    // Forward-compatible namespaces accepted per spec §23.1, §23.1.1, §23.3.
+    // Forward-compatible namespaces accepted by policy.
     // Field paths within these namespaces are accepted by the parser but
     // only resolve to values when the caller's EvalContext carries the
     // corresponding data (tracked in #488).

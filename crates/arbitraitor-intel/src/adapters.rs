@@ -1,4 +1,4 @@
-//! Threat-intelligence feed adapters required by specification §21.5.
+//! Threat-intelligence feed adapters.
 
 use std::fs;
 use std::path::{Path, PathBuf};

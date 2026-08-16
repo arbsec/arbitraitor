@@ -1,4 +1,4 @@
-//! Stable CLI exit codes per spec §29.
+//! Stable CLI exit codes.
 //!
 //! Every Arbitraitor exit code has a stable numeric value and a documented
 //! meaning. Machine consumers should primarily use structured output
@@ -20,8 +20,8 @@
 //!
 //! ## Adding a new exit code
 //!
-//! 1. Document the code and its trigger in spec §29 first.
-//! 2. Add the variant here with the spec's numeric value.
+//! 1. Document the code and its trigger first.
+//! 2. Add the variant here with its numeric value.
 //! 3. Add a regression test in the `tests` module below that asserts the
 //!    numeric value matches the spec.
 //! 4. Update the exit-code table in `book/src/cli-reference.md`.
@@ -29,7 +29,7 @@
 
 use crate::verdict::Verdict;
 
-/// Stable CLI exit code per spec §29.
+/// Stable CLI exit code.
 ///
 /// Numeric values are fixed by the spec; do **not** renumber them. Existing
 /// consumers (CI pipelines, shell scripts, MCP clients) depend on the values
@@ -130,7 +130,7 @@ pub enum ExitCode {
     ExecutionFailed = 50,
     /// `60` — Internal integrity invariant failure.
     ///
-    /// One of the security invariants in spec §9 was violated: starting
+    /// One of the security invariants was violated: starting
     /// Arbitraitor as root, hash mismatch between scan and release, missing
     /// CAS object after approval, or any other condition the design treats
     /// as a non-recoverable invariant breach.
@@ -191,7 +191,7 @@ impl From<Verdict> for ExitCode {
     }
 }
 
-/// Canonical verdict-to-exit-code mapping point per spec §23.2 + §29.
+/// Canonical verdict-to-exit-code mapping point.
 ///
 /// This is the named entry point the daemon and CLI use to convert a
 /// [`Verdict`] into the stable [`ExitCode`] they hand back to the operating
@@ -328,10 +328,10 @@ mod tests {
         for code in all {
             assert!(
                 seen.insert(code.as_i32()),
-                "duplicate numeric value {} — spec §29 mandates uniqueness",
+                "duplicate numeric value {} — exit codes must be unique",
                 code.as_i32()
             );
         }
-        assert_eq!(seen.len(), 16, "spec §29 defines 16 exit codes");
+        assert_eq!(seen.len(), 16, "16 exit codes defined");
     }
 }

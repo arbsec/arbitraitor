@@ -1,7 +1,6 @@
-//! Sigstore Bundle policy enforcement (spec §14.2.1).
+//! Sigstore Bundle policy enforcement.
 //!
-//! Implements policy evaluation for Sigstore Bundle consumption as required by
-//! [spec §14.2.1](../../../.spec/spec.md). The verifier records bundle metadata
+//! Implements policy evaluation for Sigstore Bundle consumption. The verifier records bundle metadata
 //! and policy evaluates:
 //!
 //! - **Bundle version**: media-type must be one of the accepted version strings
@@ -31,8 +30,7 @@ use thiserror::Error;
 
 use crate::{SigstoreVerificationMode, VerificationMaterialForm, determine_material_form};
 
-/// Transparency-log evidence policy for Sigstore Bundle consumption
-/// (spec §14.2.1).
+/// Transparency-log evidence policy for Sigstore Bundle consumption.
 ///
 /// Controls what transparency-log evidence is required. The spec states:
 /// "Each entry's inclusion proof is verified independently. A Bundle with no
@@ -55,12 +53,12 @@ pub enum TlogPolicy {
     /// inclusion proof and an inclusion promise.
     RequireBoth,
     /// Tlog entries are optional; the bundle may rely on RFC 3161 timestamps
-    /// alone. Per spec §14.2.1: "A Bundle with no tlog entry is accepted only
+    /// alone. A Bundle with no tlog entry is accepted only
     /// when policy explicitly permits offline-only mode."
     Optional,
 }
 
-/// Policy governing Sigstore Bundle consumption (spec §14.2.1).
+/// Policy governing Sigstore Bundle consumption.
 ///
 /// Controls which bundle versions, verification material forms, and
 /// transparency-log evidence are accepted. Identity/issuer binding is **not**
@@ -69,8 +67,7 @@ pub enum TlogPolicy {
 ///
 /// # Secure defaults
 ///
-/// [`SigstoreBundlePolicy::new()`] creates a policy with secure defaults per
-/// spec §14.2.1:
+/// [`SigstoreBundlePolicy::new()`] creates a policy with secure defaults.
 ///
 /// | Field | Default | Rationale |
 /// |---|---|---|
@@ -83,19 +80,19 @@ pub enum TlogPolicy {
 #[serde(deny_unknown_fields)]
 pub struct SigstoreBundlePolicy {
     /// Accepted bundle media-type strings. Defaults to all three versions
-    /// (`0.1`, `0.2`, `0.3`) per spec §14.2.1.
+    /// (`0.1`, `0.2`, `0.3`).
     pub accepted_media_types: Vec<String>,
     /// Accepted verification material forms. Defaults to all three forms
-    /// per spec §14.2.1.
+    ///
     pub accepted_forms: Vec<VerificationMaterialForm>,
     /// Transparency-log evidence policy. Defaults to
     /// [`TlogPolicy::RequireInclusionProof`].
     pub tlog_policy: TlogPolicy,
     /// Whether RFC 3161 timestamps are accepted as signing-time evidence
-    /// (spec §14.2.1). Defaults to `true`.
+    /// Defaults to `true`.
     pub accept_rfc3161_timestamps: bool,
     /// Verification mode. Offline by default; online is opt-in and never
-    /// produces a stronger verdict than offline (spec §14.2.1).
+    /// produces a stronger verdict than offline.
     pub verification_mode: SigstoreVerificationMode,
 }
 
@@ -106,7 +103,7 @@ impl Default for SigstoreBundlePolicy {
 }
 
 impl SigstoreBundlePolicy {
-    /// Creates a policy with secure defaults per spec §14.2.1.
+    /// Creates a policy with secure defaults.
     ///
     /// Accepts all three media types, all three verification material forms,
     /// requires inclusion proofs, accepts RFC 3161 timestamps, and uses
@@ -151,7 +148,7 @@ impl SigstoreBundlePolicy {
         self
     }
 
-    /// Validates a Sigstore Bundle against this policy (spec §14.2.1).
+    /// Validates a Sigstore Bundle against this policy.
     ///
     /// Checks:
     /// - `mediaType` is present and in the accepted list.
@@ -186,7 +183,7 @@ impl SigstoreBundlePolicy {
     }
 }
 
-/// Sigstore Bundle policy enforcement errors (spec §14.2.1).
+/// Sigstore Bundle policy enforcement errors.
 ///
 /// Each variant names the specific policy violation so callers can distinguish
 /// "bundle is malformed" from "bundle is well-formed but does not satisfy

@@ -1,4 +1,4 @@
-//! crates.io Cargo RFC #3724 attestation verifier stub (spec §41.12, issue #469).
+//! crates.io Cargo RFC #3724 attestation verifier stub (issue #469).
 //!
 //! Cargo RFC #3724 was accepted Q4 2025 and is rolling to GA in Q3-Q4 2026.
 //! This module provides a policy-side opt-in stub so policy authors can
@@ -9,7 +9,7 @@
 use crate::Result;
 use crate::attestation::AttestationVerifierPolicy;
 
-/// Stub verifier for crates.io Cargo RFC #3724 attestations (spec §41.12).
+/// Stub verifier for crates.io Cargo RFC #3724 attestations.
 ///
 /// Policy-side opt-in is required via
 /// [`AttestationVerifierPolicy::recognize_crates_io`] because the RFC is not

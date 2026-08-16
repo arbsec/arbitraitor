@@ -721,7 +721,7 @@ fn status_falls_back_when_socket_missing() -> Result<(), Box<dyn std::error::Err
 #[tokio::test]
 async fn status_query_returns_none_when_daemon_socket_missing() {
     // A path under /tmp that has no socket bound. The handler must NOT error:
-    // missing-daemon is the documented spec §28.1 fallback path.
+    // missing-daemon is the documented fallback path.
     let socket = unique_temp_path("status-missing-daemon").join("daemon.sock");
     let info = query_daemon_status(&socket).await;
     assert!(
@@ -905,7 +905,7 @@ fn health_marker_renders_distinct_glyph_per_status() {
 #[test]
 fn analysis_coordinator_with_rules_dir_preserves_all_built_in_detectors()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Regression (spec §9 invariant 1): rules_dir must NOT drop the
+    // Regression: rules_dir must NOT drop the
     // built-in MVP detectors — UrlDiscovery is mandatory for HTML/JSON.
     let tempdir = tempfile::tempdir()?;
     let (coordinator, _versions) = crate::pipeline::analysis_coordinator(Some(tempdir.path()))?;

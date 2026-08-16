@@ -451,7 +451,7 @@ fn temp_file_path() -> Result<PathBuf, std::time::SystemTimeError> {
 }
 
 // ---------------------------------------------------------------------------
-// User-supplied headers (spec §11.2, issue #498)
+// User-supplied headers (issue #498)
 // ---------------------------------------------------------------------------
 
 async fn header_capture_server(

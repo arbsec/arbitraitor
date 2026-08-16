@@ -3,8 +3,7 @@
 //! Builds on [`crate::submission`] and [`crate::workflow`] to provide the
 //! review lifecycle. [`ReviewWorkflow`] processes [`Review`] decisions against
 //! a submission and tracks reviewer consensus, while [`AntiAbuseChecker`]
-//! enforces per-submitter rate limits on submissions and disputes
-//! (spec §22.3 anti-abuse controls).
+//! enforces per-submitter rate limits on submissions and disputes.
 //!
 //! All review and dispute types use [`serde`] with `deny_unknown_fields` so
 //! unexpected keys are rejected at the deserialization boundary, matching the
@@ -102,7 +101,7 @@ pub enum DisputePriority {
     High,
 }
 
-/// Manages the review lifecycle for community submissions (spec §22.5).
+/// Manages the review lifecycle for community submissions.
 ///
 /// Construct with [`ReviewWorkflow::new`] for the default policy (2 accepting
 /// reviews required, [`TrustTier::Registered`] minimum to accept), or
@@ -285,8 +284,7 @@ impl Default for ReviewWorkflow {
     }
 }
 
-/// Anti-abuse rate limiter for community intelligence contributions
-/// (spec §22.3).
+/// Anti-abuse rate limiter for community intelligence contributions.
 ///
 /// Enforces per-handle ceilings on submission and dispute frequency. The
 /// caller tracks the recent count per handle (e.g. via the transparency log,
@@ -406,7 +404,7 @@ mod tests {
     use super::*;
     use crate::submission::{SubmitterIdentity, TrustTier};
 
-    /// Minimum trust tier required to render a Reject (spec §22.5).
+    /// Minimum trust tier required to render a Reject.
     const REJECT_MIN_TIER: TrustTier = TrustTier::Verified;
 
     /// Builds a review with sensible defaults for test customization.

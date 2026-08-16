@@ -1,4 +1,4 @@
-//! Append-only transparency log for feed operations (spec §22.4).
+//! Append-only transparency log for feed operations.
 //!
 //! Every mutation of the intelligence feed — a submission accepted, a review
 //! recorded, an indicator expired — is appended to a [`TransparencyLog`] as a

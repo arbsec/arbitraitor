@@ -1,4 +1,4 @@
-//! Dependency vulnerability detector (spec §18.5).
+//! Dependency vulnerability detector.
 //!
 //! Scans artifacts that contain package manifests or lockfiles against a
 //! local OSV/KEV snapshot. Offline-first: the snapshot is passed via the
@@ -6,10 +6,10 @@
 //! and not performed by this detector.
 //!
 //! Findings, not verdicts — the detector does not block release on its own.
-//! Policy interprets the findings per §18.5.
+//! Policy interprets the findings.
 
 // allow: SIZE_OK — the detector, snapshot types, config, and lockfile parsers
-// form a single cohesive module for spec §18.5. Splitting would scatter
+// form a single cohesive module for dependency vulnerability policy. Splitting would scatter
 // tightly-coupled types across files without reducing cognitive load.
 use crate::{AnalysisContext, Detector, DetectorError};
 use arbitraitor_model::artifact::ArtifactKind;
@@ -202,7 +202,7 @@ impl KevSnapshot {
     }
 }
 
-/// Update mode for the dependency-vulnerability detector (spec §18.5).
+/// Update mode for the dependency-vulnerability detector.
 ///
 /// Controls whether the detector may reach the network for advisory
 /// refresh. The default and safest mode is [`OfflineOnly`].
@@ -222,14 +222,14 @@ pub enum DepVulnUpdateMode {
     OnlineWithRedaction,
 }
 
-/// Configuration for the dependency-vulnerability detector (spec §18.5).
+/// Configuration for the dependency-vulnerability detector.
 ///
 /// Per spec: `enabled = "auto"` is forbidden. The detector must be
 /// explicitly enabled with `enabled = true`. The default is `disabled`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DepVulnConfig {
     /// Whether the detector is enabled. Must be explicitly `true` to run.
-    /// Defaults to `false` (disabled) per spec §18.5.
+    /// Defaults to `false` (disabled).
     #[serde(default)]
     pub enabled: bool,
     /// Advisory update mode. Defaults to [`DepVulnUpdateMode::OfflineOnly`].
@@ -244,7 +244,7 @@ pub struct DepVulnConfig {
 }
 
 /// Full dependency-vulnerability detector with config, OSV/KEV snapshots,
-/// and VEX interaction (spec §18.5).
+/// and VEX interaction.
 ///
 /// This detector wraps the lower-level [`DepVulnDetector`] with:
 /// - Explicit enable/disable (spec: `enabled = "auto"` is forbidden).

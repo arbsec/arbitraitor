@@ -1,9 +1,9 @@
-//! Advisory scan analysis for npm (spec §39.14, Phase 1 — advisory mode).
+//! Advisory scan analysis for npm (Phase 1 — advisory mode).
 //!
 //! Pure analysis — no I/O, no subprocess. The caller reads the lockfile and
 //! root `package.json`, parses them, and passes the structured inputs here.
 //! This module derives findings, a verdict, and the
-//! [`PackageManagerReceipt`] per spec §39.14.5.
+//! [`PackageManagerReceipt`] per the spec.
 //!
 //! Phase 1 scope (advisory): lockfile pre-scan + lifecycle detection.
 //! Registry-proxy interception (Phase 2) and tarball byte scanning are
@@ -67,7 +67,7 @@ impl AdvisoryVerdict {
 /// Outcome of an advisory scan.
 #[derive(Clone, Debug)]
 pub struct NpmAdvisoryOutcome {
-    /// The receipt recorded per spec §39.14.5.
+    /// The receipt recorded per the spec.
     pub receipt: PackageManagerReceipt,
     /// Findings raised during the scan.
     pub findings: Vec<PackageFinding>,

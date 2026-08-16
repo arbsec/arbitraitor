@@ -1,4 +1,4 @@
-//! Windows-specific sandbox adapters (spec §27.5).
+//! Windows-specific sandbox adapters.
 //!
 //! These are stub implementations that document the intended adapter
 //! surface for Windows platforms. Actual integration requires Windows
@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-/// Adapter for `Windows Sandbox` (spec §27.5).
+/// Adapter for `Windows Sandbox`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowsSandboxAdapter;
 
@@ -19,7 +19,7 @@ impl WindowsSandboxAdapter {
     }
 }
 
-/// Adapter for `AppContainer` (spec §27.5).
+/// Adapter for `AppContainer`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AppContainerAdapter;
 
@@ -31,7 +31,7 @@ impl AppContainerAdapter {
     }
 }
 
-/// Adapter for `Job Objects` (spec §27.5).
+/// Adapter for `Job Objects`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JobObjectsAdapter;
 
@@ -45,7 +45,7 @@ impl JobObjectsAdapter {
     }
 }
 
-/// Adapter for `WDAC` (spec §27.5).
+/// Adapter for `WDAC`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WdacAdapter;
 
@@ -57,7 +57,7 @@ impl WdacAdapter {
     }
 }
 
-/// Adapter for `Hyper-V` disposable VM (spec §27.5).
+/// Adapter for `Hyper-V` disposable VM.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HyperVAdapter;
 

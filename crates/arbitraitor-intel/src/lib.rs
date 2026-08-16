@@ -111,10 +111,10 @@ pub enum IndicatorType {
     YaraRule,
     /// Campaign label indicator.
     Campaign,
-    /// Fuzzy hash of file content (spec §21.1). Used with TLSH, SSDEEP,
+    /// Fuzzy hash of file content. Used with TLSH, SSDEEP,
     /// or similar algorithms for similarity-based detection.
     FuzzyHash,
-    /// Behavioral signature pattern (spec §21.1). Matches observed
+    /// Behavioral signature pattern. Matches observed
     /// runtime behavior rather than static content.
     BehavioralSignature,
     /// `OpenSSF` malicious-packages OSV `MAL-` advisory identifier.
@@ -229,7 +229,7 @@ pub struct FeedEntry {
     ///
     /// Distinct from [`Self::last_seen`]: `last_seen` records when Arbitraitor
     /// last observed the indicator, while `source_update_time` records when
-    /// the originating feed last touched it. Required by spec §21.6 so callers
+    /// the originating feed last touched it. Required so callers
     /// can distinguish freshly-published indicators from stale feed rows that
     /// simply survived a resync.
     pub source_update_time: Option<String>,
@@ -283,7 +283,7 @@ impl FeedEntry {
     ///
     /// An entry is expired when `expires_at` is set and strictly precedes `now`.
     /// Entries without an expiration timestamp are never expired. This implements
-    /// the spec §21.6 freshness rule: expired indicators should not silently remain
+    /// the freshness rule: expired indicators should not silently remain
     /// blocking unless policy says so, so the moment an entry is past its
     /// expiration it is no longer considered fresh.
     #[must_use]
@@ -736,22 +736,22 @@ fn civil_from_days(days_since_epoch: u64) -> (i64, u64, u64) {
     )
 }
 
-/// Placeholder substituted for redacted values in community reports (spec §22.6).
+/// Placeholder substituted for redacted values in community reports.
 pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
 
 /// Lowercased query parameter keys whose values must be redacted from URLs
-/// before inclusion in community reports (spec §22.6).
+/// before inclusion in community reports.
 ///
 /// Comparison is case-insensitive; the literal key value in the URL is
 /// preserved (only the value is replaced with [`REDACTED_PLACEHOLDER`]).
 const SENSITIVE_QUERY_KEYS: &[&str] = &["token", "secret", "key", "password", "sig", "signature"];
 
 /// Uppercased environment-variable suffixes that mark a variable as sensitive
-/// regardless of value (spec §22.6).
+/// regardless of value.
 const SENSITIVE_ENV_SUFFIXES: &[&str] = &["_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
 
 /// Strips credentials and sensitive query parameters from a URL for safe
-/// inclusion in community reports and feeds (spec §22.6).
+/// inclusion in community reports and feeds.
 ///
 /// Userinfo is removed entirely; only the username/password are dropped so the
 /// host, path, and remaining query survive. Query parameter values whose
@@ -816,7 +816,7 @@ fn redact_query_pair(pair: &str) -> String {
 }
 
 /// Redacts local paths so home-directory and user-prefixed absolute paths
-/// collapse to `~/` for safe inclusion in community reports (spec §22.6).
+/// collapse to `~/` for safe inclusion in community reports.
 ///
 /// Replacement applies in two passes:
 /// 1. If `path` begins with the current value of the `HOME` environment
@@ -862,7 +862,7 @@ fn redact_home_user_prefix(path: &str) -> String {
 
 /// Returns `Some(value)` when `name` is safe to surface in a community
 /// report, and `None` when it matches a sensitive naming pattern
-/// (spec §22.6).
+/// report, and `None` when it matches a sensitive naming pattern.
 ///
 /// Names ending in `_KEY`, `_TOKEN`, `_SECRET`, or `_PASSWORD`
 /// (case-insensitive) are treated as sensitive regardless of value. Other

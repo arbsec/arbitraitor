@@ -132,7 +132,7 @@ emit receipt
 
 ## Exit codes
 
-`arbitraitor run` follows the stable exit codes defined in spec §29
+`arbitraitor run` follows the stable exit codes
 (see also [CLI reference → Exit codes](../cli-reference.md#exit-codes)).
 
 The codes most relevant to `run` are:

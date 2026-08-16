@@ -4,7 +4,7 @@
 //! data flow graph showing how commands feed data to each other through
 //! process substitution, pipes, and redirects.
 //!
-//! See spec §16.1 (Shell analysis) and §16.4 (Semantic normalization).
+//! See the spec for shell analysis and semantic normalization.
 
 #![forbid(unsafe_code)]
 

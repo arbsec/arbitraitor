@@ -26,7 +26,7 @@ use thiserror::Error;
 pub struct CurlArgs {
     /// First URL to retrieve (backward-compatible single-URL accessor).
     pub url: Option<String>,
-    /// All positional URLs observed on the command line (spec §39.9).
+    /// All positional URLs observed on the command line.
     ///
     /// Multi-URL invocations must create independent artifact identities and
     /// verdicts. The first entry mirrors `url`; subsequent entries are

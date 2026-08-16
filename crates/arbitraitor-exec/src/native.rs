@@ -35,7 +35,7 @@ const MACOS_QUARANTINE_XATTR: &str = "com.apple.quarantine";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MACOS_QUARANTINE_VALUE: &[u8] = b"0081;5f123456;arbitraitor;";
 
-/// Platform provenance preservation result (spec §26.4, ADR-0010).
+/// Platform provenance preservation result (ADR-0010).
 ///
 /// Records which platform-native provenance attributes were applied
 /// during release. On Linux this is xattr; on macOS it's quarantine;
@@ -334,7 +334,7 @@ fn apply_platform_quarantine(binary_path: &Path) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// Applies macOS quarantine xattr (spec §26.4, ADR-0010).
+/// Applies macOS quarantine xattr (ADR-0010).
 ///
 /// On macOS, downloaded files receive `com.apple.quarantine` to trigger
 /// Gatekeeper checks. Arbitraitor sets this so files released through it
@@ -362,7 +362,7 @@ fn apply_macos_quarantine(binary_path: &Path) -> Result<(), ExecError> {
     })
 }
 
-/// Applies Windows Mark of the Web (spec §26.4, ADR-0010).
+/// Applies Windows Mark of the Web (ADR-0010).
 ///
 /// On Windows, downloaded files receive a Zone.Identifier alternate data
 /// stream marking them as from the internet (Zone 3). This triggers

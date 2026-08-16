@@ -1,4 +1,4 @@
-//! Integration tests for decoded child artifact discovery (spec §41.4.2).
+//! Integration tests for decoded child artifact discovery.
 
 use std::io::Cursor;
 use std::io::Write;

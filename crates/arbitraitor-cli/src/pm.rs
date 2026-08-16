@@ -1,6 +1,6 @@
 //! `arbitraitor pm` — package-manager advisory scan and gated execution.
 //!
-//! Implements spec §39.14 Phase 1 (advisory mode) for npm: resolves the
+//! Implements Phase 1 (advisory mode) for npm: resolves the
 //! dependency tree via the lockfile, detects lifecycle scripts, derives a
 //! verdict, and gates the real `npm install` behind it. When execution is
 //! allowed, scripts are denied (`--ignore-scripts`) per the npm adapter's
@@ -30,7 +30,7 @@ pub struct PmCommand {
 #[derive(Subcommand)]
 pub enum PmSubcommand {
     /// Run a package manager tool through advisory scan, then execute it
-    /// if the verdict allows (spec §39.14).
+    /// if the verdict allows.
     Run {
         /// Package manager tool to wrap (currently: `npm`).
         #[arg(long)]

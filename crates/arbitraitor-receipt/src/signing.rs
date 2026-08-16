@@ -1,4 +1,4 @@
-//! Receipt signing trait and adapters (spec §31.3).
+//! Receipt signing trait and adapters.
 //!
 //! The [`ReceiptSigner`] trait abstracts over signing backends so receipts can
 //! be signed by minisign (default), Sigstore/cosign, a local enterprise key,
@@ -15,7 +15,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Receipt signing method (spec §31.3).
+/// Receipt signing method.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SigningMethod {
@@ -80,7 +80,7 @@ pub enum SignerError {
     },
 }
 
-/// Trait for receipt signing adapters (spec §31.3).
+/// Trait for receipt signing adapters.
 ///
 /// Implementations receive the RFC 8785 JCS canonical bytes of the unsigned
 /// receipt and return a [`Signature`] to embed in the receipt. The trait is
@@ -98,7 +98,7 @@ pub trait ReceiptSigner: Send + Sync {
     fn method(&self) -> SigningMethod;
 }
 
-/// Minisign receipt signer (spec §31.3, default adapter).
+/// Minisign receipt signer (default adapter).
 ///
 /// Wraps a [`minisign::KeyPair`] and signs receipt canonical bytes using
 /// minisign's Ed25519 + `BLAKE2b` prehash signature scheme. The resulting

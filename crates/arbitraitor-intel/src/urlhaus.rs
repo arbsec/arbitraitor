@@ -8,7 +8,7 @@
 //! else selects CSV.
 //!
 //! Parsed rows become [`FeedEntry`] records with
-//! [`FeedSourceClass::Authoritative`] per specification §21.4, `Block`
+//! [`FeedSourceClass::Authoritative`], `Block`
 //! disposition, `High` severity, and `Confirmed` confidence — matching the
 //! default enforcement table for authoritative sources.
 

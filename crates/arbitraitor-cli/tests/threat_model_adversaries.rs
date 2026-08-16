@@ -1,4 +1,4 @@
-//! Regression tests for spec §8.2 threat-model adversaries added in v0.5.
+//! Regression tests for threat-model adversaries added in v0.5.
 //!
 //! This file covers testable aspects of adversaries 17, 18, 20, and 21.
 //! Adversaries 19 (mandatory scanning coverage) and 22 (privilege-helper

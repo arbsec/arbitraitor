@@ -1,4 +1,4 @@
-//! CLI inspect pipeline tests — Tier 2 per spec §43.8.
+//! CLI inspect pipeline tests — Tier 2.
 //!
 //! Tests that require HTTP backends are in Tier 3 (`cli_pipeline_e2e.rs`).
 

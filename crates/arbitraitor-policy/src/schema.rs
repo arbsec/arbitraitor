@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// limits, provenance requirements, detector configuration, and an ordered
 /// list of matching rules.
 ///
-/// This schema accepts the full spec §23.3 example policy. Field paths
+/// This schema accepts the full example policy. Field paths
 /// beyond `finding.*` and `context.*` (e.g. `caller_origin.class`,
 /// `execution.network`, `integrity.digest_match`, `findings.max_severity`)
 /// are accepted at parse time. Whether they actually resolve to values at
@@ -51,14 +51,14 @@ pub struct Policy {
     #[serde(default)]
     pub integrity: IntegrityConfig,
 
-    /// Provenance + signature requirements (spec §14, §23.3).
+    /// Provenance + signature requirements.
     ///
     /// Parsed and fingerprinted; enforcement at evaluation time is wired
     /// by the analysis pipeline.
     #[serde(default)]
     pub provenance: ProvenanceConfig,
 
-    /// Detector configuration keyed by detector id (spec §15, §23.3).
+    /// Detector configuration keyed by detector id.
     ///
     /// The map accepts arbitrary detector names (e.g. `yara_x`, `clamav`,
     /// `script_ast`). Each detector's `required`/`required_for`/`required_on`
@@ -136,13 +136,13 @@ impl Default for NetworkConfig {
 
 /// HTTP redirect limits.
 ///
-/// Defaults match spec §11.4 (lines 644-653). The cross-origin defaults
+/// Defaults match the spec. The cross-origin defaults
 /// are:
 /// - `allow_cross_origin = true` — most legitimate downloads redirect
 ///   across origins (e.g. GitHub release → CDN).
 /// - `forward_authorization_cross_origin = false` — Authorization
 ///   headers must never silently follow a redirect to a new origin.
-///   This is the critical credential-leak defence from spec §11.2
+///   This is the critical credential-leak defence from the spec
 ///   (lines 608-612); callers opt in to cross-origin credential
 ///   forwarding only when the redirect chain is fully trusted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,7 +169,7 @@ pub struct RedirectsConfig {
     /// Whether `Authorization` (and other credential-bearing) headers
     /// may be forwarded across origins during a redirect chain.
     ///
-    /// Defaults to `false` per spec §11.2. When `false`, any redirect
+    /// Defaults to `false`. When `false`, any redirect
     /// that lands on a different origin triggers a forced strip of
     /// `Authorization` and `Cookie` headers from subsequent requests in
     /// the chain. When `true`, the original headers are preserved.
@@ -234,7 +234,7 @@ pub struct IntegrityConfig {
     pub require_digest: bool,
 }
 
-/// Provenance + signature requirements (spec §14.3, §23.3).
+/// Provenance + signature requirements.
 ///
 /// Parsed into the policy fingerprint; enforcement happens in the
 /// analysis pipeline when the provenance verifier runs (issue #514).
@@ -252,7 +252,7 @@ pub struct ProvenanceConfig {
     pub trusted_sigstore_identities: Vec<SigstoreIdentity>,
 }
 
-/// A trusted Sigstore signer identity (spec §14.3, §23.3 example).
+/// A trusted Sigstore signer identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigstoreIdentity {
@@ -262,7 +262,7 @@ pub struct SigstoreIdentity {
     pub subject: String,
 }
 
-/// Per-detector policy (spec §15, §23.3 example).
+/// Per-detector policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DetectorConfig {
@@ -512,7 +512,7 @@ pub enum MatchOp {
 
     /// Non-membership in a set: matches when the resolved value is not in
     /// the supplied list. Complement of [`OneOf`](Self::OneOf). Used by the
-    /// spec §23.1.1 example policy for `caller_origin.mcp_server_id
+    /// example policy for `caller_origin.mcp_server_id
     /// not_in = ["trusted-mcp-server-1"]`.
     NotIn(Vec<ScalarValue>),
 
@@ -627,7 +627,7 @@ impl Condition {
             // Shorthand: each key → equality match on `finding.<key>`.
             //
             // Special case: if the key ends with `_contains` (e.g.
-            // `tags_contains` from spec §23.3), strip the suffix and use
+            // `tags_contains`), strip the suffix and use
             // the `Contains` operator against the named field (e.g.
             // `finding.tags Contains "<value>"`). This accepts the spec
             // example `[rules.when.finding] tags_contains = "privilege-escalation"`

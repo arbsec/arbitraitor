@@ -137,7 +137,7 @@ Plugins declare capabilities in their WIT interface and cannot exceed them at ru
 | Execution fuel | Bounded (1B instructions default) |
 | Host calls | Bounded by count and deadline |
 
-### Component Model execution (ADR-0006, spec §41.9.1)
+### Component Model execution (ADR-0006)
 
 `WasmPlugin` loads a `.wasm` Component Model binary, instantiates it inside the
 sandboxed Wasmtime engine, and calls the `analyze` export. Host bindings are

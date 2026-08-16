@@ -1181,11 +1181,11 @@ all = []
 }
 
 // ---------------------------------------------------------------------------
-// Spec §23.3 example policy parser regression
+// Example policy parser regression
 // ---------------------------------------------------------------------------
 
-/// Verbatim copy of the spec §23.3 example policy (lines 1828-1897 of
-/// `docs/spec/spec.md`). Used to assert the engine loads the documented
+/// Verbatim copy of the example policy from `docs/spec/spec.md`.
+/// Used to assert the engine loads the documented
 /// example without parse or validation errors. Adding a new operator,
 /// field, or top-level section to the spec example requires extending
 /// this constant alongside the schema change so accidental drift is
@@ -1261,8 +1261,8 @@ all = [
 ]
 "#;
 
-/// Verbatim copy of the spec §23.1.1 example policy (lines 1793-1813 of
-/// `docs/spec/spec.md`). Exercises the `not_in` operator and `caller_origin.*`
+/// Verbatim copy of the example policy from `docs/spec/spec.md`.
+/// Exercises the `not_in` operator and `caller_origin.*`
 /// nested field access.
 const SPEC_SECTION_23_1_1_EXAMPLE_POLICY: &str = r#"
 version = 1
@@ -1291,7 +1291,7 @@ all = [
 #[test]
 fn loads_spec_section_23_3_example_policy() {
     let engine = PolicyEngine::load(SPEC_SECTION_23_3_EXAMPLE_POLICY)
-        .expect("spec §23.3 example policy must parse without errors");
+        .expect("example policy must parse without errors");
     let digest = engine.digest();
     assert!(!digest.is_empty(), "policy digest must be computed");
 }
@@ -1299,7 +1299,7 @@ fn loads_spec_section_23_3_example_policy() {
 #[test]
 fn loads_spec_section_23_1_1_example_policy_with_not_in_and_nested_fields() {
     let engine = PolicyEngine::load(SPEC_SECTION_23_1_1_EXAMPLE_POLICY)
-        .expect("spec §23.1.1 example policy must parse without errors");
+        .expect("example policy must parse without errors");
     let digest = engine.digest();
     assert!(!digest.is_empty(), "policy digest must be computed");
 }

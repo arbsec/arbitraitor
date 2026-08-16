@@ -1,4 +1,4 @@
-//! CLI smoke tests — Tier 2 per spec §43.8.
+//! CLI smoke tests — Tier 2.
 //!
 //! Black-box tests that exercise the `arbitraitor` binary surface:
 //! exit codes, help output, and basic subcommand behavior. These do
