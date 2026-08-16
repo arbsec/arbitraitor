@@ -198,6 +198,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell name exits non-zero, and `--detect-shell` prints the detected
   shell and rcfile path.
 
+#### Doctor
+
+- `--allow-degraded-detectors` flag (and `ARBITRAITOR_ALLOW_DEGRADED_DETECTORS`
+  env var, accepting truthy values `true`/`yes`/`on`/`1`,
+  case-insensitive) on the `doctor` subcommand. Acknowledges dev-build
+  deployment where only the 5 built-in MVP detectors (archive-hazards,
+  artifact, python-js, shell, url-discovery) are running, and suppresses
+  spec §29 exit code 33 when external layers (YARA rule packs, AV
+  adapters, plugins, policy file) are at `Warn`. Does NOT suppress exit
+  33 for `Fail` — the flag is Warn-only.
+- New "Fix detector coverage" guidance section in `doctor` output, printed
+  whenever `detectors` or `av_adapters` is at `Warn` or `Fail`. Points to
+  `[detectors] yara_rule_packs`, `[policy] policy_file`, AV adapter
+  installation, `[plugins] dirs`, and the new
+  `--allow-degraded-detectors` escape hatch.
+
+### Changed
+
+#### Doctor
+
+- **Doctor now exits 33 on detector-coverage `Warn` (spec §29).**
+  Previously `doctor` only treated `Fail` statuses as unhealthy, so a
+  dev build without external YARA rule packs / AV adapters / plugins
+  / policy file exited 0 with every Skipped/Warn row rendered as ✓.
+  Per spec §29 ("Required detector unavailable or stale"), exit code 33
+  is the canonical trigger when detector posture is degraded. Pass
+  `--allow-degraded-detectors` (or set
+  `ARBITRAITOR_ALLOW_DEGRADED_DETECTORS=true`) to acknowledge the
+  MVP baseline and exit 0. `Fail` still triggers 33 regardless of the
+  flag.
+- **Doctor renders distinct per-status markers** — Pass `✓`, Warn `⚠`,
+  Skipped `⌀`, Fail `✗` — instead of lumping every non-Fail status
+  under `✓`. A "6/18 healthy" count now visibly matches the row
+  markers.
+- **`arbitraitor status` Detectors row rewritten.** Previously it
+  reported `Warn: no detectors configured; analysis coverage is
+  unavailable` even though the 5 built-in MVP detectors always run via
+  `AnalysisCoordinator::new()` on every fetch through `wrap_downloader`,
+  `arbitraitor scan`, and `arbitraitor run`. The new message states
+  that the built-in baseline is running and distinguishes the absent
+  external coverage layers (YARA rule packs, AV adapters, plugins) —
+  the Warn is preserved so operators know additional layers are
+  recommended for full §9 coverage.
+
+### Fixed
+
+#### Analysis
+
+- **Fail-closed regression in `pipeline::analysis_coordinator(Some(rules_dir))`**
+  (spec §9 invariant 1). When a YARA rules directory was configured
+  (`arbitraitor scan <file> --rules <dir>`, `arbitraitor inspect` with
+  `--rules`, doctor with `--rules`), the coordinator was rebuilt as
+  `with_detectors([ArtifactDetector, ShellDetector, YaraDetector])`,
+  silently dropping `ArchiveHazardDetector`, `PythonJsDetector`, and
+  `UrlDiscoveryDetector`. Since `UrlDiscoveryDetector` (id
+  `arbitraitor-analysis.url-discovery`) is mandatory for HTML and JSON
+  artifacts per `MandatoryDetectorRegistry::mandatory_detectors`
+  (spec §9 invariant 1), configuring any YARA rules directory caused
+  every HTML/JSON fetch through `arbitraitor wrap curl` and
+  `arbitraitor scan <html|json> --rules <dir>` to emit a
+  `Severity::Critical` mandatory-coverage finding and fail-closed with
+  `Verdict::Block`. The fix preserves all 5 built-in MVP detectors
+  alongside the configured `YaraDetector` via the new
+  `AnalysisCoordinator::default_detectors()` accessor; future additions
+  to the built-in set land in one place. A regression test
+  (`analysis_coordinator_with_rules_dir_preserves_all_built_in_detectors`)
+  verifies the url-discovery detector still runs and emits findings on
+  HTML containing `https://${HOST}/run` template expressions when YARA
+  rules are configured.
+
 ### Changed
 
 #### Receipt

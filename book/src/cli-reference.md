@@ -89,6 +89,42 @@ These numeric values are stable for the lifetime of the project. New codes
 may be added (with a corresponding spec change); existing codes are not
 renumbered.
 
+`arbitraitor doctor` exits 33 not only when a component is at `Fail` but
+also when `detectors` or `av_adapters` is at `Warn` — i.e. the 5 built-in
+MVP detectors (archive-hazards, artifact, python-js, shell, url-discovery)
+are running but external layers (YARA rule packs, AV adapters, plugins,
+policy file) are absent (spec §9 invariant 1, §29). Pass
+`--allow-degraded-detectors` (or set
+`ARBITRAITOR_ALLOW_DEGRADED_DETECTORS=true` / `=1` / `=yes` / `=on`) when
+acknowledging a dev-build MVP baseline; `Fail` still triggers 33 regardless
+of the flag.
+
+## Doctor command
+
+```sh
+arbitraitor doctor [--json] [--rules <DIR>] [--cas-dir <DIR>]
+                   [--receipt-signing-key <PATH>]
+                   [--allow-degraded-detectors]
+```
+
+Surfaces system health across content-addressed storage, detector coverage,
+provenance, sandbox, plugins, shims, PATH order, clock skew, and tar-rs
+versioning. Rendered health rows show distinct per-status markers
+(`✓` Pass, `⚠` Warn, `⌀` Skipped, `✗` Fail) so degraded posture is visually
+distinct from healthy posture.
+
+The `Detectors` row distinguishes the always-running built-in MVP detector
+baseline (archive-hazards, artifact, python-js, shell, url-discovery) from
+external coverage layers (YARA rule packs, AV adapters, plugins). When
+external layers are absent, the row is `Warn` (analysis still runs on every
+fetch via `AnalysisCoordinator::new()`), and `doctor` exits 33 per spec §29
+unless `--allow-degraded-detectors` acknowledges the dev-build baseline.
+
+`--allow-degraded-detectors` (env var
+`ARBITRAITOR_ALLOW_DEGRADED_DETECTORS=true` / `=1` / `=yes` / `=on`)
+suppresses exit 33 for `Warn` detector/av-adapters posture only; `Fail`
+rows still trigger 33 either way.
+
 ## Inspect command
 
 ```sh

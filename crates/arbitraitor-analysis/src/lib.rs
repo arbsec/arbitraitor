@@ -274,13 +274,32 @@ impl AnalysisCoordinator {
     /// Creates a coordinator with the default MVP detectors.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_detectors(vec![
+        Self::with_detectors(Self::default_detectors())
+    }
+
+    /// Returns the built-in MVP detector set used by [`Self::new`].
+    ///
+    /// Composers that wire external detectors alongside the MVP set (e.g.
+    /// the CLI pipeline's YARA wiring) should start with this list, push
+    /// their own detectors, then construct via
+    /// [`AnalysisCoordinator::with_detectors`] — that path sorts by id and
+    /// applies per-detector timeouts uniformly.
+    ///
+    /// Dropping any built-in detector here weakens spec §9 invariant 1
+    /// (mandatory coverage); see
+    /// [`mandatory::MandatoryDetectorRegistry::mandatory_detectors`]. The
+    /// coordinator would emit `Severity::Critical` findings on artifacts
+    /// whose class lists a removed detector as mandatory, silently turning
+    /// the verifier into a fail-closed blocker for those classes.
+    #[must_use]
+    pub fn default_detectors() -> Vec<Box<dyn Detector>> {
+        vec![
             Box::new(ArchiveHazardDetector),
             Box::new(ArtifactDetector),
             Box::new(pyjs::PythonJsDetector),
             Box::new(ShellDetector),
             Box::new(url_discovery::UrlDiscoveryDetector),
-        ])
+        ]
     }
 
     /// Creates a coordinator from explicit detectors sorted by detector id.

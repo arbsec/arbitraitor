@@ -117,3 +117,17 @@ fn unknown_subcommand_exits_non_zero() -> TestResult {
         .failure();
     Ok(())
 }
+
+#[test]
+fn doctor_help_lists_allow_degraded_detectors_flag() -> TestResult {
+    Command::cargo_bin("arbitraitor")?
+        .arg("doctor")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--allow-degraded-detectors"))
+        .stdout(predicate::str::contains(
+            "ARBITRAITOR_ALLOW_DEGRADED_DETECTORS",
+        ));
+    Ok(())
+}

@@ -873,9 +873,82 @@ fn doctor_command_parses_json_flag() -> Result<(), Box<dyn std::error::Error>> {
             assert!(command.json);
             assert!(command.cas_dir.is_none());
             assert!(command.rules.is_none());
+            assert!(!command.allow_degraded_detectors);
         }
         _ => return Err("parsed wrong command".into()),
     }
+    Ok(())
+}
+
+#[test]
+fn doctor_command_parses_allow_degraded_detectors_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(["arbitraitor", "doctor", "--allow-degraded-detectors"])?;
+
+    match cli.command {
+        Command::Doctor(command) => {
+            assert!(command.allow_degraded_detectors);
+        }
+        _ => return Err("parsed wrong command".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn health_marker_renders_distinct_glyph_per_status() {
+    use arbitraitor_core::health::HealthStatus;
+    assert_eq!(commands::health_marker(HealthStatus::Pass), "✓");
+    assert_eq!(commands::health_marker(HealthStatus::Warn), "⚠");
+    assert_eq!(commands::health_marker(HealthStatus::Skipped), "⌀");
+    assert_eq!(commands::health_marker(HealthStatus::Fail), "✗");
+}
+
+#[test]
+fn analysis_coordinator_with_rules_dir_preserves_all_built_in_detectors()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Regression (spec §9 invariant 1): rules_dir must NOT drop the
+    // built-in MVP detectors — UrlDiscovery is mandatory for HTML/JSON.
+    let tempdir = tempfile::tempdir()?;
+    let (coordinator, _versions) = crate::pipeline::analysis_coordinator(Some(tempdir.path()))?;
+
+    let html = b"<html><body><a href=\"https://${HOST}/run\">x</a></body></html>";
+    let result = coordinator.analyze_with_retrieval(html, None);
+
+    let url_discovery_ran = result
+        .detector_results
+        .iter()
+        .any(|d| d.metadata.id == "arbitraitor-analysis.url-discovery");
+    assert!(
+        url_discovery_ran,
+        "url-discovery detector must run when YARA rules_dir is configured; \
+         dropped detectors: {:?}",
+        result
+            .detector_results
+            .iter()
+            .map(|d| d.metadata.id.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let url_discovery_findings: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| f.detector == "arbitraitor-analysis.url-discovery")
+        .collect();
+    assert!(
+        !url_discovery_findings.is_empty(),
+        "url-discovery must emit findings on the HTML with a \
+         https://${{HOST}} template expression"
+    );
+
+    let mandatory_coverage_failure = result
+        .findings
+        .iter()
+        .find(|f| f.id == "mandatory-detector.missing");
+    assert!(
+        mandatory_coverage_failure.is_none(),
+        "expected no mandatory-coverage failure findings; got: {:?}",
+        mandatory_coverage_failure.map(|f| &f.description)
+    );
+
     Ok(())
 }
 
