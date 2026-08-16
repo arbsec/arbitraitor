@@ -394,7 +394,20 @@ impl HealthChecker {
         }))
     }
 
-    /// Reports whether any detector (rule pack) is configured.
+    /// Reports detector coverage posture (spec §9 invariant 1, spec §29 code 33).
+    ///
+    /// The 5 built-in MVP detectors (archive-hazards, artifact, python-js,
+    /// shell, url-discovery) always run via
+    /// [`arbitraitor_analysis::AnalysisCoordinator::new`], so analysis is
+    /// never silently off — every fetch through `wrap_downloader` or
+    /// `arbitraitor scan`/`arbitraitor run` invokes them. This check
+    /// surfaces the *additional* external coverage layers (YARA rule packs,
+    /// explicit detector version probes, AV adapters, plugins, policy file)
+    /// that compose the full §9 boundary. When external coverage is absent,
+    /// analysis still runs on the built-in baseline, but doctor propagates
+    /// the degradation as [`HealthStatus::Warn`] so operators can decide
+    /// whether to wire additional layers or rely on the MVP baseline for
+    /// dev builds.
     #[must_use]
     pub fn check_detectors(&self) -> HealthCheckResult {
         if self.rule_pack_version.is_some() || !self.detector_versions.is_empty() {
@@ -408,13 +421,19 @@ impl HealthChecker {
             return HealthCheckResult::new(
                 "detectors",
                 HealthStatus::Pass,
-                format!("detectors configured: {versions}"),
+                format!(
+                    "external detectors configured: {versions}; 5 built-in MVP detectors also \
+                     running (archive-hazards, artifact, python-js, shell, url-discovery)"
+                ),
             );
         }
         HealthCheckResult::new(
             "detectors",
             HealthStatus::Warn,
-            "no detectors configured; analysis coverage is unavailable",
+            "external detector rule packs and detector probes not configured; \
+             5 built-in MVP detectors still run on every fetch (archive-hazards, artifact, \
+             python-js, shell, url-discovery) — wire additional layers for full §9 coverage; \
+             see also av_adapters, plugin_manifests, and policy_validity checks",
         )
     }
 

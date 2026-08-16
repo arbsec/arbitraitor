@@ -7,9 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arbitraitor_analysis::{
-    AnalysisCoordinator, ArtifactDetector, RetrievalInfo as AnalysisRetrievalInfo, ShellDetector,
-};
+use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
 use arbitraitor_fetch::{
     ChildArtifact, FetchPolicy, FetchRequest, FetchSource, FetchUrl, Fetcher, FileFetcher,
@@ -227,12 +225,17 @@ pub(crate) fn analysis_coordinator(
     let rule_pack_versions = manager.pack_versions();
     let scanner = manager.compile_all().into_diagnostic()?;
     let detector = YaraDetector::from_scanner(&scanner).into_diagnostic()?;
+    // Preserve the 5 built-in MVP detectors alongside YARA (spec §9 inv 1).
+    // The previous construction replaced built-ins with `[Artifact, Shell,
+    // Yara]`, dropping ArchiveHazard, PythonJs, and UrlDiscovery — and
+    // UrlDiscovery is mandatory for HTML/JSON per
+    // MandatoryDetectorRegistry::mandatory_detectors, so configuring any
+    // YARA rule pack silently blocked every HTML/JSON fetch with a
+    // mandatory-coverage Critical finding.
+    let mut detectors = AnalysisCoordinator::default_detectors();
+    detectors.push(Box::new(detector));
     Ok((
-        AnalysisCoordinator::with_detectors(vec![
-            Box::new(ArtifactDetector),
-            Box::new(ShellDetector),
-            Box::new(detector),
-        ]),
+        AnalysisCoordinator::with_detectors(detectors),
         rule_pack_versions,
     ))
 }

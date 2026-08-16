@@ -81,7 +81,44 @@ fn degraded_when_no_detectors() {
         .get("detectors")
         .expect("detectors check present");
     assert_eq!(detectors.status, HealthStatus::Warn);
+    assert!(
+        !detectors
+            .message
+            .contains("analysis coverage is unavailable"),
+        "detectors message must not claim coverage is unavailable: {}",
+        detectors.message
+    );
+    assert!(
+        detectors.message.contains("built-in MVP detectors"),
+        "detectors message must mention the built-in baseline: {}",
+        detectors.message
+    );
+    assert!(
+        detectors.message.contains("external"),
+        "detectors message must mention absent external coverage layers: {}",
+        detectors.message
+    );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn check_detectors_warns_when_external_coverage_absent_and_baseline_running() {
+    let result = HealthChecker::new().check_detectors();
+
+    assert_eq!(result.status, HealthStatus::Warn);
+    let message = result.message.expect("detectors check has a message");
+    assert!(
+        message.contains("built-in MVP detectors"),
+        "expected built-in baseline in message: {message}"
+    );
+    assert!(
+        message.contains("external"),
+        "expected built-in baseline in message: {message}"
+    );
+    assert!(
+        !message.contains("AV adapters"),
+        "detectors check must not claim AV/plugin state: {message}"
+    );
 }
 
 #[test]

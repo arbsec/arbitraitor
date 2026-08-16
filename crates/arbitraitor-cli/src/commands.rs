@@ -104,6 +104,22 @@ pub struct DoctorCommand {
     /// Output JSON instead of human-readable format.
     #[arg(long)]
     pub json: bool,
+    /// Acknowledge that only the 5 built-in MVP detectors are running
+    /// and suppress spec §29 exit code 33 when external layers (YARA
+    /// rule packs, AV adapters, plugins) are absent (spec §9 inv 1, §29).
+    ///
+    /// The `ARBITRAITOR_ALLOW_DEGRADED_DETECTORS` env var is also honored,
+    /// accepting truthy values (true, yes, on, 1 — case-insensitive).
+    #[arg(
+        long,
+        env = "ARBITRAITOR_ALLOW_DEGRADED_DETECTORS",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+    )]
+    pub allow_degraded_detectors: bool,
 }
 
 #[derive(Args)]
@@ -678,10 +694,72 @@ fn print_health_row(
     stdout: &mut std::io::StdoutLock<'_>,
     name: &str,
     value: &str,
-    ok: bool,
+    status: HealthStatus,
 ) -> Result<()> {
-    let mark = if ok { "✓" } else { "✗" };
+    let mark = health_marker(status);
     writeln!(stdout, "  {name:<12} {value}  {mark}").into_diagnostic()
+}
+
+pub(crate) const fn health_marker(status: HealthStatus) -> &'static str {
+    match status {
+        HealthStatus::Pass => "✓",
+        HealthStatus::Warn => "⚠",
+        HealthStatus::Skipped => "⌀",
+        HealthStatus::Fail => "✗",
+    }
+}
+
+const fn pass_or_fail(ok: bool) -> HealthStatus {
+    if ok {
+        HealthStatus::Pass
+    } else {
+        HealthStatus::Fail
+    }
+}
+
+fn print_detector_fix_guidance(
+    stdout: &mut std::io::StdoutLock<'_>,
+    detectors_status: HealthStatus,
+    av_adapters_status: HealthStatus,
+) -> Result<()> {
+    writeln!(stdout).into_diagnostic()?;
+    writeln!(
+        stdout,
+        "Fix detector coverage (spec §9 invariant 1, §29 exit code 33):"
+    )
+    .into_diagnostic()?;
+    if matches!(detectors_status, HealthStatus::Warn | HealthStatus::Fail) {
+        writeln!(
+            stdout,
+            "  [detectors] yara_rule_packs = \"<rules-dir>\"  (YARA rule directory)"
+        )
+        .into_diagnostic()?;
+    }
+    if matches!(av_adapters_status, HealthStatus::Warn | HealthStatus::Fail) {
+        writeln!(
+            stdout,
+            "  install ClamAV (`clamdscan`) or Microsoft Defender (`mdatp`) in PATH"
+        )
+        .into_diagnostic()?;
+    }
+    if matches!(detectors_status, HealthStatus::Warn)
+        && matches!(
+            av_adapters_status,
+            HealthStatus::Warn | HealthStatus::Skipped
+        )
+    {
+        writeln!(
+            stdout,
+            "  --allow-degraded-detectors / ARBITRAITOR_ALLOW_DEGRADED_DETECTORS=true"
+        )
+        .into_diagnostic()?;
+        writeln!(
+            stdout,
+            "    acknowledge dev-build MVP baseline (does NOT suppress Fail)"
+        )
+        .into_diagnostic()?;
+    }
+    Ok(())
 }
 
 const MIN_SAFE_TAR_RS_VERSION: &str = "0.4.46";
@@ -731,12 +809,33 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
     }
     let report = checker.check();
 
+    let report_has_failures = report
+        .checks
+        .values()
+        .any(|c| c.status == HealthStatus::Fail);
+    let detectors_status = report
+        .checks
+        .get("detectors")
+        .map_or(HealthStatus::Skipped, |c| c.status);
+    let av_adapters_status = report
+        .checks
+        .get("av_adapters")
+        .map_or(HealthStatus::Skipped, |c| c.status);
+    let detector_posture_degraded =
+        matches!(detectors_status, HealthStatus::Warn | HealthStatus::Fail)
+            || matches!(av_adapters_status, HealthStatus::Warn | HealthStatus::Fail);
+    let exit_33 =
+        report_has_failures || (!command.allow_degraded_detectors && detector_posture_degraded);
+
     if command.json {
         let json = serde_json::to_vec_pretty(&report).into_diagnostic()?;
         std::io::stdout()
             .lock()
             .write_all(&json)
             .into_diagnostic()?;
+        if exit_33 {
+            std::process::exit(33);
+        }
         return Ok(());
     }
 
@@ -777,12 +876,12 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         .is_some_and(|version| semver_at_least(version, MIN_SAFE_TAR_RS_VERSION));
 
     writeln!(stdout, "Arbitraitor health:").into_diagnostic()?;
-    print_health_row(&mut stdout, "version", &report.version, true)?;
+    print_health_row(&mut stdout, "version", &report.version, HealthStatus::Pass)?;
     print_health_row(
         &mut stdout,
         "store",
         &cas_dir.display().to_string(),
-        store_healthy,
+        pass_or_fail(store_healthy),
     )?;
 
     let check_count = report.checks.len();
@@ -791,17 +890,14 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         .values()
         .filter(|c| c.status.is_pass())
         .count();
-    let report_has_failures = report
-        .checks
-        .values()
-        .any(|c| c.status == HealthStatus::Fail);
     print_health_row(
         &mut stdout,
         "checks",
         &format!("{healthy_count}/{check_count} healthy"),
-        check_count > 0,
+        report.overall,
     )?;
     for component_name in [
+        "detectors",
         "policy_validity",
         "yara_rules",
         "av_adapters",
@@ -822,7 +918,7 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
                 &mut stdout,
                 component_name,
                 &format!("{:?}: {}", component.status, component.message),
-                component.status != HealthStatus::Fail,
+                component.status,
             )?;
         }
     }
@@ -838,7 +934,7 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
         ),
         None => "not detected".to_owned(),
     };
-    print_health_row(&mut stdout, "shell", &shell_label, shell_ok)?;
+    print_health_row(&mut stdout, "shell", &shell_label, pass_or_fail(shell_ok))?;
 
     let shims_label = {
         let installed: Vec<&str> = shim_results
@@ -852,28 +948,32 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
             installed.join(", ")
         }
     };
-    print_health_row(&mut stdout, "shims", &shims_label, shims_ok)?;
+    print_health_row(&mut stdout, "shims", &shims_label, pass_or_fail(shims_ok))?;
     print_health_row(
         &mut stdout,
         "PATH",
         &shim_dir.display().to_string(),
-        path_has_shim,
+        pass_or_fail(path_has_shim),
     )?;
 
     let rcfile_label = shell_info
         .as_ref()
         .and_then(|d| shell_init::target_rcfile(d.shell))
         .map_or_else(|| "n/a".to_owned(), |p| p.display().to_string());
-    print_health_row(&mut stdout, "rcfile", &rcfile_label, rcfile_ok)?;
+    print_health_row(
+        &mut stdout,
+        "rcfile",
+        &rcfile_label,
+        pass_or_fail(rcfile_ok),
+    )?;
     print_health_row(
         &mut stdout,
         "tar-rs",
         tar_rs_version.as_deref().unwrap_or("not locked"),
-        tar_rs_ok,
+        pass_or_fail(tar_rs_ok),
     )?;
 
-    all_healthy =
-        all_healthy && !report_has_failures && shims_ok && path_has_shim && rcfile_ok && tar_rs_ok;
+    all_healthy = all_healthy && !exit_33 && shims_ok && path_has_shim && rcfile_ok && tar_rs_ok;
 
     if !all_healthy {
         writeln!(stdout).into_diagnostic()?;
@@ -891,6 +991,10 @@ pub(crate) fn doctor(command: &DoctorCommand, config: &Config) -> Result<()> {
             )
             .into_diagnostic()?;
         }
+    }
+
+    if detector_posture_degraded {
+        print_detector_fix_guidance(&mut stdout, detectors_status, av_adapters_status)?;
     }
 
     if all_healthy {
