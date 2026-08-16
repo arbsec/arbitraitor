@@ -955,12 +955,12 @@ fn wrapper_url_argument<'a>(tool: Option<&str>, args: &'a [String]) -> Option<&'
 /// Returns true if the arguments are a known-safe non-networking invocation
 /// that should passthrough to the real binary.
 ///
-/// Only explicit help/version/manual flags are allowed. Bare invocation
-/// (no args) is NOT safe because curl reads `~/.curlrc` and wget reads
-/// `~/.wgetrc` by default, which can specify URLs for download.
+/// Bare invocation (no args) and explicit help/version/manual flags are
+/// allowed. `exec_passthrough` prepends `-q` for curl to disable `~/.curlrc`
+/// config file reading as defense-in-depth.
 fn is_safe_passthrough(_tool: Option<&str>, args: &[String]) -> bool {
     if args.is_empty() {
-        return false;
+        return true;
     }
     args.iter().all(|arg| {
         matches!(

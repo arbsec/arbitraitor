@@ -212,7 +212,9 @@ fn is_executable_file(path: &Path) -> bool {
 /// Resolves the real binary for `tool` and execs it with `args`.
 ///
 /// Used as a passthrough when the wrapper detects a known-safe
-/// non-networking invocation (e.g. `curl --version`, `curl --help`).
+/// non-networking invocation (e.g. bare `curl`, `curl --version`).
+/// For curl, `-q` is prepended to disable `~/.curlrc` config file
+/// reading. For wget, `--no-config` is prepended to disable `~/.wgetrc`.
 /// Returns an error only if the real binary cannot be resolved.
 /// On success, this function does not return — the process is replaced.
 #[cfg(unix)]
@@ -220,7 +222,17 @@ pub(crate) fn exec_passthrough(tool: &str, args: &[String]) -> Result<()> {
     let shim_dir = shim_dir_from_home()?;
     let path = std::env::var_os("PATH").unwrap_or_default();
     let real = resolve_real_binary_in_path(tool, &shim_dir, &path)?;
-    let err = std::process::Command::new(&real).args(args).exec();
+    let mut cmd = std::process::Command::new(&real);
+    match tool {
+        "curl" => {
+            cmd.arg("-q");
+        }
+        "wget" => {
+            cmd.arg("--no-config");
+        }
+        _ => {}
+    }
+    let err = cmd.args(args).exec();
     miette::bail!("exec {real:?} failed: {err}");
 }
 
