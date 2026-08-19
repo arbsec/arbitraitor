@@ -53,6 +53,15 @@ pub trait FeedAdapter: Send + Sync {
     fn parse(&self, _bytes: &[u8]) -> Result<Vec<FeedEntry>> {
         self.fetch_indicators()
     }
+
+    /// Optional request body for POST-based feeds.
+    ///
+    /// When this returns `Some(bytes)`, [`ingest_feed`] sends a POST request
+    /// with the returned bytes as the body and `Content-Type: application/json`.
+    /// The default returns `None`, causing [`ingest_feed`] to use a GET request.
+    fn request_body(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Statistics produced by merging a batch of feed entries into an [`IntelStore`].
@@ -108,7 +117,10 @@ pub async fn ingest_feed(
         FetchUrl::parse(adapter.feed_url()).map_err(|error| IntelError::FeedDecode {
             reason: format!("invalid feed URL: {error}"),
         })?;
-    let request = FetchRequest::url(fetch_url, policy.clone());
+    let request = match adapter.request_body() {
+        Some(body) => FetchRequest::url(fetch_url, policy.clone()).with_post(body),
+        None => FetchRequest::url(fetch_url, policy.clone()),
+    };
     let mut sink = VecSink::new();
     let receipt = fetcher
         .fetch(request, &mut sink)

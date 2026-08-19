@@ -70,39 +70,62 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Fetch and inspect an artifact for threats.
     Inspect(Box<InspectCommand>),
     /// Fetch an artifact with provenance verification.
     Fetch(Box<FetchCommand>),
     /// Wrap an existing tool invocation through Arbitraitor.
     Wrap(WrapCommand),
+    /// Fetch, inspect, and execute an artifact.
     Run(Box<run::RunCommand>),
+    /// Manage the background daemon.
     Daemon(DaemonCommand),
+    /// Unpack and inspect an archive or container image.
     Unpack(UnpackCommand),
+    /// Manage local threat-intelligence feeds.
     Intel(IntelCommand),
+    /// Show health and operational status.
     Status(StatusCommand),
+    /// Install and manage PATH shims for curl/wget.
     Wrappers(WrappersCommand),
+    /// Start the MCP server for AI agent integration.
     Mcp,
+    /// Scan local files or stdin for threats.
     Scan(commands::ScanCommand),
+    /// Explain a verdict from a receipt file.
     Explain(commands::ExplainCommand),
+    /// Manage the content-addressed artifact store.
     Store(commands::StoreCommand),
+    /// Validate a policy file.
     Policy(commands::PolicyCommand),
+    /// Check system health and dependencies.
     Doctor(commands::DoctorCommand),
+    /// Manage YARA-X rule packs.
     Rules(commands::RulesCommand),
+    /// Verify signed update manifests.
     Update(commands::UpdateCommand),
+    /// Manage installed plugins.
     Plugin(commands::PluginCommand),
+    /// Legacy shell integration (use wrappers instead).
     Hook(commands::HookCommand),
+    /// Manage per-tool PATH shims.
     Shim(commands::ShimCommand),
+    /// Show the dependency graph of an artifact.
     Graph(commands::GraphCommand),
+    /// Approve an artifact for execution.
     Approve(commands::ApproveCommand),
+    /// Execute an approved artifact.
     Execute(commands::ExecuteCommand),
     /// Report user feedback on findings.
     Report(commands::ReportCommand),
     /// Record a scoped allow exception for an artifact digest.
     Allow(commands::AllowCommand),
+    /// Manage package-manager integration.
     Pm(pm::PmCommand),
     /// Hidden alias of `wrappers init` for discoverability.
     #[command(hide = true)]
     Env(EnvCommand),
+    /// Print the version.
     Version,
 }
 
@@ -116,8 +139,11 @@ struct DaemonCommand {
 
 #[derive(Subcommand)]
 enum DaemonSubcommand {
+    /// Start the background daemon.
     Start,
+    /// Stop the background daemon.
     Stop,
+    /// Show daemon status.
     Status,
 }
 
@@ -285,27 +311,39 @@ struct IntelCommand {
 
 #[derive(Subcommand)]
 enum IntelSubcommand {
-    /// Fetch and ingest one or more feeds into the local intel store.
+    /// Fetch and ingest threat-intelligence feeds into the local store.
     Update(UpdateCommand),
 }
 
 #[derive(Args)]
 struct UpdateCommand {
-    /// Ingest the `URLhaus` malicious-URL feed.
-    #[arg(long)]
-    urlhaus: bool,
-    /// Override the `URLhaus` feed URL (CSV or JSON).
-    #[arg(long, value_name = "URL")]
-    urlhaus_url: Option<String>,
-    /// Ingest `OpenSSF` malicious-packages `MAL-` IDs from an OSV querybatch response.
-    #[arg(long)]
-    ossf_malicious_packages: bool,
-    /// Override the `OpenSSF` malicious-packages OSV querybatch URL or signed mirror.
-    #[arg(long, value_name = "URL")]
-    ossf_malicious_packages_url: Option<String>,
     /// Override the local intel store path.
     #[arg(long, value_name = "PATH")]
     intel_store: Option<PathBuf>,
+    #[command(subcommand)]
+    subcommand: UpdateSubcommand,
+}
+
+#[derive(Subcommand)]
+enum UpdateSubcommand {
+    /// Ingest the `URLhaus` malicious-URL feed.
+    Urlhaus(UrlhausUpdateCommand),
+    /// Ingest `OpenSSF` malicious-packages from OSV.
+    OssfMaliciousPackages(OssfUpdateCommand),
+}
+
+#[derive(Args)]
+struct UrlhausUpdateCommand {
+    /// Override the `URLhaus` feed URL (CSV or JSON).
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
+}
+
+#[derive(Args)]
+struct OssfUpdateCommand {
+    /// OSV malicious-package mirror/snapshot URL.
+    #[arg(long, value_name = "URL")]
+    url: String,
 }
 
 /// `arbitraitor wrappers` — install and manage PATH shims for curl/wget.
@@ -1103,11 +1141,6 @@ fn unpack(archive_path: &Path, output_dir: &Path) -> Result<()> {
 
 async fn intel(command: IntelCommand) -> Result<()> {
     let IntelSubcommand::Update(update) = command.subcommand;
-    if !update.urlhaus && !update.ossf_malicious_packages {
-        miette::bail!(
-            "no feed selected; pass --urlhaus or --ossf-malicious-packages to ingest a feed"
-        );
-    }
     let store_path = update
         .intel_store
         .unwrap_or_else(|| PathBuf::from(".arbitraitor/intel.json"));
@@ -1116,26 +1149,24 @@ async fn intel(command: IntelCommand) -> Result<()> {
     let policy = FetchPolicy::default();
     let mut writer = std::io::stderr().lock();
 
-    if update.urlhaus {
-        let adapter = match update.urlhaus_url {
-            Some(url) => UrlhausAdapter::with_url(url),
-            None => UrlhausAdapter::new(),
-        };
-        let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
-            .await
-            .into_diagnostic()?;
-        write_intel_report(&mut writer, &report)?;
-    }
-
-    if update.ossf_malicious_packages {
-        let adapter = match update.ossf_malicious_packages_url {
-            Some(url) => OssfMaliciousPackagesAdapter::with_url(url),
-            None => OssfMaliciousPackagesAdapter::new(),
-        };
-        let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
-            .await
-            .into_diagnostic()?;
-        write_intel_report(&mut writer, &report)?;
+    match update.subcommand {
+        UpdateSubcommand::Urlhaus(command) => {
+            let adapter = match command.url {
+                Some(url) => UrlhausAdapter::with_url(url),
+                None => UrlhausAdapter::new(),
+            };
+            let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
+                .await
+                .into_diagnostic()?;
+            write_intel_report(&mut writer, &report)?;
+        }
+        UpdateSubcommand::OssfMaliciousPackages(command) => {
+            let adapter = OssfMaliciousPackagesAdapter::with_url(command.url);
+            let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
+                .await
+                .into_diagnostic()?;
+            write_intel_report(&mut writer, &report)?;
+        }
     }
 
     Ok(())

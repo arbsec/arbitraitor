@@ -9,9 +9,8 @@
 Spec §21 extends Arbitraitor's intelligence model with package-reputation
 feeds. OpenSSF's malicious-packages repository publishes package malware
 records as OSV advisories with identifiers in the `MAL-YYYY-NNNN` family.
-OSV.dev exposes those records through the same API surface used for other
-package advisories, including the `/v1/querybatch` endpoint for package and
-version batches.
+OpenSSF publishes those records as OSV-shaped data that can be mirrored into
+explicit malicious-package snapshots for bounded ingestion.
 
 This matters for npm because npm v11.10 added `--min-release-age`, making
 freshly published packages a first-class risk-control axis. Arbitraitor needs
@@ -23,7 +22,7 @@ package-manager policy can combine age gating with malicious-package evidence.
 Arbitraitor treats OpenSSF malicious-packages as a bundled Tier-1 intelligence
 feed named `ossf-malicious-packages`.
 
-- The adapter consumes OSV.dev `querybatch` JSON responses and emits one
+- The adapter consumes OSV malicious-package mirror/snapshot JSON and emits one
   signed-feed entry for each `MAL-` advisory.
 - `MAL-` identifiers are parsed into the `OsvMalId` newtype before entering
   the domain model. Invalid or non-`MAL-` OSV advisories are not promoted to
@@ -32,8 +31,8 @@ feed named `ossf-malicious-packages`.
   `FeedSourceClass::OssfMaliciousPackages`, with `Block` disposition,
   `High` severity, and `Confirmed` confidence.
 - Network access remains off by default. Fetching happens only when an
-  operator runs `arbitraitor intel update --ossf-malicious-packages` or points
-  the adapter at a signed mirror URL.
+  operator runs `arbitraitor intel update ossf-malicious-packages --url <URL>`
+  and points the adapter at a signed mirror URL.
 - Feed retrieval continues through `arbitraitor-fetch` and the existing local
   intel store ingestion path so SSRF policy, byte limits, TLS policy, and
   signed-store handling remain centralized.
@@ -46,9 +45,10 @@ ingestion, Arbitraitor converts parsed `MAL-` records into its local
 the same JSON/RFC 8785 discipline used for receipts and signed by the
 configured intel feed key before distribution in bundled feed snapshots.
 
-Online updates may fetch OSV.dev directly, but redistributable bundled feeds
-must be signed Arbitraitor feed snapshots. Consumers verify the bundled
-snapshot signature before using entries for blocking policy.
+Online updates require an explicit OSV malicious-package mirror/snapshot URL.
+Redistributable bundled feeds must be signed Arbitraitor feed snapshots.
+Consumers verify the bundled snapshot signature before using entries for
+blocking policy.
 
 ### Freshness requirements
 
@@ -63,14 +63,11 @@ result. Enforcement that requires current Tier-1 package intelligence must
 fail closed; advisory-only configurations may continue with an explicit
 incomplete-intel diagnostic.
 
-### Batch endpoint limits
+### Mirror/snapshot limits
 
-The adapter targets OSV.dev `/v1/querybatch`, which accepts a batch of package
-queries and returns a parallel `results` array. Arbitraitor callers must bound
-batch size and payload size before fetch:
+The adapter targets explicit OSV malicious-package mirror/snapshot payloads.
+Arbitraitor callers must bound payload size before fetch:
 
-- split package inventories into deterministic batches;
-- preserve result-to-query order for diagnostics;
 - apply the same byte, timeout, redirect, TLS, and SSRF limits as other feed
   retrieval;
 - skip non-`MAL-` advisories from mixed OSV responses instead of treating them
@@ -105,4 +102,4 @@ batch size and payload size before fetch:
 - ADR-0025 OpenSSF Scorecard, deps.dev, and GUAC as optional integrations
 - OpenSSF blog: <https://openssf.org/blog/2026/05/20/detecting-malicious-packages-using-the-osv-api/>
 - OpenSSF malicious-packages: <https://github.com/ossf/malicious-packages>
-- OSV API: <https://api.osv.dev/v1/querybatch>
+- OSV API: <https://osv.dev/docs/>

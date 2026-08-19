@@ -1,4 +1,4 @@
-//! `OpenSSF` malicious-packages feed adapter backed by OSV.dev.
+//! `OpenSSF` malicious-packages feed adapter backed by a signed OSV mirror.
 
 use std::str::FromStr;
 
@@ -12,36 +12,19 @@ use crate::{
     ReviewStatus, Severity, current_utc_timestamp,
 };
 
-/// Default OSV.dev batch-query endpoint for package-version lookups.
-pub const OSV_QUERYBATCH_URL: &str = "https://api.osv.dev/v1/querybatch";
-
-/// Feed adapter for `OpenSSF` malicious-packages `MAL-` IDs returned by OSV.dev.
+/// Feed adapter for `OpenSSF` malicious-packages `MAL-` IDs returned by a mirror.
 #[derive(Clone, Debug)]
 pub struct OssfMaliciousPackagesAdapter {
     feed_url: String,
 }
 
 impl OssfMaliciousPackagesAdapter {
-    /// Creates an adapter targeting the OSV.dev `querybatch` endpoint.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            feed_url: OSV_QUERYBATCH_URL.to_owned(),
-        }
-    }
-
-    /// Creates an adapter targeting an OSV-compatible batch-response URL.
+    /// Creates an adapter targeting an OSV malicious-package mirror or snapshot URL.
     #[must_use]
     pub fn with_url(url: impl Into<String>) -> Self {
         Self {
             feed_url: url.into(),
         }
-    }
-}
-
-impl Default for OssfMaliciousPackagesAdapter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -68,20 +51,17 @@ impl FeedAdapter for OssfMaliciousPackagesAdapter {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OsvBatchResponse {
     results: Vec<OsvQueryResult>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OsvQueryResult {
     #[serde(default)]
     vulns: Vec<OsvVulnerability>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OsvVulnerability {
     id: String,
     #[serde(default)]
@@ -99,14 +79,12 @@ struct OsvVulnerability {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OsvAffected {
     #[serde(default)]
     package: Option<OsvPackage>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OsvPackage {
     #[serde(default)]
     ecosystem: Option<String>,
@@ -117,7 +95,7 @@ struct OsvPackage {
 fn parse_osv_batch(bytes: &[u8]) -> Result<Vec<FeedEntry>> {
     let payload: OsvBatchResponse =
         serde_json::from_slice(bytes).map_err(|error| IntelError::FeedDecode {
-            reason: format!("OSV querybatch payload is malformed: {error}"),
+            reason: format!("OSV malicious-package mirror/snapshot payload is malformed: {error}"),
         })?;
     let observed_at = current_utc_timestamp();
     let mut entries = Vec::new();
@@ -224,7 +202,7 @@ fn evidence_notes(vulnerability: &OsvVulnerability) -> Option<String> {
 mod tests {
     use super::*;
 
-    const OSV_QUERYBATCH_FIXTURE: &str = r#"{
+    const OSV_BATCH_RESPONSE_FIXTURE: &str = r#"{
   "results": [
     {
       "vulns": [
@@ -250,13 +228,13 @@ mod tests {
 }"#;
 
     #[test]
-    fn parses_real_mal_id_from_osv_querybatch_fixture()
+    fn parses_real_mal_id_from_osv_batch_response_fixture()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Given
-        let adapter = OssfMaliciousPackagesAdapter::new();
+        let adapter = OssfMaliciousPackagesAdapter::with_url("https://example.com/test");
 
         // When
-        let entries = adapter.parse(OSV_QUERYBATCH_FIXTURE.as_bytes())?;
+        let entries = adapter.parse(OSV_BATCH_RESPONSE_FIXTURE.as_bytes())?;
 
         // Then
         assert_eq!(entries.len(), 1);
@@ -286,7 +264,7 @@ mod tests {
     fn skips_non_mal_osv_advisories() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Given
         let payload = r#"{"results":[{"vulns":[{"id":"GHSA-xxxx-yyyy-zzzz"}]}]}"#;
-        let adapter = OssfMaliciousPackagesAdapter::new();
+        let adapter = OssfMaliciousPackagesAdapter::with_url("https://example.com/test");
 
         // When
         let entries = adapter.parse(payload.as_bytes())?;
@@ -297,9 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn adapter_targets_osv_querybatch_endpoint() {
+    fn adapter_targets_explicit_mirror_url() {
         // Given
-        let adapter = OssfMaliciousPackagesAdapter::new();
+        let adapter = OssfMaliciousPackagesAdapter::with_url("https://example.com/test");
 
         // When / Then
         assert_eq!(adapter.name(), "ossf-malicious-packages");
@@ -307,6 +285,36 @@ mod tests {
             adapter.source_class(),
             FeedSourceClass::OssfMaliciousPackages
         );
-        assert_eq!(adapter.feed_url(), OSV_QUERYBATCH_URL);
+        assert_eq!(adapter.feed_url(), "https://example.com/test");
+    }
+
+    #[test]
+    fn parses_real_osv_fields_from_mirror_snapshot()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // Given
+        let payload = r#"{"schema_version":"1.7.3","results":[{"vulns":[{"id":"MAL-2026-5678","modified":"2026-06-20T00:00:00Z","published":"2026-06-19T00:00:00Z","summary":"Malicious package with real OSV fields","details":"Additional advisory detail","aliases":["GHSA-extra-extra-extra"],"affected":[{"package":{"ecosystem":"PyPI","name":"malicious-example","purl":"pkg:pypi/malicious-example"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"}]}],"database_specific":{"source":"openssf"}}],"database_specific":{"malicious-packages-origins":[{"source":"ossf-package-analysis"}]},"references":[{"type":"WEB","url":"https://osv.dev/vulnerability/MAL-2026-5678"}]}]}]}"#;
+        let adapter = OssfMaliciousPackagesAdapter::with_url("https://example.com/test");
+
+        // When
+        let entries = adapter.parse(payload.as_bytes())?;
+
+        // Then
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.indicator.value, "MAL-2026-5678");
+        assert_eq!(
+            entry.evidence.malware_family.as_deref(),
+            Some("PyPI:malicious-example")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_body_defaults_to_get() {
+        // Given
+        let adapter = OssfMaliciousPackagesAdapter::with_url("https://example.com/test");
+
+        // When / Then
+        assert!(adapter.request_body().is_none());
     }
 }

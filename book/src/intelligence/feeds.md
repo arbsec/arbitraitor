@@ -95,17 +95,17 @@ If URLhaus cannot be reached during a pipeline run:
 
 OpenSSF malicious-packages publishes malicious package reports as OSV
 advisories with `MAL-YYYY-NNNN` identifiers. Arbitraitor ingests these as
-`osv-mal` indicators from OSV.dev `querybatch` responses or signed mirrors.
+`osv-mal` indicators from OSV malicious-package mirror/snapshot payloads.
 
 ### Update command
 
 ```sh
-arbitraitor intel update --ossf-malicious-packages
+arbitraitor intel update ossf-malicious-packages --url https://example.com/malicious-packages.json
 ```
 
-Use `--ossf-malicious-packages-url` to point at a pre-fetched signed mirror or
-test fixture. Network access is explicit; package inspection does not perform
-implicit live OSV lookups.
+Use `--url` to point at a pre-fetched signed mirror or test fixture. Network
+access is explicit; package inspection does not perform implicit live OSV
+lookups.
 
 ### Indicator mapping
 
