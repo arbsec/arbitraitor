@@ -65,6 +65,18 @@ impl FeedAdapter for OssfMaliciousPackagesAdapter {
     fn parse(&self, bytes: &[u8]) -> Result<Vec<FeedEntry>> {
         parse_osv_batch(bytes)
     }
+
+    fn request_body(&self) -> Option<Vec<u8>> {
+        let payload = serde_json::json!({
+            "queries": [{
+                "package": {
+                    "ecosystem": "OpenSSF",
+                    "name": ""
+                }
+            }]
+        });
+        serde_json::to_vec(&payload).ok()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,5 +320,16 @@ mod tests {
             FeedSourceClass::OssfMaliciousPackages
         );
         assert_eq!(adapter.feed_url(), OSV_QUERYBATCH_URL);
+    }
+
+    #[test]
+    fn request_body_returns_valid_json() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let adapter = OssfMaliciousPackagesAdapter::new();
+        let body = adapter
+            .request_body()
+            .ok_or("request_body() returned None")?;
+        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        assert!(parsed.get("queries").is_some());
+        Ok(())
     }
 }

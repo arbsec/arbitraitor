@@ -200,9 +200,7 @@ impl From<UrlhausJsonRow> for UrlhausRecord {
 }
 
 fn parse_csv(bytes: &[u8], ttl_days: u64) -> Result<Vec<FeedEntry>> {
-    let text = std::str::from_utf8(bytes).map_err(|error| IntelError::FeedDecode {
-        reason: format!("urlhaus csv is not valid UTF-8: {error}"),
-    })?;
+    let text = String::from_utf8_lossy(bytes);
     let header = text
         .find(CSV_HEADER_MARKER)
         .ok_or_else(|| IntelError::FeedDecode {

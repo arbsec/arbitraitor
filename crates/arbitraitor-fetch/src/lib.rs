@@ -121,6 +121,16 @@ pub enum FetchSource {
     Stdin,
 }
 
+/// HTTP method for the fetch request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HttpMethod {
+    /// Standard GET request (default).
+    #[default]
+    Get,
+    /// POST request with a body.
+    Post,
+}
+
 impl FetchSource {
     fn scheme(&self) -> FetchScheme {
         match self {
@@ -177,6 +187,10 @@ pub struct FetchRequest {
     pub source: FetchSource,
     /// Transport and byte-limit policy.
     pub policy: FetchPolicy,
+    /// HTTP method for the request (GET by default).
+    pub method: HttpMethod,
+    /// Optional request body for POST requests.
+    pub body: Option<Vec<u8>>,
     /// Expected SHA-256 digest of the fetched artifact bytes.
     pub expected_sha256: Option<Sha256Digest>,
     /// Cancellation token observed by the fetcher.
@@ -211,6 +225,8 @@ impl FetchRequest {
         Self {
             source: FetchSource::Url(url),
             policy,
+            method: HttpMethod::Get,
+            body: None,
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
             credentials: RequestCredentials::default(),
@@ -224,6 +240,8 @@ impl FetchRequest {
         Self {
             source: FetchSource::File(path),
             policy,
+            method: HttpMethod::Get,
+            body: None,
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
             credentials: RequestCredentials::default(),
@@ -237,6 +255,8 @@ impl FetchRequest {
         Self {
             source: FetchSource::Stdin,
             policy,
+            method: HttpMethod::Get,
+            body: None,
             expected_sha256: None,
             cancellation: FetchCancellation::new(),
             credentials: RequestCredentials::default(),
@@ -307,6 +327,14 @@ impl FetchRequest {
     #[must_use]
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Sets the HTTP method to POST with the given body.
+    #[must_use]
+    pub fn with_post(mut self, body: Vec<u8>) -> Self {
+        self.method = HttpMethod::Post;
+        self.body = Some(body);
         self
     }
 }
@@ -876,6 +904,8 @@ impl Fetcher for HttpFetcher {
         let future = self.fetch_inner(
             url,
             &request.policy,
+            request.method,
+            request.body.as_deref(),
             request.expected_sha256.as_ref(),
             &request.credentials,
             &request.headers,
@@ -888,10 +918,13 @@ impl Fetcher for HttpFetcher {
 }
 
 impl HttpFetcher {
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_inner(
         &self,
         url: FetchUrl,
         policy: &FetchPolicy,
+        method: HttpMethod,
+        body: Option<&[u8]>,
         expected_sha256: Option<&Sha256Digest>,
         credentials: &RequestCredentials,
         user_headers: &[(String, String)],
@@ -916,7 +949,16 @@ impl HttpFetcher {
             let resolved_ips = unique_ips(&resolved_addrs);
             debug!(url = %redact_parsed_url(&current), resolved_count = resolved_ips.len(), "resolved fetch host");
             let client = build_http_client(policy, &current, &resolved_addrs)?;
-            let response = execute_request(&client, current.clone(), &headers).await?;
+            let response = execute_request(
+                &client,
+                OutgoingRequest {
+                    url: current.clone(),
+                    method,
+                    body,
+                    headers: &headers,
+                },
+            )
+            .await?;
             let status = response.status();
 
             if status.is_redirection() {
@@ -1104,8 +1146,7 @@ fn build_http_client(
 
 async fn execute_request(
     client: &reqwest::Client,
-    url: Url,
-    headers: &HeaderMap,
+    request_input: OutgoingRequest<'_>,
 ) -> Result<reqwest::Response, FetchError> {
     // Exact-byte semantics: Arbitraitor stores and hashes the HTTP representation
     // bytes after HTTP transfer framing is removed by the HTTP stack. It does
@@ -1113,16 +1154,30 @@ async fn execute_request(
     // `Accept-Encoding: identity` and disabling all reqwest auto-decoders keeps
     // `Content-Encoding` bytes intact for CAS storage and later explicit wrapper
     // decoding into a separate child artifact.
-    let mut request = client
-        .get(url)
-        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
-    if !headers.is_empty() {
-        request = request.headers(headers.clone());
+    let mut request = match request_input.method {
+        HttpMethod::Get => client.get(request_input.url),
+        HttpMethod::Post => client
+            .post(request_input.url)
+            .body(request_input.body.unwrap_or_default().to_vec()),
+    }
+    .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    if !request_input.headers.is_empty() {
+        request = request.headers(request_input.headers.clone());
+    }
+    if request_input.method == HttpMethod::Post {
+        request = request.header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }
     request
         .send()
         .await
         .map_err(|error| classify_reqwest_error("request", error))
+}
+
+struct OutgoingRequest<'a> {
+    url: Url,
+    method: HttpMethod,
+    body: Option<&'a [u8]>,
+    headers: &'a HeaderMap,
 }
 
 async fn stream_response(
@@ -1761,9 +1816,10 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        FetchCancellation, FetchError, FetchPolicy, FetchScheme, TlsVerifier, build_http_client,
-        ensure_cross_origin_allowed, ensure_no_insecure_downgrade, execute_request,
-        merge_user_headers, strip_credentials_on_cross_origin, verify_connected_peer,
+        FetchCancellation, FetchError, FetchPolicy, FetchScheme, HttpMethod, OutgoingRequest,
+        TlsVerifier, build_http_client, ensure_cross_origin_allowed, ensure_no_insecure_downgrade,
+        execute_request, merge_user_headers, strip_credentials_on_cross_origin,
+        verify_connected_peer,
     };
     use url::Url;
 
@@ -1800,7 +1856,17 @@ mod tests {
         };
         let client = build_http_client(&policy, &url, &[addr])?;
 
-        let response = execute_request(&client, url, &reqwest::header::HeaderMap::new()).await?;
+        let headers = reqwest::header::HeaderMap::new();
+        let response = execute_request(
+            &client,
+            OutgoingRequest {
+                url,
+                method: HttpMethod::Get,
+                body: None,
+                headers: &headers,
+            },
+        )
+        .await?;
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let request = server.await??;

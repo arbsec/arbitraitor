@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `arbitraitor intel update` now selects feeds with positional subcommands:
+  `urlhaus` and `ossf-malicious-packages`. Feed URL overrides use a consistent
+  `--url <URL>` flag, while `--intel-store <PATH>` remains on the `update`
+  parent command.
+
 ### Added
 
 - Unknown curl and wget flag passthrough for curl/wget shims. The wrappers no

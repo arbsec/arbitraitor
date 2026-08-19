@@ -11,7 +11,7 @@ use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetriev
 use arbitraitor_core::config::Config;
 use arbitraitor_fetch::{
     ChildArtifact, FetchPolicy, FetchRequest, FetchSource, FetchUrl, Fetcher, FileFetcher,
-    HttpFetcher, VecSink, discover_child_artifacts_with_bytes,
+    HttpFetcher, HttpMethod, VecSink, discover_child_artifacts_with_bytes,
 };
 use arbitraitor_model::finding::FindingCategory;
 use arbitraitor_model::ids::Sha256Digest;
@@ -85,6 +85,8 @@ pub(crate) async fn inspect(
     let request = FetchRequest {
         source,
         policy: fetch_policy,
+        method: HttpMethod::Get,
+        body: None,
         expected_sha256,
         cancellation: arbitraitor_fetch::FetchCancellation::new(),
         credentials: arbitraitor_fetch::RequestCredentials::default(),
