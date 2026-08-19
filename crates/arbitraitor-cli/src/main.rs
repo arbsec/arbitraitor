@@ -341,9 +341,9 @@ struct UrlhausUpdateCommand {
 
 #[derive(Args)]
 struct OssfUpdateCommand {
-    /// Override the OSV querybatch URL.
+    /// OSV malicious-package mirror/snapshot URL.
     #[arg(long, value_name = "URL")]
-    url: Option<String>,
+    url: String,
 }
 
 /// `arbitraitor wrappers` — install and manage PATH shims for curl/wget.
@@ -1161,10 +1161,7 @@ async fn intel(command: IntelCommand) -> Result<()> {
             write_intel_report(&mut writer, &report)?;
         }
         UpdateSubcommand::OssfMaliciousPackages(command) => {
-            let adapter = match command.url {
-                Some(url) => OssfMaliciousPackagesAdapter::with_url(url),
-                None => OssfMaliciousPackagesAdapter::new(),
-            };
+            let adapter = OssfMaliciousPackagesAdapter::with_url(command.url);
             let report = ingest_feed(&adapter, &fetcher, &mut store, &policy)
                 .await
                 .into_diagnostic()?;

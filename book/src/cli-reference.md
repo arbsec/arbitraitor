@@ -48,7 +48,7 @@ Feeds:
 | Feed | Description |
 |------|-------------|
 | `urlhaus` | Ingest the URLhaus malicious-URL feed |
-| `ossf-malicious-packages` | Ingest OpenSSF malicious-packages `MAL-` IDs from an OSV querybatch response |
+| `ossf-malicious-packages` | Ingest OpenSSF malicious-packages `MAL-` IDs from an OSV malicious-package mirror/snapshot |
 
 | Flag | Description |
 |------|-------------|

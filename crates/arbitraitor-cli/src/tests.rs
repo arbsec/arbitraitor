@@ -614,7 +614,7 @@ fn intel_update_parses_ossf_malicious_packages_subcommand() -> Result<(), Box<dy
         "update",
         "ossf-malicious-packages",
         "--url",
-        "https://mirror.example/osv-querybatch.json",
+        "https://mirror.example/osv-malicious-snapshot.json",
     ])?;
 
     match cli.command {
@@ -626,8 +626,8 @@ fn intel_update_parses_ossf_malicious_packages_subcommand() -> Result<(), Box<dy
             }
             super::UpdateSubcommand::OssfMaliciousPackages(command) => {
                 assert_eq!(
-                    command.url.as_deref(),
-                    Some("https://mirror.example/osv-querybatch.json")
+                    command.url,
+                    "https://mirror.example/osv-malicious-snapshot.json"
                 );
             }
         },

@@ -409,7 +409,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Intel
 
 - `ossf-malicious-packages` feed adapter for OpenSSF malicious-packages
-  `MAL-` IDs returned by OSV.dev `querybatch` responses. Adds typed
+  `MAL-` IDs returned by OSV malicious-package mirror/snapshot payloads. Adds typed
   `OsvMalId`, `IndicatorType::OsvMal`, and
   `FeedSourceClass::OssfMaliciousPackages` so malicious npm packages can be
   ingested into the signed local intel store without raw string IDs.

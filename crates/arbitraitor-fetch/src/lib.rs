@@ -1975,6 +1975,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_redirect_303_replays_as_get_without_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first_request, second_request, sink) =
+            fetch_post_through_redirect(reqwest::StatusCode::SEE_OTHER).await?;
+
+        assert_eq!(sink.as_bytes(), b"ok");
+        assert!(first_request.starts_with("post /start http/1.1"));
+        assert!(first_request.contains("content-type: application/json"));
+        assert!(first_request.contains("content-length: 15"));
+        assert!(first_request.ends_with("malware=payload"));
+        assert!(second_request.starts_with("get /final http/1.1"));
+        assert!(!second_request.contains("content-type:"));
+        assert!(!second_request.contains("content-length:"));
+        assert!(!second_request.contains("malware=payload"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn post_redirect_307_preserves_body_and_content_type()
     -> Result<(), Box<dyn std::error::Error>> {
         let (first_request, second_request, sink) =
@@ -1983,6 +2001,24 @@ mod tests {
         assert_eq!(sink.as_bytes(), b"ok");
         assert!(first_request.starts_with("post /start http/1.1"));
         assert!(first_request.contains("content-type: application/json"));
+        assert!(first_request.ends_with("malware=payload"));
+        assert!(second_request.starts_with("post /final http/1.1"));
+        assert!(second_request.contains("content-type: application/json"));
+        assert!(second_request.contains("content-length: 15"));
+        assert!(second_request.ends_with("malware=payload"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_redirect_308_preserves_body_and_content_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first_request, second_request, sink) =
+            fetch_post_through_redirect(reqwest::StatusCode::PERMANENT_REDIRECT).await?;
+
+        assert_eq!(sink.as_bytes(), b"ok");
+        assert!(first_request.starts_with("post /start http/1.1"));
+        assert!(first_request.contains("content-type: application/json"));
+        assert!(first_request.contains("content-length: 15"));
         assert!(first_request.ends_with("malware=payload"));
         assert!(second_request.starts_with("post /final http/1.1"));
         assert!(second_request.contains("content-type: application/json"));
