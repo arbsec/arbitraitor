@@ -1,4 +1,4 @@
-//! `OpenSSF` malicious-packages feed adapter backed by OSV.dev.
+//! `OpenSSF` malicious-packages feed adapter backed by a signed OSV mirror.
 
 use std::str::FromStr;
 
@@ -12,21 +12,22 @@ use crate::{
     ReviewStatus, Severity, current_utc_timestamp,
 };
 
-/// Default OSV.dev batch-query endpoint for package-version lookups.
-pub const OSV_QUERYBATCH_URL: &str = "https://api.osv.dev/v1/querybatch";
+/// Default signed mirror for `OpenSSF` malicious-packages OSV batch snapshots.
+pub const OSSF_MALICIOUS_PACKAGES_MIRROR_URL: &str =
+    "https://ossf.github.io/malicious-packages/osv/malicious.json";
 
-/// Feed adapter for `OpenSSF` malicious-packages `MAL-` IDs returned by OSV.dev.
+/// Feed adapter for `OpenSSF` malicious-packages `MAL-` IDs returned by a mirror.
 #[derive(Clone, Debug)]
 pub struct OssfMaliciousPackagesAdapter {
     feed_url: String,
 }
 
 impl OssfMaliciousPackagesAdapter {
-    /// Creates an adapter targeting the OSV.dev `querybatch` endpoint.
+    /// Creates an adapter targeting the default signed mirror endpoint.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            feed_url: OSV_QUERYBATCH_URL.to_owned(),
+            feed_url: OSSF_MALICIOUS_PACKAGES_MIRROR_URL.to_owned(),
         }
     }
 
@@ -64,18 +65,6 @@ impl FeedAdapter for OssfMaliciousPackagesAdapter {
 
     fn parse(&self, bytes: &[u8]) -> Result<Vec<FeedEntry>> {
         parse_osv_batch(bytes)
-    }
-
-    fn request_body(&self) -> Option<Vec<u8>> {
-        let payload = serde_json::json!({
-            "queries": [{
-                "package": {
-                    "ecosystem": "OpenSSF",
-                    "name": ""
-                }
-            }]
-        });
-        serde_json::to_vec(&payload).ok()
     }
 }
 
@@ -236,7 +225,7 @@ fn evidence_notes(vulnerability: &OsvVulnerability) -> Option<String> {
 mod tests {
     use super::*;
 
-    const OSV_QUERYBATCH_FIXTURE: &str = r#"{
+    const OSV_BATCH_RESPONSE_FIXTURE: &str = r#"{
   "results": [
     {
       "vulns": [
@@ -262,13 +251,13 @@ mod tests {
 }"#;
 
     #[test]
-    fn parses_real_mal_id_from_osv_querybatch_fixture()
+    fn parses_real_mal_id_from_osv_batch_response_fixture()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Given
         let adapter = OssfMaliciousPackagesAdapter::new();
 
         // When
-        let entries = adapter.parse(OSV_QUERYBATCH_FIXTURE.as_bytes())?;
+        let entries = adapter.parse(OSV_BATCH_RESPONSE_FIXTURE.as_bytes())?;
 
         // Then
         assert_eq!(entries.len(), 1);
@@ -309,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_targets_osv_querybatch_endpoint() {
+    fn adapter_targets_ossf_mirror_endpoint() {
         // Given
         let adapter = OssfMaliciousPackagesAdapter::new();
 
@@ -319,17 +308,22 @@ mod tests {
             adapter.source_class(),
             FeedSourceClass::OssfMaliciousPackages
         );
-        assert_eq!(adapter.feed_url(), OSV_QUERYBATCH_URL);
+        assert_eq!(adapter.feed_url(), OSSF_MALICIOUS_PACKAGES_MIRROR_URL);
     }
 
     #[test]
-    fn request_body_returns_valid_json() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn mirror_url_constant_uses_https() {
+        // Given / When / Then
+        assert!(!OSSF_MALICIOUS_PACKAGES_MIRROR_URL.is_empty());
+        assert!(OSSF_MALICIOUS_PACKAGES_MIRROR_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn request_body_defaults_to_get() {
+        // Given
         let adapter = OssfMaliciousPackagesAdapter::new();
-        let body = adapter
-            .request_body()
-            .ok_or("request_body() returned None")?;
-        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
-        assert!(parsed.get("queries").is_some());
-        Ok(())
+
+        // When / Then
+        assert!(adapter.request_body().is_none());
     }
 }

@@ -100,12 +100,12 @@ advisories with `MAL-YYYY-NNNN` identifiers. Arbitraitor ingests these as
 ### Update command
 
 ```sh
-arbitraitor intel update --ossf-malicious-packages
+arbitraitor intel update ossf-malicious-packages --url https://example.com/malicious-packages.json
 ```
 
-Use `--ossf-malicious-packages-url` to point at a pre-fetched signed mirror or
-test fixture. Network access is explicit; package inspection does not perform
-implicit live OSV lookups.
+Use `--url` to point at a pre-fetched signed mirror or test fixture. Network
+access is explicit; package inspection does not perform implicit live OSV
+lookups.
 
 ### Indicator mapping
 

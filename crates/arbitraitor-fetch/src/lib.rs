@@ -940,6 +940,8 @@ impl HttpFetcher {
         let mut redirect_chain = Vec::new();
         let mut headers = credentials.header_map()?;
         let user_header_names = merge_user_headers(&mut headers, user_headers)?;
+        let mut method = method;
+        let mut body = body;
 
         for redirect_count in 0..=policy.max_redirects {
             if !visited.insert(current.clone()) {
@@ -982,6 +984,15 @@ impl HttpFetcher {
                 trace!(from = %redact_parsed_url(&current), to = %redact_parsed_url(&next), "following policy-approved redirect");
                 redirect_chain.push(FetchUrl(current));
                 current = next;
+                // RFC 7231 §6.4.2/3/4: 301/302/303 must not replay the request body.
+                // Only 307/308 preserve method and body across redirects.
+                if status == reqwest::StatusCode::MOVED_PERMANENTLY
+                    || status == reqwest::StatusCode::FOUND
+                    || status == reqwest::StatusCode::SEE_OTHER
+                {
+                    method = HttpMethod::Get;
+                    body = None;
+                }
                 continue;
             }
 
@@ -1813,13 +1824,13 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::{
-        FetchCancellation, FetchError, FetchPolicy, FetchScheme, HttpMethod, OutgoingRequest,
-        TlsVerifier, build_http_client, ensure_cross_origin_allowed, ensure_no_insecure_downgrade,
-        execute_request, merge_user_headers, strip_credentials_on_cross_origin,
-        verify_connected_peer,
+        FetchCancellation, FetchError, FetchPolicy, FetchScheme, FetchUrl, HttpFetcher, HttpMethod,
+        OutgoingRequest, RequestCredentials, TlsVerifier, VecSink, build_http_client,
+        ensure_cross_origin_allowed, ensure_no_insecure_downgrade, execute_request,
+        merge_user_headers, strip_credentials_on_cross_origin, verify_connected_peer,
     };
     use url::Url;
 
@@ -1872,6 +1883,281 @@ mod tests {
         let request = server.await??;
         assert!(request.contains(&format!("host: rebind.invalid:{}", addr.port())));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_request_sends_body_and_content_type() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let request = read_http_request(&mut stream).await?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await?;
+            stream.shutdown().await?;
+            Ok::<String, std::io::Error>(request)
+        });
+        let url = format!("http://127.0.0.1:{}/artifact", addr.port()).parse()?;
+        let headers = reqwest::header::HeaderMap::new();
+        let body = br#"{"answer":42}"#;
+
+        let response = execute_request(
+            &reqwest::Client::new(),
+            OutgoingRequest {
+                url,
+                method: HttpMethod::Post,
+                body: Some(body),
+                headers: &headers,
+            },
+        )
+        .await?;
+        let request = server.await??.to_ascii_lowercase();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(request.starts_with("post /artifact http/1.1"));
+        assert!(request.contains("content-type: application/json"));
+        assert!(request.ends_with(r#"{"answer":42}"#));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_request_does_not_send_body() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let request = read_http_request(&mut stream).await?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await?;
+            stream.shutdown().await?;
+            Ok::<String, std::io::Error>(request)
+        });
+        let url = format!("http://127.0.0.1:{}/artifact", addr.port()).parse()?;
+        let headers = reqwest::header::HeaderMap::new();
+
+        let response = execute_request(
+            &reqwest::Client::new(),
+            OutgoingRequest {
+                url,
+                method: HttpMethod::Get,
+                body: Some(b"ignored"),
+                headers: &headers,
+            },
+        )
+        .await?;
+        let request = server.await??.to_ascii_lowercase();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(request.starts_with("get /artifact http/1.1"));
+        assert!(!request.contains("content-type:"));
+        assert!(!request.contains("content-length:"));
+        assert!(!request.ends_with("ignored"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_redirect_301_replays_as_get_without_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first_request, second_request, sink) =
+            fetch_post_through_redirect(reqwest::StatusCode::MOVED_PERMANENTLY).await?;
+
+        assert_eq!(sink.as_bytes(), b"ok");
+        assert!(first_request.starts_with("post /start http/1.1"));
+        assert!(first_request.contains("content-type: application/json"));
+        assert!(first_request.ends_with("malware=payload"));
+        assert!(second_request.starts_with("get /final http/1.1"));
+        assert!(!second_request.contains("content-type:"));
+        assert!(!second_request.contains("content-length:"));
+        assert!(!second_request.contains("malware=payload"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_redirect_307_preserves_body_and_content_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first_request, second_request, sink) =
+            fetch_post_through_redirect(reqwest::StatusCode::TEMPORARY_REDIRECT).await?;
+
+        assert_eq!(sink.as_bytes(), b"ok");
+        assert!(first_request.starts_with("post /start http/1.1"));
+        assert!(first_request.contains("content-type: application/json"));
+        assert!(first_request.ends_with("malware=payload"));
+        assert!(second_request.starts_with("post /final http/1.1"));
+        assert!(second_request.contains("content-type: application/json"));
+        assert!(second_request.contains("content-length: 15"));
+        assert!(second_request.ends_with("malware=payload"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_redirect_302_replays_as_get_without_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut first_stream, _) = listener.accept().await?;
+            let first_request = read_http_request(&mut first_stream).await?;
+            first_stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        addr.port()
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            first_stream.shutdown().await?;
+
+            let (mut second_stream, _) = listener.accept().await?;
+            let second_request = read_http_request(&mut second_stream).await?;
+            second_stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await?;
+            second_stream.shutdown().await?;
+
+            Ok::<(String, String), std::io::Error>((first_request, second_request))
+        });
+
+        let url = FetchUrl::parse(&format!("http://127.0.0.1:{}/start", addr.port()))?;
+        let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
+            allowed_schemes: vec![FetchScheme::Http],
+            allow_loopback_addresses: true,
+            max_redirects: 1,
+            ..FetchPolicy::default()
+        };
+        let body = b"malware=payload";
+        let mut sink = VecSink::new();
+
+        let receipt = HttpFetcher::new()
+            .fetch_inner(
+                url,
+                &policy,
+                HttpMethod::Post,
+                Some(body),
+                None,
+                &RequestCredentials::default(),
+                &[],
+                &mut sink,
+            )
+            .await?;
+        let (first_request, second_request) = server.await??;
+        let first_request = first_request.to_ascii_lowercase();
+        let second_request = second_request.to_ascii_lowercase();
+
+        assert_eq!(
+            receipt
+                .metadata
+                .final_url
+                .as_ref()
+                .map(|url| url.as_url().path()),
+            Some("/final")
+        );
+        assert!(first_request.starts_with("post /start http/1.1"));
+        assert!(first_request.contains("content-length: 15"));
+        assert!(first_request.ends_with("malware=payload"));
+        assert!(second_request.starts_with("get /final http/1.1"));
+        assert!(!second_request.contains("content-length:"));
+        assert!(!second_request.contains("malware=payload"));
+        Ok(())
+    }
+
+    async fn read_http_request(stream: &mut TcpStream) -> Result<String, std::io::Error> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let header_len = loop {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
+                return Ok(String::from_utf8_lossy(&request).to_string());
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break header_end + 4;
+            }
+        };
+        let target_len = header_len + request_content_length(&request[..header_len]);
+        while request.len() < target_len {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        Ok(String::from_utf8_lossy(&request).to_string())
+    }
+
+    fn request_content_length(headers: &[u8]) -> usize {
+        String::from_utf8_lossy(headers)
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    async fn fetch_post_through_redirect(
+        status: reqwest::StatusCode,
+    ) -> Result<(String, String, VecSink), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut first_stream, _) = listener.accept().await?;
+            let first_request = read_http_request(&mut first_stream).await?;
+            first_stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {} {}\r\nLocation: http://127.0.0.1:{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or("Redirect"),
+                        addr.port()
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            first_stream.shutdown().await?;
+
+            let (mut second_stream, _) = listener.accept().await?;
+            let second_request = read_http_request(&mut second_stream).await?;
+            second_stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await?;
+            second_stream.shutdown().await?;
+
+            Ok::<(String, String), std::io::Error>((first_request, second_request))
+        });
+
+        let url = FetchUrl::parse(&format!("http://127.0.0.1:{}/start", addr.port()))?;
+        let policy = FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
+            allowed_schemes: vec![FetchScheme::Http],
+            allow_loopback_addresses: true,
+            max_redirects: 1,
+            ..FetchPolicy::default()
+        };
+        let mut sink = VecSink::new();
+
+        HttpFetcher::new()
+            .fetch_inner(
+                url,
+                &policy,
+                HttpMethod::Post,
+                Some(b"malware=payload"),
+                None,
+                &RequestCredentials::default(),
+                &[],
+                &mut sink,
+            )
+            .await?;
+        let (first_request, second_request) = server.await??;
+        Ok((
+            first_request.to_ascii_lowercase(),
+            second_request.to_ascii_lowercase(),
+            sink,
+        ))
     }
 
     // --- ADR-0018: post-connect peer verification (Issue #383) ---
