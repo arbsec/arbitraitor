@@ -1,9 +1,9 @@
 [tools]
 # Core language toolchain
-rust = "1.96.0"
+rust = "1.97.1"
 
 # Git hooks and conventional commits
-lefthook = "1.13.0"
+lefthook = "2.1.10"
 cocogitto = "7.0.0"
 
 # Markdown linter
