@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":pinDevDependencies"
+  ],
+  "schedule": ["before 5am on monday"],
+  "minimumReleaseAge": "3 days",
+  "prConcurrentLimit": 10,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 5am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "Group all patch updates",
+      "matchUpdateTypes": ["patch", "digest", "pin"],
+      "groupName": "patch-updates",
+      "automerge": true
+    },
+    {
+      "description": "Group all minor updates",
+      "matchUpdateTypes": ["minor"],
+      "groupName": "minor-updates"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group mise tool updates",
+      "matchManagers": ["mise"],
+      "groupName": "mise-tools"
+    }
+  ]
+}
