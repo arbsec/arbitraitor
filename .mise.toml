@@ -3,7 +3,7 @@
 rust = "1.97.1"
 
 # Git hooks and conventional commits
-lefthook = "2.1.10"
+lefthook = "2.1.11"
 cocogitto = "7.0.0"
 
 # Markdown linter
