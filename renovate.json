@@ -32,9 +32,9 @@
       "groupName": "github-actions"
     },
     {
-      "description": "Automerge GitHub Actions patch, digest, and pin updates",
+      "description": "Automerge GitHub Actions patch, digest, pin, and pinDigest updates",
       "matchManagers": ["github-actions"],
-      "matchUpdateTypes": ["patch", "digest", "pin"],
+      "matchUpdateTypes": ["patch", "digest", "pin", "pinDigest"],
       "groupName": "github-actions",
       "automerge": true
     },
@@ -58,6 +58,13 @@
       "matchUpdateTypes": ["patch", "digest", "pin"],
       "groupName": "mise-tools",
       "automerge": true
+    },
+    {
+      "description": "Never automerge Rust toolchain updates (conventions.md: pin changes require an ADR)",
+      "matchManagers": ["mise"],
+      "matchDepNames": ["rust"],
+      "groupName": "mise-tools",
+      "automerge": false
     }
   ]
 }
