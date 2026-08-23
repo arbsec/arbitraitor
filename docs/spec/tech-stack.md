@@ -1273,6 +1273,7 @@ Example:
 
 ```text
 /.github/                     @arbitraitor/maintainers
+/renovate.json                @arbitraitor/security
 /Cargo.lock                   @arbitraitor/security
 /deny.toml                    @arbitraitor/security
 /crates/arbitraitor-core/     @arbitraitor/security
