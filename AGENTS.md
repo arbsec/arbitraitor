@@ -119,7 +119,7 @@ When a task completes or exits via the review loop limit, pick the next availabl
 5. **Codebase sweep** if nothing else is available:
    - Search for `TODO`/`FIXME`/`unwrap()` in production code and file issues for findings.
    - Run `cargo-deny check`, `cargo-audit`, `rumdl check .` on the full repo.
-   - Check for stale Dependabot PRs.
+   - Check for stale Renovate PRs.
    - Verify `cargo run -p xtask -- docs-check` passes on `main`.
 
 ### Stale PR detection

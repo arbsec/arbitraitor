@@ -5528,7 +5528,7 @@ Use:
 - `cargo-deny` for advisories, licenses, bans, sources, and duplicates;
 - `cargo-audit` for RustSec advisory checks;
 - GitHub dependency review to block vulnerable additions in pull requests;
-- Dependabot for Cargo and GitHub Actions updates;
+- Renovate for Cargo, GitHub Actions, and mise tool updates;
 - `cargo-semver-checks` for public crates;
 - `cargo-hack` for feature combinations;
 - scheduled `cargo-mutants` for policy and state-machine tests;
@@ -5563,7 +5563,7 @@ Policy:
 
 ### 41.19 CI architecture on GitHub Actions
 
-All third-party actions must be pinned to full commit SHA with a version comment. GitHub documents a full-length commit SHA as the only immutable action reference. Dependabot should update those pins.
+All third-party actions must be pinned to full commit SHA with a version comment. GitHub documents a full-length commit SHA as the only immutable action reference. Renovate should update those pins.
 
 Use least-privilege `GITHUB_TOKEN` permissions at workflow and job level. Use OIDC or trusted publishing instead of long-lived release credentials.
 
@@ -6268,7 +6268,7 @@ Never blindly copy action examples that reference floating tags. Pin to full SHA
 1. Add format, Clippy, check, nextest, and docs workflows.
 2. Add cargo-deny, cargo-audit, dependency review, CodeQL, and secret scanning.
 3. Pin every action by SHA.
-4. Add Dependabot for Cargo and GitHub Actions.
+4. Add Renovate for Cargo, GitHub Actions, and mise tool updates.
 5. Add release workflow in dry-run mode.
 6. Add artifact attestation proof-of-concept.
 
