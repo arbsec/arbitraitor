@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native automerge for patch updates. Spec and agent documentation now
   reference Renovate as the dependency-update tool.
 
+- Rust toolchain updates detected in `.mise.toml` and `rust-toolchain.toml`
+  are now grouped into a single Renovate PR so the two pins cannot drift
+  apart independently. Toolchain updates are never automerged
+  (conventions.md requires an ADR for pin changes).
+
 - `arbitraitor intel update` now selects feeds with positional subcommands:
   `urlhaus` and `ossf-malicious-packages`. Feed URL overrides use a consistent
   `--url <URL>` flag, while `--intel-store <PATH>` remains on the `update`
