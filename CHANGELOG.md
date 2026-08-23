@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replaced Dependabot with Renovate for dependency automation.
+  Renovate adds first-class mise tool version updates (Rust, lefthook,
+  cocogitto), improves Cargo workspace dependency handling, and enables
+  native automerge for patch updates. Spec and agent documentation now
+  reference Renovate as the dependency-update tool.
+
 - `arbitraitor intel update` now selects feeds with positional subcommands:
   `urlhaus` and `ossf-malicious-packages`. Feed URL overrides use a consistent
   `--url <URL>` flag, while `--intel-store <PATH>` remains on the `update`
