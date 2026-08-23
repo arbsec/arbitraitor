@@ -60,10 +60,10 @@
       "automerge": true
     },
     {
-      "description": "Never automerge Rust toolchain updates (conventions.md: pin changes require an ADR)",
-      "matchManagers": ["mise"],
+      "description": "Group Rust toolchain updates from the mise and rust-toolchain managers into one reviewed PR; never automerge (conventions.md: pin changes require an ADR)",
+      "matchManagers": ["mise", "rust-toolchain"],
       "matchDepNames": ["rust"],
-      "groupName": "mise-tools",
+      "groupName": "rust-toolchain",
       "automerge": false
     }
   ]
