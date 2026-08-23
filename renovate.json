@@ -27,14 +27,35 @@
       "groupName": "cargo-minor-updates"
     },
     {
-      "description": "Group GitHub Actions updates",
+      "description": "Group all GitHub Actions updates",
       "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Automerge GitHub Actions patch, digest, and pin updates",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["patch", "digest", "pin"],
       "groupName": "github-actions",
       "automerge": true
     },
     {
-      "description": "Group mise tool updates",
+      "description": "Never automerge Actions in docs and release workflows (no pull_request trigger to validate them)",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [
+        ".github/workflows/docs.yml",
+        ".github/workflows/release.yml"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Group all mise tool updates",
       "matchManagers": ["mise"],
+      "groupName": "mise-tools"
+    },
+    {
+      "description": "Automerge mise tool patch, digest, and pin updates",
+      "matchManagers": ["mise"],
+      "matchUpdateTypes": ["patch", "digest", "pin"],
       "groupName": "mise-tools",
       "automerge": true
     }
