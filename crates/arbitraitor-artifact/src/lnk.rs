@@ -430,8 +430,10 @@ fn read_counted_string(
 /// with the replacement character.
 fn decode_utf16le_lossy(payload: &[u8]) -> String {
     let units: Vec<u16> = payload
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect();
     String::from_utf16_lossy(&units)
 }
