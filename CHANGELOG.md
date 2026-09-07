@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Security CI (`cargo audit` / `cargo deny check`) failures caused by
+  RUSTSEC-2026-0268/0269 are fixed by the `wasmtime` floor bump below.
+  Separately, stale `RUSTSEC-2026-0185/0186/0190` ignore entries
+  (quinn-proto, memmap2, anyhow versions long since fixed in the lockfile)
+  are pruned from `deny.toml` and the audit workflow to keep the
+  unused-ignore warning signal clean — they emitted advisory-not-detected
+  warnings only and never failed a check themselves.
+- Direct `wasmtime` dependency floor raised `>=29` → `>=47.0.4` (lockfile
+  47.0.3 → 47.0.4), closing RUSTSEC-2026-0268 and RUSTSEC-2026-0269 for the
+  plugin runtime. The floor also prevents future `cargo update` runs from
+  silently resolving the direct copy onto yara-x's wasmtime `^43.0.2` range.
+- RUSTSEC-2026-0269 is now ignored with a recorded reason for the
+  yara-x-pinned `wasmtime 43.0.2` copy; the ignore tracks the upstream
+  release that will allow its removal.
+
 ### Changed
 
 - Replaced Dependabot with Renovate for dependency automation.
