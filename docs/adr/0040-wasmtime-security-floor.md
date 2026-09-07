@@ -57,11 +57,13 @@ explicitly deferred as "a separate decision that requires its own ADR".
   stable under `cargo update` and fresh resolves. A future accidental
   four-major-version downgrade of the plugin runtime is a resolver error,
   not a silent change.
-- `advisories-not-detected` drift in `deny.toml` is reduced: ignore entries
-  whose advisory no longer exists in the graph now fail only for genuinely
-  stale entries (RUSTSEC-2026-0185/0186/0190 were pruned in the same change;
-  their quinn-proto, memmap2, and anyhow versions had long been fixed in
-  the lockfile).
+- Stale ignore entries are pruned (RUSTSEC-2026-0185/0186/0190 — quinn-proto,
+  memmap2, and anyhow versions long since fixed in the lockfile). These could
+  never fail `cargo deny check` on their own (`advisory-not-detected` is a
+  warning in cargo-deny 0.20.x, and the CI failures were driven by the
+  unignored 0268/0269 vulnerability errors), but pruning keeps the
+  unused-ignore warning signal clean so genuinely stale entries stand out
+  during future ignore hygiene.
 - Both Security CI jobs pass again; dependency automation PRs are no longer
   blocked by unrelated advisory-database drift.
 - When yara-x publishes a version with a non-vulnerable wasmtime range, the
@@ -97,9 +99,11 @@ Renovate to propose separately, with its own review.
 
 Rejected. YARA rule evaluation is core functionality (ADR-0037 context); the
 43.0.2 copy's exposure is bounded: it is compiled into the analysis crate, not
-the plugin host, and RUSTSEC-2026-0269's trailing-slash sandbox escape requires
-wasip3-style preopened directories that yara-x's usage does not configure.
-Tracked via the ignore's removal condition instead.
+the plugin host, and RUSTSEC-2026-0269 is a bug in the `wasmtime-wasi`
+filesystem sandbox (cap-std trailing-slash symlink handling, exercised via
+WASI preopened directories), while yara-x's wasmtime dependency enables no
+WASI feature and configures no preopened directories. Tracked via the
+ignore's removal condition instead.
 
 ## References
 
