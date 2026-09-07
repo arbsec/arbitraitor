@@ -12,7 +12,8 @@ was determined entirely by `Cargo.lock`, which held two copies of the `wasmtime`
 facade crate:
 
 - **47.0.3** — our direct dependency (plugin runtime).
-- **43.0.2** — a transitive copy required by `yara-x ^43.0.2`.
+- **43.0.2** — a transitive copy required by yara-x's `wasmtime ^43.0.2`
+  dependency requirement (yara-x 1.19.0).
 
 In August 2026 the RustSec database published two advisories affecting the
 wasmtime line:
@@ -28,7 +29,8 @@ Both were triggered by our 47.0.3 copy, failing the Security CI jobs
 automation PRs that do not touch Rust dependencies at all.
 
 While investigating the fix, a second defect surfaced: because `>=29` overlaps
-yara-x's `^43.0.2` requirement, any *fresh* resolution of the dependency graph
+yara-x's `wasmtime ^43.0.2` requirement, any *fresh* resolution of the
+dependency graph
 (`cargo update`, or a resolver-driven edit to the lockfile) is free to unify
 both copies onto the single 43.0.2 version — silently replacing our patched
 47.x plugin runtime with a four-major-versions-older, advisory-affected
