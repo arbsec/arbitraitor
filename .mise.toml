@@ -1,6 +1,6 @@
 [tools]
 # Core language toolchain
-rust = "1.98.0"
+rust = "1.98.1"
 
 # Git hooks and conventional commits
 lefthook = "2.1.11"
