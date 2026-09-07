@@ -44,7 +44,7 @@ tracing = { workspace = true }
 #   component-model    — Component Model support (ADR-0006)
 #   parallel-compilation — speed up compilation of large components
 #   cache              — on-disk compilation cache to avoid recompilation
-wasmtime = { version = ">=29", default-features = false, features = [
+wasmtime = { version = ">=47.0.4", default-features = false, features = [
     "cranelift",
     "runtime",
     "component-model",
