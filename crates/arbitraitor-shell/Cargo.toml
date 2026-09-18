@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 xz2 = "0.1"
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
