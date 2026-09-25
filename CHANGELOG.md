@@ -46,7 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without a resolvable `HOME`, the legacy relative default is retained.
   The daemon now resolves its default store through the same XDG rules as
   the CLI, and ignores non-absolute `XDG_CACHE_HOME` values per the XDG
-  spec, so the two components always agree on one CAS root.
+  spec, so the two components always agree on one CAS root. Note the
+  daemon's default socket path moves with it for the affected environments:
+  without a resolvable `HOME` it changes from
+  `.arbitraitor-cache/daemon.sock` to `.arbitraitor/daemon.sock`, and with
+  an empty or relative `XDG_CACHE_HOME` from
+  `$XDG_CACHE_HOME/arbitraitor/daemon.sock` to
+  `$HOME/.cache/arbitraitor/daemon.sock` (spec-compliant; existing clients
+  on the old path must start a fresh daemon).
 - First-class `fetch <URL> -o PATH` / `--output PATH` placed **after** the
   URL is now honored. clap's trailing-argument support previously
   swallowed the flag, releasing the artifact bytes to stdout with the

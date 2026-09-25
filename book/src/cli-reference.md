@@ -92,6 +92,7 @@ evidence; exit codes are a coarse-grained summary.
 | 42 | Content type or size policy violation |
 | 50 | Execution failed after approval (non-zero child exit, signal, sandbox violation) |
 | 60 | Internal integrity invariant failure (e.g. running as root per ADR-0009) |
+| 141 | Wrapper fetch released stdout after the pipeline consumer closed the pipe (conventional signal-13 termination; no diagnostic is printed) |
 
 These numeric values are stable for the lifetime of the project. New codes
 may be added (with a corresponding spec change); existing codes are not
