@@ -710,7 +710,15 @@ fn first_class_output_from_args(args: &[String]) -> Option<String> {
 /// Writes `bytes` to stdout, exiting silently with [`PIPE_EXIT_CODE`] when
 /// the consumer has closed the pipe. Any other error is surfaced normally.
 pub(crate) fn write_stdout_or_exit_on_broken_pipe(bytes: &[u8]) -> Result<()> {
-    if let Err(error) = std::io::stdout().write_all(bytes) {
+    let flush_result = {
+        let mut stdout = std::io::stdout().lock();
+        let write = stdout.write_all(bytes);
+        // Flush inside the same check so buffered writes to a closed pipe
+        // also produce a diagnosable EPIPE instead of a swallowed flush at
+        // process exit.
+        write.and_then(|()| stdout.flush())
+    };
+    if let Err(error) = flush_result {
         if error.kind() == std::io::ErrorKind::BrokenPipe {
             std::process::exit(PIPE_EXIT_CODE);
         }
@@ -721,7 +729,10 @@ pub(crate) fn write_stdout_or_exit_on_broken_pipe(bytes: &[u8]) -> Result<()> {
 
 /// True when the wrapped tool itself requested quiet output: `curl -s`
 /// without `-S` (errors still wanted), or `wget -q` / `--quiet`, including
-/// short-option clusters such as `-qO-`.
+/// short-option clusters where `-q` leads (e.g. `-qO-`). A trailing `q`
+/// inside another cluster (e.g. `-Oq`, an appended filename) intentionally
+/// does NOT count, so an unrelated `q` in an option value cannot silence
+/// the report.
 fn wrapper_tool_requested_quiet(tool: Option<&str>, args: &[String]) -> bool {
     match tool.and_then(WrapperTarget::from_binary_name) {
         Some(WrapperTarget::Curl) => {
@@ -730,7 +741,7 @@ fn wrapper_tool_requested_quiet(tool: Option<&str>, args: &[String]) -> bool {
         Some(WrapperTarget::Wget) => args.iter().any(|arg| {
             arg == "-q"
                 || arg == "--quiet"
-                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('q'))
+                || (arg.starts_with("-q") && !arg.starts_with("-q-") && arg.len() > 2)
         }),
         None => false,
     }
@@ -910,7 +921,7 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
 
     let mut errors: Vec<String> = Vec::new();
     for url in &urls {
-        match wrap_fetch_single(url, config).await {
+        match wrap_fetch_single(url, config, tool, &command.args).await {
             Ok(outcome) => {
                 let emit_remote = remote_name || urls.len() > 1;
                 let emit_path = if urls.len() > 1 {
@@ -940,12 +951,27 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn wrap_fetch_single(url: &str, config: &Config) -> Result<pipeline::InspectOutcome> {
+async fn wrap_fetch_single(
+    url: &str,
+    config: &Config,
+    tool: Option<&str>,
+    args: &[String],
+) -> Result<pipeline::InspectOutcome> {
     let signatures =
         pipeline::signature_inputs(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
 
-    let outcome =
-        pipeline::inspect(url, None, None, None, None, signatures, config, None, false).await?;
+    let outcome = pipeline::inspect(
+        url,
+        None,
+        None,
+        None,
+        None,
+        signatures,
+        config,
+        None,
+        wrapper_human_report_requested(tool, args),
+    )
+    .await?;
 
     if outcome.verdict != Verdict::Pass {
         miette::bail!("fetch rejected artifact with verdict {:?}", outcome.verdict);
@@ -981,7 +1007,7 @@ async fn wrap_bash(command: &WrapCommand, config: &Config) -> Result<()> {
         pipeline::signature_inputs(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())?,
         config,
         None,
-        false,
+        std::io::stderr().is_terminal(),
     )
     .await?;
     if outcome.verdict != Verdict::Pass {

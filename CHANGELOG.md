@@ -18,9 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interception metadata (digest/CAS/verdict report) is written to stderr
   only when stderr is a terminal: agent shells and `2>&1` merges that
   capture the piped stream never receive the report, so released artifact
-  bytes stay parse-clean. `curl -s` (without `-S`) and `wget -q`/`--quiet`
-  now also suppress the report, mirroring the wrapped tool's own quiet
-  semantics (#731). Full metadata remains available via the store
+  bytes stay parse-clean. This applies to `arbitraitor fetch`, the
+  curl/wget shims, and `arbitraitor wrap` alike. `curl -s` (without `-S`)
+  and `wget -q`/`--quiet` (or clusters led by `-q`, e.g. `-qO-`) now also
+  suppress the report, mirroring the wrapped tool's own quiet semantics
+  (#731). Full metadata remains available via the store
   (`arbitraitor store list/inspect`) and `--receipt`.
 - Wrapper fetch non-Pass verdicts now print a plain rejection line to
   stderr and exit with the verdict-mapped exit code (Warn → 10, Block →
@@ -42,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command ran in. Set `store.cas_dir` in config (or pass `--cas-dir` /
   `inspect --cas-dir`) to opt back into a per-project store (#733).
   Without a resolvable `HOME`, the legacy relative default is retained.
+  The daemon now resolves its default store through the same XDG rules as
+  the CLI, and ignores non-absolute `XDG_CACHE_HOME` values per the XDG
+  spec, so the two components always agree on one CAS root.
 - First-class `fetch <URL> -o PATH` / `--output PATH` placed **after** the
   URL is now honored. clap's trailing-argument support previously
   swallowed the flag, releasing the artifact bytes to stdout with the

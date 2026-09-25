@@ -2438,6 +2438,11 @@ fn curl_silent_without_show_error_is_quiet() {
         Some("wget"),
         &a(&["wget", "-qO-", "https://example.com"])
     ));
+    // `q` in value position of another option must not silence the report.
+    assert!(!wrapper_tool_requested_quiet(
+        Some("wget"),
+        &a(&["wget", "-Oq", "https://example.com"])
+    ));
     assert!(wrapper_tool_requested_quiet(
         Some("wget"),
         &a(&["wget", "--quiet", "https://example.com"])
