@@ -2550,6 +2550,7 @@ Proposed stable exit codes:
 | 42 | Content type or size policy violation |
 | 50 | Execution failed after approval |
 | 60 | Internal integrity invariant failure |
+| 141 | Wrapper fetch released stdout after the pipeline consumer closed the pipe (conventional signal-13 termination; no diagnostic is printed) |
 
 Machine consumers should primarily use structured output rather than relying only on exit codes.
 

@@ -10,7 +10,7 @@ mod run;
 mod shim;
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use arbitraitor_archive::{
@@ -26,6 +26,7 @@ use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
 use arbitraitor_intel::{
     IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
 };
+use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::origin::CallerOrigin;
@@ -522,6 +523,7 @@ async fn run_main() -> Result<()> {
                 signatures,
                 &config,
                 explain_format,
+                true,
             )
             .await
             .map(|outcome| {
@@ -666,6 +668,93 @@ where
     Cli::parse_from(rewritten)
 }
 
+/// Exit code used when stdout was closed by the pipeline consumer: 141 is
+/// the shell convention for termination by `SIGPIPE` (128 + 13). Real curl
+/// exits non-zero in this situation too, but printing a diagnostic into a
+/// merged agent-capture stream would reintroduce the very pollution this
+/// wrapper exists to prevent.
+const PIPE_EXIT_CODE: i32 = 141;
+
+/// Extracts `-o PATH` / `--output PATH` / `--output=PATH` / `-oPATH` from
+/// first-class fetch positional arguments (everything after the URL token).
+#[must_use]
+fn first_class_output_from_args(args: &[String]) -> Option<String> {
+    let mut positionals = args.iter().skip(1);
+    while let Some(token) = positionals.next() {
+        if let Some(value) = token.strip_prefix("--output=") {
+            return Some(value.to_owned());
+        }
+        if token == "--output" || token == "-o" {
+            return positionals.next().cloned();
+        }
+        if token == "-" {
+            return None;
+        }
+        if token.starts_with("--") {
+            continue;
+        }
+        if token.starts_with("-o") && !token.starts_with("-o-") {
+            if token.len() > 2 {
+                return Some(token[2..].to_owned());
+            }
+            return None;
+        }
+        if token.starts_with('-') {
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+/// Writes `bytes` to stdout, exiting silently with [`PIPE_EXIT_CODE`] when
+/// the consumer has closed the pipe. Any other error is surfaced normally.
+pub(crate) fn write_stdout_or_exit_on_broken_pipe(bytes: &[u8]) -> Result<()> {
+    let flush_result = {
+        let mut stdout = std::io::stdout().lock();
+        let write = stdout.write_all(bytes);
+        // Flush inside the same check so buffered writes to a closed pipe
+        // also produce a diagnosable EPIPE instead of a swallowed flush at
+        // process exit.
+        write.and_then(|()| stdout.flush())
+    };
+    if let Err(error) = flush_result {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(PIPE_EXIT_CODE);
+        }
+        return Err(error).into_diagnostic();
+    }
+    Ok(())
+}
+
+/// True when the wrapped tool itself requested quiet output: `curl -s`
+/// without `-S` (errors still wanted), or `wget -q` / `--quiet`, including
+/// short-option clusters where `-q` leads (e.g. `-qO-`). A trailing `q`
+/// inside another cluster (e.g. `-Oq`, an appended filename) intentionally
+/// does NOT count, so an unrelated `q` in an option value cannot silence
+/// the report.
+fn wrapper_tool_requested_quiet(tool: Option<&str>, args: &[String]) -> bool {
+    match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl) => {
+            parse_curl_args(args).is_ok_and(|parsed| parsed.silent && !parsed.show_error)
+        }
+        Some(WrapperTarget::Wget) => args.iter().any(|arg| {
+            arg == "-q"
+                || arg == "--quiet"
+                || (arg.starts_with("-q") && !arg.starts_with("-q-") && arg.len() > 2)
+        }),
+        None => false,
+    }
+}
+
+/// Human interception report is printed only when stderr is attached to a
+/// terminal and the wrapped tool did not ask for quiet output. Captured
+/// stderr (agent shells, `2>&1` merges) never receives the report, keeping
+/// released artifact streams byte-clean even when stdout/stderr merge.
+fn wrapper_human_report_requested(tool: Option<&str>, args: &[String]) -> bool {
+    std::io::stderr().is_terminal() && !wrapper_tool_requested_quiet(tool, args)
+}
+
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
     let (url, output_path, remote_name) = if command.tool.is_some() {
         let target = wrapper_fetch_target(command.tool.as_deref())?;
@@ -708,10 +797,15 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
             .args
             .first()
             .ok_or_else(|| miette::miette!("fetch requires a URL argument"))?;
+        // clap's trailing_var_arg swallowing means output flags placed after
+        // the URL land in `args` instead of `output`. Honor them there —
+        // dropping the file bytes to stdout is data loss from the caller's
+        // perspective.
         let output_path = command
             .output
             .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
+            .map(|path| path.to_string_lossy().into_owned())
+            .or_else(|| first_class_output_from_args(&command.args));
         (url.clone(), output_path, false)
     };
 
@@ -732,11 +826,19 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         signatures,
         config,
         None,
+        wrapper_human_report_requested(command.tool.as_deref(), &command.args),
     )
     .await?;
 
     if outcome.verdict != Verdict::Pass {
-        miette::bail!("fetch rejected artifact with verdict {:?}", outcome.verdict);
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "fetch rejected artifact with verdict {:?}",
+            outcome.verdict
+        );
+        drop(stderr);
+        std::process::exit(ExitCode::from(outcome.verdict).as_i32());
     }
 
     let recomputed = Sha256Digest::new(Sha256::digest(&outcome.bytes).into());
@@ -819,7 +921,7 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
 
     let mut errors: Vec<String> = Vec::new();
     for url in &urls {
-        match wrap_fetch_single(url, config).await {
+        match wrap_fetch_single(url, config, tool, &command.args).await {
             Ok(outcome) => {
                 let emit_remote = remote_name || urls.len() > 1;
                 let emit_path = if urls.len() > 1 {
@@ -849,11 +951,27 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn wrap_fetch_single(url: &str, config: &Config) -> Result<pipeline::InspectOutcome> {
+async fn wrap_fetch_single(
+    url: &str,
+    config: &Config,
+    tool: Option<&str>,
+    args: &[String],
+) -> Result<pipeline::InspectOutcome> {
     let signatures =
         pipeline::signature_inputs(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
 
-    let outcome = pipeline::inspect(url, None, None, None, None, signatures, config, None).await?;
+    let outcome = pipeline::inspect(
+        url,
+        None,
+        None,
+        None,
+        None,
+        signatures,
+        config,
+        None,
+        wrapper_human_report_requested(tool, args),
+    )
+    .await?;
 
     if outcome.verdict != Verdict::Pass {
         miette::bail!("fetch rejected artifact with verdict {:?}", outcome.verdict);
@@ -889,6 +1007,7 @@ async fn wrap_bash(command: &WrapCommand, config: &Config) -> Result<()> {
         pipeline::signature_inputs(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())?,
         config,
         None,
+        std::io::stderr().is_terminal(),
     )
     .await?;
     if outcome.verdict != Verdict::Pass {
@@ -926,7 +1045,7 @@ fn emit_wrapper_output(
             std::fs::write(&filename, bytes).into_diagnostic()?;
         }
         None => {
-            std::io::stdout().write_all(bytes).into_diagnostic()?;
+            write_stdout_or_exit_on_broken_pipe(bytes)?;
         }
     }
     Ok(())

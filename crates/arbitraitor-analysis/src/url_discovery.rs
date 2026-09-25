@@ -40,6 +40,9 @@ const MAX_URLS: usize = 1000;
 /// Maximum length of a single discovered URL in bytes.
 const MAX_URL_LENGTH: usize = 2048;
 
+/// Overlap between consecutive detector scan windows (2× `MAX_URL_LENGTH`).
+const SCAN_WINDOW_OVERLAP_BYTES: usize = 2 * MAX_URL_LENGTH;
+
 /// URL schemes the extractors recognize.
 const URL_SCHEMES: &[&str] = &["https://", "http://", "ftp://"];
 
@@ -436,12 +439,6 @@ impl Detector for UrlDiscoveryDetector {
     }
 
     fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
-        if ctx.artifact_bytes.len() > MAX_SOURCE_SIZE {
-            return Err(DetectorError::Resource(format!(
-                "artifact exceeds URL discovery size limit ({MAX_SOURCE_SIZE} bytes)"
-            )));
-        }
-
         let source = std::str::from_utf8(ctx.artifact_bytes)
             .map_err(|_| DetectorError::ParseError("artifact is not valid UTF-8".to_owned()))?;
 
@@ -451,24 +448,66 @@ impl Detector for UrlDiscoveryDetector {
             _ => return Ok(Vec::new()),
         };
 
-        let expressions = detect_dynamic_url_expressions(source, source_kind);
-
+        // Artifacts larger than MAX_SOURCE_SIZE are scanned in overlapping,
+        // size-capped windows instead of being rejected. This keeps every
+        // individual extractor call within its documented resource bounds
+        // (URL count, URL length, window size) so a legitimate multi-megabyte
+        // JSON/HTML document still receives full template-expression coverage
+        // rather than failing closed as `Verdict::Incomplete`.
+        let window_stride = max_scan_window_stride();
         let mut seen: Vec<(String, String)> = Vec::new();
         let mut findings = Vec::new();
-        for expr in expressions {
-            let key = (expr.url.clone(), expr.unresolved_expression.clone());
-            if seen.iter().any(|s| s == &key) {
-                continue;
+        let mut start = 0_usize;
+        while start < source.len() && findings.len() < MAX_URLS {
+            let clamped_end = start.saturating_add(MAX_SOURCE_SIZE).min(source.len());
+            // `str::get` returns None on a non-char-boundary index; back both
+            // ends up to boundaries so the window is always extractable. The
+            // byte shrink is < 4 and absorbed by the overlap.
+            let mut window_end = clamped_end;
+            while window_end > start && !source.is_char_boundary(window_end) {
+                window_end -= 1;
             }
-            seen.push(key);
-            findings.push(dynamic_url_finding(
-                ctx,
-                &expr.unresolved_expression,
-                source_kind,
-            ));
+            let Some(window) = source.get(start..window_end) else {
+                // Unreachable after the boundary back-off (start < len implies
+                // a boundary exists at or after start); advance rather than
+                // abort so a latent misalignment can never silently end the
+                // scan.
+                start = start.saturating_add(1).min(source.len());
+                continue;
+            };
+            for expr in detect_dynamic_url_expressions(window, source_kind) {
+                let key = (expr.url, expr.unresolved_expression);
+                if seen.iter().any(|candidate| candidate == &key) {
+                    continue;
+                }
+                seen.push(key.clone());
+                findings.push(dynamic_url_finding(ctx, &key.1, source_kind));
+                if findings.len() >= MAX_URLS {
+                    break;
+                }
+            }
+            start = next_window_start(source, start.saturating_add(window_stride));
         }
         Ok(findings)
     }
+}
+
+/// Next window start advanced to a UTF-8 char boundary (at most `len`).
+fn next_window_start(source: &str, candidate: usize) -> usize {
+    let mut start = candidate.min(source.len());
+    while start < source.len() && !source.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
+
+/// Byte distance between the starts of consecutive scan windows.
+///
+/// Windows overlap by [`SCAN_WINDOW_OVERLAP_BYTES`] so that a template URL
+/// straddling a window boundary is still fully contained in at least one
+/// window (a discovered URL is at most [`MAX_URL_LENGTH`] bytes long).
+fn max_scan_window_stride() -> usize {
+    MAX_SOURCE_SIZE.saturating_sub(SCAN_WINDOW_OVERLAP_BYTES)
 }
 
 fn dynamic_url_finding(
@@ -923,15 +962,126 @@ url = "https://example.com/api"
     }
 
     #[test]
-    fn oversize_input_returns_error() {
-        let html = format!(
-            "<!DOCTYPE html>\n<html>{}</html>",
-            "x".repeat(MAX_SOURCE_SIZE)
+    fn oversize_input_is_scanned_in_windows_not_rejected() {
+        let template_url = "https://${HOST}/install.sh";
+        // Padding pushes the template URL past the first window boundary so
+        // only the overlapped window scan can discover it.
+        let padding = "x".repeat(MAX_SOURCE_SIZE + MAX_URL_LENGTH);
+        let html = format!("<!DOCTYPE html>\n<html>{padding}</html>\n{template_url}\n");
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html.as_bytes()))
+            .expect("oversize input must be scanned, not rejected");
+        assert_eq!(
+            findings.len(),
+            1,
+            "template URL past 1 MiB must still be discovered, got: {findings:?}"
         );
-        let result = UrlDiscoveryDetector.analyze(&test_ctx(html.as_bytes()));
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
+    }
+
+    #[test]
+    fn oversize_input_without_templates_is_ok_and_finding_free() {
+        // models.dev-shaped payload: multi-megabyte plain JSON.
+        let json = format!("{{\"items\": [\"{}\"]}}", "z".repeat(MAX_SOURCE_SIZE * 4));
+        let result = UrlDiscoveryDetector.analyze(&test_ctx(json.as_bytes()));
         assert!(
-            result.is_err(),
-            "oversize input should return DetectorError, got: {result:?}"
+            result.is_ok(),
+            "large document must not fail closed, got: {result:?}"
+        );
+        assert!(result.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn oversize_input_finds_multiple_windows_of_templates() {
+        // ~2,070 B per line × 1,020 lines ≈ 2.1 MiB, so more than one window
+        // is scanned and the 1,000-finding cap is exercised before exhaustion.
+        use std::fmt::Write as _;
+        let mut lines = String::from("<!DOCTYPE html>\n");
+        let filler = "z".repeat(MAX_URL_LENGTH);
+        for i in 0..MAX_URLS + 20 {
+            let _ = writeln!(lines, "https://${{HOST}}/p{i}{filler}");
+        }
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(lines.as_bytes()))
+            .expect("detector should analyze oversize HTML");
+        assert_eq!(
+            findings.len(),
+            MAX_URLS,
+            "distinct template URLs cap at MAX_URLS, got: {}",
+            findings.len()
+        );
+    }
+
+    #[test]
+    fn multibyte_char_at_window_boundary_does_not_end_the_scan() {
+        // A 3-byte char is placed so it spans each edge of the first two
+        // windows: one at [stride-1, stride+2) straddles the window-1 start
+        // (`stride = MAX_SOURCE_SIZE - overlap`) and one at
+        // [MAX_SOURCE_SIZE-1, +2) straddles the window-0 end. `str::get`
+        // returns None for both boundaries; the scan must back off / bump
+        // forward instead of aborting, so the template URL past
+        // `MAX_SOURCE_SIZE` (skipped entirely by a scan that breaks) is
+        // still discovered alongside the earlier one.
+        let mut html = String::from("<!DOCTYPE html>");
+        html.push_str("<a href=\"https://${HOST}/one\">a</a>");
+        html.push_str(&"x".repeat(max_scan_window_stride() - 1 - html.len()));
+        html.push('中');
+        html.push_str(&"x".repeat(MAX_SOURCE_SIZE - 1 - html.len()));
+        html.push('中');
+        html.push_str("<a href=\"https://${HOST}/two\">b</a>");
+        assert!(
+            html.len() > MAX_SOURCE_SIZE,
+            "fixture must exceed one window"
+        );
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html.as_bytes()))
+            .expect("detector should scan past multibyte boundaries");
+        assert_eq!(
+            findings.len(),
+            2,
+            "template URLs on both sides of multibyte boundaries must be found, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn url_straddling_window_end_is_found_via_overlap() {
+        // "<!DOCTYPE html>\n" is 16 bytes; the scheme starts exactly 4 bytes
+        // before the first window end (`MAX_SOURCE_SIZE`), so window 0 only
+        // sees "http" (no complete scheme) and the full token survives only
+        // in window 1, whose start is `MAX_SOURCE_SIZE - overlap`. With zero
+        // overlap no window contains the scheme and this test fails.
+        let url = "https://${HOST}/install.sh";
+        let head = "x".repeat(MAX_SOURCE_SIZE - 4 - "<!DOCTYPE html>\n".len());
+        let html = format!("<!DOCTYPE html>\n{head}{url}\n");
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html.as_bytes()))
+            .expect("detector should analyze HTML straddling window 1");
+        assert_eq!(
+            findings.len(),
+            1,
+            "scheme straddling window end must be found via overlap, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn duplicates_across_windows_are_deduped() {
+        // 33 bytes per unit × 34,000 ≈ 1.12 MB, so the identical template
+        // URL is re-materialized in two consecutive windows; the seen-set
+        // must persist across windows for the count to stay at 1.
+        let same = "<a href=\"https://${HOST}/a\">x</a>".repeat(34_000);
+        let html = format!("<!DOCTYPE html>\n{same}");
+        assert!(
+            html.len() > MAX_SOURCE_SIZE,
+            "fixture must exceed one window"
+        );
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html.as_bytes()))
+            .expect("detector should analyze HTML spanning windows");
+        assert_eq!(
+            findings.len(),
+            1,
+            "the same template URL across windows must dedupe, got: {findings:?}"
         );
     }
 

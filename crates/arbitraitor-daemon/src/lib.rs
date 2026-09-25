@@ -1089,19 +1089,26 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 fn default_store_path() -> PathBuf {
-    PathBuf::from(".arbitraitor").join("cas")
+    cache_dir().join("cas")
 }
 
+/// User cache directory: non-empty absolute `$XDG_CACHE_HOME/arbitraitor`
+/// per the XDG spec, else `$HOME/.cache/arbitraitor`, else the legacy
+/// working-directory-relative `.arbitraitor` (shared with the CLI's
+/// no-`HOME` fallback so both components agree on one store).
 fn cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME").map_or_else(
-        || {
-            std::env::var_os("HOME").map_or_else(
-                || PathBuf::from(".arbitraitor-cache"),
-                |home| PathBuf::from(home).join(".cache").join("arbitraitor"),
-            )
-        },
-        |cache_home| PathBuf::from(cache_home).join("arbitraitor"),
-    )
+    if let Some(path) = std::env::var_os("XDG_CACHE_HOME")
+        && !path.is_empty()
+    {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return path.join("arbitraitor");
+        }
+    }
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return PathBuf::from(".arbitraitor");
+    };
+    PathBuf::from(home).join(".cache").join("arbitraitor")
 }
 
 fn prepare_socket_path(socket_path: &Path) -> io::Result<()> {

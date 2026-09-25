@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shell-hook mode (`arbitraitor fetch` via curl/wget shims) no longer
+  prints a miette diagnostic into merged stdout/stderr captures when the
+  piped consumer closes early. A `Broken pipe` on released stdout now exits
+  silently with the SIGPIPE-conventional code 141 (141 = 128 + SIGPIPE)
+  instead of interleaving `× Broken pipe (os error 32)` into the stream the
+  consumer just walked away from (#731).
+- Interception metadata (digest/CAS/verdict report) is written to stderr
+  only when stderr is a terminal: agent shells and `2>&1` merges that
+  capture the piped stream never receive the report, so released artifact
+  bytes stay parse-clean. This applies to `arbitraitor fetch`, the
+  curl/wget shims, and `arbitraitor wrap` alike. `curl -s` (without `-S`)
+  and `wget -q`/`--quiet` (or clusters led by `-q`, e.g. `-qO-`) now also
+  suppress the report, mirroring the wrapped tool's own quiet semantics
+  (#731). Full metadata remains available via the store
+  (`arbitraitor store list/inspect`) and `--receipt`.
+- Wrapper fetch non-Pass verdicts now print a plain rejection line to
+  stderr and exit with the verdict-mapped exit code (Warn → 10, Block →
+  30, Incomplete → 34, …) instead of the miette-formatted error and a
+  generic exit 1, so scripts can branch on the verdict (#731, #732).
+- URL discovery no longer rejects JSON/HTML artifacts larger than 1 MiB
+  with `Verdict::Incomplete` (which made wrapper fetch discard the bytes).
+  Artifacts are scanned in overlapping 1 MiB windows with the same
+  per-extractor URL count, URL length, and window-size caps, so legitimate
+  multi-megabyte JSON/HTML documents (e.g. registry dumps) fetch cleanly
+  while template-expression detection still covers the whole document
+  (#732). Oversized artifacts can now time out like any other input —
+  that still fails closed as `Incomplete`, unchanged.
+- The default CAS store directory moved from the CWD-relative
+  `.arbitraitor/cas` to the user cache root
+  (`$XDG_CACHE_HOME/arbitraitor/cas`, falling back to
+  `$HOME/.cache/arbitraitor/cas`), interception no longer materializes a
+  store (or lock directory) inside whatever working directory the wrapped
+  command ran in. Set `store.cas_dir` in config (or pass `--cas-dir` /
+  `inspect --cas-dir`) to opt back into a per-project store (#733).
+  Without a resolvable `HOME`, the legacy relative default is retained.
+  The daemon now resolves its default store through the same XDG rules as
+  the CLI, and ignores non-absolute `XDG_CACHE_HOME` values per the XDG
+  spec, so the two components always agree on one CAS root. Note the
+  daemon's default socket path moves with it for the affected environments:
+  without a resolvable `HOME` it changes from
+  `.arbitraitor-cache/daemon.sock` to `.arbitraitor/daemon.sock`, and with
+  an empty or relative `XDG_CACHE_HOME` from
+  `<value>/arbitraitor/daemon.sock` (an empty value yields the relative
+  `arbitraitor/daemon.sock`) to
+  `$HOME/.cache/arbitraitor/daemon.sock` (spec-compliant; existing clients
+  on the old path must start a fresh daemon).
+- First-class `fetch <URL> -o PATH` / `--output PATH` placed **after** the
+  URL is now honored. clap's trailing-argument support previously
+  swallowed the flag, releasing the artifact bytes to stdout with the
+  output file never created — silent data loss for the file consumer.
 - Security CI (`cargo audit` / `cargo deny check`) failures caused by
   RUSTSEC-2026-0268/0269 are fixed by the `wasmtime` floor bump below.
   Separately, stale `RUSTSEC-2026-0185/0186/0190` ignore entries
