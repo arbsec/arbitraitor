@@ -1015,16 +1015,24 @@ url = "https://example.com/api"
 
     #[test]
     fn multibyte_char_at_window_boundary_does_not_end_the_scan() {
-        // A 3-byte UTF-8 char straddles offset MAX_SOURCE_SIZE and a 4-byte
-        // char straddles the first window start (MAX_SOURCE_SIZE - overlap):
-        // `str::get` returns None for both boundaries, and the scan must
-        // back off/bump forwards instead of aborting.
-        let first_url = "https://${HOST}/one";
-        let second_url = "https://${HOST}/two";
-        let cjk_run = "中".repeat(8000);
-        let tail = "y".repeat(MAX_SOURCE_SIZE);
-        let html = format!(
-            "<!DOCTYPE html><html>x{cjk_run}</html><a href=\"{first_url}\">a</a>{tail}{second_url}</a>",
+        // A 3-byte char is placed so it spans each edge of the first two
+        // windows: one at [stride-1, stride+2) straddles the window-1 start
+        // (`stride = MAX_SOURCE_SIZE - overlap`) and one at
+        // [MAX_SOURCE_SIZE-1, +2) straddles the window-0 end. `str::get`
+        // returns None for both boundaries; the scan must back off / bump
+        // forward instead of aborting, so the template URL past
+        // `MAX_SOURCE_SIZE` (skipped entirely by a scan that breaks) is
+        // still discovered alongside the earlier one.
+        let mut html = String::from("<!DOCTYPE html>");
+        html.push_str("<a href=\"https://${HOST}/one\">a</a>");
+        html.push_str(&"x".repeat(max_scan_window_stride() - 1 - html.len()));
+        html.push('中');
+        html.push_str(&"x".repeat(MAX_SOURCE_SIZE - 1 - html.len()));
+        html.push('中');
+        html.push_str("<a href=\"https://${HOST}/two\">b</a>");
+        assert!(
+            html.len() > MAX_SOURCE_SIZE,
+            "fixture must exceed one window"
         );
         let findings = UrlDiscoveryDetector
             .analyze(&test_ctx(html.as_bytes()))
@@ -1038,11 +1046,13 @@ url = "https://example.com/api"
 
     #[test]
     fn url_straddling_window_end_is_found_via_overlap() {
-        // Scheme starts 4 bytes before the first window end, so the token is
-        // cut by window 1 and only discoverable through the overlap in
-        // window 2. With zero overlap this test would fail.
+        // "<!DOCTYPE html>\n" is 16 bytes; the scheme starts exactly 4 bytes
+        // before the first window end (`MAX_SOURCE_SIZE`), so window 0 only
+        // sees "http" (no complete scheme) and the full token survives only
+        // in window 1, whose start is `MAX_SOURCE_SIZE - overlap`. With zero
+        // overlap no window contains the scheme and this test fails.
         let url = "https://${HOST}/install.sh";
-        let head = "x".repeat(MAX_SOURCE_SIZE - 4);
+        let head = "x".repeat(MAX_SOURCE_SIZE - 4 - "<!DOCTYPE html>\n".len());
         let html = format!("<!DOCTYPE html>\n{head}{url}\n");
         let findings = UrlDiscoveryDetector
             .analyze(&test_ctx(html.as_bytes()))
@@ -1056,8 +1066,15 @@ url = "https://example.com/api"
 
     #[test]
     fn duplicates_across_windows_are_deduped() {
-        let same = "<a href=\"https://${HOST}/a\">x</a>".repeat(2000);
+        // 33 bytes per unit × 34,000 ≈ 1.12 MB, so the identical template
+        // URL is re-materialized in two consecutive windows; the seen-set
+        // must persist across windows for the count to stay at 1.
+        let same = "<a href=\"https://${HOST}/a\">x</a>".repeat(34_000);
         let html = format!("<!DOCTYPE html>\n{same}");
+        assert!(
+            html.len() > MAX_SOURCE_SIZE,
+            "fixture must exceed one window"
+        );
         let findings = UrlDiscoveryDetector
             .analyze(&test_ctx(html.as_bytes()))
             .expect("detector should analyze HTML spanning windows");
