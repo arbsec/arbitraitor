@@ -60,7 +60,19 @@ pub(crate) struct InspectOutcome {
 }
 
 /// Fetch, store, analyze, verify provenance, and optionally emit a receipt.
-#[allow(clippy::too_many_arguments)]
+///
+/// `emit_human_report` controls the human-readable interception report on
+/// stderr. Wrapper invocations (shim mode) pass `false` whenever stderr is
+/// captured — piped agents merge stdout and stderr, so reports must not
+/// interleave with released artifact streams.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pipeline inputs mirror the CLI flag surface; grouping would hide the contract"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "fetch/store/signature/receipt stages read linearly; extraction would scatter the pipeline"
+)]
 pub(crate) async fn inspect(
     url: &str,
     receipt_path: Option<&Path>,
@@ -70,6 +82,7 @@ pub(crate) async fn inspect(
     signatures: SignatureInputs,
     config: &Config,
     explain_format: Option<crate::ExplainFormat>,
+    emit_human_report: bool,
 ) -> Result<InspectOutcome> {
     let fetch_policy = FetchPolicy {
         total_timeout: Duration::from_secs(config.fetch.total_timeout_secs),
@@ -145,13 +158,15 @@ pub(crate) async fn inspect(
     let analysis_retrieval = analysis_retrieval_info(url, &fetch_receipt);
     let (coordinator, rule_pack_versions) = analysis_coordinator(rules_dir)?;
     let result = coordinator.analyze_with_retrieval(&bytes, Some(analysis_retrieval));
-    crate::write_report(
-        &mut std::io::stderr().lock(),
-        &result,
-        &artifact_sha256,
-        &cas_root,
-        &signature_verifications,
-    )?;
+    if emit_human_report {
+        crate::write_report(
+            &mut std::io::stderr().lock(),
+            &result,
+            &artifact_sha256,
+            &cas_root,
+            &signature_verifications,
+        )?;
+    }
 
     if let Some(format) = explain_format {
         crate::write_explainability(&result.findings, url, format)?;
@@ -243,8 +258,33 @@ pub(crate) fn analysis_coordinator(
 }
 
 /// Return the default content-addressed store directory.
+///
+/// The default lives in the user's cache root —
+/// `$XDG_CACHE_HOME/arbitraitor/cas`, falling back to
+/// `$HOME/.cache/arbitraitor/cas` — so interception never materializes a
+/// store inside the caller's working directory. When no home directory can
+/// be resolved, the legacy relative `.arbitraitor/cas` is returned.
 pub(crate) fn default_cas_dir() -> PathBuf {
-    PathBuf::from(".arbitraitor").join("cas")
+    match user_cache_root() {
+        Some(root) => root.join("arbitraitor").join("cas"),
+        None => PathBuf::from(".arbitraitor").join("cas"),
+    }
+}
+
+/// Resolves the user's cache root: `$XDG_CACHE_HOME` when set to an absolute
+/// path, otherwise `$HOME/.cache`.
+fn user_cache_root() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_CACHE_HOME")
+        && !path.is_empty()
+    {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".cache"))
 }
 
 /// Convert fetch receipt metadata to analysis retrieval metadata.

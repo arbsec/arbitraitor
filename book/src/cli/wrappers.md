@@ -290,7 +290,25 @@ When the verdict is anything other than Pass (Warn, Prompt, Block, Error,
 Incomplete):
 
 - **Nothing is written to stdout** — downstream consumers receive no bytes.
-- The wrapper exits non-zero.
+- The wrapper prints a plain rejection line to stderr and exits with the
+  verdict's exit code (Warn → 10, Prompt in non-interactive sessions → 21,
+  Block → 30, Error → 33, Incomplete → 34). Scripts can branch on the code.
+
+### Interception metadata (the human report)
+
+The digest/CAS/verdict report is printed to stderr **only when stderr is a
+terminal**. Captured stderr — agent shells, CI logs, `2>&1` merges — never
+receives it, so piped artifact streams stay byte-clean even when stdout and
+stderr are merged by the capturing tool. The wrapped tool's own quiet flags
+are honored: `curl -s` (without `-S`) and `wget -q` / `--quiet` suppress the
+report too. Full audit data remains available via
+`arbitraitor store list` / `store inspect`, and `fetch --receipt PATH`
+writes the same data as a receipt file.
+
+If the pipeline consumer closes the pipe while bytes are being released
+(early `exit` of `head`, `jq` parse error with an empty reader, …), the
+wrapper exits silently with 141 (the conventional code for termination by
+`SIGPIPE`) instead of printing a broken-pipe diagnostic.
 
 This means `curl URL | bash` (with shims active) is safe by construction:
 `bash` receives input only when the artifact received a `Pass` verdict.

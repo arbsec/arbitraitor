@@ -2,7 +2,7 @@ use super::{
     Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
     emit_wrapper_output, is_safe_passthrough, parse_cli_from_args, pipeline::parse_fetch_source,
     query_daemon_status, wrapper_output_destination, wrapper_url_argument, wrapper_url_arguments,
-    write_status_text,
+    write_status_text, write_stdout_or_exit_on_broken_pipe,
 };
 use arbitraitor_artifact::ArtifactType;
 use arbitraitor_fetch::FetchSource;
@@ -2370,4 +2370,117 @@ fn is_safe_passthrough_rejects_url_with_unknown_flags() {
         Some("curl"),
         &["-s".to_owned(), "--version".to_owned()]
     ));
+}
+
+#[test]
+fn default_cas_dir_lives_under_user_cache_root() {
+    use crate::pipeline::default_cas_dir;
+    use std::path::Path;
+
+    let resolved = default_cas_dir();
+    let tail = Path::new("arbitraitor").join("cas");
+
+    assert!(
+        resolved.ends_with(&tail),
+        "default cas dir must end with arbitraitor/cas, got: {resolved:?}"
+    );
+    let home_or_xdg_set =
+        std::env::var_os("XDG_CACHE_HOME").is_some() || std::env::var_os("HOME").is_some();
+    if home_or_xdg_set {
+        assert!(
+            resolved.is_absolute(),
+            "with a user cache root the default cas dir must be absolute, got: {resolved:?}"
+        );
+    }
+}
+
+#[test]
+fn default_cas_dir_is_never_relative_to_typical_home_environments() {
+    use crate::pipeline::default_cas_dir;
+    // Interception (shim mode) runs in arbitrary working directories; a
+    // CWD-relative default would materialize stores inside every repo visited.
+    if std::env::var_os("HOME").is_none_or(|h| h.is_empty()) {
+        return;
+    }
+    let resolved = default_cas_dir();
+    assert!(
+        !resolved.starts_with(".arbitraitor"),
+        "default cas dir must not be the legacy CWD-relative .arbitraitor/cas, got: {resolved:?}"
+    );
+}
+
+#[test]
+fn fresh_stdout_pipe_delivers_bytes_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+    // The BrokenPipe special case calls process::exit and cannot be exercised
+    // in-process; this pins the happy path (writer accepts the bytes).
+    write_stdout_or_exit_on_broken_pipe(b"payload")?;
+    Ok(())
+}
+
+#[test]
+fn curl_silent_without_show_error_is_quiet() {
+    use crate::wrapper_tool_requested_quiet;
+    let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+
+    assert!(wrapper_tool_requested_quiet(
+        Some("curl"),
+        &a(&["curl", "-s", "https://example.com"])
+    ));
+    assert!(!wrapper_tool_requested_quiet(
+        Some("curl"),
+        &a(&["curl", "-sS", "https://example.com"])
+    ));
+    assert!(!wrapper_tool_requested_quiet(
+        Some("curl"),
+        &a(&["curl", "-fsSL", "https://example.com"])
+    ));
+    assert!(wrapper_tool_requested_quiet(
+        Some("wget"),
+        &a(&["wget", "-qO-", "https://example.com"])
+    ));
+    assert!(wrapper_tool_requested_quiet(
+        Some("wget"),
+        &a(&["wget", "--quiet", "https://example.com"])
+    ));
+    assert!(!wrapper_tool_requested_quiet(
+        Some("wget"),
+        &a(&["wget", "https://example.com"])
+    ));
+    assert!(!wrapper_tool_requested_quiet(
+        None,
+        &a(&["https://example.com"])
+    ));
+}
+
+#[test]
+fn first_class_output_extracted_after_url() {
+    use crate::first_class_output_from_args;
+    let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+
+    assert_eq!(
+        first_class_output_from_args(&a(&["https://example.com/x", "-o", "out.bin"])),
+        Some("out.bin".to_owned())
+    );
+    assert_eq!(
+        first_class_output_from_args(&a(&["https://example.com/x", "--output", "out.bin"])),
+        Some("out.bin".to_owned())
+    );
+    assert_eq!(
+        first_class_output_from_args(&a(&["https://example.com/x", "--output=out.bin"])),
+        Some("out.bin".to_owned())
+    );
+    assert_eq!(
+        first_class_output_from_args(&a(&["https://example.com/x", "-oout.bin"])),
+        Some("out.bin".to_owned())
+    );
+    assert_eq!(
+        first_class_output_from_args(&a(&["https://example.com/x"])),
+        None,
+        "no output flag after URL"
+    );
+    assert_eq!(
+        first_class_output_from_args(&a(&["-o", "/lead", "https://example.com/x"])),
+        None,
+        "clap already captured flags before the URL"
+    );
 }

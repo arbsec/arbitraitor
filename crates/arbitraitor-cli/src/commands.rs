@@ -431,10 +431,7 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     }
 
     if command.emit_on_pass && result.verdict == Verdict::Pass {
-        std::io::stdout()
-            .lock()
-            .write_all(&bytes)
-            .into_diagnostic()?;
+        crate::write_stdout_or_exit_on_broken_pipe(&bytes)?;
     }
 
     let exit_code = ExitCode::from(result.verdict);

@@ -1089,7 +1089,7 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 fn default_store_path() -> PathBuf {
-    PathBuf::from(".arbitraitor").join("cas")
+    cache_dir().join("cas")
 }
 
 fn cache_dir() -> PathBuf {

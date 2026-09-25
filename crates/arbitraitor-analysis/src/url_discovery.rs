@@ -40,6 +40,9 @@ const MAX_URLS: usize = 1000;
 /// Maximum length of a single discovered URL in bytes.
 const MAX_URL_LENGTH: usize = 2048;
 
+/// Overlap between consecutive detector scan windows (2× `MAX_URL_LENGTH`).
+const SCAN_WINDOW_OVERLAP_BYTES: usize = 2 * MAX_URL_LENGTH;
+
 /// URL schemes the extractors recognize.
 const URL_SCHEMES: &[&str] = &["https://", "http://", "ftp://"];
 
@@ -436,12 +439,6 @@ impl Detector for UrlDiscoveryDetector {
     }
 
     fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Finding>, DetectorError> {
-        if ctx.artifact_bytes.len() > MAX_SOURCE_SIZE {
-            return Err(DetectorError::Resource(format!(
-                "artifact exceeds URL discovery size limit ({MAX_SOURCE_SIZE} bytes)"
-            )));
-        }
-
         let source = std::str::from_utf8(ctx.artifact_bytes)
             .map_err(|_| DetectorError::ParseError("artifact is not valid UTF-8".to_owned()))?;
 
@@ -451,24 +448,45 @@ impl Detector for UrlDiscoveryDetector {
             _ => return Ok(Vec::new()),
         };
 
-        let expressions = detect_dynamic_url_expressions(source, source_kind);
-
+        // Artifacts larger than MAX_SOURCE_SIZE are scanned in overlapping,
+        // size-capped windows instead of being rejected. This keeps every
+        // individual extractor call within its documented resource bounds
+        // (URL count, URL length, window size) so a legitimate multi-megabyte
+        // JSON/HTML document still receives full template-expression coverage
+        // rather than failing closed as `Verdict::Incomplete`.
+        let window_stride = max_scan_window_stride();
         let mut seen: Vec<(String, String)> = Vec::new();
         let mut findings = Vec::new();
-        for expr in expressions {
-            let key = (expr.url.clone(), expr.unresolved_expression.clone());
-            if seen.iter().any(|s| s == &key) {
-                continue;
+        let mut start = 0_usize;
+        while start < source.len() && findings.len() < MAX_URLS {
+            let window_end = start.saturating_add(MAX_SOURCE_SIZE).min(source.len());
+            let Some(window) = source.get(start..window_end) else {
+                break;
+            };
+            for expr in detect_dynamic_url_expressions(window, source_kind) {
+                let key = (expr.url, expr.unresolved_expression);
+                if seen.iter().any(|candidate| candidate == &key) {
+                    continue;
+                }
+                seen.push(key.clone());
+                findings.push(dynamic_url_finding(ctx, &key.1, source_kind));
+                if findings.len() >= MAX_URLS {
+                    break;
+                }
             }
-            seen.push(key);
-            findings.push(dynamic_url_finding(
-                ctx,
-                &expr.unresolved_expression,
-                source_kind,
-            ));
+            start = start.saturating_add(window_stride).min(source.len());
         }
         Ok(findings)
     }
+}
+
+/// Byte distance between the starts of consecutive scan windows.
+///
+/// Windows overlap by [`SCAN_WINDOW_OVERLAP_BYTES`] so that a template URL
+/// straddling a window boundary is still fully contained in at least one
+/// window (a discovered URL is at most [`MAX_URL_LENGTH`] bytes long).
+fn max_scan_window_stride() -> usize {
+    MAX_SOURCE_SIZE.saturating_sub(SCAN_WINDOW_OVERLAP_BYTES)
 }
 
 fn dynamic_url_finding(
@@ -923,15 +941,54 @@ url = "https://example.com/api"
     }
 
     #[test]
-    fn oversize_input_returns_error() {
-        let html = format!(
-            "<!DOCTYPE html>\n<html>{}</html>",
-            "x".repeat(MAX_SOURCE_SIZE)
+    fn oversize_input_is_scanned_in_windows_not_rejected() {
+        let template_url = "https://${HOST}/install.sh";
+        // Padding pushes the template URL past the first window boundary so
+        // only the overlapped window scan can discover it.
+        let padding = "x".repeat(MAX_SOURCE_SIZE + MAX_URL_LENGTH);
+        let html = format!("<!DOCTYPE html>\n<html>{padding}</html>\n{template_url}\n");
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(html.as_bytes()))
+            .expect("oversize input must be scanned, not rejected");
+        assert_eq!(
+            findings.len(),
+            1,
+            "template URL past 1 MiB must still be discovered, got: {findings:?}"
         );
-        let result = UrlDiscoveryDetector.analyze(&test_ctx(html.as_bytes()));
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
+    }
+
+    #[test]
+    fn oversize_input_without_templates_is_ok_and_finding_free() {
+        // models.dev-shaped payload: multi-megabyte plain JSON.
+        let json = format!("{{\"items\": [\"{}\"]}}", "z".repeat(MAX_SOURCE_SIZE * 4));
+        let result = UrlDiscoveryDetector.analyze(&test_ctx(json.as_bytes()));
         assert!(
-            result.is_err(),
-            "oversize input should return DetectorError, got: {result:?}"
+            result.is_ok(),
+            "large document must not fail closed, got: {result:?}"
+        );
+        assert!(result.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn oversize_input_finds_multiple_windows_of_templates() {
+        // ~2,070 B per line × 1,020 lines ≈ 2.1 MiB, so more than one window
+        // is scanned and the 1,000-finding cap is exercised before exhaustion.
+        let mut lines = String::from("<!DOCTYPE html>\n");
+        let filler = "z".repeat(MAX_URL_LENGTH);
+        for i in 0..MAX_URLS + 20 {
+            use std::fmt::Write as _;
+            let _ = writeln!(lines, "https://${{HOST}}/p{i}{filler}");
+        }
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(lines.as_bytes()))
+            .expect("detector should analyze oversize HTML");
+        assert_eq!(
+            findings.len(),
+            MAX_URLS,
+            "distinct template URLs cap at MAX_URLS, got: {}",
+            findings.len()
         );
     }
 

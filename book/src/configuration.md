@@ -113,24 +113,22 @@ Content-addressed storage configuration.
 
 ```toml
 [store]
-# Store directory
-path = "~/.arbitraitor/store"
+# CAS root directory.
+# When unset, the default is the user cache root:
+#   $XDG_CACHE_HOME/arbitraitor/cas  (falling back to
+#   $HOME/.cache/arbitraitor/cas)
+# A relative path (for example "cas") is resolved against the working
+# directory of each arbitraitor invocation.
+cas_dir = "/var/lib/arbitraitor/cas"
 
-# Maximum store size (bytes)
-max_size = "10GB"
-
-# Default retention period (days)
-retention_days = 90
-
-# Garbage collection schedule (cron expression)
-# gc_schedule = "0 4 * * *"  # daily at 4 AM UTC
-
-# Quarantine directory for manual review
-quarantine_path = "~/.arbitraitor/quarantine"
-
-# Enable cryptographic integrity checking
-integrity_check = true
+# Maximum artifact size accepted into storage (bytes)
+max_bytes = 52428800
 ```
+
+> The default CAS location is deliberately outside the working directory:
+> shell shims intercept `curl`/`wget` in arbitrary repositories, and a
+> CWD-relative store would litter every visited repo with an
+> `.arbitraitor/` directory.
 
 ### `[intel]`
 

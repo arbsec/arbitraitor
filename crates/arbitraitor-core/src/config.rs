@@ -203,7 +203,8 @@ impl Default for TimeoutConfig {
 pub struct StoreConfig {
     /// Maximum bytes accepted into storage.
     pub max_bytes: u64,
-    /// CAS root directory. When unset, callers use `.arbitraitor/cas`.
+    /// CAS root directory. When unset, callers use the user cache root
+    /// (`$XDG_CACHE_HOME/arbitraitor/cas` or `$HOME/.cache/arbitraitor/cas`).
     pub cas_dir: Option<PathBuf>,
 }
 
