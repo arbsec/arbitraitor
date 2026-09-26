@@ -47,7 +47,7 @@ memchr = { version = "2" }
 num-traits = { version = "0.2" }
 once_cell = { version = "1" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
-pulley-interpreter = { version = "48", default-features = false, features = ["disas", "interp", "std"] }
+pulley-interpreter = { version = "49", default-features = false, features = ["disas", "interp", "std"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
@@ -88,7 +88,7 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 once_cell = { version = "1" }
 proc-macro2 = { version = "1" }
-pulley-interpreter = { version = "48", default-features = false, features = ["disas", "interp", "std"] }
+pulley-interpreter = { version = "49", default-features = false, features = ["disas", "interp", "std"] }
 quote = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }

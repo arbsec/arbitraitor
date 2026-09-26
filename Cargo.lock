@@ -605,7 +605,7 @@ dependencies = [
  "once_cell",
  "potential_utf",
  "proc-macro2",
- "pulley-interpreter 48.0.2",
+ "pulley-interpreter 49.0.1",
  "quote",
  "regex",
  "regex-automata",
@@ -1241,6 +1241,15 @@ dependencies = [
  "serde",
  "serde_derive",
  "wasmtime-internal-core 48.0.2",
+]
+
+[[package]]
+name = "cranelift-bitset"
+version = "0.136.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76b63a4b0cfea80610150fffda11b1a9c3dc5a835403d9f381bf7d1a2874b4d7"
+dependencies = [
+ "wasmtime-internal-core 49.0.1",
 ]
 
 [[package]]
@@ -3169,6 +3178,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulley-interpreter"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0091857bc410bd7117eb6ac042ced7714c69f994a8b9c2ae30add2f73e3a25ac"
+dependencies = [
+ "cranelift-bitset 0.136.1",
+ "log",
+ "pulley-macros 49.0.1",
+ "wasmtime-internal-core 49.0.1",
+]
+
+[[package]]
 name = "pulley-macros"
 version = "45.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3184,6 +3205,17 @@ name = "pulley-macros"
 version = "48.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "550c64f4245f013664d187a37ec94b4e99bd43a00980134e0e5fd48896b1d3af"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pulley-macros"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8798ebc6bf0ef227e204fa3fad05b04970599a85f456fd28365450fd679b2600"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5031,6 +5063,16 @@ dependencies = [
  "hashbrown 0.17.1",
  "libm",
  "serde",
+]
+
+[[package]]
+name = "wasmtime-internal-core"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64b67114739063bb72bb8ed2b4994b8b22809d354432db68553ad529850f9536"
+dependencies = [
+ "hashbrown 0.17.1",
+ "libm",
 ]
 
 [[package]]
