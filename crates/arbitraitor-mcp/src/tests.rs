@@ -1475,6 +1475,25 @@ fn headless_resolution_approve_consumes_once_then_requires_fresh_approval()
         .get(&plan_digest)?
         .unwrap_or_else(|| panic!("record must exist"));
     assert_eq!(refreshed.state, PendingApprovalState::Pending);
+
+    // The fresh cycle must be consumable: the cycle marker from the first
+    // consumption is removed with the fresh record, so a second genuine
+    // human approval grants a second (single-use) token. Without marker
+    // removal the second approval would be silently discarded and this
+    // final retry would hover on Pending forever.
+    store.resolve(
+        &plan_digest,
+        ApprovalResolution::Approve {
+            approver: "ops-eve".to_owned(),
+            expected_plan_digest: plan_digest.clone(),
+        },
+        SystemTime::now(),
+    )?;
+    assert!(!store.has_consumed_marker(&plan_digest)?);
+    let fourth =
+        prompt.request_confirmation_attested(&sha256, "run once per click", &default_ctx())?;
+    assert!(fourth.approved);
+    assert_eq!(fourth.approver_identity.as_deref(), Some("ops-eve"));
     Ok(())
 }
 

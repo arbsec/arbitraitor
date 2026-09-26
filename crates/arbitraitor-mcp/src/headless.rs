@@ -304,9 +304,16 @@ pub enum PendingApprovalError {
 /// for a live record (a cross-process race winner, or the survivor of a
 /// crash between claiming and committing) fails closed: the stale approval
 /// is treated as already consumed and a fresh pending record is registered
-/// for a future approval. A marker is permanent while its record lives ("one
-/// approval = one grant ever", across restarts); [`Self::prune_expired`]
-/// removes a marker only together with its record or once the record no
+/// for a future approval. A marker is permanent while its record lives and
+/// embodies "one approval = one grant" *within a consumption cycle*: the
+/// next request for the same digest opens a new cycle — it registers a
+/// fresh pending record and removes the marker. Exactly-once therefore
+/// holds only while the store directory is not writable by agent-side
+/// processes: a same-user writer can never forge an approval (the MAC
+/// prevents that) but can restore a snapshot of a genuinely approved
+/// record alongside deleting its marker, re-minting a token for a plan
+/// the operator genuinely approved once. [`Self::prune_expired`]
+/// removes a marker together with its record or once the record no
 /// longer exists.
 ///
 /// ### Capacity
@@ -850,6 +857,22 @@ impl PendingApprovalStore {
         })
     }
 
+    /// Removes the consumed marker for `key` if present. Called when a fresh
+    /// Pending record is registered over a finished cycle: the marker
+    /// protects exactly one consumption within a cycle, and the new
+    /// request opens a new one. Without this removal, a fresh approval
+    /// could never be consumed (marker permanently blocks the claim).
+    fn remove_consumed_marker(&self, key: &str) -> Result<(), PendingApprovalError> {
+        match std::fs::remove_file(self.consumed_marker_path(key)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(PendingApprovalError::Store {
+                stage: "remove-consumed-marker",
+                message: error.to_string(),
+            }),
+        }
+    }
+
     fn persist_fresh_pending(
         &self,
         sha256: &Sha256Digest,
@@ -891,7 +914,8 @@ impl PendingApprovalStore {
             resolved_at_unix_seconds: None,
             record_mac: String::new(),
         };
-        self.write_record(&mut record)
+        self.write_record(&mut record)?;
+        self.remove_consumed_marker(plan_digest)
     }
 
     /// Registers the request when no live resolution exists and applies any
@@ -908,11 +932,13 @@ impl PendingApprovalStore {
     /// | Denied, expired          | refresh to `Pending`        | Pending   |
     /// | Approved, unexpired      | mark `Consumed`             | Approved  |
     /// | Approved, expired        | lapse: refresh to `Pending` | Pending   |
-    /// | Consumed (any)           | new request ⇒ `Pending`     | Pending   |
+    /// | Consumed (any)           | new request ⇒ `Pending`,     | Pending   |
+    /// |                          | cycle marker removed         |           |
     ///
-    /// A single human approval therefore mints at most one token: the record
-    /// becomes `Consumed` in the same locked transaction that reports the
-    /// approval, and the next request starts a fresh pending record.
+    /// A single human approval therefore mints at most one token within a
+    /// cycle: the record becomes `Consumed` in the same locked transaction
+    /// that reports the approval, and the next request starts a fresh
+    /// pending record and removes the cycle marker (`remove_consumed_marker`).
     pub(crate) fn register_or_consume(
         &self,
         sha256: &Sha256Digest,
@@ -1205,9 +1231,10 @@ fn create_fresh_file(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// Refuses to open a pending-approval store in a directory writable by
 /// group or others (Unix). A permissive store directory lets any local
-/// process plant, rename, or delete records and consumed markers, so opening
-/// fails closed rather than trusting content the MAC alone cannot fully
-/// police (deletion is a denial the MAC cannot authenticate).
+/// process replant records or delete consumed markers — deletion of the
+/// marker re-arms consumption of a legitimately approved record — so
+/// opening fails closed rather than trusting content the MAC alone cannot
+/// fully police (the MAC rejects forgery, not deletion or state reversion).
 fn refuse_permissive_dir(dir: &Path) -> Result<(), PendingApprovalError> {
     #[cfg(unix)]
     {
