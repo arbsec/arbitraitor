@@ -2490,3 +2490,257 @@ fn inspect_url_persists_cas_entry_and_receipt() {
         "inspect_url must persist an inspection receipt"
     );
 }
+
+/// MCP is a remote-content surface: `file://` URLs and bare paths are
+/// rejected at the tool-handler level even though the engine's
+/// `parse_fetch_source` would otherwise accept them for the CLI. Without
+/// the guard, an agent could turn the gateway into an unlisted local-file
+/// read primitive.
+#[test]
+fn inspect_url_rejects_file_scheme_urls_and_bare_paths() {
+    let api = test_engine_api();
+    let tool = InspectUrlTool::new(api.clone());
+
+    for candidate in ["file:///etc/hostname", "/etc/hostname"] {
+        let response = tool.handle(json!({"url": candidate}), &agent());
+        assert!(
+            response.is_error,
+            "{candidate} must be rejected, got {response:?}"
+        );
+        let McpContent::Json { json } = &response.content[0] else {
+            panic!("expected json content");
+        };
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("only http and https schemes are accepted by the MCP gateway"),
+            "error must name the MCP scheme contract, got: {error}"
+        );
+        assert!(
+            error.contains(candidate),
+            "error must echo the rejected URL, got: {error}"
+        );
+    }
+
+    // The rejected calls must not have produced any CAS entry or receipt;
+    // otherwise the guard would still leave observable state behind.
+    let artifacts = api.list_artifacts().unwrap_or_else(|e| panic!("list: {e}"));
+    assert!(
+        artifacts.is_empty(),
+        "rejected inspect_url must not store any artifact: {artifacts:?}"
+    );
+    let receipts: Vec<_> = std::fs::read_dir(api.receipts_dir())
+        .map(|rd| rd.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    assert!(
+        receipts.is_empty(),
+        "rejected inspect_url must not persist any receipt: {receipts:?}"
+    );
+}
+
+/// The same MCP-scheme guard covers the fetch-only tool; the gate rejects
+/// before the engine ever sees the URL, so no CAS entry or receipt is
+/// written for a rejected call.
+#[test]
+fn fetch_artifact_rejects_file_scheme_urls_and_bare_paths() {
+    let api = test_engine_api();
+    let tool = FetchArtifactTool::new(api.clone());
+
+    for candidate in ["file:///etc/hostname", "/etc/hostname"] {
+        let response = tool.handle(json!({"url": candidate}), &agent());
+        assert!(
+            response.is_error,
+            "{candidate} must be rejected, got {response:?}"
+        );
+        assert_error_contains(
+            &response,
+            "only http and https schemes are accepted by the MCP gateway",
+        );
+    }
+
+    let artifacts = api.list_artifacts().unwrap_or_else(|e| panic!("list: {e}"));
+    assert!(
+        artifacts.is_empty(),
+        "rejected fetch_artifact must not store any artifact: {artifacts:?}"
+    );
+    let receipts: Vec<_> = std::fs::read_dir(api.receipts_dir())
+        .map(|rd| rd.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    assert!(
+        receipts.is_empty(),
+        "rejected fetch_artifact must not persist any receipt: {receipts:?}"
+    );
+}
+
+/// Belt-and-braces for the URL guards: even if a handler forgot the
+/// explicit check, the default server's engine refuses to fetch a non-http
+/// scheme. The stdio server constructs its engine with `allowed_schemes =
+/// [Http, Https]`; this exercises that clamp and the handler contract
+/// together.
+#[test]
+fn default_server_engine_rejects_non_http_schemes_via_policy_clamp() {
+    let server = build_default_server(test_engine_api());
+
+    for tool in ["inspect_url", "fetch_artifact"] {
+        for url in ["file:///etc/hostname", "/etc/hostname", "ftp://example/x"] {
+            let response = server
+                .call_tool(tool, json!({"url": url}), agent())
+                .unwrap_or_else(|error| panic!("call_tool: {error}"));
+            assert!(
+                response.is_error,
+                "{tool}({url}) must be rejected, got {response:?}"
+            );
+        }
+    }
+}
+
+/// The default stdio MCP server cannot host an interactive approval prompt:
+/// its stdin is the JSON-RPC channel. `request_approval` must therefore
+/// fail closed — typed `TransportUnavailable` error, no token minted, and
+/// (because the prompt is `TransportUnavailablePrompt`, which contains no
+/// stdin handling) no read from stdin. If the default server regressed to
+/// `StdinApprovalPrompt` this test would block indefinitely on a CI runner
+/// with no TTY, so completing at all proves the non-stdin code path.
+#[test]
+fn default_server_request_approval_fails_closed_without_stdin_read() {
+    let server = build_default_server(test_engine_api());
+
+    let response = server
+        .call_tool(
+            "request_approval",
+            json!({
+                "sha256": "ab".repeat(32),
+                "plan": "run the inspected shell script verbatim",
+            }),
+            agent(),
+        )
+        .unwrap_or_else(|error| panic!("call_tool: {error}"));
+
+    assert!(
+        response.is_error,
+        "default-server request_approval must error, got {response:?}"
+    );
+    let McpContent::Json { json } = &response.content[0] else {
+        panic!("expected json content");
+    };
+    let error = json["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("interactive approval prompting is unavailable on the stdio transport"),
+        "error must name the stdio transport unavailability, got: {error}"
+    );
+    assert!(
+        error.contains("RequestApprovalTool::with_prompt"),
+        "error must point embedders at the injection seam, got: {error}"
+    );
+    // The approval RPC returned an error response, so the success surface
+    // fields carried by an approved path (`approved`, `approval_token`,
+    // `plan_digest`) are absent; equivalently, no approval token was
+    // minted.
+    assert!(
+        json.get("approved").is_none(),
+        "no `approved` flag on an error response: {json}"
+    );
+    assert!(
+        json.get("approval_token").is_none(),
+        "no approval token may be issued on a stdio default server: {json}"
+    );
+}
+
+/// `TransportUnavailablePrompt` is a typed fail-closed stub: it never
+/// approves, so no attestation is ever minted against it. (The
+/// `"stdin-human-confirmation"` method label on `ApprovalTokenPayload` is
+/// only ever attached to a token issued through `StdinApprovalPrompt`,
+/// which this prompt replaces.)
+#[test]
+fn transport_unavailable_prompt_never_approves() {
+    let prompt = TransportUnavailablePrompt;
+    let digest: Sha256Digest = "ab".repeat(32).parse().unwrap_or_else(|e| panic!("{e}"));
+    let result = prompt.request_confirmation(&digest, "any plan", &default_ctx());
+    let error = match result {
+        Err(error) => error,
+        Ok(approved) => panic!("prompt must not return Ok, got Ok({approved})"),
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("interactive approval prompting is unavailable on the stdio transport"),
+        "got: {message}"
+    );
+}
+
+/// ADR-0038 decision 3 (migration parity): `query_receipt` on the default
+/// server reads the engine's persisted receipts, so a real verdict and
+/// finding count are returned for an inspected digest instead of the
+/// in-memory store's "not found". Queries for never-inspected digests
+/// return `found: false`.
+#[test]
+fn default_server_query_receipt_returns_persisted_receipt_after_inspect() {
+    let body = b"#!/bin/sh\necho query parity\n";
+    let url = serve_once(body);
+    let api = test_engine_api();
+    let server = build_default_server(api);
+
+    let inspected = server
+        .call_tool("inspect_url", json!({"url": url}), agent())
+        .unwrap_or_else(|error| panic!("inspect call: {error}"));
+    assert!(!inspected.is_error, "inspect failed: {inspected:?}");
+    let McpContent::Json { json } = &inspected.content[0] else {
+        panic!("expected json content");
+    };
+    let sha256 = json["artifact"]["sha256"]
+        .as_str()
+        .unwrap_or("missing")
+        .to_owned();
+    let verdict = json["verdict"].as_str().unwrap_or("missing").to_owned();
+    let findings_count = json["findings"]
+        .as_array()
+        .map(std::vec::Vec::len)
+        .unwrap_or_default();
+
+    let queried = server
+        .call_tool("query_receipt", json!({"sha256": sha256}), agent())
+        .unwrap_or_else(|error| panic!("query call: {error}"));
+    assert!(!queried.is_error, "query_receipt failed: {queried:?}");
+    let McpContent::Json { json: query_json } = &queried.content[0] else {
+        panic!("expected json content");
+    };
+    assert_eq!(query_json["found"], true);
+    assert_eq!(query_json["sha256"], sha256);
+    // The receipt payload is sanitised for the agent surface, so string
+    // fields arrive wrapped in the untrusted-data markers; containment is
+    // the correct assertion here.
+    let persisted_sha = query_json["receipt"]["artifact"]["sha256"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        persisted_sha.contains(&sha256),
+        "the persisted receipt's artifact digest must match: {persisted_sha}"
+    );
+    let persisted_findings = query_json["receipt"]["findings"]
+        .as_array()
+        .map(std::vec::Vec::len)
+        .unwrap_or_default();
+    assert_eq!(
+        persisted_findings, findings_count,
+        "persisted receipt findings count must match the inspected one"
+    );
+    let persisted_verdict = query_json["receipt"]["verdict"]["verdict"]
+        .as_str()
+        .unwrap_or_default();
+    // The receipt payload is sanitised for the agent surface (untrusted-data
+    // markers around every string); containment side-steps both the markers
+    // and any capitalisation drift between serde output and the live
+    // `verdict` field.
+    assert!(
+        persisted_verdict.contains(&verdict),
+        "persisted verdict {persisted_verdict} must match inspected verdict {verdict}"
+    );
+
+    let missing = server
+        .call_tool("query_receipt", json!({"sha256": "cd".repeat(32)}), agent())
+        .unwrap_or_else(|error| panic!("query call: {error}"));
+    assert!(!missing.is_error, "unknown digest must not error the tool");
+    let McpContent::Json { json: missing_json } = &missing.content[0] else {
+        panic!("expected json content");
+    };
+    assert_eq!(missing_json["found"], false);
+    assert_eq!(missing_json["sha256"], "cd".repeat(32));
+}

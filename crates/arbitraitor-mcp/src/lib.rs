@@ -258,6 +258,18 @@ impl McpToolHandler for InspectUrlTool {
 impl InspectUrlTool {
     fn inspect(&self, params: Value, agent: &AgentIdentity) -> Result<Value, InspectUrlError> {
         let params: InspectUrlParams = serde_json::from_value(params)?;
+        // The MCP gateway is a remote-content inspection surface (spec §33,
+        // §40.3): the URL contract here is http/https only. The engine's
+        // `parse_fetch_source` also accepts `file://` URLs and bare paths
+        // for the CLI; without this guard, an agent could re-interpret the
+        // same JSON-RPC parameter as a local file read and thereby acquire
+        // an unlisted capability expansion (reads, stores, and reports
+        // arbitrary host files). The daemon applies the same http/https
+        // check; mirror its error shape so clients see one contract across
+        // both surfaces.
+        if !params.url.starts_with("http://") && !params.url.starts_with("https://") {
+            return Err(InspectUrlError::InvalidUrl { url: params.url });
+        }
         let expected = params
             .sha256
             .map(|sha256| {
@@ -451,6 +463,13 @@ impl McpToolHandler for FetchArtifactTool {
 impl FetchArtifactTool {
     fn fetch(&self, params: Value, agent: &AgentIdentity) -> Result<Value, FetchArtifactError> {
         let params: FetchArtifactParams = serde_json::from_value(params)?;
+        // See the matching guard on `InspectUrlTool::inspect` — the MCP
+        // gateway speaks http/https only. Without the guard, the engine's
+        // `parse_fetch_source` accepts `file://` URLs and bare paths and the
+        // tool silently becomes a local-file read/store primitive.
+        if !params.url.starts_with("http://") && !params.url.starts_with("https://") {
+            return Err(FetchArtifactError::InvalidUrl { url: params.url });
+        }
         let expected = params
             .sha256
             .map(|sha256| {
@@ -794,6 +813,34 @@ pub trait ApprovalPrompt: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdinApprovalPrompt;
 
+/// Fail-closed approval prompt for non-interactive transports.
+///
+/// The default MCP server speaks line-delimited JSON-RPC over stdio; on that
+/// transport `stdin` is the request channel, not an interactive operator
+/// channel. Reading a human confirmation from it would block the protocol
+/// loop and silently consume the client's next request line. This prompt
+/// therefore never prompts and never approves: `request_confirmation`
+/// returns [`ApprovalPromptError::TransportUnavailable`], the issuing path
+/// treats the request as denied (no token is minted, no attestation is
+/// derived), and the surface stays fail-closed. Embedders hosting a real
+/// approval channel inject their own prompt through
+/// [`RequestApprovalTool::with_prompt`]; embedders that legitimately own a
+/// TTY (the `arbitraitor-mcp` crate used as a library by a terminal harness)
+/// keep [`StdinApprovalPrompt`] via [`RequestApprovalTool::new`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransportUnavailablePrompt;
+
+impl ApprovalPrompt for TransportUnavailablePrompt {
+    fn request_confirmation(
+        &self,
+        _sha256: &Sha256Digest,
+        _plan: &str,
+        _ctx: &PlanContext,
+    ) -> Result<bool, ApprovalPromptError> {
+        Err(ApprovalPromptError::TransportUnavailable)
+    }
+}
+
 impl ApprovalPrompt for StdinApprovalPrompt {
     fn request_confirmation(
         &self,
@@ -871,6 +918,14 @@ pub enum ApprovalPromptError {
         /// Safe diagnostic message describing the serialization failure.
         message: String,
     },
+    /// The MCP server's transport cannot host an interactive approval
+    /// prompt. Carried by [`TransportUnavailablePrompt`]; the message names
+    /// the `with_prompt` injection seam so an embedder's next step is
+    /// obvious from the error.
+    #[error(
+        "interactive approval prompting is unavailable on the stdio transport; the MCP client / server embedder must inject an appropriate prompt via RequestApprovalTool::with_prompt(...) (see docs)"
+    )]
+    TransportUnavailable,
 }
 
 impl ApprovalPromptError {
@@ -1806,6 +1861,8 @@ struct RunApprovedArtifactParams {
 enum InspectUrlError {
     #[error("invalid inspect_url parameters: {0}")]
     Params(#[from] serde_json::Error),
+    #[error("invalid URL: only http and https schemes are accepted by the MCP gateway: {url}")]
+    InvalidUrl { url: String },
     #[error("invalid sha256: {message}")]
     InvalidSha256 { message: String },
     #[error("fetch failed: {message}")]
@@ -1816,6 +1873,8 @@ enum InspectUrlError {
 enum FetchArtifactError {
     #[error("invalid fetch_artifact parameters: {0}")]
     Params(#[from] serde_json::Error),
+    #[error("invalid URL: only http and https schemes are accepted by the MCP gateway: {url}")]
+    InvalidUrl { url: String },
     #[error("invalid sha256: {message}")]
     InvalidSha256 { message: String },
     #[error("fetch failed: {message}")]
@@ -1961,8 +2020,33 @@ impl ArtifactLookup for EngineArtifactLookup {
     }
 }
 
+/// [`ReceiptLookup`] backed by the engine's persisted receipts directory.
+///
+/// Reads `<receipts_dir>/<sha256>.json` on every lookup; the engine's
+/// inspection path is the sole writer, so a lookup that misses returns
+/// `None` and a lookup that hits returns the receipt as it was persisted,
+/// without rewriting it. This makes `QueryReceiptTool` reflect the engine's
+/// actual audit trail rather than an in-memory side index (ADR-0038
+/// decision 3: the toolhandler translates the request into a typed engine
+/// call, not into an unrelated backing store).
+struct EngineReceiptLookup {
+    receipts_dir: PathBuf,
+}
+
+impl ReceiptLookup for EngineReceiptLookup {
+    fn lookup(&self, sha256: &Sha256Digest) -> Option<Receipt> {
+        let path = self.receipts_dir.join(format!("{sha256}.json"));
+        if !path.is_file() {
+            return None;
+        }
+        let data = std::fs::read(&path).ok()?;
+        serde_json::from_slice(&data).ok()
+    }
+}
+
 fn build_default_server(api: ArbitraitorApi) -> McpServer {
-    let receipts = Arc::new(InMemoryReceiptStore::new()) as Arc<dyn ReceiptLookup>;
+    let receipts_dir = api.receipts_dir().to_path_buf();
+    let receipts = Arc::new(EngineReceiptLookup { receipts_dir }) as Arc<dyn ReceiptLookup>;
 
     let mut server = McpServer::new();
     server.register(Box::new(InspectUrlTool::new(api.clone())));
@@ -1971,11 +2055,19 @@ fn build_default_server(api: ArbitraitorApi) -> McpServer {
     server.register(Box::new(QueryReceiptTool::new(receipts)));
     server.register(Box::new(ExplainVerdictTool));
     // ADR-0038 decision 3: the default server registers all seven tool
-    // handlers. `request_approval` uses the stdin/stderr prompt — the only
-    // shipped `ApprovalPrompt` implementation; non-interactive embedders
-    // inject a headless prompt via `RequestApprovalTool::with_prompt`
+    // handlers. `request_approval` cannot use `StdinApprovalPrompt` here:
+    // stdin is the JSON-RPC channel of the stdio transport, so reading a
+    // human confirmation from it would block the protocol loop and consume
+    // the client's next request line. `TransportUnavailablePrompt` fails
+    // closed (never approves, never issues a token); interactive embedders
+    // with a real TTY use `RequestApprovalTool::new`, and headless embedders
+    // inject their own prompt via `RequestApprovalTool::with_prompt`
     // (issue #746 tracks the headless implementation).
-    server.register(Box::new(RequestApprovalTool::new()));
+    server.register(Box::new(RequestApprovalTool::with_prompt(
+        Arc::new(TransportUnavailablePrompt),
+        ApprovalTokenIssuer::new(),
+        PlanContext::for_bash(true, ""),
+    )));
     server.register(Box::new(RunApprovedArtifactTool::new(
         Arc::new(EngineArtifactLookup { api }),
         ApprovalTokenIssuer::new(),
@@ -2099,7 +2191,24 @@ fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) ->
 /// Returns [`StdioError`] on I/O or JSON serialization failure.
 pub fn run_stdio_server() -> Result<(), StdioError> {
     arbitraitor_core::privilege::refuse_root();
-    let api = ArbitraitorApi::new(EngineConfig::default())?;
+    // Belt-and-braces with the handler-level URL guards on
+    // `InspectUrlTool::inspect` and `FetchArtifactTool::fetch`: clamp the
+    // engine's fetch policy to http/https so even a future handler that
+    // forgets the explicit scheme check cannot turn this surface into a
+    // local-file reader. The default `FetchPolicy::allowed_schemes`
+    // includes `File` (and `Stdin`) for the CLI's `inspect ./local.sh`
+    // workflow; the MCP gateway never has that contract.
+    let fetch_policy = arbitraitor_fetch::FetchPolicy {
+        allowed_schemes: vec![
+            arbitraitor_fetch::FetchScheme::Http,
+            arbitraitor_fetch::FetchScheme::Https,
+        ],
+        ..arbitraitor_fetch::FetchPolicy::default()
+    };
+    let api = ArbitraitorApi::new(EngineConfig {
+        fetch_policy,
+        ..EngineConfig::default()
+    })?;
     let server = build_default_server(api);
     let agent = default_agent();
     let stdin = std::io::stdin();

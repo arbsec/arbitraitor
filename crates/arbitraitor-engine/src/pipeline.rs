@@ -333,15 +333,25 @@ impl ReceiptInput<'_> {
 /// When the fetched bytes are an archive or compressed stream, extracts
 /// each direct child, stores it in CAS, and returns the child artifact
 /// metadata for the receipt. Extraction is bounded by
-/// `ArchiveLimits::default()` (Invariant 4: bounded processing).
+/// `ArchiveLimits::default()` (Invariant 4: bounded processing); each stored
+/// child is additionally bounded by the engine's configured per-artifact
+/// `max_bytes` so a tiny configured store limit applies to expanded content
+/// the same way it applies to the top-level fetch.
 pub(crate) fn discover_and_store_children(
     store: &ContentStore,
     bytes: &[u8],
+    max_bytes: u64,
 ) -> Result<Vec<ChildArtifact>, EngineError> {
     let children_with_bytes = arbitraitor_fetch::discover_child_artifacts_with_bytes(bytes);
     let mut child_artifacts = Vec::with_capacity(children_with_bytes.len());
     for (artifact, child_bytes) in children_with_bytes {
-        store.store_with_metadata(child_bytes, None, None, RetentionMode::Cache)?;
+        store.store_with_metadata_and_limits(
+            child_bytes,
+            None,
+            None,
+            RetentionMode::Cache,
+            max_bytes,
+        )?;
         child_artifacts.push(artifact);
     }
     Ok(child_artifacts)

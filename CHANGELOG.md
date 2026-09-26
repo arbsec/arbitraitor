@@ -24,6 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `arbitraitor-engine::scan_path`: bounded, symlink-rejecting local-file
   scan through the full pipeline (moved from the MCP tool's private
   implementation).
+- `arbitraitor-engine::ArbitraitorApi::receipt_summary`: read-only lookup
+  of the persisted receipt for a digest. The daemon's `QueryReceipt`
+  socket endpoint and any future reader go through this accessor; the
+  audit trail is never rewritten by a query.
+- `arbitraitor-engine::Config::store_max_bytes`: engine-wide bound on
+  bytes accepted into CAS, plumbed to `sink_with_limits` on every
+  engine-managed write (inspect, fetch, scan, child-artifact expansion).
+  The CLI passes `store.max_bytes` through directly; the daemon and MCP
+  keep the engine default of `arbitraitor_store::DEFAULT_MAX_BYTES`
+  (1 GiB).
+- `arbitraitor_store::DEFAULT_MAX_BYTES` and
+  `arbitraitor_store::ContentStore::store_with_metadata_and_limits`: the
+  storage crate's default 1 GiB bound is now exported as a public
+  constant, and a variant of `store_with_metadata` accepts an explicit
+  per-call byte bound so engine consumers can enforce a tighter
+  configured limit without a post-write check.
+- `arbitraitor-mcp::TransportUnavailablePrompt`: a fail-closed
+  `ApprovalPrompt` used by the default stdio MCP server so
+  `request_approval` cannot block the JSON-RPC channel trying to read an
+  interactive confirmation from stdin.
 - The MCP default server now registers all seven tool handlers:
   `request_approval` and `run_approved_artifact` were implemented but never
   registered (ADR-0038 decision 3). Approved execution reads artifact
@@ -89,15 +109,29 @@ caps pending record files at
     effective final URL instead of `null` when no redirect occurred.
   - **Daemon socket `Inspect`/`Scan`/`QueryReceipt`** now apply the
     daemon's fail-closed policy (an unmatched artifact verdicts `Block`
-    instead of the analysis verdict), verify provenance, persist receipts,
-    and bound local-file reads (previously unbounded). `QueryReceipt` now
+    instead of the analysis verdict), persist receipts, and bound
+    local-file reads (previously unbounded). The daemon's provenance stage
+    runs through the engine with an empty default input set (`DaemonOptions`
+    exposes no signature inputs), so signature verifications are recorded
+    on the receipt only when an embedder supplies inputs; the stage exists
+    structurally but produces no minisign/cosign checks in daemon default
+    configuration. `QueryReceipt` now
     returns the artifact's actual verdict and finding count instead of the
-    existence-only `stored` marker. `Daemon::new`/`with_options` return
+    existence-only `stored` marker, and is a strict read: it never
+    re-runs analysis or rewrites the persisted receipt.
+    `Daemon::new`/`with_options` return
     `Result` because the engine opens the CAS eagerly.
   - **`ArbitraitorApi` release gate is now the state machine**: release
     after an `Incomplete` verdict (detector failure) is rejected — the
     previous check only rejected `Block` and `Error` (fail-closed per
     spec §18.3).
+  - **Configured `default_action = "prompt"` policies upgrade to `Block`
+    on non-interactive surfaces**: the engine evaluates policy with
+    `EvalContext::new(false)`, so any unmatched prompt verdict becomes
+    `Block` on the daemon, the MCP default stdio server, and the CLI when
+    run unattended. Interactive TTY embedders that explicitly want a
+    prompt verdict register their own approval channel via
+    `RequestApprovalTool::with_prompt`.
   - Receipts are unified on the richer CLI shape (transport metadata,
     signature findings, rule pack versions, detector provenance) and the
     canonical `unix:<secs>.<nanos>Z` timestamp; `query_receipts` parses both
@@ -108,6 +142,55 @@ caps pending record files at
   - `arbitraitor-daemon`'s `Config::default` directories moved with the
     engine to the user cache root (`$XDG_CACHE_HOME/arbitraitor`), no longer
     the working-directory-relative `.arbitraitor`.
+- **Spec/tech-stack naming sweep**: the §40 and §3/§3.5 bodies now refer
+  to the engine crate as `arbitraitor-engine` everywhere, and the
+  "deferred to a focused ADR (proposed ADR-0037)" constructs are replaced
+  by "ADR-0038 (accepted)" references. The pre-existing ADR-0037 number is
+  the Wasmtime CVE risk register; carrying it in spec §40 was a stale
+  cross-reference.
+
+### Fixed
+
+- **MCP `inspect_url` and `fetch_artifact` rejected non-HTTP(S) URLs at the
+  handler level**: the engine's `parse_fetch_source` accepts `file://` URLs
+  and bare paths for the CLI's legitimate `inspect ./local.sh` use, so the
+  MCP tools previously read arbitrary host files. Both handlers now reject
+  non-http(s) inputs with a typed error before the engine sees the URL;
+  the default stdio server's engine config additionally clamps
+  `FetchPolicy::allowed_schemes` to `[Http, Https]` so a future handler
+  regression cannot reopen the gap. Tests assert no CAS entry and no
+  receipt is written for a rejected call (`file://` URL or bare path),
+  plus a positive control for `http://`.
+- **`QueryReceipt` on the daemon is read-only**: the previous engine route
+  called `api.scan()`, which re-ran analysis AND unconditionally re-wrote
+  the persisted receipt, regenerating `timestamps.created`/`modified` on
+  every lookup and breaking §31's write-once audit-trail property. The
+  daemon now uses `ArbitraitorApi::receipt_summary` (a read-only accessor);
+  a sockets-level test asserts the persisted receipt is byte-identical
+  before and after the query. The MCP `QueryReceiptTool` is likewise
+  backed by the engine's persisted receipts directory rather than a fresh
+  empty in-memory store, so `inspect_url` results can actually be queried.
+- **Default MCP `request_approval` cannot block the stdio transport**: the
+  previous default server registered `RequestApprovalTool::new()`, whose
+  `StdinApprovalPrompt` reads from `std::io::stdin()` — that is the
+  JSON-RPC request channel on the stdio transport, so an agent calling
+  `request_approval` blocked the protocol loop and consumed the client's
+  next request line. The default server now registers
+  `RequestApprovalTool::with_prompt(Arc::new(TransportUnavailablePrompt),
+  …)`, which returns a typed `TransportUnavailable` error (approved=false
+  surface, no token issued). `RequestApprovalTool::new()` keeps
+  `StdinApprovalPrompt` as the interactive-TTY default; embedders with a
+  real approval channel inject it via `with_prompt`. Decision to wire a
+  headless pending-store prompt into the default server is deferred to a
+  follow-up.
+- **CLI `inspect` honors `store.max_bytes` again**: the pre-extraction
+  CLI pipeline rejected artifacts larger than the configured
+  `store.max_bytes` after fetch; the engine dropped that bound during the
+  ADR-0038 extraction (the store's 1 GiB `DEFAULT_MAX_BYTES` was the only
+  enforced cap). `arbitraitor_engine::Config::store_max_bytes` now plumbs
+  the configured bound to `sink_with_limits` on every engine-managed
+  write; the CLI passes `store.max_bytes` through, so identical config
+  now means identical enforcement across `scan` and `inspect`.
 
 ### Changed (CI)
 

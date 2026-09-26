@@ -859,12 +859,23 @@ fn scan_path(path: &str, state: &DaemonState) -> DaemonResponse {
 
 /// Delegates a `QueryReceipt` request to the pipeline engine.
 ///
-/// The engine scans the stored artifact, so the response now carries the
-/// artifact's actual verdict and finding count instead of the previous
-/// existence-only `stored` marker.
+/// Read-only: the engine's `receipt_summary` reads the persisted receipt but
+/// never re-runs analysis or rewrites it, so a query cannot silently rewrite
+/// the audit trail (ADR-0038 decision 2; §31 receipt integrity). A read
+/// endpoint that re-persisted the receipt would mutate policy traces and
+/// timestamps on every lookup.
 fn query_receipt(sha256: &str, state: &DaemonState) -> DaemonResponse {
-    match state.api.scan(sha256) {
-        Ok(result) => inspection_response(&result),
+    match state.api.receipt_summary(sha256) {
+        Ok(Some(summary)) => DaemonResponse {
+            success: true,
+            verdict: Some(format!("{:?}", summary.verdict)),
+            findings_count: summary.findings_count,
+            sha256: Some(summary.sha256.clone()),
+            error: None,
+            health_report: None,
+            daemon_info: None,
+        },
+        Ok(None) => error_response(format!("no inspection receipt for {sha256}")),
         Err(error) => error_response(error.to_string()),
     }
 }
@@ -1270,6 +1281,167 @@ mod tests {
         );
         handle.await??;
         server.await??;
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    /// §31 receipt integrity: `QueryReceipt` is a read endpoint and must
+    /// never rewrite the persisted receipt. The previous engine route
+    /// through `api.scan()` re-ran analysis and unconditionally called
+    /// `persist_receipt`, regenerating timestamps and policy traces on
+    /// every lookup; the byte-for-byte equality check proves the audit
+    /// trail is now immutable to queries.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn daemon_query_receipt_does_not_rewrite_the_persisted_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_path("query-receipt-readonly")?;
+        let socket = root.join("daemon.sock");
+        let cas_root = root.join("cas");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buffer = [0_u8; 1024];
+            let _read = stream.read(&mut buffer).await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nplain text",
+                )
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: cas_root.clone(),
+                fetch_policy: FetchPolicy {
+                    tls_verifier: TlsVerifier::PlatformVerifier,
+                    allowed_schemes: vec![FetchScheme::Http],
+                    allow_loopback_addresses: true,
+                    ..FetchPolicy::default()
+                },
+                ..DaemonOptions::default()
+            },
+        )?;
+        let handle = tokio::spawn(async move { daemon.run().await });
+        wait_for_socket(&socket).await?;
+
+        let inspected = request_once(
+            &socket,
+            &DaemonRequest::Inspect {
+                url: format!("http://127.0.0.1:{}/artifact", addr.port()),
+                expected_sha256: None,
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+        assert!(inspected.success, "{:?}", inspected.error);
+        let sha256 = inspected.sha256.ok_or("inspect must return sha256")?;
+        let receipts_dir = cas_root.parent().ok_or("missing parent")?.join("receipts");
+        let receipt_path = receipts_dir.join(format!("{sha256}.json"));
+        let bytes_before = std::fs::read(&receipt_path)?;
+
+        let queried = request_once(
+            &socket,
+            &DaemonRequest::QueryReceipt {
+                sha256: sha256.clone(),
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+        assert!(queried.success, "{:?}", queried.error);
+        assert_eq!(queried.sha256.as_deref(), Some(sha256.as_str()));
+        assert_eq!(
+            queried.verdict.as_deref(),
+            Some("Block"),
+            "the socket-level answer carries the fail-closed verdict from the persisted receipt"
+        );
+        // Content-bitwise equality: any rewrite (even a trivial one) would
+        // regenerate `timestamps.created`/`modified` and surface here.
+        let bytes_after = std::fs::read(&receipt_path)?;
+        assert_eq!(
+            bytes_before, bytes_after,
+            "QueryReceipt must not modify the persisted receipt"
+        );
+
+        assert!(
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
+        );
+        handle.await??;
+        server.await??;
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    /// Read-only also means fail-closed on the unknown side: a digest with
+    /// no persisted receipt returns a clean error rather than triggering a
+    /// scan-and-persist side effect.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn daemon_query_receipt_returns_error_for_unknown_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_path("query-receipt-missing")?;
+        let socket = root.join("daemon.sock");
+        let cas_root = root.join("cas");
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: cas_root.clone(),
+                ..DaemonOptions::default()
+            },
+        )?;
+        let handle = tokio::spawn(async move { daemon.run().await });
+        wait_for_socket(&socket).await?;
+
+        let unknown_digest = "ab".repeat(32);
+        let response = request_once(
+            &socket,
+            &DaemonRequest::QueryReceipt {
+                sha256: unknown_digest.clone(),
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(
+            error.contains("no inspection receipt"),
+            "expected a readable 'no receipt' error, got: {error}"
+        );
+        let receipts_dir = cas_root.parent().ok_or("missing parent")?.join("receipts");
+        let persisted: Vec<_> = std::fs::read_dir(&receipts_dir)
+            .map(|rd| rd.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(
+            persisted.is_empty(),
+            "a missed lookup must not have persisted a receipt: {persisted:?}"
+        );
+
+        assert!(
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
+        );
+        handle.await??;
         remove_dir_all_if_exists(root)?;
         Ok(())
     }

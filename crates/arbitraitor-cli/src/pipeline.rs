@@ -91,6 +91,7 @@ pub(crate) async fn inspect(
         store_path: cas_root.clone(),
         receipts_path: receipts_sibling(&cas_root),
         fetch_policy,
+        store_max_bytes: config.store.max_bytes,
         ..arbitraitor_engine::Config::default()
     });
     if policy_configured {
