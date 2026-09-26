@@ -229,6 +229,11 @@ pub struct EffectiveControls {
     /// enforced for the child.
     pub resource_limits: ControlState,
     /// Effective Landlock ABI version observed for Linux filesystem isolation.
+    ///
+    /// On the `linux` branch, `filesystem_isolation` reports `Available`
+    /// only when this is `Some` (#755): a kernel that returns `None` from
+    /// the ABI probe (Linux < 5.13 or the Landlock LSM disabled) gets no
+    /// ruleset from the enforcement hook, so the matrix fails closed.
     pub landlock_abi_version: Option<LandlockAbiVersion>,
     /// Whether `io_uring` is available on the host kernel.
     ///
@@ -275,9 +280,10 @@ impl EffectiveControls {
         }
     }
 
-    /// Every control marked `Available`. Returned for `Restricted` and
-    /// `Disposable` modes on platforms where every required containment
-    /// primitive is wired up (Linux today).
+    /// Every control marked `Available`. Serves as the base for the
+    /// `Restricted`/`Disposable` matrix on platforms where every required
+    /// containment primitive is wired up (Linux with a successful Landlock
+    /// ABI probe today); see [`effective_restricted_controls`].
     #[must_use]
     pub const fn all_available() -> Self {
         Self {
@@ -367,13 +373,29 @@ impl EffectiveControls {
 /// `Unavailable`. This is intentional — a platform we cannot classify
 /// is one we cannot guarantee containment on.
 ///
+/// On the `linux` branch, filesystem isolation is additionally coupled to
+/// the live Landlock ABI probe ([`probe_landlock_abi_version`]): when the
+/// probe returns `None` (Linux kernels that predate 5.13, or hosts with the
+/// Landlock LSM disabled), the enforcement hook installs no ruleset and the
+/// matrix reports [`ControlState::Unavailable`] instead of a false
+/// `Available` (#755, ADR-0028). All other Linux controls are
+/// classification claims — this crate probes no equivalent primitive for
+/// them at matrix-computation time.
+///
 /// # Examples
 ///
 /// ```
-/// use arbitraitor_sandbox::{compute_effective_controls, SandboxMode};
+/// use arbitraitor_sandbox::{compute_effective_controls, ControlState, SandboxMode};
 ///
 /// let on_linux = compute_effective_controls(SandboxMode::Restricted, "linux");
-/// assert!(on_linux.is_fully_contained());
+/// // Filesystem isolation claims enforcement only when the host's Landlock
+/// // ABI probe succeeded; otherwise it fails closed to `Unavailable`.
+/// let expected = if on_linux.landlock_abi_version.is_some() {
+///     ControlState::Available
+/// } else {
+///     ControlState::Unavailable
+/// };
+/// assert_eq!(on_linux.filesystem_isolation, expected);
 ///
 /// let on_macos = compute_effective_controls(SandboxMode::Restricted, "macos");
 /// assert!(on_macos.has_unavailable());
@@ -408,12 +430,13 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
         // seccomp-BPF (syscall + network + platform-settings via filter),
         // pid/user namespaces (process tree + privilege suppression),
         // `no_new_privs`, and `RLIMIT_*` for both Restricted and Disposable.
-        let mut controls = EffectiveControls::all_available();
-        controls.landlock_abi_version = probe_landlock_abi_version();
-        controls.io_uring_available = probe_io_uring_available();
-        controls.userns_available = probe_userns_available();
-        controls.container_runtime = probe_container_runtime();
-        controls
+        // The filesystem-isolation claim is probe-coupled below (#755).
+        effective_restricted_controls_on_linux(
+            probe_landlock_abi_version(),
+            probe_io_uring_available(),
+            probe_userns_available(),
+            probe_container_runtime(),
+        )
     } else if platform.eq_ignore_ascii_case("macos") || platform.eq_ignore_ascii_case("darwin") {
         // ADR-0024: macOS containment ADR deferred — no primitive wired up.
         EffectiveControls::all_unavailable()
@@ -423,6 +446,30 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
     } else {
         EffectiveControls::all_unavailable()
     }
+}
+
+/// Assembles the effective matrix for the `linux` platform branch.
+///
+/// Probes are parameters rather than calls so the mapping stays
+/// unit-testable on hosts whose kernel answer is out of the test's control.
+#[must_use]
+fn effective_restricted_controls_on_linux(
+    landlock_abi_version: Option<LandlockAbiVersion>,
+    io_uring_available: Option<bool>,
+    userns_available: Option<bool>,
+    container_runtime: Option<ContainerRuntime>,
+) -> EffectiveControls {
+    let mut controls = EffectiveControls::all_available();
+    controls.landlock_abi_version = landlock_abi_version;
+    controls.io_uring_available = io_uring_available;
+    controls.userns_available = userns_available;
+    controls.container_runtime = container_runtime;
+    controls.filesystem_isolation = if landlock_abi_version.is_some() {
+        ControlState::Available
+    } else {
+        ControlState::Unavailable
+    };
+    controls
 }
 
 /// Privilege and isolation settings for child processes.
@@ -875,16 +922,32 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn compute_effective_controls_for_restricted_on_linux_is_all_available() {
+    fn compute_effective_controls_for_restricted_on_linux_matches_landlock_probe() {
+        let probe = probe_landlock_abi_version();
         let controls = compute_effective_controls(SandboxMode::Restricted, "linux");
-        assert!(controls.is_fully_contained());
-        assert!(!controls.has_unavailable());
-        assert!(!controls.has_degraded());
-        assert!(
-            controls
-                .landlock_abi_version
-                .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
+        assert_eq!(
+            controls.landlock_abi_version, probe,
+            "the matrix must carry the live ABI probe datum"
         );
+        if let Some(abi) = probe {
+            // Landlock-capable host: every control is in effect.
+            assert!(abi >= LandlockAbiVersion::V1);
+            assert!(controls.is_fully_contained());
+            assert!(!controls.has_unavailable());
+            assert!(!controls.has_degraded());
+        } else {
+            // #755: kernels without Landlock get no ruleset from the
+            // enforcement hook, so filesystem isolation fails closed while
+            // the remaining Linux controls stay wired.
+            assert_eq!(controls.filesystem_isolation, ControlState::Unavailable);
+            assert!(controls.has_unavailable());
+            assert!(!controls.is_fully_contained());
+            assert_eq!(controls.network_isolation, ControlState::Available);
+            assert_eq!(controls.syscall_filtering, ControlState::Available);
+            assert_eq!(controls.privilege_suppression, ControlState::Available);
+            assert_eq!(controls.process_tree_containment, ControlState::Available);
+            assert_eq!(controls.resource_limits, ControlState::Available);
+        }
         // io_uring probe must be populated on Linux (Some or None depending
         // on kernel version, but the field must be set by the probe).
         assert_eq!(controls.io_uring_available, probe_io_uring_available());
@@ -893,18 +956,63 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn compute_effective_controls_for_disposable_on_linux_is_all_available() {
+    fn compute_effective_controls_for_disposable_on_linux_matches_landlock_probe() {
+        let probe = probe_landlock_abi_version();
         let controls = compute_effective_controls(SandboxMode::Disposable, "linux");
-        assert!(controls.is_fully_contained());
-        assert!(!controls.has_unavailable());
-        assert!(!controls.has_degraded());
-        assert!(
-            controls
-                .landlock_abi_version
-                .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
-        );
+        assert_eq!(controls.landlock_abi_version, probe);
+        if probe.is_some() {
+            assert!(controls.is_fully_contained());
+            assert!(!controls.has_unavailable());
+            assert!(!controls.has_degraded());
+        } else {
+            assert_eq!(controls.filesystem_isolation, ControlState::Unavailable);
+            assert!(controls.has_unavailable());
+            assert!(!controls.is_fully_contained());
+        }
         assert_eq!(controls.io_uring_available, probe_io_uring_available());
         assert_eq!(controls.userns_available, probe_userns_available());
+    }
+
+    #[test]
+    fn linux_branch_reports_filesystem_isolation_unavailable_without_landlock_probe() {
+        // Issue #755: the pre_exec hook installs no ruleset when the ABI
+        // probe returns None (Linux < 5.13 or the Landlock LSM disabled).
+        // The matrix must not claim Available for a control the platform
+        // will not deliver, and must keep the None probe datum so consumers
+        // can distinguish this host state from arbitrary misconfiguration.
+        let controls = effective_restricted_controls_on_linux(None, None, None, None);
+        assert_eq!(controls.filesystem_isolation, ControlState::Unavailable);
+        assert_eq!(controls.landlock_abi_version, None);
+        assert!(controls.has_unavailable());
+        assert!(!controls.is_fully_contained());
+        // The gap is isolated to filesystem isolation: the other Linux
+        // controls stay classified as available so receipts report a
+        // targeted containment gap instead of a blank matrix.
+        assert_eq!(controls.network_isolation, ControlState::Available);
+        assert_eq!(controls.syscall_filtering, ControlState::Available);
+        assert_eq!(controls.privilege_suppression, ControlState::Available);
+        assert_eq!(controls.process_tree_containment, ControlState::Available);
+        assert_eq!(
+            controls.platform_settings_isolation,
+            ControlState::Available
+        );
+        assert_eq!(controls.resource_limits, ControlState::Available);
+        assert!(!controls.has_degraded());
+    }
+
+    #[test]
+    fn linux_branch_reports_filesystem_isolation_available_with_landlock_probe() {
+        let controls = effective_restricted_controls_on_linux(
+            Some(LandlockAbiVersion::V6),
+            Some(true),
+            Some(true),
+            None,
+        );
+        assert_eq!(controls.filesystem_isolation, ControlState::Available);
+        assert!(!controls.has_unavailable());
+        assert!(!controls.has_degraded());
+        assert!(controls.is_fully_contained());
+        assert_eq!(controls.landlock_abi_version, Some(LandlockAbiVersion::V6));
     }
 
     #[test]
@@ -961,17 +1069,24 @@ mod tests {
         // to ASCII, which is sufficient for these inputs.
         for platform in ["linux", "Linux", "LINUX", "liNuX", "lInUx"] {
             let controls = compute_effective_controls(SandboxMode::Restricted, platform);
-            assert!(
-                controls.is_fully_contained(),
-                "platform {platform:?} must match linux case-insensitively"
+            // #755: filesystem isolation tracks the host Landlock probe;
+            // the remaining controls in the linux branch are classification
+            // claims and stay Available for every recognized casing.
+            assert_eq!(
+                controls.filesystem_isolation == ControlState::Available,
+                controls.landlock_abi_version.is_some(),
+                "platform {platform:?}: filesystem_isolation must track the Landlock probe"
             );
-            assert!(!controls.has_unavailable());
-            assert!(!controls.has_degraded());
-            assert!(
-                controls
-                    .landlock_abi_version
-                    .is_none_or(|abi| abi >= LandlockAbiVersion::V1)
+            assert_eq!(controls.network_isolation, ControlState::Available);
+            assert_eq!(controls.process_tree_containment, ControlState::Available);
+            assert_eq!(controls.privilege_suppression, ControlState::Available);
+            assert_eq!(controls.syscall_filtering, ControlState::Available);
+            assert_eq!(
+                controls.platform_settings_isolation,
+                ControlState::Available
             );
+            assert_eq!(controls.resource_limits, ControlState::Available);
+            assert!(!controls.has_degraded(), "platform {platform:?}");
         }
         for platform in ["macos", "Macos", "MACOS", "Darwin", "DARWIN"] {
             let controls = compute_effective_controls(SandboxMode::Restricted, platform);

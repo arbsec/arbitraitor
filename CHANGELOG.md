@@ -151,6 +151,20 @@ caps pending record files at
 
 ### Fixed
 
+- **Sandbox effective-controls matrix no longer claims filesystem isolation
+  without an enforcing Landlock ABI** (`arbitraitor_sandbox`): on the
+  `linux` branch, `compute_effective_controls` reported
+  `filesystem_isolation: Available` unconditionally, while the Landlock
+  `pre_exec` hook silently installs **no ruleset** when
+  `probe_landlock_abi_version()` returns `None` (Linux kernels < 5.13 or
+  hosts with the Landlock LSM disabled) — framework consumers trusted the
+  false `Available` and executed children with zero filesystem confinement
+  while run-state records claimed isolation. The matrix now reports
+  `filesystem_isolation: Unavailable` when the ABI probe fails, keeping
+  `landlock_abi_version: None` in the matrix so consumers can distinguish
+  a Landlock-absent host from other misconfigurations. Probed-Available
+  hosts see no change. Reported in #755; the probe-reporting semantics
+  follow ADR-0028 and spec §27.7 fail-closed rules.
 - **MCP `inspect_url` and `fetch_artifact` rejected non-HTTP(S) URLs at the
   handler level**: the engine's `parse_fetch_source` accepts `file://` URLs
   and bare paths for the CLI's legitimate `inspect ./local.sh` use, so the
