@@ -24,7 +24,7 @@ bitflags = { version = "2", default-features = false, features = ["serde", "std"
 block-buffer = { version = "0.12", default-features = false, features = ["zeroize"] }
 bstr = { version = "1", features = ["serde"] }
 bumpalo = { version = "3", features = ["allocator-api2"] }
-cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
+cranelift-bitset-e3aae47b6313639a = { package = "cranelift-bitset", version = "0.136", default-features = false, features = ["enable-serde"] }
 crc32fast = { version = "1" }
 crossbeam-utils = { version = "0.8" }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac"] }
@@ -47,7 +47,7 @@ memchr = { version = "2" }
 num-traits = { version = "0.2" }
 once_cell = { version = "1" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
-pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
+pulley-interpreter-250b128af4f17eb8 = { package = "pulley-interpreter", version = "49", default-features = false, features = ["disas", "interp", "std"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
@@ -63,9 +63,9 @@ stable_deref_trait = { version = "1", default-features = false, features = ["std
 subtle = { version = "2" }
 tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tracing-core = { version = "0.1" }
-wasm-encoder = { version = "0.254", features = ["wasmparser"] }
-wasmparser = { version = "0.254", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
-wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
+wasm-encoder = { version = "0.258", features = ["wasmparser"] }
+wasmparser = { version = "0.258", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
+wasmtime-internal-core-250b128af4f17eb8 = { package = "wasmtime-internal-core", version = "49", default-features = false, features = ["anyhow", "serde", "std"] }
 writeable = { version = "0.6", default-features = false, features = ["alloc"] }
 yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
 zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
@@ -79,7 +79,7 @@ anyhow = { version = "1" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
-cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
+cranelift-bitset-e3aae47b6313639a = { package = "cranelift-bitset", version = "0.136", default-features = false, features = ["enable-serde"] }
 crossbeam-utils = { version = "0.8" }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher", "serde"] }
 id-arena = { version = "2" }
@@ -88,7 +88,7 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 once_cell = { version = "1" }
 proc-macro2 = { version = "1" }
-pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
+pulley-interpreter-250b128af4f17eb8 = { package = "pulley-interpreter", version = "49", default-features = false, features = ["disas", "interp", "std"] }
 quote = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
@@ -98,13 +98,14 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit-mut"] }
-wasm-encoder = { version = "0.254", features = ["wasmparser"] }
-wasmparser = { version = "0.254", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
-wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
+wasm-encoder = { version = "0.258", features = ["wasmparser"] }
+wasmparser = { version = "0.258", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
+wasmtime-internal-core-250b128af4f17eb8 = { package = "wasmtime-internal-core", version = "49", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
-getrandom = { version = "0.4", default-features = false, features = ["std"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
 libc = { version = "0.2" }
@@ -127,7 +128,8 @@ wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", 
 [target.aarch64-apple-darwin.dependencies]
 cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
 errno = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
 libc = { version = "0.2" }
@@ -148,7 +150,8 @@ wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", 
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
-getrandom = { version = "0.4", default-features = false, features = ["std"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
 libc = { version = "0.2" }
