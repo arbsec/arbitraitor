@@ -26,7 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `human_approver_identity` attestation plumbed through the
   `ApprovalPrompt::request_confirmation_attested` defaulted trait method;
   `StdinApprovalPrompt` remains the interactive default and is audit-
-  identical to before (`stdin-human-confirmation`).
+  identical to before (`stdin-human-confirmation`). Records are MAC'd
+  (HMAC-SHA-256) with an embedder-supplied key; tampered, forged, or
+  key-less records fail closed. Cross-process consumption is claimed
+  atomically via an exclusive permanent `.consumed` marker (one approval =
+  one grant ever), the store caps pending record files at
+  `MAX_PENDING_RECORDS` (1000, freed by
+  `PendingApprovalStore::prune_expired`), and `PendingApprovalStore::open`
+  refuses group/world-writable store directories on Unix.
 
 - `xtask cleanup` (repo maintenance, `cargo run -p xtask -- cleanup`):
   the `worktrees` phase removes secondary worktrees whose branch maps to

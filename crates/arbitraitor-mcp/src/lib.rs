@@ -39,8 +39,8 @@ use explain::{
 };
 pub use headless::{
     ApprovalResolution, DEFAULT_PENDING_APPROVAL_LIFETIME, HEADLESS_APPROVAL_METHOD,
-    HeadlessApprovalPrompt, PendingApprovalError, PendingApprovalRecord, PendingApprovalState,
-    PendingApprovalStore,
+    HeadlessApprovalPrompt, MAX_PENDING_RECORDS, PendingApprovalError, PendingApprovalRecord,
+    PendingApprovalState, PendingApprovalStore,
 };
 use std::ops::Not;
 use subtle::ConstantTimeEq;

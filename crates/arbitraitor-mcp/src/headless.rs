@@ -38,16 +38,19 @@
 //! [`StdinApprovalPrompt`]: crate::StdinApprovalPrompt
 //! [`DEFAULT_APPROVAL_TOKEN_LIFETIME`]: crate::DEFAULT_APPROVAL_TOKEN_LIFETIME
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_model::ids::Sha256Digest;
+use hmac::{KeyInit, Mac as _};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ApprovalDecision, ApprovalPrompt, ApprovalPromptError, PlanContext, canonical_plan_digest,
+    ApprovalDecision, ApprovalPrompt, ApprovalPromptError, HmacSha256, PlanContext,
+    canonical_plan_digest,
 };
 
 /// Default lifetime of a pending-approval record: one hour.
@@ -62,6 +65,15 @@ pub const DEFAULT_PENDING_APPROVAL_LIFETIME: Duration = Duration::from_mins(60);
 /// (1 MiB). Bound so a single request cannot force unbounded durable state
 /// (§9 invariant 4).
 const MAX_PENDING_PLAN_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of pending-approval record files a single store holds at
+/// once (1000). Beyond the cap, registering a *new* request fails closed;
+/// [`PendingApprovalStore::prune_expired`] is the escape hatch. See the
+/// capacity notes on [`PendingApprovalStore`].
+pub const MAX_PENDING_RECORDS: usize = 1000;
+
+/// Domain-separation tag for the record authentication MAC.
+const RECORD_MAC_DOMAIN: &[u8] = b"arbitraitor-mcp-headless-pending-approval-record-v1";
 
 /// Current pending-approval record schema version.
 const PENDING_APPROVAL_SCHEMA_VERSION: u32 = 1;
@@ -131,6 +143,29 @@ pub struct PendingApprovalRecord {
     pub approver: Option<String>,
     /// Resolution timestamp (Unix seconds), set on resolution.
     pub resolved_at_unix_seconds: Option<u64>,
+    /// HMAC-SHA-256 (lowercase hex) authenticating this record, keyed with
+    /// the store's embedder-supplied key. Covers the canonical serialization
+    /// of the record's security-relevant fields (state, approver, resolution
+    /// and expiry and request timestamps, plan digest, artifact digest); the
+    /// MAC field itself is excluded from the computation. Records with a
+    /// missing, malformed, or mismatching MAC fail closed as
+    /// [`PendingApprovalError::Corrupt`].
+    pub record_mac: String,
+}
+
+/// Canonical serialization of a [`PendingApprovalRecord`]'s MAC-covered
+/// fields. Field order of this struct defines the canonical byte order of
+/// the MAC input, mirroring the struct-serialization canonicalization the
+/// plan digest uses (`super::canonical_plan_digest`).
+#[derive(Serialize)]
+struct RecordMacBody<'record> {
+    state: PendingApprovalState,
+    approver: Option<&'record str>,
+    resolved_at_unix_seconds: Option<u64>,
+    expires_at_unix_seconds: u64,
+    plan_digest: &'record str,
+    artifact_sha256: &'record str,
+    requested_at_unix_seconds: u64,
 }
 
 /// A trusted resolver's decision for a pending record.
@@ -160,6 +195,10 @@ pub enum ApprovalResolution {
 #[derive(Debug, Error)]
 pub enum PendingApprovalError {
     /// Filesystem or serialization failure; `stage` identifies the operation.
+    /// Also used for fail-closed policy refusals: the stage
+    /// `pending-record-capacity` rejects new requests beyond
+    /// [`MAX_PENDING_RECORDS`], and stage `open` rejects an empty MAC key or
+    /// (Unix) a group/world-writable store directory.
     #[error("pending-approval store failure during {stage}: {message}")]
     Store {
         /// Operation stage.
@@ -176,8 +215,10 @@ pub enum PendingApprovalError {
     /// The resolver's expected plan digest does not match the stored digest.
     #[error("pending-approval plan digest mismatch: record changed between listing and resolution")]
     PlanDigestMismatch,
-    /// The record's stored plan fields do not reproduce its plan digest, or a
-    /// record marked approved carries no approver identity.
+    /// The record fails integrity checks: stored plan fields do not reproduce
+    /// its plan digest, its filename key does not match its embedded plan
+    /// digest, its record MAC is missing/malformed/mismatched under the store
+    /// key, or a record marked approved carries no approver identity.
     #[error(
         "pending-approval record is corrupt: stored fields are inconsistent with its plan digest"
     )]
@@ -226,33 +267,87 @@ pub enum PendingApprovalError {
 /// HMAC-signed, plan-bound, single-use token minted by `RequestApprovalTool`
 /// after the prompt consumes the approved record.
 ///
-/// The directory is trusted at same-user granularity, mirroring the TTY that
-/// anchors the interactive prompt: records are written mode `0600` under a
-/// directory created mode `0700` on Unix. Deployments split across OS users
-/// must apply stricter ACLs themselves. A store directory serves a single
-/// MCP server process at a time (plus its trusted resolvers); in-process
-/// double-consumption of an approved record is prevented by the store's
-/// internal lock around every read-modify-write.
+/// ### Record authentication (HMAC-SHA-256)
 ///
-/// Writes are atomic (write-then-rename), so a reader never observes a torn
-/// record.
+/// Every record carries an HMAC-SHA-256 over the canonical serialization of
+/// its security-relevant fields (state, approver, resolution, expiry, and
+/// request timestamps, plan digest, artifact digest), keyed with the `key`
+/// handed to [`Self::open`]. The embedder generates the key and distributes
+/// it to the MCP server process and the trusted resolver; the key MUST
+/// never be persisted adjacent to the store and MUST NOT be derivable from
+/// store contents. The MAC defends record integrity against tampering or
+/// forgery by processes that do not hold the key — in particular
+/// agent-side workers that share the OS user owning the store directory —
+/// so a planted "approved" record cannot mint a token. It does NOT protect
+/// against a key-holder: any process with the key can mint approvals, so
+/// key disclosure is resolver compromise. Records with a missing, malformed,
+/// or mismatching MAC fail closed as [`PendingApprovalError::Corrupt`] on
+/// [`Self::get`], [`Self::list_pending`], [`Self::resolve`], and the
+/// prompt's consume path; [`Self::prune_expired`] instead removes them as
+/// fail-safe housekeeping (removal grants nothing by itself).
+///
+/// ### Filesystem posture
+///
+/// The store directory MUST NOT be writable by any agent-side process:
+/// [`Self::open`] refuses group- or world-writable directories on Unix
+/// (mode masked with `0o022`). Record files, temporary files, and consumed
+/// markers are created `0600`; record writes are atomic
+/// create-new-then-rename, so a reader never observes a torn record.
+/// Temporary files are named `{digest}.json.tmp-{pid}`; a stale temporary
+/// file left by a crashed writer is reclaimed by the next write.
+///
+/// ### Consumption markers
+///
+/// Consuming an approval creates an exclusive `{digest}.consumed` marker
+/// *before* the approval decision is reported, so two processes racing the
+/// same approved record produce exactly one grant. A pre-existing marker
+/// for a live record (a cross-process race winner, or the survivor of a
+/// crash between claiming and committing) fails closed: the stale approval
+/// is treated as already consumed and a fresh pending record is registered
+/// for a future approval. A marker is permanent while its record lives ("one
+/// approval = one grant ever", across restarts); [`Self::prune_expired`]
+/// removes a marker only together with its record or once the record no
+/// longer exists.
+///
+/// ### Capacity
+///
+/// The store admits at most [`MAX_PENDING_RECORDS`] record files; beyond
+/// the cap a new request fails closed with [`PendingApprovalError::Store`]
+/// (stage `pending-record-capacity`) and no token is minted. The cap counts
+/// record files in the directory regardless of state or expiry —
+/// expired-but-unpruned records still count against it — while `resolve`
+/// and consumption of an existing record are unaffected. [`Self::prune_expired`]
+/// is the escape hatch that frees capacity.
 #[derive(Clone)]
 pub struct PendingApprovalStore {
     dir: PathBuf,
+    mac_key: Arc<[u8]>,
     lock: Arc<Mutex<()>>,
 }
 
 impl PendingApprovalStore {
     /// Opens (creating it if needed) the pending-approval store rooted at
-    /// `dir`. On Unix a newly created directory has `0700` permissions;
-    /// existing directories are left untouched.
+    /// `dir`, authenticating records with `mac_key`. On Unix a newly created
+    /// directory has `0700` permissions, and `open` refuses an existing
+    /// directory that is writable by group or others.
+    ///
+    /// The embedder owns `mac_key` lifecycle: the same key must reach the
+    /// MCP server process and the trusted resolver, must never be persisted
+    /// adjacent to the store, and must not be derivable from store contents.
     ///
     /// # Errors
     ///
     /// Returns [`PendingApprovalError::Store`] when the directory cannot be
-    /// created or the path exists and is not a directory.
-    pub fn open(dir: impl Into<PathBuf>) -> Result<Self, PendingApprovalError> {
+    /// created, the path exists and is not a directory, the directory is
+    /// group- or world-writable (Unix), or the key is empty.
+    pub fn open(dir: impl Into<PathBuf>, mac_key: Arc<[u8]>) -> Result<Self, PendingApprovalError> {
         let dir = dir.into();
+        if mac_key.is_empty() {
+            return Err(PendingApprovalError::Store {
+                stage: "open",
+                message: "pending-approval record MAC key must not be empty".to_owned(),
+            });
+        }
         if !dir.exists() {
             create_restricted_dir(&dir)?;
         }
@@ -262,8 +357,10 @@ impl PendingApprovalStore {
                 message: "pending-approval store path exists and is not a directory".to_owned(),
             });
         }
+        refuse_permissive_dir(&dir)?;
         Ok(Self {
             dir,
+            mac_key,
             lock: Arc::new(Mutex::new(())),
         })
     }
@@ -297,7 +394,7 @@ impl PendingApprovalStore {
     ) -> Result<Option<PendingApprovalRecord>, PendingApprovalError> {
         match self.read_record(plan_digest)? {
             Some(record) => {
-                verify_record_integrity(&record)?;
+                self.verify_record_integrity(&record)?;
                 Ok(Some(record))
             }
             None => Ok(None),
@@ -345,7 +442,7 @@ impl PendingApprovalStore {
             let Some(record) = self.read_record(&key)? else {
                 continue;
             };
-            verify_record_integrity(&record)?;
+            self.verify_record_integrity(&record)?;
             if record.state == PendingApprovalState::Pending
                 && now_seconds < record.expires_at_unix_seconds
             {
@@ -401,7 +498,7 @@ impl PendingApprovalStore {
         let mut record = self
             .read_record(&key)?
             .ok_or(PendingApprovalError::NotFound)?;
-        verify_record_integrity(&record)?;
+        self.verify_record_integrity(&record)?;
         if record.plan_digest != expected_plan_digest {
             return Err(PendingApprovalError::PlanDigestMismatch);
         }
@@ -418,14 +515,25 @@ impl PendingApprovalStore {
         };
         record.approver = Some(approver);
         record.resolved_at_unix_seconds = Some(now_seconds);
-        self.write_record(&record)?;
+        self.write_record(&mut record)?;
         Ok(record)
     }
 
     /// Removes every record whose expiry has passed at `now`, returning how
-    /// many were removed. Lapsed records fail closed even before pruning;
-    /// this is housekeeping so resolver queues and disk do not accumulate
-    /// dead records.
+    /// many records were removed. Lapsed records fail closed even before
+    /// pruning; this is housekeeping so resolver queues and disk do not
+    /// accumulate dead records and the [`MAX_PENDING_RECORDS`] capacity cap
+    /// can be freed.
+    ///
+    /// Pruning also removes records that fail integrity verification. Removal
+    /// is fail-safe — a record authorizes nothing by itself — so planted junk
+    /// (unparseable, wrong MAC, or filename/digest mismatch) is deleted rather
+    /// than blocking housekeeping forever; the failing paths (get, list,
+    /// resolve, consume) still fail closed on the same records.
+    ///
+    /// Finally, orphaned `.consumed` markers (whose record no longer exists)
+    /// are removed. Marker removal is not included in the returned count, and
+    /// markers of records that survive this pass are kept.
     ///
     /// # Errors
     ///
@@ -454,10 +562,15 @@ impl PendingApprovalStore {
             let Ok(key) = normalize_plan_digest_key(stem) else {
                 continue;
             };
-            let Some(record) = self.read_record(&key)? else {
-                continue;
+            let remove = match self.read_record(&key) {
+                Ok(Some(record)) => match self.verify_record_integrity(&record) {
+                    Ok(()) => now_seconds >= record.expires_at_unix_seconds,
+                    Err(_) => true,
+                },
+                Ok(None) => continue,
+                Err(_) => true,
             };
-            if now_seconds >= record.expires_at_unix_seconds {
+            if remove {
                 std::fs::remove_file(entry.path()).map_err(|error| {
                     PendingApprovalError::Store {
                         stage: "prune-record",
@@ -467,11 +580,50 @@ impl PendingApprovalStore {
                 removed += 1;
             }
         }
+        self.prune_orphaned_markers()?;
         Ok(removed)
+    }
+
+    /// Removes `.consumed` markers whose record file no longer exists.
+    fn prune_orphaned_markers(&self) -> Result<(), PendingApprovalError> {
+        let entries =
+            std::fs::read_dir(&self.dir).map_err(|error| PendingApprovalError::Store {
+                stage: "read-dir",
+                message: error.to_string(),
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| PendingApprovalError::Store {
+                stage: "read-dir-entry",
+                message: error.to_string(),
+            })?;
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".consumed") else {
+                continue;
+            };
+            let Ok(key) = normalize_plan_digest_key(stem) else {
+                continue;
+            };
+            if !self.record_path(&key).exists() {
+                std::fs::remove_file(entry.path()).map_err(|error| {
+                    PendingApprovalError::Store {
+                        stage: "prune-consumed-marker",
+                        message: error.to_string(),
+                    }
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn record_path(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.json"))
+    }
+
+    fn consumed_marker_path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.consumed"))
     }
 
     fn read_record(
@@ -495,10 +647,48 @@ impl PendingApprovalStore {
                 stage: "parse-record",
                 message: error.to_string(),
             })?;
+        // A record whose embedded plan digest does not match its filename key
+        // is a mixed-up or copied file; fail closed as corrupt.
+        if normalize_plan_digest_key(&record.plan_digest)? != key {
+            return Err(PendingApprovalError::Corrupt);
+        }
         Ok(Some(record))
     }
 
-    fn write_record(&self, record: &PendingApprovalRecord) -> Result<(), PendingApprovalError> {
+    /// Number of live record files in the store directory. Counts files
+    /// regardless of record state or expiry; temporary files and consumed
+    /// markers are excluded by their suffixes.
+    fn pending_record_count(&self) -> Result<usize, PendingApprovalError> {
+        let entries =
+            std::fs::read_dir(&self.dir).map_err(|error| PendingApprovalError::Store {
+                stage: "read-dir",
+                message: error.to_string(),
+            })?;
+        let mut count = 0;
+        for entry in entries {
+            let entry = entry.map_err(|error| PendingApprovalError::Store {
+                stage: "read-dir-entry",
+                message: error.to_string(),
+            })?;
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if normalize_plan_digest_key(stem).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Recomputes the record MAC and atomically commits the record. Every
+    /// write path re-signs under the caller's store lock, so a state
+    /// transition can never persist an unauthenticated mutation.
+    fn write_record(&self, record: &mut PendingApprovalRecord) -> Result<(), PendingApprovalError> {
+        record.record_mac = self.compute_record_mac(record)?;
         let bytes =
             serde_json::to_vec_pretty(record).map_err(|error| PendingApprovalError::Store {
                 stage: "encode-record",
@@ -510,15 +700,147 @@ impl PendingApprovalStore {
             record.plan_digest,
             std::process::id()
         ));
-        std::fs::write(&tmp, bytes).map_err(|error| PendingApprovalError::Store {
-            stage: "write-record",
-            message: error.to_string(),
-        })?;
+        // `create_new` (not plain `fs::write`) prevents truncating a file we
+        // did not create; a stale temp file from a crashed earlier writer is
+        // reclaimed once and then creation is retried.
+        let mut file = match create_fresh_file(&tmp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&tmp).map_err(|error| PendingApprovalError::Store {
+                    stage: "reclaim-temp-record",
+                    message: error.to_string(),
+                })?;
+                create_fresh_file(&tmp).map_err(|error| PendingApprovalError::Store {
+                    stage: "write-record",
+                    message: error.to_string(),
+                })?
+            }
+            Err(error) => {
+                return Err(PendingApprovalError::Store {
+                    stage: "write-record",
+                    message: error.to_string(),
+                });
+            }
+        };
+        file.write_all(&bytes)
+            .map_err(|error| PendingApprovalError::Store {
+                stage: "write-record",
+                message: error.to_string(),
+            })?;
+        drop(file);
+        // Belt-and-braces: the file was already created `0600` on Unix.
         set_owner_only_permissions(&tmp)?;
         std::fs::rename(&tmp, &target).map_err(|error| PendingApprovalError::Store {
             stage: "commit-record",
             message: error.to_string(),
         })
+    }
+
+    /// HMAC-SHA-256 over the canonical serialization of the record's
+    /// MAC-covered fields (everything in [`RecordMacBody`]; the MAC field
+    /// itself is excluded). Mirrors the struct-serialization canonicalization
+    /// `super::canonical_plan_digest` uses.
+    fn compute_record_mac(
+        &self,
+        record: &PendingApprovalRecord,
+    ) -> Result<String, PendingApprovalError> {
+        let body = RecordMacBody {
+            state: record.state,
+            approver: record.approver.as_deref(),
+            resolved_at_unix_seconds: record.resolved_at_unix_seconds,
+            expires_at_unix_seconds: record.expires_at_unix_seconds,
+            plan_digest: &record.plan_digest,
+            artifact_sha256: &record.artifact_sha256,
+            requested_at_unix_seconds: record.requested_at_unix_seconds,
+        };
+        let canonical = serde_json::to_vec(&body).map_err(|error| PendingApprovalError::Store {
+            stage: "encode-record-mac",
+            message: error.to_string(),
+        })?;
+        let mut mac =
+            HmacSha256::new_from_slice(&self.mac_key).map_err(|_| PendingApprovalError::Store {
+                stage: "record-mac-key",
+                message: "record MAC key is rejected by HMAC-SHA-256".to_owned(),
+            })?;
+        mac.update(RECORD_MAC_DOMAIN);
+        mac.update(&canonical);
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    }
+
+    /// Verifies the record's MAC against the store key using the `hmac`
+    /// crate's constant-time tag comparison, after the structural checks in
+    /// [`Self::verify_record_integrity`]. Any mismatch fails closed as
+    /// [`PendingApprovalError::Corrupt`].
+    fn verify_record_mac(
+        &self,
+        record: &PendingApprovalRecord,
+    ) -> Result<(), PendingApprovalError> {
+        let stored = hex::decode(&record.record_mac).map_err(|_| PendingApprovalError::Corrupt)?;
+        let body = RecordMacBody {
+            state: record.state,
+            approver: record.approver.as_deref(),
+            resolved_at_unix_seconds: record.resolved_at_unix_seconds,
+            expires_at_unix_seconds: record.expires_at_unix_seconds,
+            plan_digest: &record.plan_digest,
+            artifact_sha256: &record.artifact_sha256,
+            requested_at_unix_seconds: record.requested_at_unix_seconds,
+        };
+        let canonical = serde_json::to_vec(&body).map_err(|error| PendingApprovalError::Store {
+            stage: "encode-record-mac",
+            message: error.to_string(),
+        })?;
+        let mut mac =
+            HmacSha256::new_from_slice(&self.mac_key).map_err(|_| PendingApprovalError::Store {
+                stage: "record-mac-key",
+                message: "record MAC key is rejected by HMAC-SHA-256".to_owned(),
+            })?;
+        mac.update(RECORD_MAC_DOMAIN);
+        mac.update(&canonical);
+        mac.verify_slice(&stored)
+            .map_err(|_| PendingApprovalError::Corrupt)
+    }
+
+    /// Structural and authenticity checks applied on every record read path.
+    fn verify_record_integrity(
+        &self,
+        record: &PendingApprovalRecord,
+    ) -> Result<(), PendingApprovalError> {
+        verify_record_integrity(record)?;
+        self.verify_record_mac(record)
+    }
+
+    /// Verifies the full record (structural integrity + MAC). Test-only hook
+    /// that re-signs a record whose fields were legitimately changed under
+    /// test control (for example time-travelled expiry).
+    #[cfg(test)]
+    pub(crate) fn re_seal(
+        &self,
+        record: &mut PendingApprovalRecord,
+    ) -> Result<(), PendingApprovalError> {
+        self.write_record(record)
+    }
+
+    /// Atomically claims consumption for `key`. Returns `false` when the
+    /// marker already exists (another process won the race, or a crashed
+    /// consumer left it behind); the caller then fails closed.
+    fn claim_consumption(&self, key: &str) -> Result<bool, PendingApprovalError> {
+        match create_fresh_file(&self.consumed_marker_path(key)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(PendingApprovalError::Store {
+                stage: "create-consumed-marker",
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_consumed_marker(
+        &self,
+        plan_digest: &str,
+    ) -> Result<bool, PendingApprovalError> {
+        let key = normalize_plan_digest_key(plan_digest)?;
+        Ok(self.consumed_marker_path(&key).exists())
     }
 
     fn store_lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, PendingApprovalError> {
@@ -537,7 +859,21 @@ impl PendingApprovalStore {
         requested_at_unix_seconds: u64,
         expires_at_unix_seconds: u64,
     ) -> Result<(), PendingApprovalError> {
-        self.write_record(&PendingApprovalRecord {
+        // Capacity cap: refuse to create a *new* record file once the store
+        // already holds MAX_PENDING_RECORDS files. Refreshes of an existing
+        // digest rewrite the same file and do not count against the cap.
+        if !self.record_path(plan_digest).exists()
+            && self.pending_record_count()? >= MAX_PENDING_RECORDS
+        {
+            return Err(PendingApprovalError::Store {
+                stage: "pending-record-capacity",
+                message: format!(
+                    "pending-approval store holds the maximum of {MAX_PENDING_RECORDS} \
+                     records; prune_expired frees capacity"
+                ),
+            });
+        }
+        let mut record = PendingApprovalRecord {
             schema_version: PENDING_APPROVAL_SCHEMA_VERSION,
             state: PendingApprovalState::Pending,
             artifact_sha256: sha256.to_string(),
@@ -553,7 +889,9 @@ impl PendingApprovalStore {
             expires_at_unix_seconds,
             approver: None,
             resolved_at_unix_seconds: None,
-        })
+            record_mac: String::new(),
+        };
+        self.write_record(&mut record)
     }
 
     /// Registers the request when no live resolution exists and applies any
@@ -603,16 +941,36 @@ impl PendingApprovalStore {
         )?)?;
         let _guard = self.store_lock()?;
         if let Some(mut record) = self.read_record(&plan_digest)? {
-            verify_record_integrity(&record)?;
+            self.verify_record_integrity(&record)?;
             let expired = now_seconds >= record.expires_at_unix_seconds;
             match (record.state, expired) {
                 (PendingApprovalState::Approved, false) => {
+                    // Cross-process exclusivity: claim the consumption marker
+                    // before reporting the approval. The in-process Mutex above
+                    // already serializes same-process consumes; the
+                    // `create_new` marker extends exactly-once across separate
+                    // store handles/processes sharing this directory.
+                    if !self.claim_consumption(&plan_digest)? {
+                        // The marker already exists: another process consumed
+                        // (or crashed mid-claim) this approval. Treat the stale
+                        // approval as consumed and register a fresh pending
+                        // record for a future approval.
+                        self.persist_fresh_pending(
+                            sha256,
+                            plan,
+                            ctx,
+                            &plan_digest,
+                            now_seconds,
+                            expires_at_unix_seconds,
+                        )?;
+                        return Ok(HeadlessOutcome::Pending);
+                    }
                     let approver = record
                         .approver
                         .clone()
                         .ok_or(PendingApprovalError::Corrupt)?;
                     record.state = PendingApprovalState::Consumed;
-                    self.write_record(&record)?;
+                    self.write_record(&mut record)?;
                     Ok(HeadlessOutcome::Approved { approver })
                 }
                 (PendingApprovalState::Denied, false) => Ok(HeadlessOutcome::Denied),
@@ -675,7 +1033,11 @@ pub(crate) enum HeadlessOutcome {
 /// #     PendingApprovalStore, PlanContext, RequestApprovalTool, RunApprovedArtifactTool,
 /// # };
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let store = PendingApprovalStore::open(PendingApprovalStore::default_dir()?)?;
+/// // The embedder generates the record MAC key and hands the same bytes to the
+/// // MCP server process and the trusted resolver; it is never persisted next
+/// // to the store (see the `PendingApprovalStore` trust model).
+/// let record_mac_key: Arc<[u8]> = Arc::from(&b"embedder-managed record MAC key"[..]);
+/// let store = PendingApprovalStore::open(PendingApprovalStore::default_dir()?, record_mac_key)?;
 /// let prompt = Arc::new(HeadlessApprovalPrompt::new(store.clone()));
 /// let issuer = ApprovalTokenIssuer::new();
 /// let mut server = McpServer::new();
@@ -824,6 +1186,48 @@ fn verify_record_integrity(record: &PendingApprovalRecord) -> Result<(), Pending
     if recomputed != record.plan_digest {
         return Err(PendingApprovalError::Corrupt);
     }
+    Ok(())
+}
+
+/// Create-new file with owner-only permissions on Unix. Used for record
+/// temporary files and `.consumed` markers; `AlreadyExists` is surfaced to
+/// the caller, which decides between fail-closed refuse and reclaim.
+fn create_fresh_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Refuses to open a pending-approval store in a directory writable by
+/// group or others (Unix). A permissive store directory lets any local
+/// process plant, rename, or delete records and consumed markers, so opening
+/// fails closed rather than trusting content the MAC alone cannot fully
+/// police (deletion is a denial the MAC cannot authenticate).
+fn refuse_permissive_dir(dir: &Path) -> Result<(), PendingApprovalError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = std::fs::metadata(dir).map_err(|error| PendingApprovalError::Store {
+            stage: "open",
+            message: error.to_string(),
+        })?;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(PendingApprovalError::Store {
+                stage: "open",
+                message: format!(
+                    "pending-approval store directory {} is writable by group or others; \
+                     tighten permissions (e.g. chmod 0700) before opening",
+                    dir.display()
+                ),
+            });
+        }
+    }
+    let _ = dir;
     Ok(())
 }
 
