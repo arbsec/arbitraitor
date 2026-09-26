@@ -6,8 +6,7 @@ use std::time::{Duration, SystemTime};
 
 const REPO_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-const USAGE: &str =
-    "usage: xtask docs-check | cleanup [--yes] [--days <n>] [--worktrees|--artifacts]";
+const USAGE: &str = "usage: xtask docs-check | cleanup [worktrees|artifacts] [--yes] [--days <n>]";
 
 fn repo_root() -> PathBuf {
     Path::new(REPO_ROOT)
@@ -251,20 +250,95 @@ fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     None
 }
 
+/// A summary of `gh pr list --json headRefOid,state` output.
+#[derive(Debug, PartialEq, Eq)]
+struct PrRecord {
+    state: String,
+    head_oid: String,
+}
+
+/// Parse the flat JSON array gh prints for `--json headRefOid,state`.
+/// gh emits keys in sorted order, so each record's `headRefOid` precedes its
+/// `state`; records are isolated by slicing between consecutive `headRefOid`
+/// keys. Values are simple unescaped strings (enum names, hex SHAs); anything
+/// else fails to extract rather than guessing.
+fn parse_pr_records(json: &str) -> Vec<PrRecord> {
+    let hay = json.trim();
+    if !hay.starts_with('[') {
+        return Vec::new();
+    }
+    const KEY: &str = "\"headRefOid\"";
+    let mut key_starts: Vec<usize> = hay.match_indices(KEY).map(|(i, _)| i).collect();
+    key_starts.push(hay.len());
+    let mut records = Vec::new();
+    for (n, &start) in key_starts.iter().take(key_starts.len() - 1).enumerate() {
+        let stop = key_starts[n + 1];
+        // Rebuild a minimal object so extract_json_string_field can read the
+        // fields: {"headRefOid":"<oid>","state":"<state>"}
+        let slice = &hay[start..stop];
+        let object = format!("{{{slice}");
+        let Some(head_oid) = extract_json_string_field(&object, "headRefOid") else {
+            return Vec::new();
+        };
+        let Some(state) = extract_json_string_field(&object, "state") else {
+            return Vec::new();
+        };
+        records.push(PrRecord { state, head_oid });
+    }
+    records
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrState {
     Open,
     Merged,
     Closed,
+    /// PRs exist for the branch name but none of them matches this branch's
+    /// HEAD SHA (recycled branch name); treat as unsubmitted work.
+    HeadMismatch,
     None,
 }
 
-fn map_pr_state(state: Option<&str>) -> PrState {
-    match state.map(|s| s.to_ascii_uppercase()).as_deref() {
-        Some("OPEN") => PrState::Open,
-        Some("MERGED") => PrState::Merged,
-        Some("CLOSED") => PrState::Closed,
-        _ => PrState::None,
+/// Decide the cleanup action from PR records versus the local branch HEAD.
+/// A PR only counts when its `headRefOid` equals the worktree's HEAD, so a
+/// branch name recycled from a previously merged PR cannot cause deletion of
+/// unrelated work. Open takes precedence over Merged, which takes precedence
+/// over Closed (most-conservative state wins).
+fn decide_pr_state(records: &[PrRecord], local_head: &str) -> PrState {
+    let mut saw_open = false;
+    let mut saw_merged = false;
+    let mut saw_closed = false;
+    for record in records {
+        if record.head_oid.eq_ignore_ascii_case(local_head)
+            && match record.state.to_ascii_uppercase().as_str() {
+                "OPEN" => {
+                    saw_open = true;
+                    true
+                }
+                "MERGED" => {
+                    saw_merged = true;
+                    true
+                }
+                "CLOSED" => {
+                    saw_closed = true;
+                    true
+                }
+                _ => false,
+            }
+        {
+            continue;
+        }
+    }
+    if saw_open {
+        PrState::Open
+    } else if saw_merged {
+        PrState::Merged
+    } else if saw_closed {
+        PrState::Closed
+    } else if records.is_empty() {
+        PrState::None
+    } else {
+        PrState::HeadMismatch
     }
 }
 
@@ -343,21 +417,38 @@ fn run_capture(cwd: &Path, program: &str, args: &[&str]) -> Result<String, Strin
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn query_pr_state(root: &Path, repo: &str, branch: &str) -> Result<PrState, String> {
+/// Resolve what to do with `branch` in `worktree`: fetch that branch's HEAD
+/// SHA, list every PR whose head branch matches by name, and let
+/// `decide_pr_state` pick the safe action (SHA match required).
+fn query_pr_state(
+    root: &Path,
+    worktree: &Path,
+    repo: &str,
+    branch: &str,
+) -> Result<PrState, String> {
+    let head = run_capture(worktree, "git", &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+    if head.is_empty() {
+        return Err(format!("no HEAD SHA resolved in {}", worktree.display()));
+    }
     let out = run_capture(
         root,
         "gh",
         &[
-            "pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--limit", "1",
-            "--json", "state",
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "headRefOid,state",
         ],
     )?;
-    if out.trim().is_empty() {
-        return Ok(PrState::None);
-    }
-    Ok(map_pr_state(
-        extract_json_string_field(&out, "state").as_deref(),
-    ))
+    Ok(decide_pr_state(&parse_pr_records(&out), &head))
 }
 
 /// Max mtime and total byte size of everything under `dir` (dirs included in
@@ -430,8 +521,20 @@ fn clean_worktrees(root: &Path, opts: &CleanOptions) -> Result<usize, String> {
 
     for entry in &entries[1..] {
         let display_path = entry.path.display().to_string();
-        let canonical = fs::canonicalize(&entry.path)
-            .map_err(|e| format!("cannot canonicalize {display_path}: {e}"))?;
+        if !entry.path.is_dir() {
+            println!(
+                "cleanup worktrees: stale entry {display_path} (missing on disk; git worktree prune handles it)"
+            );
+            continue;
+        }
+        let canonical = match fs::canonicalize(&entry.path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cleanup worktrees: skip {display_path}: cannot canonicalize: {e}");
+                errors += 1;
+                continue;
+            }
+        };
         if canonical == main {
             continue;
         }
@@ -444,10 +547,6 @@ fn clean_worktrees(root: &Path, opts: &CleanOptions) -> Result<usize, String> {
             println!("cleanup worktrees: skip {display_path} (locked by git)");
             continue;
         }
-        if !entry.path.is_dir() {
-            println!("cleanup worktrees: prune stale entry {display_path} (missing on disk)");
-            continue;
-        }
         let status = run_capture(&entry.path, "git", &["status", "--porcelain"])?;
         if !status.trim().is_empty() {
             println!(
@@ -456,7 +555,7 @@ fn clean_worktrees(root: &Path, opts: &CleanOptions) -> Result<usize, String> {
             continue;
         }
         let branch = entry.branch.as_deref().unwrap_or_default();
-        let state = query_pr_state(root, &repo, branch)?;
+        let state = query_pr_state(root, &entry.path, &repo, branch)?;
         match state {
             PrState::Open => {
                 println!("cleanup worktrees: keep {display_path} (branch {branch}: open PR)");
@@ -464,6 +563,11 @@ fn clean_worktrees(root: &Path, opts: &CleanOptions) -> Result<usize, String> {
             PrState::None => {
                 println!(
                     "cleanup worktrees: keep {display_path} (branch {branch}: no PR found; unsubmitted work is not removed)"
+                );
+            }
+            PrState::HeadMismatch => {
+                println!(
+                    "cleanup worktrees: keep {display_path} (branch {branch}: PRs exist for this branch name but none matches its HEAD; unsubmitted work is not removed)"
                 );
             }
             PrState::Merged | PrState::Closed => {
@@ -520,6 +624,13 @@ fn clean_artifacts(root: &Path, opts: &CleanOptions) -> Result<u64, String> {
         }
         let target = entry.path.join("target");
         if !target.is_dir() {
+            continue;
+        }
+        if entry.locked {
+            println!(
+                "cleanup artifacts: skip {} (worktree locked by git)",
+                target.display()
+            );
             continue;
         }
         let (age, size) = match dir_age_and_size(&target, now) {
@@ -639,11 +750,18 @@ fn parse_cleanup_args(args: &[String]) -> Result<(CleanOptions, bool, bool), Str
                 }
                 opts.artifact_max_age = Duration::from_secs(days.saturating_mul(86_400));
             }
-            "--worktrees" => {
-                run_artifacts = false;
-            }
-            "--artifacts" => {
-                run_worktrees = false;
+            "worktrees" | "artifacts" => {
+                let is_worktrees = args[i].as_str() == "worktrees";
+                if is_worktrees {
+                    run_artifacts = false;
+                } else {
+                    run_worktrees = false;
+                }
+                if !run_worktrees && !run_artifacts {
+                    return Err(format!(
+                        "select at most one phase (worktrees|artifacts); {USAGE}"
+                    ));
+                }
             }
             other => return Err(format!("unknown cleanup option {other:?}; {USAGE}")),
         }
@@ -729,12 +847,75 @@ mod tests {
     }
 
     #[test]
-    fn maps_pr_state_strings() {
-        assert_eq!(map_pr_state(Some("OPEN")), PrState::Open);
-        assert_eq!(map_pr_state(Some("MERGED")), PrState::Merged);
-        assert_eq!(map_pr_state(Some("CLOSED")), PrState::Closed);
-        assert_eq!(map_pr_state(Some("weird")), PrState::None);
-        assert_eq!(map_pr_state(None), PrState::None);
+    fn parses_pr_records() {
+        let single = r#"[{"headRefOid":"abc123","state":"MERGED"}]"#;
+        assert_eq!(
+            parse_pr_records(single),
+            vec![PrRecord {
+                state: "MERGED".to_string(),
+                head_oid: "abc123".to_string()
+            }]
+        );
+        let many =
+            r#"[{"headRefOid":"0000","state":"OPEN"},{"headRefOid":"1111","state":"CLOSED"}]"#;
+        assert_eq!(parse_pr_records(many).len(), 2);
+        assert_eq!(parse_pr_records(many)[1].state, "CLOSED");
+        assert!(parse_pr_records("[]").is_empty());
+        assert!(parse_pr_records("gh: error text").is_empty());
+    }
+
+    #[test]
+    fn pr_head_mismatch_never_deletes_unsubmitted_work() {
+        // Branch name recycled from a previously merged PR whose head SHA no
+        // longer matches: the local branch tip is "newlocal".
+        let records = [PrRecord {
+            state: "MERGED".to_string(),
+            head_oid: "oldhq".to_string(),
+        }];
+        assert_eq!(decide_pr_state(&records, "newlocal"), PrState::HeadMismatch);
+        // Same HEAD SHA: the PR really is this branch's PR.
+        assert_eq!(decide_pr_state(&records, "oldhq"), PrState::Merged);
+        // No PRs at all.
+        assert_eq!(decide_pr_state(&[], "newlocal"), PrState::None);
+    }
+
+    #[test]
+    fn pr_state_precedence_is_conservative() {
+        // Same SHA matching multiple PRs: open wins over merged/closed.
+        let records = [
+            PrRecord {
+                state: "MERGED".to_string(),
+                head_oid: "sha".to_string(),
+            },
+            PrRecord {
+                state: "OPEN".to_string(),
+                head_oid: "sha".to_string(),
+            },
+            PrRecord {
+                state: "CLOSED".to_string(),
+                head_oid: "sha".to_string(),
+            },
+        ];
+        assert_eq!(decide_pr_state(&records, "sha"), PrState::Open);
+        let merged_closed = &records[0..1];
+        assert_eq!(decide_pr_state(merged_closed, "sha"), PrState::Merged);
+    }
+
+    #[test]
+    fn cleanup_args_accept_positional_phases() {
+        let (opts, wt, art) = parse_cleanup_args(&["worktrees".to_string(), "--yes".to_string()])
+            .expect("valid args");
+        assert!(opts.apply && wt && !art);
+        let (_, wt, art) = parse_cleanup_args(&["artifacts".to_string()]).expect("valid args");
+        assert!(!wt && art);
+        let (_, wt, art) = parse_cleanup_args(&[]).expect("valid args");
+        assert!(wt && art);
+        assert!(parse_cleanup_args(&["worktrees".to_string(), "artifacts".to_string()]).is_err());
+        assert!(parse_cleanup_args(&["--bogus".to_string()]).is_err());
+        let (opts, _, _) =
+            parse_cleanup_args(&["--days".to_string(), "3".to_string()]).expect("valid days");
+        assert_eq!(opts.artifact_max_age, Duration::from_secs(3 * 86_400));
+        assert!(parse_cleanup_args(&["--days".to_string(), "0".to_string()]).is_err());
     }
 
     #[test]
