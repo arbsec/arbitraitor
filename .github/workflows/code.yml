@@ -11,6 +11,7 @@ on:
       - ".github/workflows/code.yml"
       - "wit/**"
       - "**/*.wit"
+      - ".config/hakari.toml"
   pull_request:
     paths: *code_paths
 
