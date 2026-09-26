@@ -4,6 +4,7 @@ members = [
     "crates/arbitraitor-cli",
     "crates/arbitraitor-core",
     "crates/arbitraitor-daemon",
+    "crates/arbitraitor-engine",
     "crates/arbitraitor-model",
     "crates/arbitraitor-policy",
     "crates/arbitraitor-fetch",
@@ -128,6 +129,7 @@ predicates = "3"
 arbitraitor-model = { path = "crates/arbitraitor-model" }
 arbitraitor-core = { path = "crates/arbitraitor-core" }
 arbitraitor-daemon = { path = "crates/arbitraitor-daemon" }
+arbitraitor-engine = { path = "crates/arbitraitor-engine" }
 arbitraitor-policy = { path = "crates/arbitraitor-policy" }
 arbitraitor-fetch = { path = "crates/arbitraitor-fetch" }
 arbitraitor-store = { path = "crates/arbitraitor-store" }

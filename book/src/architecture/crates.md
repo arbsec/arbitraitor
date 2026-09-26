@@ -25,6 +25,7 @@ arbitraitor/                           # Workspace root (Cargo.toml)
 │   ├── arbitraitor-receipt/            # RFC 8785 canonicalized receipts
 │   ├── arbitraitor-exec/              # Mediated execution (script + native + PowerShell)
 │   ├── arbitraitor-sandbox/            # Process hardening (prctl, close_range, setrlimit)
+│   ├── arbitraitor-engine/             # Pipeline engine (fetch → store → analyze → provenance → receipt → verdict → release)
 │   ├── arbitraitor-mcp/               # MCP server (inspect, scan, explain, approve, execute)
 │   ├── arbitraitor-plugin-api/         # Plugin trait hierarchy
 │   ├── arbitraitor-plugin-host/        # Plugin runtime (subprocess + Wasmtime)
@@ -101,12 +102,22 @@ Plugin runtime supporting Wasmtime Component Model and subprocess protocols.
 **Owns:** Plugin lifecycle, capability enforcement, WASM sandboxing
 **Must not:** Native ABI loading, arbitrary dynamic library loading
 
+### `arbitraitor-engine`
+
+Pipeline engine (ADR-0038): the single consolidated composition of the
+fetch → store → analyze → provenance → receipt → verdict → release pipeline.
+Drives the `arbitraitor-core` pipeline state machine through every inspection
+and release.
+
+**Owns:** `Arbitraitor`, `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectionResult`, `InspectionResultReceipt`, typed error
+**Must not:** Socket/stdio transport, argument parsing, presentation — those stay in the consumers
+
 ### `arbitraitor-cli`
 
 Command-line interface.
 
 **Owns:** Argument parsing, output formatting, user interaction
-**Must not:** Business logic (delegates to core)
+**Must not:** Business logic (delegates to the pipeline engine)
 
 ### `arbitraitor-artifact`
 
@@ -174,7 +185,8 @@ arbitraitor-cli
 │   ├── arbitraitor-exec
 │   ├── arbitraitor-sandbox
 │   ├── arbitraitor-receipt
-│   └── arbitraitor-daemon
+│   └── arbitraitor-engine
+│       └── arbitraitor-daemon
 ├── arbitraitor-artifact
 ├── arbitraitor-mcp
 ├── arbitraitor-wrapper

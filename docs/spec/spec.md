@@ -22,7 +22,7 @@
 > - §28.1: reconciled spec CLI surface with the implemented subcommand enum.
 > - §31.3: added in-toto Statement receipt envelope (optional derived export; canonical Arbitraitor receipt stays RFC 8785 JCS).
 > - §33.6: added remote MCP Authorization spec conformance model (OAuth 2.1 + RFC 8414/9728/8707) for when remote MCP ships.
-> - §38.1: workspace layout updated to match the actual 28-crate workspace.
+> - §38.1: workspace layout updated to match the actual 29-crate workspace.
 > - §39.14: added registry-based package-manager adapters (cargo, uv/uvx, npm, pnpm, yarn, bun) with hybrid integration pattern, per-tool recipes, lifecycle-script enforcement, and capability grants. Supporting research at `docs/research/registry-package-manager-integration.md`.
 > - §41.0: added purpose note clarifying that §41/§42 are normative summaries; the standalone `docs/spec/tech-stack.md` is the authoritative operational detail and may advance faster than this spec.
 > - §41.9.1: updated WASI/Component Model wording to track the stable Wasmtime Component Model rather than locking to Preview 2.
@@ -45,14 +45,14 @@
 >
 > **Changelog vs v0.6 (2026-07-23):**
 >
-> - §40: rewrote API/daemon section around a single pipeline-engine library crate (`arbitraitor-api`, working name) consumed by the CLI, MCP, and daemon. Adds §40.0 single-pipeline principle, §40.1 pipeline-engine library, §40.3 MCP gateway as a thin consumer, §40.4 CLI integration redirecting ADR-0027 trajectory, §40.5 three integration surfaces (library / daemon / MCP) with consumer matrix, §40.6 public API stability contract for third-party embedding, §40.7 naming and boundary decisions deferred to a proposed ADR-0037, §40.8 deferred remote enterprise service.
+> - §40: rewrote API/daemon section around a single pipeline-engine library crate (named `arbitraitor-engine` per ADR-0038, accepted) consumed by the CLI, MCP, and daemon. Adds §40.0 single-pipeline principle, §40.1 pipeline-engine library, §40.3 MCP gateway as a thin consumer, §40.4 CLI integration redirecting ADR-0027 trajectory, §40.5 three integration surfaces (library / daemon / MCP) with consumer matrix, §40.6 public API stability contract for third-party embedding, §40.7 naming and boundary decisions recorded in ADR-0038, §40.8 deferred remote enterprise service.
 > - §40.0: revised per adversarial review — the "three independent compositions" are now correctly framed as "silent coverage holes" (CLI does provenance but not policy; daemon does policy but not provenance; MCP does neither).
 > - §40.1: added invariants 4 (bounded processing), 8 (safe temporary storage), 11 (approval integrity), 12 (deterministic enforcement) per adversarial review. Added `PipelineOperation` wiring-gap note. Added §18.3 fail-closed principle reference (was mislabeled as §9 invariant 6 — §9 #6 is "No automatic blocking from an unreviewed report", a different concept; section reference corrected in Round 4 review).
 > - §40.3: added `RequestApprovalTool` to tool enumeration (was omitted). Added `build_default_server()` registration gap notice — only 5 of 7 tools registered in default server.
-> - §40.4: changed "completes the trajectory defined in ADR-0027" to "redirects the trajectory" — ADR-0027 envisioned movement into `arbitraitor-core`; this design moves to a new engine crate. ADR-0037 must record the redirection.
+> - §40.4: changed "completes the trajectory defined in ADR-0027" to "redirects the trajectory" — ADR-0027 envisioned movement into `arbitraitor-core`; this design moves to a new engine crate. ADR-0038 records the redirection.
 > - §40.6: added `arbitraitor-exec` to "never exposed" list. Added migration note documenting current type leakage (`FetchPolicy`, `ReleaseMethod`, `StoreError`, `PolicyEngine`). Added receipt-type-identity unresolved question (raw `arbitraitor-receipt::Receipt` vs engine-owned wrapper) — flagged as coordination point with #492.
 > - §40.7: added `arbitraitor-engine` recommendation with reasoning (avoids REST/HTTP API confusion, aligns with spec vocabulary, prevents `arbitraitor_api::ArbitraitorApi` redundancy).
-> - §38.1: workspace layout updated to add `arbitraitor-api/` and to clarify `arbitraitor-daemon/` and `arbitraitor-mcp/` as consumers of the API crate.
+> - §38.1: workspace layout updated to add `arbitraitor-engine/` and to clarify `arbitraitor-daemon/` and `arbitraitor-mcp/` as consumers of the engine crate.
 > - Spec files moved from `.spec/` (gitignored, private) to `docs/spec/` (committed, public). All ADR cross-references updated from stale `.spec/arbitraitor-*.md` paths to canonical `docs/spec/*.md` paths.
 > - Cross-references in §33 (MCP capabilities), §31 (receipt audit), and ADR-0027 (CLI pipeline boundary) are aligned with §40 below.
 >
@@ -3119,9 +3119,9 @@ arbitraitor/
     arbitraitor-plugin-host/   # Wasmtime Component Model + subprocess runtime
     arbitraitor-wrapper/       # curl/wget translators, shims
     arbitraitor-package-manager/  # package-manager lifecycle adapters (research)
-    arbitraitor-api/          # (planned, see §40 + ADR-0037) public pipeline-engine library
-    arbitraitor-daemon/        # local Unix-socket daemon; thin consumer of arbitraitor-api (see §40.2)
-    arbitraitor-mcp/           # MCP server + AI-agent gateway; thin consumer of arbitraitor-api (see §40.3)
+    arbitraitor-engine/       # pipeline engine (ADR-0038, accepted; named per §40.7) — owns fetch → store → analyze → provenance → receipt → verdict → release
+    arbitraitor-daemon/        # local Unix-socket daemon; thin consumer of arbitraitor-engine (see §40.2)
+    arbitraitor-mcp/           # MCP server + AI-agent gateway; thin consumer of arbitraitor-engine (see §40.3)
     arbitraitor-testkit/       # testing infrastructure (mock servers, fixtures)
     arbitraitor-workspace-hack/  # hakari-managed dedup crate (autogenerated)
     xtask/                     # repo tasks (docs-check, cleanup, future generators)
@@ -4347,9 +4347,9 @@ exposed by the engine.
 **Note on §9 codification:** The single-pipeline principle ("only the
 pipeline engine may transition the state machine across retrieval → release")
 is a security-relevant assertion but is not yet codified as §9 invariant 25.
-ADR-0037 should decide whether to add it to §9; if added, the `invariants.yml`
-CI workflow must test it. Until then, §40.0 is a design principle, not a
-tested invariant.
+A future ADR should decide whether to add it to §9; if added, the
+`invariants.yml` CI workflow must test it. Until then, §40.0 is a design
+principle, not a tested invariant.
 
 The need is concrete in the current codebase: `arbitraitor-cli/src/pipeline.rs`
 (ADR-0027), the MCP `InspectUrlTool`/`FetchArtifactTool`/`ScanArtifactTool`
@@ -4364,8 +4364,8 @@ coverage holes.
 
 ### 40.1 Pipeline engine library
 
-The pipeline engine is an embeddable Rust library crate. Working name:
-`arbitraitor-api`. Final naming is deferred to an ADR (see §40.7).
+The pipeline engine is an embeddable Rust library crate, named
+`arbitraitor-engine` by ADR-0038 (see §40.7).
 
 The crate owns:
 
@@ -4373,9 +4373,10 @@ The crate owns:
 - `ArbitraitorBuilder` — config, policy, signature inputs, detector list.
 - `ArbitraitorApi` — the in-process API; cheap to clone-share behind `Arc`
   and safe to call from multiple tasks via `&self`. Already exists in
-  `arbitraitor-daemon` and is moved/extracted (ADR-0037 decides which).
+  `arbitraitor-daemon` and is *extracted* into the new crate (ADR-0038
+  decision: extraction, not a rename-and-split).
 - `Config` — store path, fetch policy, retention policy, receipts directory.
-- `InspectResult` — typed result carrying `verdict`, `findings`, `receipt`,
+- `InspectionResult` — typed result carrying `verdict`, `findings`, `receipt`,
   `sha256`, and either a borrowed view of the bytes or an `Arc<Vec<u8>>`.
   The engine does not return raw bytes by default — bytes stay
   CAS-addressed (see §26.2 and invariant 2); release happens through a typed
@@ -4407,7 +4408,7 @@ The engine is the single authority for the following invariants from §9 and
 Custom detectors (via `arbitraitor-plugin-host`) and custom fetchers (via the
 `arbitraitor-fetch::Fetcher` trait) may be plugged through the builder, but
 consumers cannot bypass mandatory stages. Consumers receive a typed
-`InspectResult`; they do not compose fetch → store → scan themselves.
+`InspectionResult`; they do not compose fetch → store → scan themselves.
 
 State transitions (§38.3) remain owned by `arbitraitor-core`; the engine drives
 them through the API. The engine is therefore *above* the `arbitraitor-core`
@@ -4423,7 +4424,7 @@ and tech-stack §36.1) before the engine crate can claim to be the single
 authority for state transitions.
 
 ```rust
-// Working API sketch. Final shape decided by ADR-0037.
+// Working API sketch. Crate naming decided by ADR-0038.
 let api = Arbitraitor::builder()
     .config(config)
     .policy(policy_engine)
@@ -4439,10 +4440,10 @@ let result = api.inspect(url).await?;
 
 ### 40.2 Local daemon
 
-The Unix-socket daemon is a thin consumer of `arbitraitor-api`. The
+The Unix-socket daemon is a thin consumer of `arbitraitor-engine`. The
 `arbitraitor-daemon` crate owns only socket I/O, the operation queue
 (`OperationQueue`), capability-token verification, and rate-limiting.
-Pipeline code lives in `arbitraitor-api`; the daemon delegates `inspect`
+Pipeline code lives in `arbitraitor-engine`; the daemon delegates `inspect`
 requests to `ArbitraitorApi::inspect(&url).await`.
 
 Persistent daemon value (inherited from v0.4 §40.2):
@@ -4463,15 +4464,15 @@ Security requirements (inherited from v0.4 §40.2 and unchanged):
 - policy-owned release;
 - strict path validation.
 
-A third-party product on the same host may either link `arbitraitor-api`
+A third-party product on the same host may either link `arbitraitor-engine`
 directly (skipping the daemon) or connect to a running daemon via the typed
 Unix-socket protocol. The daemon is not a required hop; it is an
 optimization and centralization surface.
 
 ### 40.3 MCP gateway
 
-The MCP server (`arbitraitor-mcp`) is a thin consumer of `arbitraitor-api`. It
-owns MCP JSON-RPC protocol handling, tool discovery (`McpServer`),
+The MCP server (`arbitraitor-mcp`) is a thin consumer of `arbitraitor-engine`.
+It owns MCP JSON-RPC protocol handling, tool discovery (`McpServer`),
 implemented tool handlers (`InspectUrlTool`, `ScanArtifactTool`,
 `FetchArtifactTool`, `QueryReceiptTool`, `ExplainVerdictTool`,
 `RequestApprovalTool`, `RunApprovedArtifactTool`), capability
@@ -4504,7 +4505,7 @@ deferred, see §33.6 and §40.8).
 
 Per ADR-0027, inspection orchestration was moved out of
 `arbitraitor-cli/src/main.rs` into `arbitraitor-cli/src/pipeline.rs`. With the
-pipeline engine now in `arbitraitor-api`, the CLI's `pipeline.rs` becomes a
+pipeline engine now in `arbitraitor-engine`, the CLI's `pipeline.rs` becomes a
 thin adapter that builds an `ArbitraitorBuilder` from CLI args, calls
 `ArbitraitorApi::inspect`, and formats results through the CLI's presentation
 helpers.
@@ -4523,9 +4524,9 @@ machine can own the pipeline more fully." This design **redirects** that
 trajectory: ADR-0027 envisioned future movement *into `arbitraitor-core`*;
 this design moves orchestration to the engine crate instead, because the
 pipeline composes I/O-producing crates and ADR-0002 keeps `arbitraitor-core`
-free of I/O. ADR-0037 must record this redirection — either as a formal
-supersession of ADR-0027's stated direction, or as an explicit closure of its
-"until" clause with the engine crate as the new destination.
+free of I/O. ADR-0038 records this redirection — both as a formal supersession
+of ADR-0027's stated direction ("into `arbitraitor-core`") and as an explicit
+closure of its "until" clause with the engine crate as the new destination.
 
 ### 40.5 Three integration surfaces
 
@@ -4534,7 +4535,7 @@ integration surfaces over a single engine serve them:
 
 | Surface | Transport | Lifecycle | Trust domain | Use case |
 |---|---|---|---|---|
-| Library (`arbitraitor-api`) | In-process Rust typed API | Linked into binary | Same process as consumer | "Shelly"-style package managers in Rust; CI binaries; compilers; CLIs that need artifact inspection |
+| Library (`arbitraitor-engine`) | In-process Rust typed API | Linked into binary | Same process as consumer | "Shelly"-style package managers in Rust; CI binaries; compilers; CLIs that need artifact inspection |
 | Daemon | Unix-socket JSON-RPC | Long-running host service | Same UID, separate process | Non-Rust products (Go, Python, Node) on the same host; IDE plugins; build systems; agents |
 | MCP gateway | MCP JSON-RPC over stdio | Subprocess spawned by consumer | Same user, separate process | AI agent harnesses, IDEs, MCP-client runtimes |
 
@@ -4551,8 +4552,8 @@ in Arbitraitor.
 
 - The library is the only surface that may publish to crates.io before 1.0
   (see §21.1 and §40.6).
-- The daemon and MCP crates remain `publish = false` until `arbitraitor-api`
-  stabilizes; they depend on the API crate by path.
+- The daemon and MCP crates remain `publish = false` until `arbitraitor-engine`
+  stabilizes; they depend on the engine crate by path.
 - Reusable adapters (`arbitraitor-fetch`, `arbitraitor-store`,
   `arbitraitor-analysis`, `arbitraitor-receipt`, `arbitraitor-provenance`,
   `arbitraitor-plugin-host`) remain `publish = false` and are not part of the
@@ -4561,11 +4562,11 @@ in Arbitraitor.
 
 ### 40.6 Public API stability contract
 
-Before 1.0, the published `arbitraitor-api` crate uses SemVer `0.x`:
+Before 1.0, the published `arbitraitor-engine` crate uses SemVer `0.x`:
 
 - breaking changes are tracked in `CHANGELOG.md` and flagged in the release PR;
 - the crate exposes a deliberately narrow surface: `Arbitraitor`,
-  `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectResult`, and an
+  `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectionResult`, and an
   error type derived from `thiserror`;
 - feature flags gate heavier integrations (`yara-x`, `sigstore`,
   `package-manager`, `plugin-host`) so minimal consumers do not pull those
@@ -4573,7 +4574,7 @@ Before 1.0, the published `arbitraitor-api` crate uses SemVer `0.x`:
 - the public API never exposes types from `arbitraitor-fetch`,
   `arbitraitor-store`, `arbitraitor-analysis`, `arbitraitor-receipt`,
   `arbitraitor-provenance`, or `arbitraitor-exec` verbatim — they are wrapped
-  or mapped to ID-stable structs in `arbitraitor-api` so internal
+  or mapped to ID-stable structs in `arbitraitor-engine` so internal
   refactorings do not trigger a semver bump;
 
   **Migration note (current state):** the existing `ArbitraitorApi` in
@@ -4587,14 +4588,14 @@ Before 1.0, the published `arbitraitor-api` crate uses SemVer `0.x`:
   take a transitive dependency on the internal adapter crates and will see
   breaking changes whenever their types change.
 
-  **Receipt type identity (unresolved):** §40.1 says `InspectResult` carries
+  **Receipt type identity (decided):** §40.1 says `InspectionResult` carries
   a `receipt`. If that field is the raw `arbitraitor-receipt::Receipt` type,
   every receipt schema change (e.g. the envelope restructure in #492) becomes
-  a breaking API change for consumers. If `InspectResult.receipt` is a new
+  a breaking API change for consumers. If `InspectionResult.receipt` is a new
   engine-owned wrapper struct that maps from internal receipt types, the
   breaking change is absorbed by the engine crate before consumers see it.
-  The engine-owned wrapper is the correct choice for the public API; ADR-0037
-  must record this decision explicitly.
+  ADR-0038 decision 6 records the engine-owned wrapper as the choice for the
+  public API.
 - on `1.0`, breaking changes follow Rust RFC 1105: minor versions are
   additive, breaking changes require a major bump.
 
@@ -4602,24 +4603,23 @@ After 1.0, the daemon socket protocol and the MCP tool catalogue version
 independently from the library crate, following the §33.6 and §32
 versioning strategy.
 
-### 40.7 Naming and boundary decisions deferred to ADR
+### 40.7 Naming and boundary decisions
 
-The following decisions are deferred to a focused ADR (proposed ADR-0037):
+ADR-0038 (accepted) resolved this section's open items:
 
-1. Final crate name (`arbitraitor-engine` vs `arbitraitor-api` vs
-   `arbitraitor-runtime` vs moving the API into `arbitraitor-core`). The
-   working name in this spec is `arbitraitor-api`, but
-   `arbitraitor-engine` is recommended: it aligns with the spec's own "pipeline
-   engine" vocabulary, avoids confusion with REST/HTTP APIs, and prevents
-   the redundant `arbitraitor_api::ArbitraitorApi` path that would arise if
-   both the crate and struct share the "api" suffix.
-2. Whether `ArbitraitorApi`, `ArbitraitorBuilder`, and `Config` move out of
-   `arbitraitor-daemon` (extract) or `arbitraitor-daemon` is renamed to
-   `arbitraitor-api` and the socket server moves into a new
-   `arbitraitor-daemon` (rename + split).
-3. Whether the CLI's `pipeline.rs` (ADR-0027) and MCP tool handlers gain a
-   typed `InspectResult` from the API crate, or whether they continue to
-   format MCP/CLI output inline by destructuring `ArbitraitorApi` returns.
+1. **Crate name: `arbitraitor-engine`**, chosen because the name aligns
+   with the spec's own "pipeline engine" vocabulary, avoids confusion with
+   REST/HTTP APIs, and prevents the redundant `arbitraitor_api::ArbitraitorApi`
+   path that would arise if both the crate and the entry struct shared the
+   "api" suffix.
+2. **Extraction, not rename-and-split**: `ArbitraitorApi`,
+   `ArbitraitorBuilder`, and `Config` are extracted into the new crate and
+   `arbitraitor-daemon` keeps its socket server (it becomes a thin consumer
+   of the engine, per ADR-0038 decision 2).
+3. **Engine-owned typed result**: the CLI's `pipeline.rs` (ADR-0027) and
+   the MCP tool handlers consume `InspectionResult` from the engine
+   (ADR-0038 decision 6 wraps the receipt in `InspectionResultReceipt` so
+   internal schema changes do not break consumers).
 
 Alternatives already rejected in pre-design:
 

@@ -20,13 +20,11 @@ use std::time::Duration;
 /// Maximum number of recent operations retained for the `Status` endpoint.
 const RECENT_OPERATIONS_CAPACITY: usize = 32;
 
-use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo};
-use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
+use arbitraitor_engine::ArbitraitorApi;
+use arbitraitor_fetch::FetchPolicy;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::origin::CallerOrigin;
-use arbitraitor_store::ContentStore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -226,11 +224,14 @@ pub struct DaemonInfo {
 }
 
 /// Local daemon server.
+///
+/// A thin consumer of the `arbitraitor-engine` pipeline (ADR-0038 decision 2):
+/// this crate owns socket I/O, rate-limiting, and capability-token recording
+/// only; every pipeline stage is delegated to the engine.
 pub struct Daemon {
     socket_path: PathBuf,
-    coordinator: Arc<AnalysisCoordinator>,
+    api: ArbitraitorApi,
     store_path: PathBuf,
-    fetch_policy: FetchPolicy,
     max_connections: usize,
     rate_limit_requests: usize,
     rate_limit_window: Duration,
@@ -412,19 +413,38 @@ pub enum DaemonError {
 
 impl Daemon {
     /// Creates a daemon with default policy and store settings.
-    #[must_use]
-    pub fn new(socket_path: impl AsRef<Path>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's error when the content store cannot be opened.
+    pub fn new(socket_path: impl AsRef<Path>) -> Result<Self, arbitraitor_engine::EngineError> {
         Self::with_options(socket_path, DaemonOptions::default())
     }
 
     /// Creates a daemon with explicit options.
-    #[must_use]
-    pub fn with_options(socket_path: impl AsRef<Path>, options: DaemonOptions) -> Self {
-        Self {
-            socket_path: socket_path.as_ref().to_path_buf(),
-            coordinator: Arc::new(AnalysisCoordinator::new()),
-            store_path: options.store_path,
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's error when the content store cannot be opened
+    /// or the fail-closed policy cannot be compiled.
+    pub fn with_options(
+        socket_path: impl AsRef<Path>,
+        options: DaemonOptions,
+    ) -> Result<Self, arbitraitor_engine::EngineError> {
+        let store_path = options.store_path.clone();
+        let api = ArbitraitorApi::new(arbitraitor_engine::Config {
+            store_path: store_path.clone(),
+            receipts_path: receipts_sibling(&store_path),
             fetch_policy: options.fetch_policy,
+            // The socket is unattended: every unmatched artifact prompts,
+            // and prompts upgrade to block in the non-interactive engine.
+            policy_toml: arbitraitor_engine::FAIL_CLOSED_POLICY_TOML.to_owned(),
+            ..arbitraitor_engine::Config::default()
+        })?;
+        Ok(Self {
+            socket_path: socket_path.as_ref().to_path_buf(),
+            api,
+            store_path,
             max_connections: options.max_connections,
             rate_limit_requests: options.rate_limit_requests,
             rate_limit_window: options.rate_limit_window,
@@ -435,7 +455,7 @@ impl Daemon {
                 RECENT_OPERATIONS_CAPACITY,
             ))),
             started_at: Arc::new(Instant::now()),
-        }
+        })
     }
 
     /// Runs the daemon until a shutdown request or termination signal is received.
@@ -513,9 +533,8 @@ impl Daemon {
 
     fn state(&self) -> DaemonState {
         DaemonState {
-            coordinator: Arc::clone(&self.coordinator),
+            api: self.api.clone(),
             store_path: self.store_path.clone(),
-            fetch_policy: self.fetch_policy.clone(),
             shutdown: Arc::clone(&self.shutdown),
             notify_shutdown: Arc::clone(&self.notify_shutdown),
             rate_limits: Arc::clone(&self.rate_limits),
@@ -561,9 +580,8 @@ impl Default for DaemonOptions {
 
 #[derive(Clone)]
 struct DaemonState {
-    coordinator: Arc<AnalysisCoordinator>,
+    api: ArbitraitorApi,
     store_path: PathBuf,
-    fetch_policy: FetchPolicy,
     shutdown: Arc<AtomicBool>,
     notify_shutdown: Arc<Notify>,
     rate_limits: Arc<Mutex<HashMap<u32, VecDeque<Instant>>>>,
@@ -711,7 +729,7 @@ async fn dispatch_request(request: DaemonRequest, state: &DaemonState) -> Daemon
             path,
             caller_origin: _,
             capability_token: _,
-        } => scan_path(&path, state).await,
+        } => scan_path(&path, state),
         DaemonRequest::QueryReceipt {
             sha256,
             caller_origin: _,
@@ -794,104 +812,92 @@ fn build_recent_record(
     })
 }
 
+/// Delegates an `Inspect` request to the pipeline engine.
+///
+/// The socket contract is URL-only: sources without an `http`/`https`
+/// scheme are rejected before reaching the engine, preserving the previous
+/// `FetchUrl::parse` behavior. The engine now applies the daemon's
+/// fail-closed policy, provenance verification, and receipt persistence to
+/// every socket inspection (ADR-0038: closing the silent coverage holes
+/// where the socket path previously skipped policy, receipts, and
+/// provenance).
 async fn inspect_url(
     url: &str,
     expected_sha256: Option<&str>,
     state: &DaemonState,
 ) -> DaemonResponse {
-    let fetch_url = match FetchUrl::parse(url) {
-        Ok(url) => url,
-        Err(error) => return error_response(error.to_string()),
-    };
-    let mut request = FetchRequest::url(fetch_url, state.fetch_policy.clone());
-    if let Some(expected) = expected_sha256 {
-        let digest = match Sha256Digest::from_str(expected) {
-            Ok(digest) => digest,
-            Err(error) => return error_response(error.to_string()),
-        };
-        request = request.with_expected_sha256(digest);
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return error_response(format!(
+            "invalid URL: only http and https schemes are accepted by the daemon: {url}"
+        ));
     }
-    let mut sink = VecSink::new();
-    let receipt = match HttpFetcher::new().fetch(request, &mut sink).await {
-        Ok(receipt) => receipt,
-        Err(error) => return error_response(error.to_string()),
+    let expected = match expected_sha256.map(Sha256Digest::from_str) {
+        Some(Ok(digest)) => Some(digest),
+        Some(Err(error)) => return error_response(error.to_string()),
+        None => None,
     };
-    let bytes = sink.into_bytes();
-    let store = match ContentStore::open(&state.store_path) {
-        Ok(store) => store,
-        Err(error) => return error_response(error.to_string()),
-    };
-    let mut store_sink = match store.sink(Some(&receipt.sha256)) {
-        Ok(sink) => sink,
-        Err(error) => return error_response(error.to_string()),
-    };
-    if let Err(error) = store_sink.write_chunk(&bytes).await {
-        return error_response(error.to_string());
-    }
-    if let Err(error) = store_sink.finish().await {
-        return error_response(error.to_string());
-    }
-    let retrieval = RetrievalInfo {
-        requested_location: Some(arbitraitor_fetch::redact_url(url)),
-        final_location: receipt
-            .metadata
-            .final_url
-            .as_ref()
-            .map(ToString::to_string)
-            .map(|url| arbitraitor_fetch::redact_url(&url)),
-        content_type: receipt.metadata.content_type,
-        byte_count: Some(receipt.bytes_written),
-    };
-    analysis_response(&bytes, Some(retrieval), &state.coordinator)
-}
-
-async fn scan_path(path: &str, state: &DaemonState) -> DaemonResponse {
-    let bytes = match tokio::fs::read(path).await {
-        Ok(bytes) => bytes,
-        Err(error) => return error_response(error.to_string()),
-    };
-    analysis_response(&bytes, None, &state.coordinator)
-}
-
-fn query_receipt(sha256: &str, state: &DaemonState) -> DaemonResponse {
-    let digest = match Sha256Digest::from_str(sha256) {
-        Ok(digest) => digest,
-        Err(error) => return error_response(error.to_string()),
-    };
-    let store = match ContentStore::open(&state.store_path) {
-        Ok(store) => store,
-        Err(error) => return error_response(error.to_string()),
-    };
-    match store.get(&digest) {
-        Ok(handle) => DaemonResponse {
-            success: true,
-            verdict: Some("stored".to_owned()),
-            findings_count: 0,
-            sha256: Some(handle.digest().to_string()),
-            error: None,
-            health_report: None,
-            daemon_info: None,
-        },
+    match state.api.inspect_pinned(url, expected).await {
+        Ok(result) => inspection_response(&result),
         Err(error) => error_response(error.to_string()),
     }
 }
 
-fn analysis_response(
-    bytes: &[u8],
-    retrieval: Option<RetrievalInfo>,
-    coordinator: &AnalysisCoordinator,
-) -> DaemonResponse {
-    let digest = Sha256Digest::new(Sha256::digest(bytes).into());
-    let result = coordinator.analyze_with_retrieval(bytes, retrieval);
+/// Delegates a `Scan` request to the pipeline engine.
+///
+/// The engine bounds the read (the previous implementation read the file
+/// unbounded), stores the artifact in CAS, applies policy, and persists a
+/// receipt.
+fn scan_path(path: &str, state: &DaemonState) -> DaemonResponse {
+    match state
+        .api
+        .scan_path(Path::new(path), arbitraitor_engine::DEFAULT_SCAN_MAX_BYTES)
+    {
+        Ok(result) => inspection_response(&result),
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
+/// Delegates a `QueryReceipt` request to the pipeline engine.
+///
+/// Read-only: the engine's `receipt_summary` reads the persisted receipt but
+/// never re-runs analysis or rewrites it, so a query cannot silently rewrite
+/// the audit trail (ADR-0038 decision 2; §31 receipt integrity). A read
+/// endpoint that re-persisted the receipt would mutate policy traces and
+/// timestamps on every lookup.
+fn query_receipt(sha256: &str, state: &DaemonState) -> DaemonResponse {
+    match state.api.receipt_summary(sha256) {
+        Ok(Some(summary)) => DaemonResponse {
+            success: true,
+            verdict: Some(format!("{:?}", summary.verdict)),
+            findings_count: summary.findings_count,
+            sha256: Some(summary.sha256.clone()),
+            error: None,
+            health_report: None,
+            daemon_info: None,
+        },
+        Ok(None) => error_response(format!("no inspection receipt for {sha256}")),
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
+fn inspection_response(result: &arbitraitor_engine::InspectionResult) -> DaemonResponse {
     DaemonResponse {
         success: true,
         verdict: Some(format!("{:?}", result.verdict)),
         findings_count: result.findings.len(),
-        sha256: Some(digest.to_string()),
+        sha256: Some(result.sha256.clone()),
         error: None,
         health_report: None,
         daemon_info: None,
     }
+}
+
+/// Returns the receipts directory sibling to a CAS root.
+fn receipts_sibling(store_path: &Path) -> PathBuf {
+    store_path.parent().map_or_else(
+        || store_path.join("receipts"),
+        |parent| parent.join("receipts"),
+    )
 }
 
 fn error_response(message: impl Into<String>) -> DaemonResponse {
@@ -1127,6 +1133,7 @@ fn prepare_socket_path(socket_path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use arbitraitor_fetch::{FetchScheme, TlsVerifier};
+    use sha2::{Digest, Sha256};
     use tokio::net::TcpListener;
 
     #[cfg(target_os = "linux")]
@@ -1159,7 +1166,7 @@ mod tests {
                 },
                 ..DaemonOptions::default()
             },
-        );
+        )?;
         let handle = tokio::spawn(async move { daemon.run().await });
         wait_for_socket(&socket).await?;
 
@@ -1195,12 +1202,262 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-0038 decision 2 (migration parity): the socket path now routes
+    /// through the pipeline engine, so an `Inspect` request applies the
+    /// daemon's fail-closed policy and persists a receipt — both were
+    /// silently skipped by the former socket-local composition.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn daemon_inspect_applies_policy_and_writes_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_path("inspect-coverage")?;
+        let socket = root.join("daemon.sock");
+        let cas_root = root.join("cas");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buffer = [0_u8; 1024];
+            let _read = stream.read(&mut buffer).await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nplain text",
+                )
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: cas_root.clone(),
+                fetch_policy: FetchPolicy {
+                    tls_verifier: TlsVerifier::PlatformVerifier,
+                    allowed_schemes: vec![FetchScheme::Http],
+                    allow_loopback_addresses: true,
+                    ..FetchPolicy::default()
+                },
+                ..DaemonOptions::default()
+            },
+        )?;
+        let handle = tokio::spawn(async move { daemon.run().await });
+        wait_for_socket(&socket).await?;
+
+        let response = request_once(
+            &socket,
+            &DaemonRequest::Inspect {
+                url: format!("http://127.0.0.1:{}/artifact", addr.port()),
+                expected_sha256: None,
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+
+        assert!(response.success, "{:?}", response.error);
+        let sha256 = response.sha256.as_ref().ok_or("missing sha256")?;
+        // Policy now runs on the socket path: the fail-closed prompt policy
+        // upgrades to Block in the engine's non-interactive context.
+        assert_eq!(
+            response.verdict.as_deref(),
+            Some("Block"),
+            "socket inspect must apply the daemon fail-closed policy"
+        );
+        // Receipts now persist on the socket path.
+        let receipts_dir = cas_root.parent().ok_or("missing parent")?.join("receipts");
+        assert!(
+            receipts_dir.join(format!("{sha256}.json")).is_file(),
+            "socket inspect must persist an inspection receipt"
+        );
+        assert!(
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
+        );
+        handle.await??;
+        server.await??;
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    /// §31 receipt integrity: `QueryReceipt` is a read endpoint and must
+    /// never rewrite the persisted receipt. The previous engine route
+    /// through `api.scan()` re-ran analysis and unconditionally called
+    /// `persist_receipt`, regenerating timestamps and policy traces on
+    /// every lookup; the byte-for-byte equality check proves the audit
+    /// trail is now immutable to queries.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn daemon_query_receipt_does_not_rewrite_the_persisted_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_path("query-receipt-readonly")?;
+        let socket = root.join("daemon.sock");
+        let cas_root = root.join("cas");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buffer = [0_u8; 1024];
+            let _read = stream.read(&mut buffer).await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nplain text",
+                )
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: cas_root.clone(),
+                fetch_policy: FetchPolicy {
+                    tls_verifier: TlsVerifier::PlatformVerifier,
+                    allowed_schemes: vec![FetchScheme::Http],
+                    allow_loopback_addresses: true,
+                    ..FetchPolicy::default()
+                },
+                ..DaemonOptions::default()
+            },
+        )?;
+        let handle = tokio::spawn(async move { daemon.run().await });
+        wait_for_socket(&socket).await?;
+
+        let inspected = request_once(
+            &socket,
+            &DaemonRequest::Inspect {
+                url: format!("http://127.0.0.1:{}/artifact", addr.port()),
+                expected_sha256: None,
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+        assert!(inspected.success, "{:?}", inspected.error);
+        let sha256 = inspected.sha256.ok_or("inspect must return sha256")?;
+        let receipts_dir = cas_root.parent().ok_or("missing parent")?.join("receipts");
+        let receipt_path = receipts_dir.join(format!("{sha256}.json"));
+        let bytes_before = std::fs::read(&receipt_path)?;
+
+        let queried = request_once(
+            &socket,
+            &DaemonRequest::QueryReceipt {
+                sha256: sha256.clone(),
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+        assert!(queried.success, "{:?}", queried.error);
+        assert_eq!(queried.sha256.as_deref(), Some(sha256.as_str()));
+        assert_eq!(
+            queried.verdict.as_deref(),
+            Some("Block"),
+            "the socket-level answer carries the fail-closed verdict from the persisted receipt"
+        );
+        // Content-bitwise equality: any rewrite (even a trivial one) would
+        // regenerate `timestamps.created`/`modified` and surface here.
+        let bytes_after = std::fs::read(&receipt_path)?;
+        assert_eq!(
+            bytes_before, bytes_after,
+            "QueryReceipt must not modify the persisted receipt"
+        );
+
+        assert!(
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
+        );
+        handle.await??;
+        server.await??;
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
+    /// Read-only also means fail-closed on the unknown side: a digest with
+    /// no persisted receipt returns a clean error rather than triggering a
+    /// scan-and-persist side effect.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn daemon_query_receipt_returns_error_for_unknown_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_path("query-receipt-missing")?;
+        let socket = root.join("daemon.sock");
+        let cas_root = root.join("cas");
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: cas_root.clone(),
+                ..DaemonOptions::default()
+            },
+        )?;
+        let handle = tokio::spawn(async move { daemon.run().await });
+        wait_for_socket(&socket).await?;
+
+        let unknown_digest = "ab".repeat(32);
+        let response = request_once(
+            &socket,
+            &DaemonRequest::QueryReceipt {
+                sha256: unknown_digest.clone(),
+                caller_origin: CallerOrigin::HumanTty,
+                capability_token: None,
+            },
+        )
+        .await?;
+
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(
+            error.contains("no inspection receipt"),
+            "expected a readable 'no receipt' error, got: {error}"
+        );
+        let receipts_dir = cas_root.parent().ok_or("missing parent")?.join("receipts");
+        let persisted: Vec<_> = std::fs::read_dir(&receipts_dir)
+            .map(|rd| rd.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(
+            persisted.is_empty(),
+            "a missed lookup must not have persisted a receipt: {persisted:?}"
+        );
+
+        assert!(
+            request_once(
+                &socket,
+                &DaemonRequest::Shutdown {
+                    caller_origin: CallerOrigin::HumanTty,
+                    capability_token: None,
+                }
+            )
+            .await?
+            .success
+        );
+        handle.await??;
+        remove_dir_all_if_exists(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     #[cfg(target_os = "linux")]
     async fn invalid_request_returns_error_response() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("invalid")?;
         let socket = root.join("daemon.sock");
-        let daemon = Daemon::new(&socket);
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: root.join("cas"),
+                ..DaemonOptions::default()
+            },
+        )?;
         let handle = tokio::spawn(async move { daemon.run().await });
         wait_for_socket(&socket).await?;
 
@@ -1233,7 +1490,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("status")?;
         let socket = root.join("daemon.sock");
-        let daemon = Daemon::new(&socket);
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: root.join("cas"),
+                ..DaemonOptions::default()
+            },
+        )?;
         let handle = tokio::spawn(async move { daemon.run().await });
         wait_for_socket(&socket).await?;
 
@@ -1300,7 +1563,13 @@ mod tests {
     async fn shutdown_command_stops_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_path("shutdown")?;
         let socket = root.join("daemon.sock");
-        let daemon = Daemon::new(&socket);
+        let daemon = Daemon::with_options(
+            &socket,
+            DaemonOptions {
+                store_path: root.join("cas"),
+                ..DaemonOptions::default()
+            },
+        )?;
         let handle = tokio::spawn(async move { daemon.run().await });
         wait_for_socket(&socket).await?;
 

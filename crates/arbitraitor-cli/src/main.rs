@@ -31,7 +31,6 @@ use arbitraitor_model::finding::Finding;
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::origin::CallerOrigin;
 use arbitraitor_model::verdict::Verdict;
-use arbitraitor_provenance::SignatureVerification;
 use arbitraitor_wrapper::init as shell_init;
 use arbitraitor_wrapper::shim::{
     ShimConfig, ShimError, WrapperTarget, check_shims, generate_shell_init, install_shims,
@@ -1162,7 +1161,11 @@ async fn daemon(command: DaemonCommand) -> Result<()> {
     let socket = command.socket.unwrap_or_else(default_socket_path);
     match command.subcommand {
         DaemonSubcommand::Start => {
-            Daemon::new(socket).run().await.into_diagnostic()?;
+            Daemon::new(socket)
+                .into_diagnostic()?
+                .run()
+                .await
+                .into_diagnostic()?;
         }
         DaemonSubcommand::Stop => {
             let response = request_once(
@@ -1687,20 +1690,17 @@ fn write_unpack_hazards(
 
 fn write_report(
     writer: &mut impl std::io::Write,
-    result: &arbitraitor_analysis::AnalysisResult,
-    digest: &Sha256Digest,
+    digest: &str,
     cas_root: &Path,
-    signature_verifications: &[SignatureVerification],
+    artifact_type: &str,
+    verdict: Verdict,
+    signature_verifications: &[arbitraitor_engine::SignatureVerificationSummary],
+    findings: &[Finding],
 ) -> Result<()> {
     writeln!(writer, "artifact_sha256: {digest}").into_diagnostic()?;
     writeln!(writer, "cas_dir: {}", cas_root.display()).into_diagnostic()?;
-    writeln!(
-        writer,
-        "artifact_type: {:?}",
-        result.classification.artifact_type
-    )
-    .into_diagnostic()?;
-    writeln!(writer, "verdict: {:?}", result.verdict).into_diagnostic()?;
+    writeln!(writer, "artifact_type: {artifact_type}").into_diagnostic()?;
+    writeln!(writer, "verdict: {verdict:?}").into_diagnostic()?;
     writeln!(
         writer,
         "signatures_verified: {}",
@@ -1711,13 +1711,13 @@ fn write_report(
         writeln!(
             writer,
             "- signature: {} identity={}",
-            verification.system.as_str(),
+            verification.system,
             verification.identity.as_deref().unwrap_or("<none>")
         )
         .into_diagnostic()?;
     }
-    writeln!(writer, "findings: {}", result.findings.len()).into_diagnostic()?;
-    for finding in &result.findings {
+    writeln!(writer, "findings: {}", findings.len()).into_diagnostic()?;
+    for finding in findings {
         writeln!(
             writer,
             "- [{} {:?}/{:?}] {}",

@@ -11,19 +11,15 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufRead, ErrorKind as IoErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arbitraitor_analysis::{AnalysisCoordinator, DetectorStatus, RetrievalInfo};
 use arbitraitor_artifact::{ArtifactType, ShellKind, classify};
+use arbitraitor_engine::{ArbitraitorApi, Config as EngineConfig, DetectorStatusSummary};
 use arbitraitor_exec::script::ScriptExecution;
-use arbitraitor_fetch::{
-    FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink, redact_url,
-};
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_receipt::Receipt;
 use hmac::{Hmac, KeyInit, Mac};
@@ -212,28 +208,21 @@ impl McpServer {
 }
 
 /// Tool that retrieves an artifact URL and inspects the exact fetched bytes.
+///
+/// A thin consumer of the pipeline engine (ADR-0038 decision 3): the handler
+/// translates JSON-RPC parameters into a typed
+/// [`ArbitraitorApi::inspect_pinned`] call. Fetch, CAS storage, analysis,
+/// provenance verification, policy evaluation, and receipt persistence all
+/// run inside the engine.
 pub struct InspectUrlTool {
-    coordinator: AnalysisCoordinator,
-    fetch_policy: FetchPolicy,
+    api: ArbitraitorApi,
 }
 
 impl InspectUrlTool {
-    /// Creates an `inspect_url` tool with the default analysis coordinator and fetch policy.
+    /// Creates an `inspect_url` tool backed by a pipeline engine API.
     #[must_use]
-    pub fn new(coordinator: AnalysisCoordinator) -> Self {
-        Self {
-            coordinator,
-            fetch_policy: FetchPolicy::default(),
-        }
-    }
-
-    /// Creates an `inspect_url` tool with an explicit fetch policy.
-    #[must_use]
-    pub fn with_fetch_policy(coordinator: AnalysisCoordinator, fetch_policy: FetchPolicy) -> Self {
-        Self {
-            coordinator,
-            fetch_policy,
-        }
+    pub fn new(api: ArbitraitorApi) -> Self {
+        Self { api }
     }
 }
 
@@ -269,37 +258,35 @@ impl McpToolHandler for InspectUrlTool {
 impl InspectUrlTool {
     fn inspect(&self, params: Value, agent: &AgentIdentity) -> Result<Value, InspectUrlError> {
         let params: InspectUrlParams = serde_json::from_value(params)?;
-        let fetch_url = FetchUrl::parse(&params.url).map_err(|error| InspectUrlError::Fetch {
-            message: error.to_string(),
-        })?;
-        let mut request = FetchRequest::url(fetch_url, self.fetch_policy.clone());
-        if let Some(sha256) = params.sha256 {
-            let digest =
+        // The MCP gateway is a remote-content inspection surface (spec §33,
+        // §40.3): the URL contract here is http/https only. The engine's
+        // `parse_fetch_source` also accepts `file://` URLs and bare paths
+        // for the CLI; without this guard, an agent could re-interpret the
+        // same JSON-RPC parameter as a local file read and thereby acquire
+        // an unlisted capability expansion (reads, stores, and reports
+        // arbitrary host files). The daemon applies the same http/https
+        // check; mirror its error shape so clients see one contract across
+        // both surfaces.
+        if !params.url.starts_with("http://") && !params.url.starts_with("https://") {
+            return Err(InspectUrlError::InvalidUrl { url: params.url });
+        }
+        let expected = params
+            .sha256
+            .map(|sha256| {
                 sha256
                     .parse::<Sha256Digest>()
                     .map_err(|error| InspectUrlError::InvalidSha256 {
                         message: error.to_string(),
-                    })?;
-            request = request.with_expected_sha256(digest);
-        }
+                    })
+            })
+            .transpose()?;
 
-        let fetched = fetch_url_once(request)?;
-        let content_type = fetched.receipt.metadata.content_type.clone();
-        let retrieval = RetrievalInfo {
-            requested_location: Some(redact_url(&params.url)),
-            final_location: fetched
-                .receipt
-                .metadata
-                .final_url
-                .as_ref()
-                .map(ToString::to_string)
-                .map(|url| redact_url(&url)),
-            content_type: content_type.clone(),
-            byte_count: Some(fetched.receipt.bytes_written),
-        };
-        let result = self
-            .coordinator
-            .analyze_with_retrieval(&fetched.bytes, Some(retrieval));
+        let api = self.api.clone();
+        let url = params.url.clone();
+        let result = block_on_engine(async move { api.inspect_pinned(&url, expected).await })
+            .map_err(|error| InspectUrlError::Fetch {
+                message: error.to_string(),
+            })?;
 
         Ok(json!({
             "capability": McpCapability::Inspect,
@@ -307,18 +294,18 @@ impl InspectUrlTool {
             "release_performed": false,
             "agent_identity": sanitized_agent(agent),
             "artifact": {
-                "sha256": fetched.receipt.sha256.to_string(),
-                "byte_count": fetched.receipt.bytes_written,
-                "content_type": sanitize_option(content_type.as_deref())
+                "sha256": result.sha256,
+                "byte_count": result.size_bytes,
+                "content_type": sanitize_option(result.content_type.as_deref())
             },
-            "classification": sanitize_json(json!(format!("{:?}", result.classification.artifact_type))),
+            "classification": sanitize_json(json!(result.artifact_type)),
             "verdict": result.verdict,
             "findings": sanitize_json(json!(result.findings)),
             "detector_results": sanitize_json(json!(
                 result
                     .detector_results
                     .iter()
-                    .map(detector_result_json)
+                    .map(detector_summary_json)
                     .collect::<Vec<_>>()
             )),
         }))
@@ -333,17 +320,17 @@ impl InspectUrlTool {
 /// trivial traversal of quarantine boundaries, and reads are bounded by
 /// [`MAX_SCAN_ARTIFACT_BYTES`] so a single tool call cannot exhaust memory.
 pub struct ScanArtifactTool {
-    coordinator: AnalysisCoordinator,
+    api: ArbitraitorApi,
     max_bytes: u64,
 }
 
 impl ScanArtifactTool {
-    /// Creates a `scan_artifact` tool with the default coordinator and
-    /// [`MAX_SCAN_ARTIFACT_BYTES`] size bound.
+    /// Creates a `scan_artifact` tool backed by a pipeline engine API with
+    /// the [`MAX_SCAN_ARTIFACT_BYTES`] size bound.
     #[must_use]
-    pub fn new(coordinator: AnalysisCoordinator) -> Self {
+    pub fn new(api: ArbitraitorApi) -> Self {
         Self {
-            coordinator,
+            api,
             max_bytes: MAX_SCAN_ARTIFACT_BYTES,
         }
     }
@@ -351,9 +338,9 @@ impl ScanArtifactTool {
     /// Creates a `scan_artifact` tool with an explicit maximum artifact size
     /// in bytes. The bound must be greater than zero.
     #[must_use]
-    pub fn with_max_bytes(coordinator: AnalysisCoordinator, max_bytes: u64) -> Self {
+    pub fn with_max_bytes(api: ArbitraitorApi, max_bytes: u64) -> Self {
         Self {
-            coordinator,
+            api,
             max_bytes: if max_bytes == 0 {
                 MAX_SCAN_ARTIFACT_BYTES
             } else {
@@ -365,8 +352,11 @@ impl ScanArtifactTool {
     fn scan(&self, params: Value, agent: &AgentIdentity) -> Result<Value, ScanArtifactError> {
         let params: ScanArtifactParams = serde_json::from_value(params)?;
         let path = PathBuf::from(&params.path);
-        let (bytes, sha256) = read_bounded(&path, self.max_bytes)?;
-        let result = self.coordinator.analyze(&bytes);
+        let result = self.api.scan_path(&path, self.max_bytes).map_err(|error| {
+            ScanArtifactError::Engine {
+                message: error.to_string(),
+            }
+        })?;
         Ok(json!({
             "capability": McpCapability::Inspect,
             "execution_performed": false,
@@ -374,17 +364,17 @@ impl ScanArtifactTool {
             "agent_identity": sanitized_agent(agent),
             "artifact": {
                 "path": sanitize_for_agent(&params.path),
-                "sha256": sha256.to_string(),
-                "byte_count": u64::try_from(bytes.len()).unwrap_or(0),
+                "sha256": result.sha256,
+                "byte_count": result.size_bytes,
             },
-            "classification": sanitize_json(json!(format!("{:?}", result.classification.artifact_type))),
+            "classification": sanitize_json(json!(result.artifact_type)),
             "verdict": result.verdict,
             "findings": sanitize_json(json!(result.findings)),
             "detector_results": sanitize_json(json!(
                 result
                     .detector_results
                     .iter()
-                    .map(detector_result_json)
+                    .map(detector_summary_json)
                     .collect::<Vec<_>>()
             )),
         }))
@@ -430,28 +420,14 @@ impl McpToolHandler for ScanArtifactTool {
 /// never writes bytes outside the CAS quarantine and never executes them,
 /// so its capability class is [`McpCapability::Inspect`].
 pub struct FetchArtifactTool {
-    fetch_policy: FetchPolicy,
+    api: ArbitraitorApi,
 }
 
 impl FetchArtifactTool {
-    /// Creates a `fetch_artifact` tool with the default fetch policy.
+    /// Creates a `fetch_artifact` tool backed by a pipeline engine API.
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            fetch_policy: FetchPolicy::default(),
-        }
-    }
-
-    /// Creates a `fetch_artifact` tool with an explicit fetch policy.
-    #[must_use]
-    pub const fn with_fetch_policy(fetch_policy: FetchPolicy) -> Self {
-        Self { fetch_policy }
-    }
-}
-
-impl Default for FetchArtifactTool {
-    fn default() -> Self {
-        Self::new()
+    pub fn new(api: ArbitraitorApi) -> Self {
+        Self { api }
     }
 }
 
@@ -487,42 +463,41 @@ impl McpToolHandler for FetchArtifactTool {
 impl FetchArtifactTool {
     fn fetch(&self, params: Value, agent: &AgentIdentity) -> Result<Value, FetchArtifactError> {
         let params: FetchArtifactParams = serde_json::from_value(params)?;
-        let fetch_url =
-            FetchUrl::parse(&params.url).map_err(|error| FetchArtifactError::Fetch {
+        // See the matching guard on `InspectUrlTool::inspect` — the MCP
+        // gateway speaks http/https only. Without the guard, the engine's
+        // `parse_fetch_source` accepts `file://` URLs and bare paths and the
+        // tool silently becomes a local-file read/store primitive.
+        if !params.url.starts_with("http://") && !params.url.starts_with("https://") {
+            return Err(FetchArtifactError::InvalidUrl { url: params.url });
+        }
+        let expected = params
+            .sha256
+            .map(|sha256| {
+                sha256
+                    .parse::<Sha256Digest>()
+                    .map_err(|error| FetchArtifactError::InvalidSha256 {
+                        message: error.to_string(),
+                    })
+            })
+            .transpose()?;
+
+        let api = self.api.clone();
+        let url = params.url.clone();
+        let result = block_on_engine(async move { api.fetch_pinned(&url, expected).await })
+            .map_err(|error| FetchArtifactError::Fetch {
                 message: error.to_string(),
             })?;
-        let mut request = FetchRequest::url(fetch_url, self.fetch_policy.clone());
-        if let Some(sha256) = params.sha256 {
-            let digest = sha256.parse::<Sha256Digest>().map_err(|error| {
-                FetchArtifactError::InvalidSha256 {
-                    message: error.to_string(),
-                }
-            })?;
-            request = request.with_expected_sha256(digest);
-        }
-
-        let fetched = fetch_url_once(request).map_err(|error| FetchArtifactError::Fetch {
-            message: error.to_string(),
-        })?;
-        let content_type = fetched.receipt.metadata.content_type.clone();
-        let final_url = fetched
-            .receipt
-            .metadata
-            .final_url
-            .as_ref()
-            .map(ToString::to_string)
-            .map(|url| redact_url(&url));
         Ok(json!({
             "capability": McpCapability::Inspect,
             "execution_performed": false,
             "release_performed": false,
             "agent_identity": sanitized_agent(agent),
             "artifact": {
-                "sha256": fetched.receipt.sha256.to_string(),
-                "byte_count": fetched.receipt.bytes_written,
-                "content_type": sanitize_option(content_type.as_deref())
+                "sha256": result.sha256,
+                "byte_count": result.size_bytes,
+                "content_type": sanitize_option(result.content_type.as_deref())
             },
-            "final_url": final_url.map(|url| sanitize_for_agent(&url))
+            "final_url": sanitize_for_agent(&result.final_url)
         }))
     }
 }
@@ -838,6 +813,34 @@ pub trait ApprovalPrompt: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdinApprovalPrompt;
 
+/// Fail-closed approval prompt for non-interactive transports.
+///
+/// The default MCP server speaks line-delimited JSON-RPC over stdio; on that
+/// transport `stdin` is the request channel, not an interactive operator
+/// channel. Reading a human confirmation from it would block the protocol
+/// loop and silently consume the client's next request line. This prompt
+/// therefore never prompts and never approves: `request_confirmation`
+/// returns [`ApprovalPromptError::TransportUnavailable`], the issuing path
+/// treats the request as denied (no token is minted, no attestation is
+/// derived), and the surface stays fail-closed. Embedders hosting a real
+/// approval channel inject their own prompt through
+/// [`RequestApprovalTool::with_prompt`]; embedders that legitimately own a
+/// TTY (the `arbitraitor-mcp` crate used as a library by a terminal harness)
+/// keep [`StdinApprovalPrompt`] via [`RequestApprovalTool::new`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransportUnavailablePrompt;
+
+impl ApprovalPrompt for TransportUnavailablePrompt {
+    fn request_confirmation(
+        &self,
+        _sha256: &Sha256Digest,
+        _plan: &str,
+        _ctx: &PlanContext,
+    ) -> Result<bool, ApprovalPromptError> {
+        Err(ApprovalPromptError::TransportUnavailable)
+    }
+}
+
 impl ApprovalPrompt for StdinApprovalPrompt {
     fn request_confirmation(
         &self,
@@ -915,6 +918,14 @@ pub enum ApprovalPromptError {
         /// Safe diagnostic message describing the serialization failure.
         message: String,
     },
+    /// The MCP server's transport cannot host an interactive approval
+    /// prompt. Carried by [`TransportUnavailablePrompt`]; the message names
+    /// the `with_prompt` injection seam so an embedder's next step is
+    /// obvious from the error.
+    #[error(
+        "interactive approval prompting is unavailable on the stdio transport; the MCP client / server embedder must inject an appropriate prompt via RequestApprovalTool::with_prompt(...) (see docs)"
+    )]
+    TransportUnavailable,
 }
 
 impl ApprovalPromptError {
@@ -1720,62 +1731,26 @@ fn unix_seconds_string(time: SystemTime) -> String {
     )
 }
 
-fn read_bounded(path: &Path, max_bytes: u64) -> Result<(Vec<u8>, Sha256Digest), ScanArtifactError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|source| ScanArtifactError::from_io("stat-path", &source))?;
-    if metadata.file_type().is_symlink() {
-        return Err(ScanArtifactError::SymlinkRejected);
-    }
-    if !metadata.is_file() {
-        return Err(ScanArtifactError::NotAFile);
-    }
-    let size = metadata.len();
-    if size > max_bytes {
-        return Err(ScanArtifactError::SizeExceeded {
-            attempted: size,
-            max_bytes,
-        });
-    }
-
-    let mut file =
-        File::open(path).map_err(|source| ScanArtifactError::from_io("open-path", &source))?;
-    let mut hasher = Sha256::new();
-    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| ScanArtifactError::from_io("read-bytes", &source))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        bytes.extend_from_slice(&buffer[..read]);
-    }
-    let digest = Sha256Digest::new(hasher.finalize().into());
-    Ok((bytes, digest))
-}
-
-fn detector_result_json(result: &arbitraitor_analysis::DetectorResult) -> Value {
+fn detector_summary_json(summary: &arbitraitor_engine::DetectorSummary) -> Value {
     json!({
         "detector": {
-            "id": result.metadata.id,
-            "version": result.metadata.version,
-            "capabilities": result.metadata.capabilities,
-            "is_local": result.metadata.is_local,
-            "may_upload": result.metadata.may_upload,
-            "is_deterministic": result.metadata.is_deterministic,
+            "id": summary.id,
+            "version": summary.version,
+            "capabilities": summary.capabilities,
+            "is_local": summary.is_local,
+            "may_upload": summary.may_upload,
+            "is_deterministic": summary.is_deterministic,
         },
-        "status": detector_status_json(&result.status),
-        "finding_count": result.finding_count,
+        "status": detector_status_json(&summary.status),
+        "finding_count": summary.finding_count,
     })
 }
 
-fn detector_status_json(status: &DetectorStatus) -> Value {
+fn detector_status_json(status: &DetectorStatusSummary) -> Value {
     match status {
-        DetectorStatus::Ok => json!({"kind": "ok"}),
-        DetectorStatus::Error(message) => json!({"kind": "error", "message": message}),
-        DetectorStatus::Timeout => json!({"kind": "timeout"}),
+        DetectorStatusSummary::Ok => json!({"kind": "ok"}),
+        DetectorStatusSummary::Error(message) => json!({"kind": "error", "message": message}),
+        DetectorStatusSummary::Timeout => json!({"kind": "timeout"}),
     }
 }
 
@@ -1815,39 +1790,30 @@ impl McpToolHandler for ExplainVerdictTool {
     }
 }
 
-fn fetch_url_once(request: FetchRequest) -> Result<FetchedArtifact, InspectUrlError> {
+/// Runs an engine future to completion on a dedicated thread with its own
+/// Tokio runtime.
+///
+/// MCP tool handlers are synchronous (the JSON-RPC stdio loop owns the main
+/// thread), while the pipeline engine is async. The bridge mirrors the
+/// previous per-call fetch thread: one short-lived runtime per call, no
+/// shared reactor state.
+fn block_on_engine<T, F>(future: F) -> Result<T, arbitraitor_engine::EngineError>
+where
+    F: std::future::Future<Output = Result<T, arbitraitor_engine::EngineError>> + Send + 'static,
+    T: Send + 'static,
+{
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = (|| {
-            let runtime =
-                tokio::runtime::Runtime::new().map_err(|error| InspectUrlError::Fetch {
-                    message: error.to_string(),
-                })?;
-            runtime.block_on(async move {
-                let mut sink = VecSink::new();
-                let receipt =
-                    HttpFetcher::new()
-                        .fetch(request, &mut sink)
-                        .await
-                        .map_err(|error| InspectUrlError::Fetch {
-                            message: error.to_string(),
-                        })?;
-                let bytes = sink.into_bytes();
-                let children = arbitraitor_fetch::discover_child_artifacts(&bytes);
-                let receipt = receipt.with_child_artifacts(children);
-                Ok(FetchedArtifact { bytes, receipt })
-            })
-        })();
+        let result = tokio::runtime::Runtime::new()
+            .map_err(arbitraitor_engine::EngineError::Io)
+            .and_then(|runtime| runtime.block_on(future));
         let _ = tx.send(result);
     });
-    rx.recv().map_err(|error| InspectUrlError::Fetch {
-        message: error.to_string(),
+    rx.recv().map_err(|error| {
+        arbitraitor_engine::EngineError::Io(std::io::Error::other(format!(
+            "engine bridge failed: {error}"
+        )))
     })?
-}
-
-struct FetchedArtifact {
-    bytes: Vec<u8>,
-    receipt: arbitraitor_fetch::FetchReceipt,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1895,6 +1861,8 @@ struct RunApprovedArtifactParams {
 enum InspectUrlError {
     #[error("invalid inspect_url parameters: {0}")]
     Params(#[from] serde_json::Error),
+    #[error("invalid URL: only http and https schemes are accepted by the MCP gateway: {url}")]
+    InvalidUrl { url: String },
     #[error("invalid sha256: {message}")]
     InvalidSha256 { message: String },
     #[error("fetch failed: {message}")]
@@ -1905,6 +1873,8 @@ enum InspectUrlError {
 enum FetchArtifactError {
     #[error("invalid fetch_artifact parameters: {0}")]
     Params(#[from] serde_json::Error),
+    #[error("invalid URL: only http and https schemes are accepted by the MCP gateway: {url}")]
+    InvalidUrl { url: String },
     #[error("invalid sha256: {message}")]
     InvalidSha256 { message: String },
     #[error("fetch failed: {message}")]
@@ -1915,32 +1885,8 @@ enum FetchArtifactError {
 enum ScanArtifactError {
     #[error("invalid scan_artifact parameters: {0}")]
     Params(#[from] serde_json::Error),
-    #[error("scan_artifact path is a symlink, which is rejected")]
-    SymlinkRejected,
-    #[error("scan_artifact path is not a regular file")]
-    NotAFile,
-    #[error("scan_artifact size exceeded: attempted {attempted} bytes, maximum {max_bytes} bytes")]
-    SizeExceeded { attempted: u64, max_bytes: u64 },
-    #[error("scan_artifact I/O failure during {stage}: {message}")]
-    Io {
-        stage: &'static str,
-        message: String,
-    },
-}
-
-impl ScanArtifactError {
-    fn from_io(stage: &'static str, error: &std::io::Error) -> Self {
-        if error.kind() == IoErrorKind::NotFound {
-            return Self::Io {
-                stage,
-                message: "path not found".to_owned(),
-            };
-        }
-        Self::Io {
-            stage,
-            message: error.to_string(),
-        }
-    }
+    #[error("scan_artifact failed: {message}")]
+    Engine { message: String },
 }
 
 #[derive(Debug, Error)]
@@ -2051,20 +1997,81 @@ pub enum StdioError {
     /// JSON serialization or deserialization failure.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// The pipeline engine could not be constructed.
+    #[error("engine error: {0}")]
+    Engine(#[from] arbitraitor_engine::EngineError),
 }
 
 const JSONRPC_VERSION: &str = "2.0";
 const MAX_LINE_LEN: usize = 1024 * 1024;
 
-fn build_default_server() -> McpServer {
-    let receipts = Arc::new(InMemoryReceiptStore::new()) as Arc<dyn ReceiptLookup>;
+/// [`ArtifactLookup`] backed by the pipeline engine's CAS.
+///
+/// Approved execution reads the exact inspected bytes from the engine's
+/// content store, so `run_approved_artifact` operates on the same
+/// digest-verified storage every other surface uses.
+struct EngineArtifactLookup {
+    api: ArbitraitorApi,
+}
+
+impl ArtifactLookup for EngineArtifactLookup {
+    fn lookup_artifact(&self, sha256: &Sha256Digest) -> Option<Vec<u8>> {
+        self.api.read_artifact(&sha256.to_string()).ok()
+    }
+}
+
+/// [`ReceiptLookup`] backed by the engine's persisted receipts directory.
+///
+/// Reads `<receipts_dir>/<sha256>.json` on every lookup; the engine's
+/// inspection path is the sole writer, so a lookup that misses returns
+/// `None` and a lookup that hits returns the receipt as it was persisted,
+/// without rewriting it. This makes `QueryReceiptTool` reflect the engine's
+/// actual audit trail rather than an in-memory side index (ADR-0038
+/// decision 3: the toolhandler translates the request into a typed engine
+/// call, not into an unrelated backing store).
+struct EngineReceiptLookup {
+    receipts_dir: PathBuf,
+}
+
+impl ReceiptLookup for EngineReceiptLookup {
+    fn lookup(&self, sha256: &Sha256Digest) -> Option<Receipt> {
+        let path = self.receipts_dir.join(format!("{sha256}.json"));
+        if !path.is_file() {
+            return None;
+        }
+        let data = std::fs::read(&path).ok()?;
+        serde_json::from_slice(&data).ok()
+    }
+}
+
+fn build_default_server(api: ArbitraitorApi) -> McpServer {
+    let receipts_dir = api.receipts_dir().to_path_buf();
+    let receipts = Arc::new(EngineReceiptLookup { receipts_dir }) as Arc<dyn ReceiptLookup>;
 
     let mut server = McpServer::new();
-    server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
-    server.register(Box::new(FetchArtifactTool::new()));
-    server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
+    server.register(Box::new(InspectUrlTool::new(api.clone())));
+    server.register(Box::new(FetchArtifactTool::new(api.clone())));
+    server.register(Box::new(ScanArtifactTool::new(api.clone())));
     server.register(Box::new(QueryReceiptTool::new(receipts)));
     server.register(Box::new(ExplainVerdictTool));
+    // ADR-0038 decision 3: the default server registers all seven tool
+    // handlers. `request_approval` cannot use `StdinApprovalPrompt` here:
+    // stdin is the JSON-RPC channel of the stdio transport, so reading a
+    // human confirmation from it would block the protocol loop and consume
+    // the client's next request line. `TransportUnavailablePrompt` fails
+    // closed (never approves, never issues a token); interactive embedders
+    // with a real TTY use `RequestApprovalTool::new`, and headless embedders
+    // inject their own prompt via `RequestApprovalTool::with_prompt`
+    // (issue #746 tracks the headless implementation).
+    server.register(Box::new(RequestApprovalTool::with_prompt(
+        Arc::new(TransportUnavailablePrompt),
+        ApprovalTokenIssuer::new(),
+        PlanContext::for_bash(true, ""),
+    )));
+    server.register(Box::new(RunApprovedArtifactTool::new(
+        Arc::new(EngineArtifactLookup { api }),
+        ApprovalTokenIssuer::new(),
+    )));
     server
 }
 
@@ -2184,7 +2191,25 @@ fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) ->
 /// Returns [`StdioError`] on I/O or JSON serialization failure.
 pub fn run_stdio_server() -> Result<(), StdioError> {
     arbitraitor_core::privilege::refuse_root();
-    let server = build_default_server();
+    // Belt-and-braces with the handler-level URL guards on
+    // `InspectUrlTool::inspect` and `FetchArtifactTool::fetch`: clamp the
+    // engine's fetch policy to http/https so even a future handler that
+    // forgets the explicit scheme check cannot turn this surface into a
+    // local-file reader. The default `FetchPolicy::allowed_schemes`
+    // includes `File` (and `Stdin`) for the CLI's `inspect ./local.sh`
+    // workflow; the MCP gateway never has that contract.
+    let fetch_policy = arbitraitor_fetch::FetchPolicy {
+        allowed_schemes: vec![
+            arbitraitor_fetch::FetchScheme::Http,
+            arbitraitor_fetch::FetchScheme::Https,
+        ],
+        ..arbitraitor_fetch::FetchPolicy::default()
+    };
+    let api = ArbitraitorApi::new(EngineConfig {
+        fetch_policy,
+        ..EngineConfig::default()
+    })?;
+    let server = build_default_server(api);
     let agent = default_agent();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();

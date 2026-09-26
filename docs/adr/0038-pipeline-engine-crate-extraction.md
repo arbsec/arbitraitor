@@ -1,8 +1,8 @@
 # ADR 0038: Pipeline engine crate extraction and naming
 
-**Status:** Proposed
-**Date:** 2026-07-23
-**Issue:** TBD (tracking issue to be created before acceptance)
+**Status:** Accepted
+**Date:** 2026-09-26
+**Issue:** #747
 
 ## Context
 
@@ -24,7 +24,7 @@ Additionally, third-party products (Rust package managers, IDE plugins, CI binar
 
 ### 1. Extract a new pipeline engine crate: `arbitraitor-engine`
 
-Working name: `arbitraitor-engine` (recommended over `arbitraitor-api` to avoid REST/HTTP API confusion and prevent the redundant `arbitraitor_api::ArbitraitorApi` path).
+The crate is named `arbitraitor-engine` (chosen over `arbitraitor-api` to avoid REST/HTTP API confusion and prevent the redundant `arbitraitor_api::ArbitraitorApi` path).
 
 The crate owns:
 
