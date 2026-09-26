@@ -56,7 +56,7 @@ arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace
 [dev-dependencies]
 tempfile = { workspace = true }
 wat = "=1.259.0"
-wit-parser = "=0.253.0"
+wit-parser = "=0.259.0"
 
 [build-dependencies]
-wit-parser = "0.253"
+wit-parser = "0.259"
