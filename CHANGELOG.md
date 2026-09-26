@@ -9,16 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (dependencies)
 
-- Refreshed the enterprise minor-dependency group: `tree-sitter` 0.26 → 0.27
-  (picks up two parser-hardening fixes: a buffer over-read when parsing
-  4-byte UTF-16 characters and validation of Wasm language memory reads),
-  `wit-parser` 0.253 → 0.259 (pinned `=0.259.0` in the plugin host),
-  `zstd` 0.13 → 0.14, `wasmparser` 0.256 → 0.259, and `cranelift-bitset`
-  0.134 → 0.136. Regenerated `arbitraitor-workspace-hack` with cargo-hakari:
-  the batch briefly left two hakari rename-aliases resolving to the same
-  `digest` 0.11 / `hashbrown 0.17` version under different names, which
-  made `cargo metadata` reject the workspace — the root cause of CI
-  failure on the Renovate batch PR (#727).
+- Refreshed the minor-dependency group: `tree-sitter` 0.26.13 → 0.27.0,
+  `wit-parser` 0.253 → 0.259 (pinned `=0.259.0` in the plugin host), and
+  `zstd` 0.13 → 0.14. `cranelift-bitset` moves to 0.135.2 (hakari
+  requirement 0.134 → 0.135; 0.136 is not selectable while wasmtime
+  48.0.2 pins `^0.135`), and the graph drops `wasmparser` 0.253/0.256 in
+  favor of the 0.254/0.259 versions already present. Regenerated
+  `arbitraitor-workspace-hack` with cargo-hakari; the regeneration also
+  pruned six lock entries the stale hack manifest had dragged in with no
+  real consumer (`allocator-api2` 0.4.0, `cranelift-bitset` 0.134.4,
+  `pulley-interpreter`/`pulley-macros` 47.0.4,
+  `wasmtime-internal-core` 47.0.4, `wasmparser` 0.256.0). This
+  supersedes the Renovate batch PR (#727), whose lock update collapsed
+  two hakari rename-aliases onto one `digest`/`hashbrown` version and
+  made `cargo metadata` reject the workspace.
+- Note on the `tree-sitter` 0.27.0 parser-hardening fixes (4-byte UTF-16
+  buffer over-read, Wasm-language memory-read validation): they are not
+  reachable in this crate's usage — the shell analyzer rejects non-UTF-8
+  input before parsing, and the wasm grammar loader is not compiled in.
+  The bump is a currency refresh, not a remediation.
 
 ### Fixed
 
