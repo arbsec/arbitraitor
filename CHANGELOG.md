@@ -28,10 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StdinApprovalPrompt` remains the interactive default and is audit-
   identical to before (`stdin-human-confirmation`). Records are MAC'd
   (HMAC-SHA-256) with an embedder-supplied key; tampered, forged, or
-  key-less records fail closed. Cross-process consumption is claimed
-  atomically via an exclusive permanent `.consumed` marker (one approval =
-  one grant ever), the store caps pending record files at
-  `MAX_PENDING_RECORDS` (1000, freed by
+key-less records fail closed. Cross-process consumption is claimed
+atomically via an exclusive `.consumed` marker (one approval = one grant
+per consumption cycle; the marker is cleared when the next request for
+the same digest opens a fresh cycle), with exactly-once holding while
+the store directory is not writable by agent-side processes. The store
+caps pending record files at
+`MAX_PENDING_RECORDS` (1000, freed by
   `PendingApprovalStore::prune_expired`), and `PendingApprovalStore::open`
   refuses group/world-writable store directories on Unix.
 
