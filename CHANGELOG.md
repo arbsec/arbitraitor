@@ -42,7 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured platforms hakari computed for the *host* platform, so a
   manifest regenerated on macOS would diverge from one regenerated on
   Linux. The hack manifest was regenerated with per-platform target
-  sections for all three triples; keep the list in sync with the CI
+  sections for all three triples; regeneration adds 16 dependency edges
+  to the lock (the yara-x → wasmtime-45 closure on the pinned targets:
+  `cranelift-bitset` 0.132, `pulley-interpreter` 45,
+  `wasmtime-internal-core` 45, plus their transitive deps) and removes
+  none. Keep the list in sync with the CI
   matrices in `.github/workflows/code.yml` and `release.yml`.
 
 ### Changed (dependencies)
