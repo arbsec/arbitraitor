@@ -1,6 +1,11 @@
 //! MCP and AI agent gateway integration
 //!
 //! See `docs/spec/` for the full specification.
+//!
+//! Interactive use is served by [`StdinApprovalPrompt`]; non-interactive
+//! embedders can opt into the headless [`HeadlessApprovalPrompt`] /
+//! [`PendingApprovalStore`] approval channel, which persists approval
+//! requests as durable state for a trusted resolver UI (ADR-0013, #746).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -26,10 +31,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 mod explain;
+mod headless;
 
 pub use explain::sanitize_for_agent;
 use explain::{
     error_response, explain_verdict, json_response, sanitize_json, sanitize_option, sanitized_agent,
+};
+pub use headless::{
+    ApprovalResolution, DEFAULT_PENDING_APPROVAL_LIFETIME, HEADLESS_APPROVAL_METHOD,
+    HeadlessApprovalPrompt, PendingApprovalError, PendingApprovalRecord, PendingApprovalState,
+    PendingApprovalStore,
 };
 use std::ops::Not;
 use subtle::ConstantTimeEq;
@@ -743,6 +754,41 @@ impl PlanContext {
     }
 }
 
+/// An approval-channel decision carrying the attestation recorded into
+/// issued approval tokens.
+///
+/// `approval_method` and `approver_identity` land in the
+/// `approval_method` and `human_approver_identity` token payload fields, so
+/// audit consumers (spec §33.4) can tell a TTY keystroke apart from a
+/// trusted headless resolver UI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalDecision {
+    /// Whether the approval channel approved the plan.
+    pub approved: bool,
+    /// How the decision was reached (e.g. `stdin-human-confirmation`,
+    /// [`HEADLESS_APPROVAL_METHOD`]). Recorded verbatim into issued tokens.
+    pub approval_method: String,
+    /// Approver identity as attested by the approval channel. When `None`,
+    /// the issuer falls back to the `USER` environment variable, preserving
+    /// the historical stdin behaviour.
+    pub approver_identity: Option<String>,
+}
+
+impl ApprovalDecision {
+    /// Builds a decision carrying only the approve/deny bit, labelled with the
+    /// historical `stdin-human-confirmation` method so tokens issued through
+    /// the default [`ApprovalPrompt::request_confirmation_attested`] wrapper
+    /// remain audit-identical to tokens issued before attestation existed.
+    #[must_use]
+    pub fn from_approved(approved: bool) -> Self {
+        Self {
+            approved,
+            approval_method: "stdin-human-confirmation".to_owned(),
+            approver_identity: None,
+        }
+    }
+}
+
 /// Human approval prompt used by [`RequestApprovalTool`].
 pub trait ApprovalPrompt: Send + Sync {
     /// Shows the artifact and untrusted plan to a human approval channel.
@@ -762,6 +808,30 @@ pub trait ApprovalPrompt: Send + Sync {
         plan: &str,
         ctx: &PlanContext,
     ) -> Result<bool, ApprovalPromptError>;
+
+    /// Shows the artifact and untrusted plan to a human approval channel and
+    /// returns the decision together with its audit attestation.
+    ///
+    /// Channels that can attest *how* a decision was reached and *by whom*
+    /// (for example [`HeadlessApprovalPrompt`], whose decisions come from a
+    /// trusted resolver UI rather than the agent-facing tool call) override
+    /// this method. The default implementation wraps
+    /// [`Self::request_confirmation`], so existing implementors compile and
+    /// behave identically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalPromptError`] when the approval channel cannot render
+    /// the prompt or read the human response.
+    fn request_confirmation_attested(
+        &self,
+        sha256: &Sha256Digest,
+        plan: &str,
+        ctx: &PlanContext,
+    ) -> Result<ApprovalDecision, ApprovalPromptError> {
+        self.request_confirmation(sha256, plan, ctx)
+            .map(ApprovalDecision::from_approved)
+    }
 }
 
 /// Stdin/stderr approval prompt for MVP interactive use.
@@ -963,13 +1033,14 @@ impl ApprovalTokenIssuer {
         })
     }
 
-    fn issue(
+    fn issue_with_attestation(
         &self,
         sha256: &Sha256Digest,
         plan: &str,
         ctx: &PlanContext,
         expires_at: SystemTime,
         agent: &AgentIdentity,
+        attestation: &ApprovalDecision,
     ) -> Result<IssuedApprovalToken, ApprovalTokenError> {
         let expires_at_unix_seconds = unix_seconds(expires_at)?;
         let payload = ApprovalTokenPayload {
@@ -999,11 +1070,14 @@ impl ApprovalTokenIssuer {
             release_destination: CanonicalExecutionPlan::RELEASE_DESTINATION.to_owned(),
             expires_at_unix_seconds,
             nonce: Uuid::new_v4().to_string(),
-            approval_method: "stdin-human-confirmation".to_owned(),
+            approval_method: attestation.approval_method.clone(),
             requester_integration: agent.integration.clone(),
             requester_agent_name: agent.agent_name.clone(),
             requester_session_id: agent.session_id.clone(),
-            human_approver_identity: std::env::var("USER").ok(),
+            human_approver_identity: attestation
+                .approver_identity
+                .clone()
+                .or_else(|| std::env::var("USER").ok()),
         };
         let payload_bytes = serde_json::to_vec(&payload)?;
         let signature = self.sign(&payload_bytes)?;
@@ -1252,17 +1326,21 @@ impl RequestApprovalTool {
                 }
             },
         )?;
-        let approved = self
-            .prompt
-            .request_confirmation(&digest, &params.plan, &self.ctx)?;
+        let decision =
+            self.prompt
+                .request_confirmation_attested(&digest, &params.plan, &self.ctx)?;
         let expires_at = SystemTime::now()
             .checked_add(self.token_lifetime)
             .ok_or(RequestApprovalError::TimeOverflow)?;
-        let issued = if approved {
-            Some(
-                self.issuer
-                    .issue(&digest, &params.plan, &self.ctx, expires_at, agent)?,
-            )
+        let issued = if decision.approved {
+            Some(self.issuer.issue_with_attestation(
+                &digest,
+                &params.plan,
+                &self.ctx,
+                expires_at,
+                agent,
+                &decision,
+            )?)
         } else {
             None
         };
@@ -1271,7 +1349,7 @@ impl RequestApprovalTool {
             "execution_performed": false,
             "release_performed": false,
             "agent_identity": sanitized_agent(agent),
-            "approved": approved,
+            "approved": decision.approved,
             "approval_token": issued.as_ref().map(|token| token.token.clone()),
             "expires_at": issued
                 .as_ref()

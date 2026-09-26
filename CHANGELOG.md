@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Headless (non-interactive) plan-bound approval for MCP embedders (#746,
+  ADR-0013): `arbitraitor-mcp` gains `HeadlessApprovalPrompt`, a
+  `PendingApprovalStore` (one JSON record per canonical plan digest in an
+  embedder-chosen directory, conventional default
+  `~/.arbitraitor/pending-approvals/`, records `0600` under a `0700`
+  directory on Unix), and a trusted-resolution API
+  (`PendingApprovalStore::{list_pending, resolve, prune_expired}`). Every
+  `request_approval` call persists a time-limited pending record (default
+  1-hour TTL) and fails closed; a retry of the same request mints a
+  plan-bound token only after a trusted resolver approves the exact
+  canonical plan digest, consuming the approval exactly once. Resolution is
+  a Rust-only API and is never exposed as an MCP tool, preserving the
+  ADR-0013 agent capability separation (H-11) on the headless path. Issued
+  tokens record the channel via a new `approval_method` /
+  `human_approver_identity` attestation plumbed through the
+  `ApprovalPrompt::request_confirmation_attested` defaulted trait method;
+  `StdinApprovalPrompt` remains the interactive default and is audit-
+  identical to before (`stdin-human-confirmation`).
+
 - `xtask cleanup` (repo maintenance, `cargo run -p xtask -- cleanup`):
   the `worktrees` phase removes secondary worktrees whose branch maps to
   a merged or closed PR (tracked via `gh`) and deletes those branches; a
