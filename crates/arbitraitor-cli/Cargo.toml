@@ -21,6 +21,7 @@ arbitraitor-archive = { workspace = true }
 arbitraitor-artifact = { workspace = true }
 arbitraitor-core = { workspace = true }
 arbitraitor-daemon = { workspace = true }
+arbitraitor-engine = { workspace = true }
 arbitraitor-exec = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-intel = { workspace = true }

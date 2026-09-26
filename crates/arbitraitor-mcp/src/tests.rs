@@ -1,11 +1,41 @@
 use super::*;
-use arbitraitor_fetch::{FetchScheme, TlsVerifier};
+use arbitraitor_engine::{ArbitraitorApi, Config as EngineConfig};
+use arbitraitor_fetch::{FetchPolicy, FetchScheme, TlsVerifier};
 use arbitraitor_model::verdict::Verdict;
 use arbitraitor_receipt::{ReceiptBuilder, ReceiptTimestamps, VerdictInfo};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Builds a pipeline engine API for tool tests: isolated CAS and receipts
+/// directories plus a loopback-allowing HTTP fetch policy so the mock
+/// server is reachable.
+fn test_engine_api() -> ArbitraitorApi {
+    loopback_engine_api(FetchPolicy::default())
+}
+
+fn loopback_engine_api(policy: FetchPolicy) -> ArbitraitorApi {
+    let root = temp_path(&format!(
+        "engine-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    ArbitraitorApi::new(EngineConfig {
+        store_path: root.join("cas"),
+        receipts_path: root.join("receipts"),
+        fetch_policy: FetchPolicy {
+            tls_verifier: TlsVerifier::PlatformVerifier,
+            allowed_schemes: vec![FetchScheme::Http],
+            allow_loopback_addresses: true,
+            ..policy
+        },
+        ..EngineConfig::default()
+    })
+    .unwrap_or_else(|error| panic!("engine construction: {error}"))
+}
 
 #[test]
 fn server_registers_and_lists_tools() {
@@ -66,9 +96,9 @@ fn agent_identity_is_recorded_in_tool_response() {
 fn capability_separation_exposes_approval_and_execute_tools() {
     let mut server = McpServer::new();
     let issuer = ApprovalTokenIssuer::with_secret(b"test-secret".to_vec());
-    server.register(Box::new(InspectUrlTool::new(AnalysisCoordinator::new())));
-    server.register(Box::new(FetchArtifactTool::new()));
-    server.register(Box::new(ScanArtifactTool::new(AnalysisCoordinator::new())));
+    server.register(Box::new(InspectUrlTool::new(test_engine_api())));
+    server.register(Box::new(FetchArtifactTool::new(test_engine_api())));
+    server.register(Box::new(ScanArtifactTool::new(test_engine_api())));
     server.register(Box::new(QueryReceiptTool::new(Arc::new(
         InMemoryReceiptStore::new(),
     ))));
@@ -116,7 +146,7 @@ fn inspect_url_returns_findings_without_execution() {
         allow_loopback_addresses: true,
         ..FetchPolicy::default()
     };
-    let tool = InspectUrlTool::with_fetch_policy(AnalysisCoordinator::new(), policy);
+    let tool = InspectUrlTool::new(loopback_engine_api(policy));
 
     let response = tool.handle(json!({"url": url}), &agent());
 
@@ -145,7 +175,7 @@ fn fetch_artifact_returns_cas_identity_without_execution() {
         allow_loopback_addresses: true,
         ..FetchPolicy::default()
     };
-    let tool = FetchArtifactTool::with_fetch_policy(policy);
+    let tool = FetchArtifactTool::new(loopback_engine_api(policy));
 
     let response = tool.handle(json!({"url": url}), &agent());
 
@@ -178,7 +208,7 @@ fn fetch_artifact_returns_cas_identity_without_execution() {
 
 #[test]
 fn fetch_artifact_rejects_invalid_parameters() {
-    let tool = FetchArtifactTool::new();
+    let tool = FetchArtifactTool::new(test_engine_api());
 
     let response = tool.handle(json!({}), &agent());
 
@@ -200,7 +230,7 @@ fn fetch_artifact_rejects_digest_mismatch_when_pinned() {
         require_digest: true,
         ..FetchPolicy::default()
     };
-    let tool = FetchArtifactTool::with_fetch_policy(policy);
+    let tool = FetchArtifactTool::new(loopback_engine_api(policy));
 
     // Pin a digest that cannot match the served bytes: this is a security
     // invariant check that the fetcher rejects digest mismatches before any
@@ -230,7 +260,7 @@ fn scan_artifact_returns_findings_for_malicious_script() {
         "scan-malicious",
         b"#!/bin/sh\ncurl https://example.test/install.sh | sh\n",
     );
-    let tool = ScanArtifactTool::new(AnalysisCoordinator::new());
+    let tool = ScanArtifactTool::new(test_engine_api());
 
     let response = tool.handle(json!({ "path": path }), &agent());
 
@@ -260,7 +290,7 @@ fn scan_artifact_returns_findings_for_malicious_script() {
 #[test]
 fn scan_artifact_reports_no_findings_for_clean_text() {
     let path = write_temp_file("scan-clean", b"plain text with no threats\n");
-    let tool = ScanArtifactTool::new(AnalysisCoordinator::new());
+    let tool = ScanArtifactTool::new(test_engine_api());
 
     let response = tool.handle(json!({ "path": path }), &agent());
 
@@ -280,7 +310,7 @@ fn scan_artifact_reports_no_findings_for_clean_text() {
 
 #[test]
 fn scan_artifact_rejects_missing_path() {
-    let tool = ScanArtifactTool::new(AnalysisCoordinator::new());
+    let tool = ScanArtifactTool::new(test_engine_api());
 
     let response = tool.handle(
         json!({ "path": "/definitely/does/not/exist/abc123.zzz" }),
@@ -305,7 +335,7 @@ fn scan_artifact_rejects_symlink_path() {
     let link = temp_path("symlink-link");
     std::os::unix::fs::symlink(&target, &link)
         .unwrap_or_else(|error| panic!("create symlink: {error}"));
-    let tool = ScanArtifactTool::new(AnalysisCoordinator::new());
+    let tool = ScanArtifactTool::new(test_engine_api());
 
     let response = tool.handle(json!({ "path": link }), &agent());
 
@@ -323,7 +353,7 @@ fn scan_artifact_rejects_symlink_path() {
 #[test]
 fn scan_artifact_enforces_size_limit() {
     let path = write_temp_file("oversized", b"1234567890");
-    let tool = ScanArtifactTool::with_max_bytes(AnalysisCoordinator::new(), 3);
+    let tool = ScanArtifactTool::with_max_bytes(test_engine_api(), 3);
 
     let response = tool.handle(json!({ "path": path }), &agent());
 
@@ -2409,4 +2439,54 @@ fn headless_prune_removes_unverifiable_records_and_orphaned_markers()
     );
     assert!(store.get(&digest_live)?.is_some());
     Ok(())
+||||||| parent of 0d57896 (feat(engine): extract arbitraitor-engine, unify the three pipeline compositions (ADR-0038))
+/// ADR-0038 decision 3: the default server registers all seven tool
+/// handlers, including `request_approval` and `run_approved_artifact` which
+/// were previously implemented but unregistered.
+#[test]
+fn default_server_registers_all_seven_tools() {
+    let server = build_default_server(test_engine_api());
+
+    let capabilities = server.list_capabilities();
+    assert_eq!(capabilities.len(), 7, "all seven tools must be registered");
+    assert_eq!(
+        capabilities,
+        vec![
+            ("inspect_url".to_owned(), McpCapability::Inspect),
+            ("fetch_artifact".to_owned(), McpCapability::Inspect),
+            ("scan_artifact".to_owned(), McpCapability::Inspect),
+            ("query_receipt".to_owned(), McpCapability::Inspect),
+            ("explain_verdict".to_owned(), McpCapability::Inspect),
+            ("request_approval".to_owned(), McpCapability::Approve),
+            ("run_approved_artifact".to_owned(), McpCapability::Execute),
+        ]
+    );
+}
+
+/// ADR-0038 decision 3 (migration parity): `inspect_url` now routes through
+/// the pipeline engine, so the fetched artifact is stored in the CAS and a
+/// receipt is persisted — the former tool-local composition skipped both.
+#[test]
+fn inspect_url_persists_cas_entry_and_receipt() {
+    let body = b"#!/bin/sh\necho parity\n";
+    let url = serve_once(body);
+    let api = test_engine_api();
+    let tool = InspectUrlTool::new(api.clone());
+
+    let response = tool.handle(json!({"url": url}), &agent());
+
+    assert!(!response.is_error, "response was {response:?}");
+    let McpContent::Json { json } = &response.content[0] else {
+        panic!("expected json content");
+    };
+    let sha256 = json["artifact"]["sha256"].as_str().unwrap_or("missing");
+    let artifacts = api.list_artifacts().unwrap_or_else(|e| panic!("list: {e}"));
+    assert!(
+        artifacts.iter().any(|a| a.sha256 == sha256),
+        "inspect_url must store the artifact in the engine CAS"
+    );
+    assert!(
+        api.receipts_dir().join(format!("{sha256}.json")).is_file(),
+        "inspect_url must persist an inspection receipt"
+    );
 }

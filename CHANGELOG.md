@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `arbitraitor-engine` crate (ADR-0038, accepted): the single consolidated
+  pipeline engine owning fetch → store → analyze → provenance → receipt →
+  verdict → release. Public surface: `Arbitraitor`, `ArbitraitorBuilder`,
+  `ArbitraitorApi`, `Config`, `InspectionResult`, `InspectionResultReceipt`
+  (engine-owned receipt wrapper, decision 6), and a typed `EngineError`. The
+  engine drives the `arbitraitor-core` `PipelineOperation` state machine
+  through every inspection (retrieval → storage → identification → analysis
+  → expansion → evaluation → verdict) and through
+  approval → release → completion on the release path (#747).
+- `arbitraitor-engine::FAIL_CLOSED_POLICY_TOML`: the fail-closed policy for
+  non-interactive surfaces, exported so the daemon and embedders configure
+  identical unattended behavior.
+- `arbitraitor-engine::scan_path`: bounded, symlink-rejecting local-file
+  scan through the full pipeline (moved from the MCP tool's private
+  implementation).
+- The MCP default server now registers all seven tool handlers:
+  `request_approval` and `run_approved_artifact` were implemented but never
+  registered (ADR-0038 decision 3). Approved execution reads artifact
+  bytes from the engine's CAS.
 - Headless (non-interactive) plan-bound approval for MCP embedders (#746,
   ADR-0013): `arbitraitor-mcp` gains `HeadlessApprovalPrompt`, a
   `PendingApprovalStore` (one JSON record per canonical plan digest in an
@@ -37,7 +56,6 @@ caps pending record files at
 `MAX_PENDING_RECORDS` (1000, freed by
   `PendingApprovalStore::prune_expired`), and `PendingApprovalStore::open`
   refuses group/world-writable store directories on Unix.
-
 - `xtask cleanup` (repo maintenance, `cargo run -p xtask -- cleanup`):
   the `worktrees` phase removes secondary worktrees whose branch maps to
   a merged or closed PR (tracked via `gh`) and deletes those branches; a
@@ -51,6 +69,45 @@ caps pending record files at
   (main checkout plus every unlocked worktree) older than `--days`
   (default 7) and reports reclaimed bytes. Both phases dry-run by
   default; `--yes` applies.
+
+### Changed
+
+- **CLI, MCP, and daemon now route through `arbitraitor-engine`**
+  (ADR-0038): the three divergent pipeline compositions are unified, which
+  closes silent coverage holes and changes observable behavior on every
+  surface:
+  - **CLI `inspect`/`fetch`/`wrap`** now evaluate the configured policy
+    (previously skipped entirely). With no policy file and no inline rules
+    configured, the built-in verdict derivation applies, preserving the
+    default pass-through behavior. CLI inspections now persist a receipt to
+    the default receipts directory even without `--receipt`, and record
+    store metadata (source URL, content type) for inspected artifacts.
+  - **MCP `inspect_url`/`fetch_artifact`/`scan_artifact`** now store fetched
+    artifacts in the CAS and persist receipts (previously neither
+    happened; `fetch_artifact`'s documented "record its CAS identity" is
+    finally true). `fetch_artifact` responses now always include the
+    effective final URL instead of `null` when no redirect occurred.
+  - **Daemon socket `Inspect`/`Scan`/`QueryReceipt`** now apply the
+    daemon's fail-closed policy (an unmatched artifact verdicts `Block`
+    instead of the analysis verdict), verify provenance, persist receipts,
+    and bound local-file reads (previously unbounded). `QueryReceipt` now
+    returns the artifact's actual verdict and finding count instead of the
+    existence-only `stored` marker. `Daemon::new`/`with_options` return
+    `Result` because the engine opens the CAS eagerly.
+  - **`ArbitraitorApi` release gate is now the state machine**: release
+    after an `Incomplete` verdict (detector failure) is rejected — the
+    previous check only rejected `Block` and `Error` (fail-closed per
+    spec §18.3).
+  - Receipts are unified on the richer CLI shape (transport metadata,
+    signature findings, rule pack versions, detector provenance) and the
+    canonical `unix:<secs>.<nanos>Z` timestamp; `query_receipts` parses both
+    timestamp forms.
+  - `arbitraitor-daemon::api` re-exports the engine surface
+    (`ApiError` → `EngineError`); the daemon crate retains only socket I/O,
+    the operation queue, capability-token recording, and rate-limiting.
+  - `arbitraitor-daemon`'s `Config::default` directories moved with the
+    engine to the user cache root (`$XDG_CACHE_HOME/arbitraitor`), no longer
+    the working-directory-relative `.arbitraitor`.
 
 ### Changed (CI)
 

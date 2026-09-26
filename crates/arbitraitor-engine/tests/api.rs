@@ -1,14 +1,18 @@
-//! Integration tests for the programmatic library API.
+//! Integration tests for the pipeline engine's programmatic API.
 //!
 //! These tests use a local `TcpListener` mock HTTP server to avoid real network
 //! requests. The fetch policy is configured to allow loopback addresses.
+//!
+//! Moved from `crates/arbitraitor-daemon/tests/api.rs` when the API moved to
+//! the engine (ADR-0038); the assertions are preserved, with `ApiError`
+//! renamed to the engine's `EngineError`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arbitraitor_daemon::api::{ApiError, Arbitraitor, ArbitraitorApi, Config};
+use arbitraitor_engine::{Arbitraitor, ArbitraitorApi, Config, EngineError};
 use arbitraitor_fetch::{FetchPolicy, FetchScheme, TlsVerifier};
 use arbitraitor_policy::PolicyEngine;
 use sha2::{Digest, Sha256};
@@ -218,7 +222,7 @@ async fn release_without_inspection_receipt_is_rejected() -> Result<(), Box<dyn 
     let result = api.release(&fetched.sha256, &dest);
 
     assert!(
-        matches!(result, Err(ApiError::NoReceipt(_))),
+        matches!(result, Err(EngineError::NoReceipt(_))),
         "release without inspection receipt must be rejected, got {result:?}"
     );
     assert!(
@@ -243,7 +247,7 @@ async fn release_after_block_verdict_is_rejected() -> Result<(), Box<dyn std::er
     let result = api.release(&inspected.sha256, &dest);
 
     assert!(
-        matches!(result, Err(ApiError::PolicyBlocked(Verdict::Block))),
+        matches!(result, Err(EngineError::PolicyBlocked(Verdict::Block))),
         "release after Block verdict must be rejected, got {result:?}"
     );
     assert!(!dest.exists());
@@ -334,7 +338,7 @@ async fn api_error_on_missing_artifact() {
     let fake = "0".repeat(64);
     let result = api.scan(&fake);
 
-    assert!(matches!(result, Err(ApiError::NotFound(_))));
+    assert!(matches!(result, Err(EngineError::NotFound(_))));
 }
 
 #[tokio::test]
@@ -355,5 +359,151 @@ action = \"block\"\n";
     let result = api.inspect(&url).await?;
 
     assert_eq!(result.verdict, Verdict::Block);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0038 decision tests
+// ---------------------------------------------------------------------------
+
+/// ADR-0038 decision 1 + staged rollout stage 2: the engine owns provenance
+/// verification. The former `ArbitraitorApi` (daemon composition) never
+/// verified signatures; every consumer routed through the engine now gets
+/// the provenance stage. This is the migration-parity fixture for the
+/// daemon path: a signature configured on the builder is verified during
+/// `inspect` and recorded in the result and the receipt.
+#[tokio::test]
+async fn inspect_with_minisign_signature_records_provenance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key = minisign::KeyPair::generate_unencrypted_keypair()?;
+    let root = unique_dir("provenance");
+    let payload = b"#!/bin/sh\necho provenance\n";
+    let signature_path = root.join("artifact.minisig");
+    let signature = minisign::sign(
+        Some(&key.pk),
+        &key.sk,
+        std::io::Cursor::new(payload),
+        Some("arbitraitor engine test"),
+        Some("engine test signer"),
+    )?;
+    std::fs::write(&signature_path, signature.to_bytes())?;
+
+    let api = Arbitraitor::builder()
+        .config(test_config(&root))
+        .signatures(arbitraitor_engine::SignatureInputs {
+            minisign: vec![arbitraitor_engine::MinisignSignatureInput {
+                signature_path,
+                public_key: key.pk.to_box()?.to_string(),
+            }],
+            cosign: Vec::new(),
+        })
+        .build()?;
+    let url = mock_http_server(payload, "text/x-shellscript").await;
+
+    let result = api.inspect(&url).await?;
+
+    assert_eq!(
+        result.signature_verifications.len(),
+        1,
+        "the provenance stage must run on the engine path"
+    );
+    let verification = &result.signature_verifications[0];
+    assert_eq!(verification.system, "minisign");
+    assert!(verification.verified);
+    assert!(verification.identity.is_some());
+    let receipt_json = result.receipt.to_vec_pretty()?;
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt_json)?;
+    let findings = receipt["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings"));
+    assert!(
+        findings.iter().any(|f| f["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("provenance.signature.minisign"))),
+        "the receipt must record the signature verification as a finding"
+    );
+    Ok(())
+}
+
+/// ADR-0038 decision 1: a pinned digest that does not match the fetched
+/// bytes fails the retrieval (immutable identity, invariant 2).
+#[tokio::test]
+async fn inspect_pinned_rejects_digest_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let root = unique_dir("pinned-mismatch");
+    let api = ArbitraitorApi::new(test_config(&root))?;
+    let url = mock_http_server(b"pinned payload", "text/plain").await;
+    let wrong = "0".repeat(64).parse()?;
+
+    let result = api.inspect_pinned(&url, Some(wrong)).await;
+
+    assert!(result.is_err(), "digest mismatch must fail the inspection");
+    Ok(())
+}
+
+/// ADR-0038 decision 5: the exported fail-closed policy constant is valid
+/// policy TOML and blocks unmatched artifacts in the engine's
+/// non-interactive evaluation context (the daemon socket behavior).
+#[tokio::test]
+async fn fail_closed_policy_blocks_unmatched_artifacts() -> Result<(), Box<dyn std::error::Error>> {
+    use arbitraitor_model::verdict::Verdict;
+    let root = unique_dir("fail-closed");
+    let config = arbitraitor_engine::Config {
+        policy_toml: arbitraitor_engine::FAIL_CLOSED_POLICY_TOML.to_owned(),
+        ..test_config(&root)
+    };
+    let api = ArbitraitorApi::new(config)?;
+    let url = mock_http_server(b"clean content", "text/plain").await;
+
+    let result = api.inspect(&url).await?;
+
+    assert_eq!(result.verdict, Verdict::Block);
+    Ok(())
+}
+
+/// ADR-0038 decision 6 + receipt unification: `query_receipts` reads the
+/// engine's canonical `unix:<secs>...` timestamps (the former daemon
+/// composition wrote bare epoch seconds and parsed its own format back as
+/// zero).
+#[tokio::test]
+async fn query_receipts_parses_engine_timestamps() -> Result<(), Box<dyn std::error::Error>> {
+    let root = unique_dir("query-timestamps");
+    let api = ArbitraitorApi::new(test_config(&root))?;
+    let url = mock_http_server(b"timestamped", "text/plain").await;
+    let result = api.inspect(&url).await?;
+
+    let summaries = api.query_receipts(arbitraitor_engine::ReceiptFilter::default())?;
+
+    let summary = summaries
+        .iter()
+        .find(|s| s.sha256 == result.sha256)
+        .unwrap_or_else(|| panic!("receipt summary for inspect must exist"));
+    assert!(
+        summary.created_at > 0,
+        "engine timestamps must parse back to nonzero epoch seconds"
+    );
+    Ok(())
+}
+
+/// Engine `scan_path` preserves the MCP tool's bounded-read contract:
+/// symlinks are rejected and the size bound is enforced.
+#[test]
+fn scan_path_rejects_symlinks_and_enforces_size_bound() -> Result<(), Box<dyn std::error::Error>> {
+    let root = unique_dir("scan-path");
+    let api = ArbitraitorApi::new(test_config(&root))?;
+    let target = root.join("target.sh");
+    std::fs::write(&target, b"#!/bin/sh\necho target\n")?;
+    let link = root.join("link.sh");
+    std::os::unix::fs::symlink(&target, &link)?;
+
+    let symlink_result = api.scan_path(&link, arbitraitor_engine::DEFAULT_SCAN_MAX_BYTES);
+    assert!(symlink_result.is_err(), "symlink must be rejected");
+
+    let oversized = root.join("oversized.sh");
+    std::fs::write(&oversized, b"0123456789")?;
+    let bounded = api.scan_path(&oversized, 3);
+    assert!(bounded.is_err(), "size bound must be enforced");
+
+    let ok = api.scan_path(&target, arbitraitor_engine::DEFAULT_SCAN_MAX_BYTES)?;
+    assert_eq!(ok.verdict, arbitraitor_model::verdict::Verdict::Pass);
     Ok(())
 }

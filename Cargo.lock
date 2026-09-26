@@ -203,6 +203,7 @@ dependencies = [
  "arbitraitor-artifact",
  "arbitraitor-core",
  "arbitraitor-daemon",
+ "arbitraitor-engine",
  "arbitraitor-exec",
  "arbitraitor-fetch",
  "arbitraitor-intel",
@@ -259,14 +260,10 @@ dependencies = [
 name = "arbitraitor-daemon"
 version = "0.1.0"
 dependencies = [
- "arbitraitor-analysis",
  "arbitraitor-core",
- "arbitraitor-exec",
+ "arbitraitor-engine",
  "arbitraitor-fetch",
  "arbitraitor-model",
- "arbitraitor-policy",
- "arbitraitor-receipt",
- "arbitraitor-store",
  "arbitraitor-workspace-hack",
  "rustix",
  "serde",
@@ -276,6 +273,31 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "arbitraitor-engine"
+version = "0.1.0"
+dependencies = [
+ "arbitraitor-analysis",
+ "arbitraitor-artifact",
+ "arbitraitor-core",
+ "arbitraitor-exec",
+ "arbitraitor-fetch",
+ "arbitraitor-model",
+ "arbitraitor-policy",
+ "arbitraitor-provenance",
+ "arbitraitor-receipt",
+ "arbitraitor-store",
+ "arbitraitor-workspace-hack",
+ "arbitraitor-yarax",
+ "minisign",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -349,6 +371,7 @@ dependencies = [
  "arbitraitor-analysis",
  "arbitraitor-artifact",
  "arbitraitor-core",
+ "arbitraitor-engine",
  "arbitraitor-exec",
  "arbitraitor-fetch",
  "arbitraitor-model",

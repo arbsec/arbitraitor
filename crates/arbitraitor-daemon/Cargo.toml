@@ -12,20 +12,18 @@ publish = false
 workspace = true
 
 [dependencies]
-arbitraitor-analysis = { workspace = true }
 arbitraitor-core = { workspace = true }
-arbitraitor-exec = { workspace = true }
+arbitraitor-engine = { workspace = true }
 arbitraitor-fetch = { workspace = true }
 arbitraitor-model = { workspace = true }
-arbitraitor-policy = { workspace = true }
-arbitraitor-receipt = { workspace = true }
-arbitraitor-store = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }

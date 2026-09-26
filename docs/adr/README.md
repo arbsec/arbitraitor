@@ -59,7 +59,7 @@ supersede it.
 | [0035](0035-lnk-argument-padding-cve-2025-9491.md) | LNK argument padding detection (CVE-2025-9491) | Accepted | #473 |
 | [0036](0036-run-pipeline-content-type-execution-gate.md) | `run` pipeline content-type execution gate | Accepted | #612 |
 | [0037](0037-wasmtime-cve-risk-register.md) | Wasmtime CVE risk register | Accepted | #463 |
-| [0038](0038-pipeline-engine-crate-extraction.md) | Pipeline engine crate extraction and naming | Proposed | — |
+| [0038](0038-pipeline-engine-crate-extraction.md) | Pipeline engine crate extraction and naming | Accepted | #747 |
 | [0039](0039-receipt-envelope-structure.md) | Receipt envelope structure (spec §31.1) | Accepted | #492 |
 | [0040](0040-wasmtime-security-floor.md) | Wasmtime security floor in Cargo.toml | Accepted | — |
 

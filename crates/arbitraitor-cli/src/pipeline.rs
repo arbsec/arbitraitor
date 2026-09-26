@@ -1,65 +1,46 @@
-//! Inspect pipeline orchestration for the CLI crate.
+//! Thin inspection adapter over the pipeline engine (ADR-0038 decision 4).
 //!
-//! This module keeps fetch, analysis, provenance verification, CAS storage, and
-//! receipt assembly out of `main.rs` so the entry point can stay focused on
-//! argument parsing, dispatch, and output formatting.
+//! This module builds an [`arbitraitor_engine::ArbitraitorBuilder`] from CLI
+//! arguments and the layered configuration, calls
+//! [`arbitraitor_engine::ArbitraitorApi::inspect_pinned`], and formats the
+//! result through the CLI's presentation helpers. No pipeline stage is
+//! composed here: fetch, CAS storage, analysis, provenance verification,
+//! policy evaluation, and receipt assembly all run inside the engine.
+//!
+//! The `scan` subcommand's local analysis wiring (`analysis_coordinator`)
+//! remains CLI-side: it is not one of the three compositions ADR-0038
+//! consolidated, and its stdin/recursive/filter semantics have no engine
+//! equivalent yet.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::str::FromStr;
 
-use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
+use arbitraitor_analysis::AnalysisCoordinator;
 use arbitraitor_core::config::Config;
-use arbitraitor_fetch::{
-    ChildArtifact, FetchPolicy, FetchRequest, FetchSource, FetchUrl, Fetcher, FileFetcher,
-    HttpFetcher, HttpMethod, VecSink, discover_child_artifacts_with_bytes,
-};
-use arbitraitor_model::finding::FindingCategory;
+use arbitraitor_engine::{Arbitraitor, SignatureInputs};
+use arbitraitor_fetch::FetchPolicy;
 use arbitraitor_model::ids::Sha256Digest;
-use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
-use arbitraitor_provenance::{
-    SignatureVerification, parse_minisign_public_key, verify_cosign, verify_minisign,
-};
-use arbitraitor_receipt::{
-    DetectorVersion, FindingSummary, ReceiptBuilder, ReceiptTimestamps,
-    RetrievalInfo as ReceiptRetrievalInfo, VerdictInfo,
-};
-use arbitraitor_store::ContentStore;
+use arbitraitor_model::verdict::Verdict;
+use arbitraitor_receipt::DetectorVersion;
 use arbitraitor_yarax::{RulePackManager, RuleSource, YaraDetector};
 use miette::{IntoDiagnostic, Result};
-use sha2::{Digest, Sha256};
 
-/// Signature verification inputs collected from CLI arguments.
-#[derive(Debug, Default)]
-pub(crate) struct SignatureInputs {
-    minisign: Vec<MinisignInput>,
-    cosign: Vec<CosignInput>,
-}
-
-#[derive(Debug)]
-struct MinisignInput {
-    signature_path: PathBuf,
-    public_key: String,
-}
-
-#[derive(Debug)]
-struct CosignInput {
-    bundle_path: PathBuf,
-    identity: String,
-    issuer: String,
-}
+pub(crate) use arbitraitor_engine::{
+    default_cas_dir, parse_fetch_source, receipt_timestamp as timestamp,
+};
 
 /// Result data the CLI needs after inspect orchestration completes.
-#[allow(clippy::too_many_arguments)]
 pub(crate) struct InspectOutcome {
     /// Final policy verdict derived from analysis findings.
     pub(crate) verdict: Verdict,
-    /// Exact bytes fetched, stored, and analyzed.
+    /// Exact bytes fetched, stored, and analyzed (read back from CAS).
     pub(crate) bytes: Vec<u8>,
     /// SHA-256 digest for the fetched artifact bytes.
     pub(crate) sha256: Sha256Digest,
 }
 
-/// Fetch, store, analyze, verify provenance, and optionally emit a receipt.
+/// Fetch, store, analyze, verify provenance, evaluate policy, and emit a
+/// receipt through the pipeline engine.
 ///
 /// `emit_human_report` controls the human-readable interception report on
 /// stderr. Wrapper invocations (shim mode) pass `false` whenever stderr is
@@ -68,10 +49,6 @@ pub(crate) struct InspectOutcome {
 #[allow(
     clippy::too_many_arguments,
     reason = "pipeline inputs mirror the CLI flag surface; grouping would hide the contract"
-)]
-#[allow(
-    clippy::too_many_lines,
-    reason = "fetch/store/signature/receipt stages read linearly; extraction would scatter the pipeline"
 )]
 pub(crate) async fn inspect(
     url: &str,
@@ -84,8 +61,18 @@ pub(crate) async fn inspect(
     explain_format: Option<crate::ExplainFormat>,
     emit_human_report: bool,
 ) -> Result<InspectOutcome> {
+    // Validate the source before opening the store so malformed URLs fail
+    // fast with the parse error, exactly as the pre-engine pipeline did.
+    if let Ok(arbitraitor_fetch::FetchSource::Stdin) = parse_fetch_source(url) {
+        miette::bail!("stdin source is not supported by inspect; use 'arbitraitor scan --stdin'");
+    }
+    parse_fetch_source(url).into_diagnostic()?;
+    let cas_root = cas_dir
+        .map(Path::to_path_buf)
+        .or_else(|| config.store.cas_dir.clone())
+        .unwrap_or_else(default_cas_dir);
     let fetch_policy = FetchPolicy {
-        total_timeout: Duration::from_secs(config.fetch.total_timeout_secs),
+        total_timeout: std::time::Duration::from_secs(config.fetch.total_timeout_secs),
         max_compressed_size: config.fetch.max_bytes,
         max_uncompressed_size: config.fetch.max_bytes,
         max_redirects: usize::try_from(config.fetch.max_redirects).into_diagnostic()?,
@@ -94,77 +81,40 @@ pub(crate) async fn inspect(
         forward_authorization_cross_origin: config.fetch.forward_authorization_cross_origin,
         ..FetchPolicy::default()
     };
-    let source = parse_fetch_source(url)?;
-    let request = FetchRequest {
-        source,
-        policy: fetch_policy,
-        method: HttpMethod::Get,
-        body: None,
-        expected_sha256,
-        cancellation: arbitraitor_fetch::FetchCancellation::new(),
-        credentials: arbitraitor_fetch::RequestCredentials::default(),
-        headers: Vec::new(),
-    };
-    let mut fetch_sink = VecSink::new();
-    let fetch_receipt = match &request.source {
-        FetchSource::File(_) => FileFetcher::new().fetch(request, &mut fetch_sink).await,
-        FetchSource::Url(_) => HttpFetcher::new().fetch(request, &mut fetch_sink).await,
-        FetchSource::Stdin => {
-            miette::bail!(
-                "stdin source is not supported by inspect; use 'arbitraitor scan --stdin'"
-            );
-        }
+    // ADR-0038: the CLI now honors configured policy (closing the coverage
+    // hole where `inspect` skipped policy evaluation entirely). With no
+    // policy file and no inline rules, the engine's built-in verdict
+    // derivation applies, preserving the CLI's default pass-through
+    // behavior for clean artifacts.
+    let policy_configured = config.policy.policy_file.is_some() || !config.policy.rules.is_empty();
+    let mut builder = Arbitraitor::builder().config(arbitraitor_engine::Config {
+        store_path: cas_root.clone(),
+        receipts_path: receipts_sibling(&cas_root),
+        fetch_policy,
+        ..arbitraitor_engine::Config::default()
+    });
+    if policy_configured {
+        builder = builder.policy(config.build_policy_engine().into_diagnostic()?);
     }
-    .into_diagnostic()?;
-    let bytes = fetch_sink.into_bytes();
-    let artifact_len = u64::try_from(bytes.len()).into_diagnostic()?;
-    if artifact_len > config.store.max_bytes {
-        miette::bail!(
-            "artifact exceeds configured store limit: bytes={}, limit={}",
-            artifact_len,
-            config.store.max_bytes
-        );
+    if let Some(rules_dir) = rules_dir {
+        builder = builder.yara_rules(rules_dir);
     }
-    let artifact_sha256 = Sha256Digest::new(Sha256::digest(&bytes).into());
-    if artifact_sha256 != fetch_receipt.sha256 {
-        miette::bail!(
-            "fetch digest mismatch: receipt={}, bytes={}",
-            fetch_receipt.sha256,
-            artifact_sha256
-        );
-    }
+    let api = builder.signatures(signatures).build().into_diagnostic()?;
 
-    let cas_root = cas_dir
-        .map(Path::to_path_buf)
-        .or_else(|| config.store.cas_dir.clone())
-        .unwrap_or_else(default_cas_dir);
-    let store = ContentStore::open(&cas_root).into_diagnostic()?;
-    let mut store_sink = store.sink(Some(&artifact_sha256)).into_diagnostic()?;
-    store_sink.write_chunk(&bytes).await.into_diagnostic()?;
-    let stored_digest = store_sink.finish().await.into_diagnostic()?;
-    if stored_digest != artifact_sha256 {
-        miette::bail!(
-            "CAS digest mismatch: stored={}, expected={}",
-            stored_digest,
-            artifact_sha256
-        );
-    }
+    let result = api
+        .inspect_pinned(url, expected_sha256)
+        .await
+        .into_diagnostic()?;
 
-    let child_artifacts = discover_and_store_children(&store, &bytes)?;
-    let fetch_receipt = fetch_receipt.with_child_artifacts(child_artifacts);
-
-    let signature_verifications = verify_signatures(&bytes, &signatures)?;
-
-    let analysis_retrieval = analysis_retrieval_info(url, &fetch_receipt);
-    let (coordinator, rule_pack_versions) = analysis_coordinator(rules_dir)?;
-    let result = coordinator.analyze_with_retrieval(&bytes, Some(analysis_retrieval));
     if emit_human_report {
         crate::write_report(
             &mut std::io::stderr().lock(),
-            &result,
-            &artifact_sha256,
+            &result.sha256,
             &cas_root,
-            &signature_verifications,
+            &result.artifact_type,
+            result.verdict,
+            &result.signature_verifications,
+            &result.findings,
         )?;
     }
 
@@ -173,61 +123,32 @@ pub(crate) async fn inspect(
     }
 
     if let Some(path) = receipt_path {
-        let receipt = build_receipt(
-            url,
-            &fetch_receipt,
-            &result,
-            &artifact_sha256,
-            bytes.len(),
-            &rule_pack_versions,
-            &signature_verifications,
-        )?;
-        let json = serde_json::to_vec_pretty(&receipt).into_diagnostic()?;
+        let json = result.receipt.to_vec_pretty().into_diagnostic()?;
         std::fs::write(path, json).into_diagnostic()?;
     }
 
+    // Bytes stay CAS-addressed in the engine; the wrapper release path reads
+    // them back and re-verifies the digest before any emission (invariant 2).
+    let bytes = api.read_artifact(&result.sha256).into_diagnostic()?;
+    let sha256 = Sha256Digest::from_str(&result.sha256).into_diagnostic()?;
     Ok(InspectOutcome {
         verdict: result.verdict,
         bytes,
-        sha256: artifact_sha256,
+        sha256,
     })
 }
 
-/// Parse a CLI inspect source into a fetch source.
-pub(crate) fn parse_fetch_source(input: &str) -> Result<FetchSource> {
-    if input == "-" || input == "stdin://" {
-        return Ok(FetchSource::Stdin);
-    }
-    if input.starts_with("http://") || input.starts_with("https://") {
-        return Ok(FetchSource::Url(
-            FetchUrl::parse(input).map_err(|e| miette::miette!("invalid URL: {e}"))?,
-        ));
-    }
-    if input.starts_with("file://") {
-        let parsed =
-            FetchUrl::parse(input).map_err(|e| miette::miette!("invalid file:// URL: {e}"))?;
-        let path = parsed
-            .as_url()
-            .to_file_path()
-            .map_err(|()| miette::miette!("file:// URL does not resolve to a local path"))?;
-        return Ok(FetchSource::File(path));
-    }
-    if let Some(colon) = input.find(':') {
-        let scheme = &input[..colon];
-        if !scheme.is_empty()
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-        {
-            miette::bail!(
-                "unsupported URI scheme '{scheme}'; only http, https, and file are accepted"
-            );
-        }
-    }
-    Ok(FetchSource::File(PathBuf::from(input)))
+/// Returns the receipts directory sibling to a CAS root.
+fn receipts_sibling(cas_root: &Path) -> PathBuf {
+    cas_root.parent().map_or_else(
+        || cas_root.join("receipts"),
+        |parent| parent.join("receipts"),
+    )
 }
 
 /// Build the artifact analysis coordinator, including optional YARA rules.
+///
+/// Used by the `scan` subcommand's local analysis wiring.
 pub(crate) fn analysis_coordinator(
     rules_dir: Option<&Path>,
 ) -> Result<(AnalysisCoordinator, Vec<DetectorVersion>)> {
@@ -257,111 +178,7 @@ pub(crate) fn analysis_coordinator(
     ))
 }
 
-/// Return the default content-addressed store directory.
-///
-/// The default lives in the user's cache root —
-/// `$XDG_CACHE_HOME/arbitraitor/cas`, falling back to
-/// `$HOME/.cache/arbitraitor/cas` — so interception never materializes a
-/// store inside the caller's working directory. When no home directory can
-/// be resolved, the legacy relative `.arbitraitor/cas` is returned.
-pub(crate) fn default_cas_dir() -> PathBuf {
-    match user_cache_root() {
-        Some(root) => root.join("arbitraitor").join("cas"),
-        None => PathBuf::from(".arbitraitor").join("cas"),
-    }
-}
-
-/// Resolves the user's cache root: `$XDG_CACHE_HOME` when set to an absolute
-/// path, otherwise `$HOME/.cache`.
-fn user_cache_root() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CACHE_HOME")
-        && !path.is_empty()
-    {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            return Some(path);
-        }
-    }
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(|home| PathBuf::from(home).join(".cache"))
-}
-
-/// Convert fetch receipt metadata to analysis retrieval metadata.
-pub(crate) fn analysis_retrieval_info(
-    requested_url: &str,
-    fetch_receipt: &arbitraitor_fetch::FetchReceipt,
-) -> AnalysisRetrievalInfo {
-    AnalysisRetrievalInfo {
-        requested_location: Some(arbitraitor_fetch::redact_url(requested_url)),
-        final_location: fetch_receipt
-            .metadata
-            .final_url
-            .as_ref()
-            .map(ToString::to_string)
-            .map(|url| arbitraitor_fetch::redact_url(&url)),
-        content_type: fetch_receipt.metadata.content_type.clone(),
-        byte_count: Some(fetch_receipt.bytes_written),
-    }
-}
-
-/// Build a receipt from fetch, analysis, detector, and signature data.
-pub(crate) fn build_receipt(
-    requested_url: &str,
-    fetch_receipt: &arbitraitor_fetch::FetchReceipt,
-    result: &arbitraitor_analysis::AnalysisResult,
-    artifact_sha256: &Sha256Digest,
-    artifact_size: usize,
-    rule_pack_versions: &[DetectorVersion],
-    signature_verifications: &[SignatureVerification],
-) -> Result<arbitraitor_receipt::Receipt> {
-    let artifact_size = u64::try_from(artifact_size).into_diagnostic()?;
-    let now = timestamp();
-    let mut builder = ReceiptBuilder::new(
-        env!("CARGO_PKG_VERSION"),
-        artifact_sha256.to_string(),
-        artifact_size,
-        VerdictInfo {
-            verdict: result.verdict,
-            deciding_rule: None,
-            policy_trace: vec!["arbitraitor-analysis built-in verdict derivation".to_owned()],
-        },
-        ReceiptTimestamps {
-            created: now.clone(),
-            modified: now,
-        },
-    )
-    .artifact_type(format!("{:?}", result.classification.artifact_type))
-    .retrieval(receipt_retrieval_info(requested_url, fetch_receipt))
-    .findings(result.findings.iter().map(FindingSummary::from))
-    .findings(
-        signature_verifications
-            .iter()
-            .enumerate()
-            .map(|(index, verification)| signature_finding(index, verification)),
-    );
-
-    for detector_result in &result.detector_results {
-        builder = builder.detector_version(DetectorVersion {
-            id: detector_result.metadata.id.clone(),
-            version: detector_result.metadata.version.clone(),
-        });
-    }
-    for rule_pack_version in rule_pack_versions {
-        builder = builder.detector_version(rule_pack_version.clone());
-    }
-
-    if let Some(identity) = signature_verifications
-        .iter()
-        .find_map(|v| v.verifier_identity.as_deref())
-    {
-        builder = builder.verifier_identity(identity);
-    }
-
-    Ok(builder.build())
-}
-
-/// Convert CLI signature argument vectors into typed signature inputs.
+/// Convert CLI signature argument vectors into typed engine signature inputs.
 pub(crate) fn signature_inputs(
     minisign_sig: Vec<PathBuf>,
     minisign_key: Vec<String>,
@@ -382,147 +199,24 @@ pub(crate) fn signature_inputs(
         minisign: minisign_sig
             .into_iter()
             .zip(minisign_key)
-            .map(|(signature_path, public_key)| MinisignInput {
-                signature_path,
-                public_key,
-            })
+            .map(
+                |(signature_path, public_key)| arbitraitor_engine::MinisignSignatureInput {
+                    signature_path,
+                    public_key,
+                },
+            )
             .collect(),
         cosign: cosign_bundle
             .into_iter()
             .zip(cosign_identity)
             .zip(cosign_issuer)
-            .map(|((bundle_path, identity), issuer)| CosignInput {
-                bundle_path,
-                identity,
-                issuer,
-            })
+            .map(
+                |((bundle_path, identity), issuer)| arbitraitor_engine::CosignBundleInput {
+                    bundle_path,
+                    identity,
+                    issuer,
+                },
+            )
             .collect(),
     })
-}
-
-/// Verify all requested minisign and cosign signatures for artifact bytes.
-pub(crate) fn verify_signatures(
-    artifact_bytes: &[u8],
-    signatures: &SignatureInputs,
-) -> Result<Vec<SignatureVerification>> {
-    let mut verifications = Vec::with_capacity(signatures.minisign.len() + signatures.cosign.len());
-    for minisign_input in &signatures.minisign {
-        let signature = std::fs::read(&minisign_input.signature_path).into_diagnostic()?;
-        let public_key = parse_minisign_public_key(&minisign_input.public_key).into_diagnostic()?;
-        verifications
-            .push(verify_minisign(artifact_bytes, &signature, &public_key).into_diagnostic()?);
-    }
-    for cosign_input in &signatures.cosign {
-        verifications.push(
-            verify_cosign(
-                artifact_bytes,
-                &cosign_input.bundle_path,
-                &cosign_input.identity,
-                &cosign_input.issuer,
-            )
-            .into_diagnostic()?,
-        );
-    }
-    Ok(verifications)
-}
-
-/// Convert a signature verification into a receipt finding summary.
-pub(crate) fn signature_finding(
-    index: usize,
-    verification: &SignatureVerification,
-) -> FindingSummary {
-    FindingSummary {
-        id: format!(
-            "provenance.signature.{}.{}",
-            verification.system.as_str(),
-            index + 1
-        ),
-        category: FindingCategory::Provenance,
-        severity: Severity::Informational,
-        confidence: Confidence::Confirmed,
-        title: signature_title(verification),
-        location: None,
-        evidence: None,
-        remediation: None,
-        references: Vec::new(),
-        taxonomies: Vec::new(),
-    }
-}
-
-/// Generate a human-readable receipt title for a signature verification.
-pub(crate) fn signature_title(verification: &SignatureVerification) -> String {
-    let system = verification.system.as_str();
-    match verification.identity.as_deref() {
-        Some(identity) => format!("{system} signature verified for {identity}"),
-        None => format!("{system} signature verified"),
-    }
-}
-
-/// Convert fetch receipt metadata to receipt retrieval metadata.
-pub(crate) fn receipt_retrieval_info(
-    requested_url: &str,
-    fetch_receipt: &arbitraitor_fetch::FetchReceipt,
-) -> ReceiptRetrievalInfo {
-    let mut retrieval = ReceiptRetrievalInfo::new(requested_url)
-        .with_redirect_chain(
-            fetch_receipt
-                .metadata
-                .redirect_chain
-                .iter()
-                .map(ToString::to_string),
-        )
-        .with_byte_count(fetch_receipt.bytes_written)
-        .with_redirect_credential_secrecy(fetch_receipt.metadata.redirect_credential_secrecy);
-    if let Some(final_url) = &fetch_receipt.metadata.final_url {
-        retrieval = retrieval.with_final_url(final_url.to_string());
-    }
-    if let Some(content_type) = &fetch_receipt.metadata.content_type {
-        retrieval = retrieval.with_content_type(content_type.clone());
-    }
-    if let Some(tls_version) = &fetch_receipt.metadata.tls_version {
-        retrieval = retrieval.with_tls_version(tls_version.clone());
-    }
-    if let Some(fingerprint) = &fetch_receipt.metadata.peer_certificate_fingerprint {
-        retrieval = retrieval.with_peer_cert_fingerprint(format!("sha256:{fingerprint}"));
-    }
-    retrieval
-}
-
-/// Return the current timestamp in the existing receipt timestamp format.
-pub(crate) fn timestamp() -> String {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => format!(
-            "unix:{}.{:09}Z",
-            duration.as_secs(),
-            duration.subsec_nanos()
-        ),
-        Err(error) => format!(
-            "unix:-{}.{:09}Z",
-            error.duration().as_secs(),
-            error.duration().subsec_nanos()
-        ),
-    }
-}
-
-/// Discover, extract, and store child artifacts in CAS.
-///
-/// When the fetched bytes are an archive or compressed stream, extracts
-/// each direct child, stores it in CAS, and returns the child artifact
-/// metadata for the receipt. Extraction is bounded by
-/// `ArchiveLimits::default()` (Invariant 4: bounded processing).
-fn discover_and_store_children(store: &ContentStore, bytes: &[u8]) -> Result<Vec<ChildArtifact>> {
-    let children_with_bytes = discover_child_artifacts_with_bytes(bytes);
-    let mut child_artifacts = Vec::with_capacity(children_with_bytes.len());
-    for (artifact, child_bytes) in children_with_bytes {
-        store
-            .store_with_metadata(
-                child_bytes,
-                None,
-                None,
-                arbitraitor_store::RetentionMode::Cache,
-            )
-            .into_diagnostic()?;
-        child_artifacts.push(artifact);
-    }
-    Ok(child_artifacts)
 }
