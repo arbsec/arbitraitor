@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `xtask cleanup` (repo maintenance, `cargo run -p xtask -- cleanup`):
+  the `worktrees` phase removes secondary worktrees whose branch maps to
+  a merged or closed PR (tracked via `gh`), deletes those branches, and
+  prunes stale worktree entries — it refuses dirty, locked, bare, and
+  open-PR/PR-less trees so in-flight work is never touched. The
+  `artifacts` phase removes `target/` build directories (main checkout
+  plus every worktree) older than `--days` (default 7) and reports
+  reclaimed bytes. Both phases dry-run by default; `--yes` applies.
+
 ### Changed (dependencies)
 
 - Refreshed the minor-dependency group: `tree-sitter` 0.26.13 → 0.27.0,

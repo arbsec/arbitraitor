@@ -43,7 +43,7 @@ cargo run -p xtask -- docs-check
 
 5. Open PR w/ Conventional Commits title (e.g., `fix(store): prevent release from stale artifact handle`). **PR description must list dependencies**: any issues, PRs, or ADRs that this work depends on or conflicts with. If the PR is blocked by in-flight work on another branch, name those issues/PRs explicitly so the reviewer knows what must land first.
 6. Complete pre-merge gate (below).
-7. Squash merge. Clean up worktree.
+7. Squash merge. Remove the worktree and branch: `cargo run -p xtask -- cleanup worktrees --yes` (removes secondary worktrees whose branch has a merged/closed PR, deletes the branch, refuses dirty/locked trees; dry-run by default).
 
 ## Pre-merge gate
 
@@ -121,6 +121,7 @@ When a task completes or exits via the review loop limit, pick the next availabl
    - Run `cargo-deny check`, `cargo-audit`, `rumdl check .` on the full repo.
    - Check for stale Renovate PRs.
    - Verify `cargo run -p xtask -- docs-check` passes on `main`.
+   - Reclaim disk (build artifacts fill it silently): `cargo run -p xtask -- cleanup artifacts --yes` removes `target/` dirs older than 7 days (`--days` to tune) across the checkout and its worktrees.
 
 ### Stale PR detection
 
