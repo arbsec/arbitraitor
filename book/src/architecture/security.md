@@ -146,6 +146,13 @@ When Level 3 (Contained) execution is requested, the following controls are veri
 These are reported per-control in the receipt, not as a single boolean.
 Landlock ABI probing and receipt recording are documented in ADR 0028.
 
+On Linux, filesystem isolation is reported `available` only when the
+host's Landlock ABI probe succeeds. A kernel without a Landlock ABI
+(Linux < 5.13, or the Landlock LSM disabled) receives no ruleset from the
+execution gate, so the effective-controls matrix fails closed and reports
+`filesystem_isolation` as `unavailable` (#755) instead of promising
+containment the platform will not deliver.
+
 ## macOS containment
 
 macOS `contained` assurance has two complementary paths:
