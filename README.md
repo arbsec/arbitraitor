@@ -268,6 +268,7 @@ arbitraitor-cli             Command-line interface (24 subcommands)
 ├── arbitraitor-receipt      RFC 8785 canonicalized receipts
 ├── arbitraitor-exec         Mediated execution (script + native + PowerShell)
 ├── arbitraitor-sandbox      Process hardening (prctl, close_range, setrlimit)
+├── arbitraitor-engine       Pipeline engine (fetch → store → analyze → provenance → receipt → verdict → release)
 ├── arbitraitor-mcp          MCP server (inspect, scan, explain, approve, execute)
 ├── arbitraitor-plugin-api   Plugin trait hierarchy
 ├── arbitraitor-plugin-host  Plugin runtime (subprocess + Wasmtime)

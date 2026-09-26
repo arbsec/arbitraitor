@@ -1,10 +1,11 @@
 use super::{
     Cli, Command, HealthChecker, WrappersCommand, WrappersSubcommand, commands,
-    emit_wrapper_output, is_safe_passthrough, parse_cli_from_args, pipeline::parse_fetch_source,
-    query_daemon_status, wrapper_output_destination, wrapper_url_argument, wrapper_url_arguments,
-    write_status_text, write_stdout_or_exit_on_broken_pipe,
+    emit_wrapper_output, is_safe_passthrough, parse_cli_from_args, query_daemon_status,
+    wrapper_output_destination, wrapper_url_argument, wrapper_url_arguments, write_status_text,
+    write_stdout_or_exit_on_broken_pipe,
 };
 use arbitraitor_artifact::ArtifactType;
+use arbitraitor_engine::parse_fetch_source;
 use arbitraitor_fetch::FetchSource;
 use arbitraitor_model::origin::CallerOrigin;
 use clap::Parser;
@@ -750,7 +751,7 @@ async fn status_query_returns_info_from_real_daemon() -> Result<(), Box<dyn std:
     let root = unique_temp_path("status-real-daemon");
     fs::create_dir_all(&root)?;
     let socket = root.join("daemon.sock");
-    let daemon = arbitraitor_daemon::Daemon::new(&socket);
+    let daemon = arbitraitor_daemon::Daemon::new(&socket)?;
     let handle = tokio::spawn(async move { daemon.run().await });
 
     // Wait for the listener to appear.

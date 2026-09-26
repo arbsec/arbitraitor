@@ -414,10 +414,12 @@ pub(crate) fn scan(command: &ScanCommand, config: &Config) -> Result<()> {
     } else {
         write_report(
             &mut std::io::stderr().lock(),
-            &result,
-            &artifact_sha256,
+            &artifact_sha256.to_string(),
             &cas_root,
+            &format!("{:?}", result.classification.artifact_type),
+            result.verdict,
             &[],
+            &result.findings,
         )?;
     }
 
