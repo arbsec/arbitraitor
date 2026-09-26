@@ -17,14 +17,14 @@ license = "MIT OR Apache-2.0"
 ### BEGIN HAKARI SECTION
 [dependencies]
 aho-corasick = { version = "1" }
-allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 anstyle = { version = "1" }
 anyhow = { version = "1" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 block-buffer = { version = "0.12", default-features = false, features = ["zeroize"] }
 bstr = { version = "1", features = ["serde"] }
 bumpalo = { version = "3", features = ["allocator-api2"] }
-cranelift-bitset = { version = "0.134", default-features = false, features = ["enable-serde"] }
+cranelift-bitset = { version = "0.135", default-features = false, features = ["enable-serde"] }
 crc32fast = { version = "1" }
 crossbeam-utils = { version = "0.8" }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac"] }
@@ -37,18 +37,22 @@ futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["async-await-macro", "channel", "io", "sink"] }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher", "serde"] }
 hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16", default-features = false, features = ["default-hasher", "serde"] }
+icu_locale_core = { version = "2", default-features = false, features = ["alloc", "zerovec"] }
+icu_provider = { version = "2", default-features = false, features = ["alloc", "baked"] }
 id-arena = { version = "2" }
 indexmap = { version = "2", features = ["serde"] }
+litemap = { version = "0.8", default-features = false, features = ["alloc"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2" }
 once_cell = { version = "1" }
-pulley-interpreter = { version = "47", default-features = false, features = ["disas", "interp", "std"] }
+potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
+pulley-interpreter = { version = "48", default-features = false, features = ["disas", "interp", "std"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
 rustc-hash = { version = "2" }
-semver = { version = "1", features = ["serde"] }
+semver = { version = "1", default-features = false, features = ["serde", "std"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
@@ -57,13 +61,17 @@ slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde", "union"] }
 stable_deref_trait = { version = "1", default-features = false, features = ["std"] }
 subtle = { version = "2" }
+tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tracing-core = { version = "0.1" }
-wasmparser = { version = "0.256", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
-wasmtime-internal-core = { version = "47", default-features = false, features = ["anyhow", "serde", "std"] }
+wasm-encoder = { version = "0.254", features = ["wasmparser"] }
+wasmparser = { version = "0.254", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
+wasmtime-internal-core = { version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
+writeable = { version = "0.6", default-features = false, features = ["alloc"] }
+yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
+zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
 zeroize = { version = "1" }
-zstd = { version = "0.13" }
-zstd-safe = { version = "8", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
-zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }
+zerotrie = { version = "0.2", default-features = false, features = ["alloc", "yoke", "zerofrom"] }
+zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
 [build-dependencies]
 aho-corasick = { version = "1" }
@@ -71,7 +79,7 @@ anyhow = { version = "1" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
-cranelift-bitset = { version = "0.134", default-features = false, features = ["enable-serde"] }
+cranelift-bitset = { version = "0.135", default-features = false, features = ["enable-serde"] }
 crossbeam-utils = { version = "0.8" }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17", default-features = false, features = ["default-hasher", "serde"] }
 id-arena = { version = "2" }
@@ -80,16 +88,18 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 once_cell = { version = "1" }
 proc-macro2 = { version = "1" }
-pulley-interpreter = { version = "47", default-features = false, features = ["disas", "interp", "std"] }
+pulley-interpreter = { version = "48", default-features = false, features = ["disas", "interp", "std"] }
 quote = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
-semver = { version = "1", features = ["serde"] }
+semver = { version = "1", default-features = false, features = ["serde", "std"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
-syn = { version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
-wasmparser = { version = "0.256", default-features = false, features = ["component-model", "features", "serde", "simd", "std", "validate"] }
-wasmtime-internal-core = { version = "47", default-features = false, features = ["anyhow", "serde", "std"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit-mut"] }
+wasm-encoder = { version = "0.254", features = ["wasmparser"] }
+wasmparser = { version = "0.254", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
+wasmtime-internal-core = { version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 ### END HAKARI SECTION
