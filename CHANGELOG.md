@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (default 7) and reports reclaimed bytes. Both phases dry-run by
   default; `--yes` applies.
 
+### Changed (CI)
+
+- The Code workflow now enforces `cargo hakari verify` in a dedicated
+  `Workspace Hack` job on both Ubuntu and macOS (#743). A stale
+  `arbitraitor-workspace-hack` manifest previously shipped silently and
+  dragged hack-only lock entries into the graph (pulley-interpreter 47,
+  wasmtime-internal-core 47, wasmparser 0.256, cranelift-bitset 0.134,
+  allocator-api2 0.4); a future batch PR could also collapse hakari
+  rename-aliases onto one version and make `cargo metadata` reject the
+  workspace for every workflow (root cause of the failed Renovate batch
+  PR #727).
+- `.config/hakari.toml` now pins `platforms` to
+  `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` (CI matrices and
+  shipped binaries). With no configured platforms hakari computed for the
+  *host* platform, so a manifest regenerated on macOS would diverge from
+  one regenerated on Linux. Keep the list in sync with the CI matrices.
+
 ### Changed (dependencies)
 
 - Refreshed the minor-dependency group: `tree-sitter` 0.26.13 → 0.27.0,
