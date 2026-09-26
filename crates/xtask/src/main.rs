@@ -273,9 +273,14 @@ fn parse_pr_records(json: &str) -> Vec<PrRecord> {
     let mut records = Vec::new();
     for (n, &start) in key_starts.iter().take(key_starts.len() - 1).enumerate() {
         let stop = key_starts[n + 1];
-        // Rebuild a minimal object so extract_json_string_field can read the
-        // fields: {"headRefOid":"<oid>","state":"<state>"}
         let slice = &hay[start..stop];
+        // Slices must span exactly one record: a closing brace mid-slice
+        // means the assumed key order does not hold — fail closed (no
+        // records → keep) instead of mis-associating oid and state across
+        // adjacent records.
+        if slice.matches('}').count() != 1 {
+            return Vec::new();
+        }
         let object = format!("{{{slice}");
         let Some(head_oid) = extract_json_string_field(&object, "headRefOid") else {
             return Vec::new();
@@ -844,6 +849,17 @@ mod tests {
             extract_json_string_field("{\"head\":\"abc\"}", "state"),
             None
         );
+    }
+
+    #[test]
+    fn malformed_pr_records_fail_closed() {
+        // Record missing its state within a slice → no records at all.
+        assert!(parse_pr_records(r#"[{"headRefOid":"abc"}]"#).is_empty());
+        // Schema drift (state before headRefOid) must never pair one
+        // record's oid with the next record's state.
+        let swapped =
+            r#"[{"state":"OPEN","headRefOid":"AAAA"},{"state":"MERGED","headRefOid":"BBBB"}]"#;
+        assert!(parse_pr_records(swapped).is_empty());
     }
 
     #[test]

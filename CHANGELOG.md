@@ -11,13 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `xtask cleanup` (repo maintenance, `cargo run -p xtask -- cleanup`):
   the `worktrees` phase removes secondary worktrees whose branch maps to
-  a merged or closed PR (tracked via `gh`), deletes those branches, and
-  prunes stale worktree entries — a PR is only followed when its
+  a merged or closed PR (tracked via `gh`) and deletes those branches; a
+  PR is only followed when its
   recorded head SHA matches the branch tip (`headRefOid` vs
   `git rev-parse HEAD`), so a recycled branch name can never delete
   unrelated work. The phase refuses dirty, locked, bare, detached,
   open-PR, name-mismatch, and PR-less trees so in-flight work is never
-  touched. The `artifacts` phase removes `target/` build directories
+  touched; stale worktree entries are pruned when `--yes` is passed. The
+  `artifacts` phase removes `target/` build directories
   (main checkout plus every unlocked worktree) older than `--days`
   (default 7) and reports reclaimed bytes. Both phases dry-run by
   default; `--yes` applies.
