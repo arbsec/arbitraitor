@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (dependencies)
+
+- Refreshed the enterprise minor-dependency group: `tree-sitter` 0.26 → 0.27
+  (picks up two parser-hardening fixes: a buffer over-read when parsing
+  4-byte UTF-16 characters and validation of Wasm language memory reads),
+  `wit-parser` 0.253 → 0.259 (pinned `=0.259.0` in the plugin host),
+  `zstd` 0.13 → 0.14, `wasmparser` 0.256 → 0.259, and `cranelift-bitset`
+  0.134 → 0.136. Regenerated `arbitraitor-workspace-hack` with cargo-hakari:
+  the batch briefly left two hakari rename-aliases resolving to the same
+  `digest` 0.11 / `hashbrown 0.17` version under different names, which
+  made `cargo metadata` reject the workspace — the root cause of CI
+  failure on the Renovate batch PR (#727).
+
 ### Fixed
 
 - Shell-hook mode (`arbitraitor fetch` via curl/wget shims) no longer
