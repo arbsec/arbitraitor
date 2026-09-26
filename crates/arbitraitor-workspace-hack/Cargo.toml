@@ -65,7 +65,7 @@ tinystr = { version = "0.8", default-features = false, features = ["alloc", "zer
 tracing-core = { version = "0.1" }
 wasm-encoder = { version = "0.254", features = ["wasmparser"] }
 wasmparser = { version = "0.254", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
-wasmtime-internal-core = { version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core = { version = "49", default-features = false, features = ["anyhow", "serde", "std"] }
 writeable = { version = "0.6", default-features = false, features = ["alloc"] }
 yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
 zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
@@ -100,6 +100,6 @@ syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-trai
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit-mut"] }
 wasm-encoder = { version = "0.254", features = ["wasmparser"] }
 wasmparser = { version = "0.254", default-features = false, features = ["component-model", "features", "hash-collections", "serde", "simd", "std", "validate"] }
-wasmtime-internal-core = { version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core = { version = "49", default-features = false, features = ["anyhow", "serde", "std"] }
 
 ### END HAKARI SECTION

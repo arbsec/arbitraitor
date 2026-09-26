@@ -626,7 +626,7 @@ dependencies = [
  "tracing-core",
  "wasm-encoder 0.254.0",
  "wasmparser 0.254.0",
- "wasmtime-internal-core 48.0.2",
+ "wasmtime-internal-core 49.0.1",
  "writeable",
  "yoke",
  "zerofrom",
@@ -5026,6 +5026,17 @@ name = "wasmtime-internal-core"
 version = "48.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8679b612a408274d91d1e0edf6baa36b63cc48d937f84dd1e7fb2fbe16a907ae"
+dependencies = [
+ "hashbrown 0.17.1",
+ "libm",
+ "serde",
+]
+
+[[package]]
+name = "wasmtime-internal-core"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64b67114739063bb72bb8ed2b4994b8b22809d354432db68553ad529850f9536"
 dependencies = [
  "anyhow",
  "hashbrown 0.17.1",
