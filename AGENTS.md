@@ -39,7 +39,10 @@ cargo check --workspace --all-targets --all-features
 cargo nextest run
 rumdl check .
 cargo run -p xtask -- docs-check
+cargo hakari generate --diff && cargo hakari verify
 ```
+
+`cargo-hakari` must be the exact version pinned in `.github/workflows/code.yml` (see `.mise.toml` for the local install command) — canonicity output differs between hakari releases.
 
 5. Open PR w/ Conventional Commits title (e.g., `fix(store): prevent release from stale artifact handle`). **PR description must list dependencies**: any issues, PRs, or ADRs that this work depends on or conflicts with. If the PR is blocked by in-flight work on another branch, name those issues/PRs explicitly so the reviewer knows what must land first.
 6. Complete pre-merge gate (below).
@@ -51,7 +54,7 @@ cargo run -p xtask -- docs-check
 
 ### 1. CI is fully green
 
-Verify every workflow check passes — including Code (fmt, clippy, tests on Ubuntu + macOS), Markdown (rumdl, book build), Security (cargo-deny, cargo-audit), Invariants, CodeQL. If any check fails, fix root cause. Do not re-run hoping for transient pass; investigate first.
+Verify every workflow check passes — including Code (fmt, clippy, tests on Ubuntu + macOS, workspace-hack canonicity + feature unification), Markdown (rumdl, book build), Security (cargo-deny, cargo-audit), Invariants, CodeQL. If any check fails, fix root cause. Do not re-run hoping for transient pass; investigate first.
 
 ### 2. Adversarial review by a different agent
 

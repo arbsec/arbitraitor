@@ -23,6 +23,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (default 7) and reports reclaimed bytes. Both phases dry-run by
   default; `--yes` applies.
 
+### Changed (CI)
+
+- The Code workflow now checks `arbitraitor-workspace-hack` in a dedicated
+  `Workspace Hack` job on both Ubuntu and macOS with two checks: `cargo
+  hakari generate --diff` (fails if the committed hack manifest differs
+  from the canonical regeneration — this would have caught the hakari
+  rename-alias collapse that made `cargo metadata` reject the workspace
+  for every workflow in the failed Renovate batch PR #727) and `cargo
+  hakari verify` (fails if any third-party dependency ends up built with
+  more than one feature set — per upstream, *"this is always a bug"*).
+  `cargo-hakari` is pinned to 0.9.38 so a future upstream release cannot
+  silently change what the guard accepts (#743). The job also triggers on
+  `.config/hakari.toml` changes.
+- `.config/hakari.toml` now pins `platforms` to the CI matrices and the
+  nightly release targets: `x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu`, and `aarch64-apple-darwin`. With no
+  configured platforms hakari computed for the *host* platform, so a
+  manifest regenerated on macOS would diverge from one regenerated on
+  Linux. The hack manifest was regenerated with per-platform target
+  sections for all three triples; regeneration adds 16 dependency edges
+  to the lock (the yara-x → wasmtime-45 closure on the pinned targets:
+  `cranelift-bitset` 0.132, `pulley-interpreter` 45,
+  `wasmtime-internal-core` 45, plus their transitive deps) and removes
+  none. Keep the list in sync with the CI
+  matrices in `.github/workflows/code.yml` and `release.yml`.
+
 ### Changed (dependencies)
 
 - Refreshed the minor-dependency group: `tree-sitter` 0.26.13 → 0.27.0,

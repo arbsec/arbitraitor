@@ -11,6 +11,9 @@ rumdl = "latest"
 
 # CI tools — installed in CI via taiki-e/install-action (prebuilt binaries).
 # For local dev, install with: cargo install cargo-nextest cargo-deny cargo-audit mdbook mdbook-mermaid --locked
+# cargo-hakari must match the exact version pinned in .github/workflows/code.yml
+# (workspace-hack canonicity is tool-version-dependent):
+#   cargo install cargo-hakari@0.9.38 --locked
 
 [env]
 RUST_BACKTRACE = "1"
