@@ -74,6 +74,7 @@ pub struct ArbitraitorApi {
     receipts_dir: PathBuf,
     emit_partial_receipt_on_cancel: bool,
     signatures: SignatureInputs,
+    store_max_bytes: u64,
 }
 
 /// Tunable construction options for [`ArbitraitorApi`].
@@ -88,6 +89,11 @@ pub struct Config {
     /// Wrapping this in an engine-owned type is sequenced as stage 6 of the
     /// ADR-0038 rollout, before the crate publishes to crates.io.
     pub fetch_policy: FetchPolicy,
+    /// Maximum bytes accepted into storage by every engine-managed write.
+    /// Enforced by the CAS streaming sink itself
+    /// ([`arbitraitor_store::ContentStore::sink_with_limits`]); defaults to
+    /// [`arbitraitor_store::DEFAULT_MAX_BYTES`].
+    pub store_max_bytes: u64,
     /// Policy TOML for verdict evaluation. An empty string selects the
     /// built-in verdict derivation (see the crate docs); non-interactive
     /// surfaces pass [`FAIL_CLOSED_POLICY_TOML`] instead.
@@ -105,6 +111,7 @@ impl Default for Config {
             store_path: default_cas_dir(),
             receipts_path: default_receipts_dir(),
             fetch_policy: FetchPolicy::default(),
+            store_max_bytes: arbitraitor_store::DEFAULT_MAX_BYTES,
             policy_toml: String::new(),
             emit_partial_receipt_on_cancel: false,
         }
@@ -390,11 +397,12 @@ impl ArbitraitorApi {
         // transition records the retrieval stage.
         operation = operation.transition_to(PipelineState::Retrieving)?;
 
-        let stored = self.store.store_with_metadata(
+        let stored = self.store.store_with_metadata_and_limits(
             bytes.clone(),
             Some(redact_url(source)),
             fetch_receipt.metadata.content_type.clone(),
             arbitraitor_store::RetentionMode::Cache,
+            self.store_max_bytes,
         )?;
         if stored.0 != digest {
             return Err(EngineError::Store(format!(
@@ -450,13 +458,14 @@ impl ArbitraitorApi {
             .map_or_else(|| url.to_owned(), ToString::to_string);
         let size = receipt.bytes_written;
         let digest = receipt.sha256.clone();
-        self.store.store_with_metadata(
+        self.store.store_with_metadata_and_limits(
             bytes.clone(),
             Some(redact_url(url)),
             content_type.clone(),
             arbitraitor_store::RetentionMode::Cache,
+            self.store_max_bytes,
         )?;
-        discover_and_store_children(&self.store, &bytes)?;
+        discover_and_store_children(&self.store, &bytes, self.store_max_bytes)?;
         Ok(FetchResult {
             sha256: digest.to_string(),
             size_bytes: size,
@@ -517,11 +526,12 @@ impl ArbitraitorApi {
         operation = operation
             .transition_to(PipelineState::Retrieving)?
             .transition_to(PipelineState::Stored)?;
-        self.store.store_with_metadata(
+        self.store.store_with_metadata_and_limits(
             bytes.clone(),
             Some(path.to_string_lossy().into_owned()),
             None,
             arbitraitor_store::RetentionMode::Cache,
+            self.store_max_bytes,
         )?;
         let (inspection, _operation) = self.analyze_and_finalize(
             operation,
@@ -631,6 +641,38 @@ impl ArbitraitorApi {
         Ok(summaries)
     }
 
+    /// Returns the persisted receipt summary for `sha256`, if one exists.
+    ///
+    /// Read-only: this accessor never re-runs analysis and never rewrites
+    /// the receipt file. The audit trail is the write-once product of the
+    /// inspection path (`inspect`, `scan`, `scan_path`, `fetch_pinned` +
+    /// analysis); a query that mutated the receipt would silently rewrite
+    /// policy traces and timestamps, breaking the §31 audit chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotFound`] when `sha256` is not a valid digest,
+    /// [`EngineError::Receipt`] when a present receipt file cannot be
+    /// parsed, or [`EngineError::Io`] on read failure.
+    pub fn receipt_summary(&self, sha256: &str) -> Result<Option<ReceiptSummary>, EngineError> {
+        parse_digest(sha256)?;
+        let path = self.receipts_dir.join(format!("{sha256}.json"));
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let data = std::fs::read(&path)?;
+        let receipt: Receipt = serde_json::from_slice(&data)
+            .map_err(|error| EngineError::Receipt(format!("{}: {error}", path.display())))?;
+        let created_at = receipt_timestamp_seconds(&receipt.timestamps.created);
+        Ok(Some(ReceiptSummary {
+            sha256: receipt.artifact.sha256.clone(),
+            verdict: receipt.verdict.verdict,
+            size_bytes: receipt.artifact.size,
+            created_at,
+            findings_count: receipt.findings.len(),
+        }))
+    }
+
     /// Lists metadata for all stored artifacts.
     ///
     /// # Errors
@@ -731,7 +773,7 @@ impl ArbitraitorApi {
         let result = self.coordinator.analyze_with_retrieval(bytes, retrieval);
         operation = operation.transition_to(PipelineState::Analyzing)?;
 
-        discover_and_store_children(&self.store, bytes)?;
+        discover_and_store_children(&self.store, bytes, self.store_max_bytes)?;
         operation = operation.transition_to(PipelineState::Expanding)?;
 
         let (verdict, policy_trace) = self.resolve_verdict(&result);

@@ -37,7 +37,10 @@ const LOCKS_DIR: &str = "locks";
 const STAGING_DIR: &str = "staging";
 const META_DB: &str = "meta.db";
 const SHA256_HEX_LEN: usize = 64;
-const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// Default maximum bytes accepted into storage (1 GiB). Callers that need a
+/// tighter bound use [`ContentStore::sink_with_limits`] or
+/// [`ContentStore::store_with_metadata_and_limits`].
+pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
@@ -209,6 +212,10 @@ impl ContentStore {
 
     /// Stores a complete artifact and records its rebuildable metadata sidecar.
     ///
+    /// The byte bound defaults to [`DEFAULT_MAX_BYTES`]; callers with a
+    /// tighter configured limit use
+    /// [`ContentStore::store_with_metadata_and_limits`].
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if storing bytes, writing the sidecar, or updating
@@ -220,11 +227,41 @@ impl ContentStore {
         content_type: Option<String>,
         retention: RetentionMode,
     ) -> Result<ArtifactId, StoreError> {
+        self.store_with_metadata_and_limits(
+            bytes,
+            source_url,
+            content_type,
+            retention,
+            DEFAULT_MAX_BYTES,
+        )
+    }
+
+    /// Stores a complete artifact under an explicit maximum-byte bound and
+    /// records its rebuildable metadata sidecar.
+    ///
+    /// The bound is enforced by the streaming sink itself
+    /// ([`ContentStore::sink_with_limits`]): bytes that exceed `max_bytes`
+    /// fail with [`StoreError::SizeExceeded`] before the artifact is
+    /// committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if storing bytes (including the byte-limit
+    /// check), writing the sidecar, or updating the non-authoritative
+    /// metadata index fails.
+    pub fn store_with_metadata_and_limits(
+        &self,
+        bytes: Vec<u8>,
+        source_url: Option<String>,
+        content_type: Option<String>,
+        retention: RetentionMode,
+        max_bytes: u64,
+    ) -> Result<ArtifactId, StoreError> {
         let size_bytes = u64::try_from(bytes.len()).map_err(|source| StoreError::Io {
             stage: "count-metadata-bytes",
             source: io::Error::new(io::ErrorKind::InvalidData, source),
         })?;
-        let mut sink = self.sink(None)?;
+        let mut sink = self.sink_with_limits(None, max_bytes)?;
         sink.write_chunk_sync(&bytes)?;
         let digest = Sha256Digest::new(sink.hasher.clone().finalize().into());
         drop(bytes);

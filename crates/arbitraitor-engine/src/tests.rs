@@ -250,3 +250,135 @@ fn store_error_is_wrapped_as_safe_string() {
     });
     assert!(matches!(error, EngineError::Store(_)));
 }
+
+/// Audit-trail integrity: `receipt_summary` reads the persisted receipt but
+/// never rewrites it. A query endpoint that re-persisted the receipt would
+/// silently regenerate policy traces and timestamps on every lookup,
+/// breaking §31's write-once audit property. The byte-wise comparison is
+/// the strongest signal: any rewrite would surface as a content drift.
+#[test]
+fn receipt_summary_returns_persisted_summary_without_rewriting() {
+    let root = std::env::temp_dir().join(format!(
+        "arb-engine-receipt-ro-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let api = crate::api::ArbitraitorApi::new(crate::Config {
+        store_path: root.join("cas"),
+        receipts_path: root.join("receipts"),
+        ..crate::Config::default()
+    })
+    .expect("engine construction must succeed");
+    let script = b"#!/bin/sh\necho receipt-read-only\n";
+    let result = api
+        .scan_path(
+            &write_temp_script("receipt-ro.sh", script),
+            crate::DEFAULT_SCAN_MAX_BYTES,
+        )
+        .expect("scan must succeed");
+    let receipt_path = result
+        .receipt_path
+        .clone()
+        .expect("scan must persist a receipt");
+    let bytes_before = std::fs::read(&receipt_path).expect("read persisted receipt");
+
+    let summary = api
+        .receipt_summary(&result.sha256)
+        .expect("receipt_summary must not error")
+        .expect("receipt_summary must find the persisted receipt");
+    assert_eq!(summary.sha256, result.sha256);
+    assert_eq!(summary.verdict, result.verdict);
+    assert_eq!(summary.size_bytes, u64::try_from(script.len()).unwrap());
+    assert_eq!(summary.findings_count, result.findings.len());
+
+    let bytes_after = std::fs::read(&receipt_path).expect("read persisted receipt after query");
+    assert_eq!(
+        bytes_before, bytes_after,
+        "receipt_summary must never rewrite the persisted receipt"
+    );
+}
+
+/// `receipt_summary` returns `None` for a digest with no persisted receipt,
+/// so the daemon's `QueryReceipt` endpoint can distinguish "no receipt
+/// exists" from "tool failed" without re-running analysis.
+#[test]
+fn receipt_summary_returns_none_for_missing_receipt() {
+    let root = std::env::temp_dir().join(format!(
+        "arb-engine-receipt-missing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let api = crate::api::ArbitraitorApi::new(crate::Config {
+        store_path: root.join("cas"),
+        receipts_path: root.join("receipts"),
+        ..crate::Config::default()
+    })
+    .expect("engine construction must succeed");
+    let summary = api
+        .receipt_summary(&"ab".repeat(32))
+        .expect("receipt_summary must not error on a missing receipt");
+    assert!(summary.is_none(), "expected no receipt, got {summary:?}");
+}
+
+/// `receipt_summary` rejects a malformed digest up front rather than
+/// constructing a receipt path from a caller-controlled string.
+#[test]
+fn receipt_summary_rejects_invalid_digest() {
+    let root = std::env::temp_dir().join(format!(
+        "arb-engine-receipt-bad-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let api = crate::api::ArbitraitorApi::new(crate::Config {
+        store_path: root.join("cas"),
+        receipts_path: root.join("receipts"),
+        ..crate::Config::default()
+    })
+    .expect("engine construction must succeed");
+    assert!(api.receipt_summary("not-a-digest").is_err());
+}
+
+/// `Config::store_max_bytes` is enforced by the CAS streaming sink itself
+/// (`sink_with_limits`), so the bound holds the moment bytes enter the store
+/// rather than as a post-write size check (the previous CLI pipeline's
+/// `artifact_len > config.store.max_bytes` was a post-write check; the
+/// engine enforces the same contract one stage earlier and uniformly across
+/// fetch, inspect, `scan_path`, and child-artifact expansion).
+#[test]
+fn store_max_bytes_is_enforced_by_scan_path_sink() {
+    let root = std::env::temp_dir().join(format!(
+        "arb-engine-store-limit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let api = crate::api::ArbitraitorApi::new(crate::Config {
+        store_path: root.join("cas"),
+        receipts_path: root.join("receipts"),
+        store_max_bytes: 8,
+        ..crate::Config::default()
+    })
+    .expect("engine construction must succeed");
+    // The script body exceeds the configured 8-byte store bound.
+    let script = b"#!/bin/sh\necho too large\n";
+    let result = api.scan_path(
+        &write_temp_script("store-limit.sh", script),
+        crate::DEFAULT_SCAN_MAX_BYTES,
+    );
+    let error = match result {
+        Ok(inspection) => panic!("scan must be rejected by the store limit, got {inspection:?}"),
+        Err(error) => error,
+    };
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("artifact size exceeded limit"),
+        "expected SizeExceeded surfaced via EngineError::Store, got: {rendered}"
+    );
+}

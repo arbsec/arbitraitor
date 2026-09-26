@@ -43,6 +43,7 @@ fn test_config(root: &Path) -> Config {
             allow_loopback_addresses: true,
             ..FetchPolicy::default()
         },
+        store_max_bytes: Config::default().store_max_bytes,
         policy_toml: String::new(),
         emit_partial_receipt_on_cancel: false,
     }

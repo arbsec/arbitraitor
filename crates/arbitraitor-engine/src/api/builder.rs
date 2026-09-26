@@ -79,6 +79,7 @@ impl ArbitraitorBuilder {
             store_path,
             receipts_path,
             fetch_policy,
+            store_max_bytes,
             policy_toml,
             emit_partial_receipt_on_cancel,
         } = self.config;
@@ -106,6 +107,7 @@ impl ArbitraitorBuilder {
             receipts_dir: receipts_path,
             emit_partial_receipt_on_cancel,
             signatures: self.signatures,
+            store_max_bytes,
         })
     }
 }
