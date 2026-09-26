@@ -280,9 +280,10 @@ impl EffectiveControls {
         }
     }
 
-    /// Every control marked `Available`. Returned for `Restricted` and
-    /// `Disposable` modes on platforms where every required containment
-    /// primitive is wired up (Linux today).
+    /// Every control marked `Available`. Serves as the base for the
+    /// `Restricted`/`Disposable` matrix on platforms where every required
+    /// containment primitive is wired up (Linux with a successful Landlock
+    /// ABI probe today); see [`effective_restricted_controls`].
     #[must_use]
     pub const fn all_available() -> Self {
         Self {
