@@ -262,7 +262,7 @@ Arbitraitor is intended to be embeddable by third-party products (package manage
 #### 3.5.2 Pre-1.0 stability contract
 
 - `arbitraitor-engine` publishes under SemVer `0.x`; breaking changes are tracked in `CHANGELOG.md` and flagged in the release PR;
-- The public surface is deliberately narrow: `Arbitraitor`, `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectResult`, and a typed error derived from `thiserror`;
+- The public surface is deliberately narrow: `Arbitraitor`, `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectionResult`, and a typed error derived from `thiserror`;
 - Feature flags gate heavier integrations (`yara-x`, `sigstore`, `package-manager`, `plugin-host`) so minimal consumers do not pull those transitive dependencies by default;
 - The public API never exposes types from `arbitraitor-fetch`,
   `arbitraitor-store`, `arbitraitor-analysis`, `arbitraitor-receipt`,
@@ -1896,7 +1896,7 @@ embedding (spec §40.5 / §40.6), the following must be in place:
    of the engine, not an independent pipeline composition.
 2. **Stability contract documented.** The deliberative scope of
    `Arbitraitor`, `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`,
-   `InspectResult`, and the error type is recorded (spec §40.6); internal
+   `InspectionResult`, and the error type is recorded (spec §40.6); internal
    adapter crates are not exposed.
 3. **MSRV pinned and tracked.** `rust-version = "1.96"` in `Cargo.toml`
    is the working baseline; bumping the MSRV is a release-blocking decision

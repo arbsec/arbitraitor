@@ -4376,7 +4376,7 @@ The crate owns:
   `arbitraitor-daemon` and is *extracted* into the new crate (ADR-0038
   decision: extraction, not a rename-and-split).
 - `Config` — store path, fetch policy, retention policy, receipts directory.
-- `InspectResult` — typed result carrying `verdict`, `findings`, `receipt`,
+- `InspectionResult` — typed result carrying `verdict`, `findings`, `receipt`,
   `sha256`, and either a borrowed view of the bytes or an `Arc<Vec<u8>>`.
   The engine does not return raw bytes by default — bytes stay
   CAS-addressed (see §26.2 and invariant 2); release happens through a typed
@@ -4408,7 +4408,7 @@ The engine is the single authority for the following invariants from §9 and
 Custom detectors (via `arbitraitor-plugin-host`) and custom fetchers (via the
 `arbitraitor-fetch::Fetcher` trait) may be plugged through the builder, but
 consumers cannot bypass mandatory stages. Consumers receive a typed
-`InspectResult`; they do not compose fetch → store → scan themselves.
+`InspectionResult`; they do not compose fetch → store → scan themselves.
 
 State transitions (§38.3) remain owned by `arbitraitor-core`; the engine drives
 them through the API. The engine is therefore *above* the `arbitraitor-core`
@@ -4566,7 +4566,7 @@ Before 1.0, the published `arbitraitor-engine` crate uses SemVer `0.x`:
 
 - breaking changes are tracked in `CHANGELOG.md` and flagged in the release PR;
 - the crate exposes a deliberately narrow surface: `Arbitraitor`,
-  `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectResult`, and an
+  `ArbitraitorBuilder`, `ArbitraitorApi`, `Config`, `InspectionResult`, and an
   error type derived from `thiserror`;
 - feature flags gate heavier integrations (`yara-x`, `sigstore`,
   `package-manager`, `plugin-host`) so minimal consumers do not pull those
@@ -4588,10 +4588,10 @@ Before 1.0, the published `arbitraitor-engine` crate uses SemVer `0.x`:
   take a transitive dependency on the internal adapter crates and will see
   breaking changes whenever their types change.
 
-  **Receipt type identity (decided):** §40.1 says `InspectResult` carries
+  **Receipt type identity (decided):** §40.1 says `InspectionResult` carries
   a `receipt`. If that field is the raw `arbitraitor-receipt::Receipt` type,
   every receipt schema change (e.g. the envelope restructure in #492) becomes
-  a breaking API change for consumers. If `InspectResult.receipt` is a new
+  a breaking API change for consumers. If `InspectionResult.receipt` is a new
   engine-owned wrapper struct that maps from internal receipt types, the
   breaking change is absorbed by the engine crate before consumers see it.
   ADR-0038 decision 6 records the engine-owned wrapper as the choice for the
