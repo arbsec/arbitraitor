@@ -146,4 +146,26 @@ libc = { version = "0.2" }
 pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
 wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
 
+[target.aarch64-unknown-linux-gnu.dependencies]
+cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
+getrandom = { version = "0.4", default-features = false, features = ["std"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
+libc = { version = "0.2" }
+linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "ioctl", "no_std", "prctl"] }
+pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
+regalloc2 = { version = "0.15", features = ["checker", "enable-serde"] }
+rustix = { version = "1", features = ["fs", "mm", "param", "process", "termios", "time"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+tracing = { version = "0.1" }
+wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+
+[target.aarch64-unknown-linux-gnu.build-dependencies]
+cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
+libc = { version = "0.2" }
+pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
+wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+
 ### END HAKARI SECTION

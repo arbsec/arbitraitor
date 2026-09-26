@@ -25,20 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (CI)
 
-- The Code workflow now enforces `cargo hakari verify` in a dedicated
-  `Workspace Hack` job on both Ubuntu and macOS (#743). A stale
-  `arbitraitor-workspace-hack` manifest previously shipped silently and
-  dragged hack-only lock entries into the graph (pulley-interpreter 47,
-  wasmtime-internal-core 47, wasmparser 0.256, cranelift-bitset 0.134,
-  allocator-api2 0.4); a future batch PR could also collapse hakari
-  rename-aliases onto one version and make `cargo metadata` reject the
-  workspace for every workflow (root cause of the failed Renovate batch
-  PR #727).
-- `.config/hakari.toml` now pins `platforms` to
-  `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` (CI matrices and
-  shipped binaries). With no configured platforms hakari computed for the
-  *host* platform, so a manifest regenerated on macOS would diverge from
-  one regenerated on Linux. Keep the list in sync with the CI matrices.
+- The Code workflow now checks `arbitraitor-workspace-hack` in a dedicated
+  `Workspace Hack` job on both Ubuntu and macOS with two checks: `cargo
+  hakari generate --diff` (fails if the committed hack manifest differs
+  from the canonical regeneration — this would have caught the hakari
+  rename-alias collapse that made `cargo metadata` reject the workspace
+  for every workflow in the failed Renovate batch PR #727) and `cargo
+  hakari verify` (fails if any third-party dependency ends up built with
+  more than one feature set — per upstream, *"this is always a bug"*).
+  `cargo-hakari` is pinned to 0.9.38 so a future upstream release cannot
+  silently change what the guard accepts (#743). The job also triggers on
+  `.config/hakari.toml` changes.
+- `.config/hakari.toml` now pins `platforms` to the CI matrices and the
+  nightly release targets: `x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu`, and `aarch64-apple-darwin`. With no
+  configured platforms hakari computed for the *host* platform, so a
+  manifest regenerated on macOS would diverge from one regenerated on
+  Linux. The hack manifest was regenerated with per-platform target
+  sections for all three triples; keep the list in sync with the CI
+  matrices in `.github/workflows/code.yml` and `release.yml`.
 
 ### Changed (dependencies)
 
