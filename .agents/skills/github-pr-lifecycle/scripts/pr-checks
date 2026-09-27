@@ -34,8 +34,14 @@ RAW="$(arb_lib_gh "${CHECK_ARGS[@]}")" || EXIT_CODE=$?
 # gh pr checks exits 8 when pending; capture the JSON regardless.
 EXIT_CODE=${EXIT_CODE:-0}
 if [ -z "$RAW" ] && [ "$EXIT_CODE" -eq 8 ]; then
-  echo '{"checks":[],"all_passed":false,"pending":true}'
+  echo '{"checks":[],"all_passed":false,"any_pending":true,"any_failing":false}'
   exit 0
+fi
+if [ -z "$RAW" ]; then
+  # Hard gh failure (auth, network, PR not found): fail loudly — exit-code
+  # contract says 0 = success, and empty output must never masquerade as one.
+  echo "error: gh pr checks failed (exit $EXIT_CODE) and produced no output" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
 fi
 
 # Known-disabled jobs: workflow jobs deliberately disabled repo-side via `if:`
@@ -47,7 +53,10 @@ fi
 #     'push'`), so it never runs on pull-request events; excluded only while
 #     it reports the skipped state — a failing or pending run still fails the
 #     gate. Re-enabling on PRs means removing the name from this list.
-KNOWN_DISABLED_JOBS='["Documentation"]'
+#   - "qlty check": external quality gate reported on the qlty dashboard; it is
+#     in [checks].optional in the project config.
+# Keep in sync with [checks].optional in .agents/project/github-project.example.toml.
+KNOWN_DISABLED_JOBS='["Documentation", "qlty check"]'
 
 # Classify checks. The not-applicable exemption requires BOTH the known-disabled
 # name AND the skipped state: a known-disabled job that actually ran and failed
@@ -73,7 +82,7 @@ echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
       end
     )
   }),
-  all_passed: all(.[]; .bucket == "pass" or exempt),
+  all_passed: (length > 0) and all(.[]; .bucket == "pass" or exempt),
   any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
   any_pending: any(.[]; .bucket == "pending")
 }'

@@ -35,6 +35,7 @@ if [ -z "$PR_NUM" ] || [ -z "$TITLE" ]; then
 fi
 
 arb_lib_require_gh_scope
+arb_lib_load_project_config
 REPO="$(arb_lib_resolve_repo)"
 
 BODY="Follow-up discovered during work on #$PR_NUM."

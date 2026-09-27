@@ -65,4 +65,4 @@ ARGS=(pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit
 arb_lib_run_or_dry_run ARGS gh
 
 echo "Merged. Cleaning up worktree..." >&2
-echo "Done. Post-merge: close linked issue, run `cargo run -p xtask -- cleanup worktrees --yes`, set issue Status=Done." >&2
+echo 'Done. Post-merge: close linked issue, run `cargo run -p xtask -- cleanup worktrees --yes`, set issue Status=Done.' >&2

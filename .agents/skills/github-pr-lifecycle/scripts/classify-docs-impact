@@ -27,7 +27,12 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ARB_OK"
 fi
 
-CHANGED="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only 2>/dev/null || true)"
+CHANGED="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only)" || {
+  # Fail loudly: an empty diff must never masquerade as "no public behavior
+  # changed" in a docs-gate script.
+  echo "error: gh pr diff failed — cannot classify documentation impact" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+}
 
 # Classify against public-behavior surfaces using file paths.
 # See references/documentation-gate.md for the full surface list.
@@ -68,14 +73,14 @@ if [ "$OPT_JSON" = true ]; then
       public_behavior_changed: ($changed == "true"),
       touched_surfaces: ($surfaces | split(", ") | map(select(length > 0))),
       docs_required: ($changed == "true"),
-      docs_updated_in_pr: ($docs == "true"),
+      changelog_updated_in_pr: ($docs == "true"),
       checklist_marker: "arb:docs"
     }'
 else
   echo "Documentation impact:"
   echo "  Public behavior changed: $PUBLIC_BEHAVIOR_CHANGED"
   [ -n "$TOUCHED_SURFACES" ] && echo "  Touched surfaces: $TOUCHED_SURFACES"
-  echo "  Docs updated in PR: $DOCS_UPDATED"
+  echo "  CHANGELOG updated in PR: $DOCS_UPDATED"
   [ "$PUBLIC_BEHAVIOR_CHANGED" = "true" ] && [ "$DOCS_UPDATED" = "false" ] && \
     echo "  WARNING: Public behavior changed but CHANGELOG.md not updated in this PR."
 fi

@@ -83,13 +83,13 @@ Remove: `removeBlockedBy(input: { issueId, blockingIssueId })`.
 
 `--blocking` (the CLI flag) swaps the two arguments under the hood; the skill scripts always construct the input with the explicit roles.
 
-## Cross-repo blockers (Arbitraitor)
+## Cross-repo blockers (Orchestraitor)
 
-A `blockedBy` edge from an Orchestraitor issue to an Arbitraitor issue is NOT supported by `gh issue --blocked-by <num>` (that flag works same-repo only). Two patterns:
+A `blockedBy` edge from an Arbitraitor issue to an Orchestraitor issue is NOT supported by `gh issue --blocked-by <num>` (that flag works same-repo only). Two patterns:
 
-1. **Body link (always supported):** in the Arbitraitor issue body, link `Blocked by arbsec/arbitraitor#<num>`. Set `Status = Blocked`. The ready-queue script's `blockedBy` check then needs a body-link heuristic OR a config-level map. Pattern used by the skill: `create-blocker --repo arbsec/arbitraitor --blocked-issue <orc-issue>` opens the upstream issue, captures its URL, and writes the body link into the Orchestraitor issue body.
+1. **GraphQL across repos (preferred; both repos are in the same org):** the `addBlockedBy` mutation takes node IDs which are cross-repo within an org. Resolve both issues' `ID!` via `gh issue view --json id` and pass them. This is what `create-blocker` does: `create-blocker --repo arbsec/orchestraitor --title "..." --blocked-issue <arbitraitor-issue>` opens the upstream issue in `arbsec/orchestraitor`, labels it, and adds the `blockedBy` edge to the Arbitraitor issue.
 
-2. **GraphQL across repos (when both repos are in the same org):** the `addBlockedBy` mutation takes node IDs which are cross-repo within an org. Resolve both issues' `ID!` via `gh issue view --json id` and pass them.
+2. **Body link (fallback only):** in the Arbitraitor issue body, link `Blocked by arbsec/orchestraitor#<num>` and label the issue `blocked:orchestraitor`. If `addBlockedBy` fails, the blocker edge does NOT exist — the issue is NOT excluded from the ready queue — so `create-blocker` fails loudly instead of leaving a silent gap.
 
 ## Auth
 

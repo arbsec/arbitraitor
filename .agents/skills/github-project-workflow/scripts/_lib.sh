@@ -29,7 +29,12 @@ arb_lib_parse_common() {
       -h|--help)       OPT_HELP=true; shift ;;
       --json)          OPT_JSON=true; shift ;;
       --dry-run)       OPT_DRY_RUN=true; shift ;;
-      -R|--repo)       OPT_REPO="${2:-}"; shift 2 ;;
+      -R|--repo)
+        if [ -z "${2:-}" ]; then
+          echo "error: --repo requires a value (OWNER/REPO)" >&2
+          exit "$ARB_ERR_CONFIG"
+        fi
+        OPT_REPO="$2"; shift 2 ;;
       -R=*|--repo=*)   OPT_REPO="${1#*=}"; shift ;;
       --)              shift; ARB_LIB_EXTRA_ARGS+=("$@"); break ;;
       *)               ARB_LIB_EXTRA_ARGS+=("$1"); shift ;;

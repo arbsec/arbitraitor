@@ -71,7 +71,9 @@ Manages the **issue lifecycle** half of spec-driven delivery: triage → decompo
                 origin/main); review stays fresh-context per PR.
 
 5. BLOCK        If work discovers a blocker (Orchestraitor upstream, conflicting PR,
-                missing spec), set the issue's Blocked-By edge and Status="Blocked".
+                missing spec), set the issue's Blocked-By edge. The issue keeps its
+                current Status — the live project has no "Blocked" option; the
+                unresolved blockedBy edge is what excludes it from the ready-queue.
                 Cross-repo blockers (Orchestraitor): open the issue in arbsec/orchestraitor,
                 then use `create-blocker --repo arbsec/orchestraitor` to link from here.
                 Do NOT retry a policy/Orchestraitor blocker as if it were transient

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # create-blocker: open a blocking issue (optionally cross-repo in arbsec/orchestraitor)
-# and link it from the current Orchestraitor issue via a blockedBy edge + body link.
+# and link it from the current Arbitraitor issue via a blockedBy edge.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -13,22 +13,16 @@ if [ "$OPT_HELP" = true ]; then
   exit "$ARB_OK"
 fi
 
-# Parse --blocked-issue and --title flags from extra args.
+# Single parse loop: consume flags and positionals from extra args.
 BLOCKED_ISSUE=""
 TITLE=""
 while [ "${#ARB_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
   case "${ARB_LIB_EXTRA_ARGS[0]}" in
-    --blocked-issue) BLOCKED_ISSUE="${ARB_LIB_EXTRA_ARGS[1]}"; shift 2; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
-    --title)         TITLE="${ARB_LIB_EXTRA_ARGS[1]}"; shift 2; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
+    --blocked-issue) BLOCKED_ISSUE="${ARB_LIB_EXTRA_ARGS[1]:-}"; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
+    --title)         TITLE="${ARB_LIB_EXTRA_ARGS[1]:-}"; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
     *) break ;;
   esac
-done 2>/dev/null || true
-
-# Simpler re-parse: extract from the raw args directly.
-BLOCKED_ISSUE="${BLOCKED_ISSUE:-$(echo "${ARB_LIB_EXTRA_ARGS[*]:-}" | grep -oP '(?<=--blocked-issue )\S+' || true)}"
-TITLE="${TITLE:-$(echo "${ARB_LIB_EXTRA_ARGS[*]:-}" | grep -oP '(?<=--title ).*' || true)}"
-
-# Fallback: accept positional args.
+done
 [ -z "$BLOCKED_ISSUE" ] && BLOCKED_ISSUE="${ARB_LIB_EXTRA_ARGS[0]:-}"
 [ -z "$TITLE" ] && TITLE="${ARB_LIB_EXTRA_ARGS[1]:-}"
 
@@ -41,42 +35,53 @@ fi
 arb_lib_require_gh_scope
 arb_lib_load_project_config
 
-# The blocked issue lives in the Arbitraitor repo (from config or --repo).
-# The blocker issue is created in TARGET_REPO (defaults to the same repo,
-# but for Orchestraitor upstream blockers the caller passes --repo arbsec/orchestraitor).
-HOME_REPO="${OPT_REPO:-arbsec/arbitraitor}"
-TARGET_REPO="${ARB_LIB_EXTRA_ARGS[0]:-$HOME_REPO}"
+# The blocked issue lives in this repo (from --repo or the gh default).
+# The blocker issue is created in TARGET_REPO: the same repo by default, or
+# the cross-repo sibling via --repo arbsec/orchestraitor. Identity is never
+# guessed: --repo, or repo resolution that fails loudly.
+HOME_REPO="$(arb_lib_resolve_repo)"
+
+# --repo targets the blocker repo. Same-repo when it equals HOME_REPO, or when
+# not passed. Positional cross-repo input is rejected — use the flag.
+TARGET_REPO="${OPT_REPO:-$HOME_REPO}"
+
+IS_CROSS_REPO="$([ "$TARGET_REPO" != "$HOME_REPO" ] && echo true || echo false)"
 
 if [ "$OPT_DRY_RUN" = true ]; then
-  echo "[dry-run] gh issue create --repo $TARGET_REPO --title \"$TITLE\" --label blocked:orchestraitor" >&2
-  echo "[dry-run] gh issue edit $BLOCKED_ISSUE --repo arbsec/arbitraitor --add-blocked-by <new-num>" >&2
+  echo "[dry-run] gh issue create --repo $TARGET_REPO --title \"$TITLE\"$( [ "$IS_CROSS_REPO" = true ] && echo ' --label blocked:orchestraitor')" >&2
+  echo "[dry-run] gh issue edit $BLOCKED_ISSUE --repo $HOME_REPO --add-blocked-by <new-num>" >&2
   exit "$ARB_OK"
 fi
 
-# Create the blocker issue.
-ARGS=(issue create --repo "$TARGET_REPO" --title "$TITLE" --label "blocked:orchestraitor")
+# Create the blocker issue. Label only cross-repo blockers: blocked:orchestraitor
+# means "blocked ON orchestraitor" and is wrong for same-repo blockers.
+if [ "$IS_CROSS_REPO" = true ]; then
+  ARGS=(issue create --repo "$TARGET_REPO" --title "$TITLE" --label "blocked:orchestraitor")
+else
+  ARGS=(issue create --repo "$TARGET_REPO" --title "$TITLE")
+fi
 BLOCKER_URL="$(arb_lib_run_or_dry_run ARGS gh)"
 echo "Created blocker: $BLOCKER_URL" >&2
+BLOCKER_NUM="$(echo "$BLOCKER_URL" | grep -oE '[0-9]+$')"
 
-# If same repo, link via native blockedBy.
-if [ "$TARGET_REPO" = "$HOME_REPO" ]; then
-  BLOCKER_NUM="$(echo "$BLOCKER_URL" | grep -oP '\d+$')"
+# Link via native blockedBy (same repo).
+if [ "$IS_CROSS_REPO" = false ]; then
   ARGS=(issue edit "$BLOCKED_ISSUE" --repo "$HOME_REPO" --add-blocked-by "$BLOCKER_NUM")
   arb_lib_run_or_dry_run ARGS gh
   echo "Linked blockedBy edge: $BLOCKED_ISSUE -> #$BLOCKER_NUM" >&2
-else
-  # Cross-repo: use GraphQL addBlockedBy (node IDs are cross-repo within an org).
-  BLOCKER_ID="$(arb_lib_gh issue view "$(echo "$BLOCKER_URL" | grep -oP '\d+$')" --repo "$TARGET_REPO" --json id -q '.id' 2>/dev/null || true)"
-  BLOCKED_ID="$(arb_lib_gh issue view "$BLOCKED_ISSUE" --repo "$HOME_REPO" --json id -q '.id' 2>/dev/null || true)"
-  if [ -n "$BLOCKER_ID" ] && [ -n "$BLOCKED_ID" ]; then
-    echo "[dry-run] gh api graphql -f query='mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { ... } }'" >&2
-    if [ "$OPT_DRY_RUN" = false ]; then
-      arb_lib_gh api graphql -f query="mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { issue { number } blockingIssue { number } } }" 2>/dev/null || \
-        echo "  GraphQL addBlockedBy failed; falling back to body link." >&2
-    fi
-  fi
-  # Always also write the link into the body as a fallback.
-  echo "Cross-repo blocker. Add the following link to issue $BLOCKED_ISSUE body:" >&2
-  echo "  Blocked by: $BLOCKER_URL" >&2
-  echo "  Label: blocked:orchestraitor" >&2
+  exit "$ARB_OK"
 fi
+
+# Cross-repo: use GraphQL addBlockedBy (node IDs are cross-repo within an org).
+BLOCKER_ID="$(arb_lib_gh issue view "$BLOCKER_NUM" --repo "$TARGET_REPO" --json id -q '.id')"
+BLOCKED_ID="$(arb_lib_gh issue view "$BLOCKED_ISSUE" --repo "$HOME_REPO" --json id -q '.id')"
+if ! arb_lib_gh api graphql \
+    -f query="mutation { addBlockedBy(input: {issueId: \"$BLOCKED_ID\", blockingIssueId: \"$BLOCKER_ID\"}) { issue { number } blockingIssue { number } } }" >/dev/null; then
+  # Fail loudly: without the edge the issue is NOT excluded from the ready
+  # queue, which defeats the "do not retry a blocked Task" policy. Never
+  # leave a silent gap behind a printed instruction.
+  echo "error: GraphQL addBlockedBy failed — the blockedBy edge does NOT exist and issue $BLOCKED_ISSUE remains schedulable." >&2
+  echo "  Manually run: gh issue edit $BLOCKED_ISSUE --repo $HOME_REPO --add-blocked-by <num>, or link 'Blocked by $BLOCKER_URL' in the issue body, then re-run." >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+fi
+echo "Cross-repo blockedBy edge created: arbsec/orchestraitor#$BLOCKER_NUM blocks $BLOCKED_ISSUE (label: blocked:orchestraitor)." >&2

@@ -34,7 +34,7 @@ run_case "leaf/label/blocker semantics" '[
   {"number":8,"title":"truncated blocker page hides open blocker","issueType":null,"labels":[{"name":"task"},{"name":"MVP"}],"blockedBy":{"nodes":[{"state":"CLOSED"}],"totalCount":2}}
 ]' '[1,3,6]'
 
-# Assignee exclusion (spec 10-orchestrator.md §9.41): a human assignee excludes
+# Assignee exclusion (arbitraitor-workflow.md "Service identity"): a human assignee excludes
 # the item; a service identity (App bot `<slug>[bot]` or bare slug form, case
 # insensitive) keeps it schedulable; unassigned stays schedulable. An issue
 # shared with any human co-assignee is excluded.

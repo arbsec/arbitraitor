@@ -40,10 +40,10 @@ gh api graphql -f query='
 
 ## Pagination
 
-`reviewThreads(first: 100)` may not return all threads on large PRs. The `review-threads` script handles pagination:
+`reviewThreads(first: 100)` may not return all threads on large PRs. The `review-threads` script does NOT paginate: it reports `has_next_page` when the first page is truncated, and `convergence-status` blocks on `threads_truncated` — an undercounted thread list is not convergence evidence, so the gate fails closed rather than silently ignoring threads beyond 100:
 
 ```text
-fetch first 100 → if pageInfo.hasNextPage → fetch next 100 with after: endCursor → repeat
+fetch first 100 → pageInfo.hasNextPage true ⇒ convergence blocked (threads_truncated)
 ```
 
 ## Resolving a thread

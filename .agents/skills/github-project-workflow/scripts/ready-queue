@@ -19,7 +19,7 @@ arb_lib_require_gh_scope
 arb_lib_load_project_config
 REPO="$(arb_lib_resolve_repo)"
 
-# --- Service identities for the assignee exclusion (spec §9.41) --------------
+# --- Service identities for the assignee exclusion ---------------------------
 # Items assigned to humans are excluded; items assigned to a declared service
 # identity (the GitHub App bot) stay schedulable. Precedence:
 # $ARB_SERVICE_IDENTITIES (comma-separated) > [service_identities].slugs in the
@@ -40,20 +40,20 @@ fi
 SERVICE_SLUGS="${SERVICE_SLUGS:-arbsec-agent}"
 SERVICE_JSON="$(printf '%s' "$SERVICE_SLUGS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | jq -R . | jq -s .)"
 
-# Fetch open issues with the fields we need for filtering.
-# gh issue list --json returns blockedBy/subIssues as {nodes:[...],totalCount:N}.
-#
-# LIMITATION: gh issue list does NOT return Project v2 field values (Target, Status, Risk).
-# This script filters on issueType + blockedBy + an MVP label as a proxy. A future
-# version will use gh project item-list to read Status=Ready and Target=MVP directly.
-# Until then, the project-manager must verify Status=Ready before claiming.
-ISSUES_JSON="$(arb_lib_gh issue list --repo "$REPO" --state open --limit 200 \
-  --json number,title,issueType,labels,assignees,blockedBy,subIssues,url)"
-
 if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh issue list --repo $REPO --state open --limit 200 --json ..." >&2
   exit "$ARB_OK"
 fi
+
+# Fetch open issues with the fields we need for filtering.
+# gh issue list --json returns blockedBy/subIssues as {nodes:[...],totalCount:N}.
+#
+# LIMITATION: gh issue list does NOT return Project v2 field values (Target, Status, Risk).
+# This script filters on issueType + blockedBy + an optional label gate as a proxy. A
+# future version will use gh project item-list to read Status=Ready directly. Until
+# then, the project-manager must verify Status=Ready before claiming.
+ISSUES_JSON="$(arb_lib_gh issue list --repo "$REPO" --state open --limit 200 \
+  --json number,title,issueType,labels,assignees,blockedBy,subIssues,url)"
 
 # Filter with jq (program lives in ready-queue.jq so it is regression-tested):
 # - leaf iff issueType.name in ["Task","Bug"] OR labels contain task/bug

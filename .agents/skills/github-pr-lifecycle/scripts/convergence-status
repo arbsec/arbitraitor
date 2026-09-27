@@ -37,6 +37,7 @@ THREADS_JSON="$("$SCRIPT_DIR/review-threads" "$PR" --repo "$REPO" --json 2>/dev/
   exit "$ARB_ERR_UNRECOVERABLE"
 }
 UNRESOLVED_THREADS="$(echo "$THREADS_JSON" | jq -r '.unresolved_actionable')"
+THREADS_TRUNCATED="$(echo "$THREADS_JSON" | jq -r '.has_next_page // false')"
 
 # 3. Checklist: all arb:* markers must be checked.
 CHECKLIST_JSON="$("$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
@@ -73,8 +74,10 @@ REASONS=""
 [ "$ALL_CHECKS_PASS" != "true" ] && REASONS="${REASONS}checks_not_passing, "
 [ "$CHECKS_PENDING" = "true" ] && REASONS="${REASONS}checks_pending, "
 [ "$UNRESOLVED_THREADS" != "0" ] && REASONS="${REASONS}unresolved_threads(${UNRESOLVED_THREADS}), "
+[ "$THREADS_TRUNCATED" = "true" ] && REASONS="${REASONS}threads_truncated, "
 [ "$ALL_CHECKED" != "true" ] && REASONS="${REASONS}unchecked_items(${UNCHECKED_COUNT}), "
 [ "$REVIEW_DECISION" = "REVIEW_REQUIRED" ] && REASONS="${REASONS}review_required, "
+[ "$REVIEW_DECISION" = "CHANGES_REQUESTED" ] && REASONS="${REASONS}changes_requested, "
 [ "$IS_DRAFT" = "true" ] && REASONS="${REASONS}is_draft, "
 REASONS="${REASONS%, }"
 
@@ -86,15 +89,20 @@ if [ "$OPT_JSON" = true ]; then
     --arg mergeable "$MERGEABLE" \
     --arg reasons "$REASONS" \
     --arg head_sha "$HEAD_SHA" \
+    --arg all_checks_pass "$ALL_CHECKS_PASS" \
+    --arg unresolved "$UNRESOLVED_THREADS" \
+    --arg unchecked "$UNCHECKED_COUNT" \
+    --arg review_decision "$REVIEW_DECISION" \
+    --arg is_draft "$IS_DRAFT" \
     '{
       mergeable: ($mergeable == "true"),
       reasons: ($reasons | split(", ") | map(select(length > 0))),
       head_sha: $head_sha,
-      checks_all_passed: ($mergeable == "true" or true),
-      unresolved_actionable_threads: 0,
-      unchecked_checklist_items: 0,
-      review_decision: "",
-      is_draft: false
+      checks_all_passed: ($all_checks_pass == "true"),
+      unresolved_actionable_threads: ($unresolved | tonumber),
+      unchecked_checklist_items: ($unchecked | tonumber),
+      review_decision: $review_decision,
+      is_draft: ($is_draft == "true")
     }'
 else
   if [ "$MERGEABLE" = "true" ]; then

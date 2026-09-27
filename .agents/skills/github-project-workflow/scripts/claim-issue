@@ -45,9 +45,10 @@ CURRENT="$(arb_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,assignees
 
 # Check: issue must not already be assigned to someone (unless it's us).
 ALREADY_ASSIGNED="$(echo "$CURRENT" | jq -r '.assignees | length')"
-MY_LOGIN=""
-if [ "$ALREADY_ASSIGNED" -gt 0 ] || [ "$OPT_ALLOW_PARALLEL" = true ]; then
-  MY_LOGIN="$(arb_lib_gh api user --jq '.login' 2>/dev/null || echo "")"
+MY_LOGIN="$(arb_lib_gh api user --jq '.login' 2>/dev/null || echo "")"
+if [ -z "$MY_LOGIN" ]; then
+  echo "error: could not resolve caller identity (gh api user failed)" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
 fi
 if [ "$ALREADY_ASSIGNED" -gt 0 ]; then
   FOREIGN_ASSIGNEE="$(echo "$CURRENT" | jq -r --arg me "$MY_LOGIN" '[.assignees[] | select(.login != $me)] | length')"
@@ -60,16 +61,24 @@ if [ "$ALREADY_ASSIGNED" -gt 0 ]; then
   fi
 fi
 
-# Check: claim budget. Lane mode raises the per-caller cap from one active claim to
-# ARB_MAX_PARALLEL_CLAIMS concurrent lanes; each lane owns one worktree + branch and
-# the caller passes the flag deliberately (see the project workflow policy).
+# Check: claim budget. The default one-claim guard counts the caller's other
+# open assigned issues (excluding this one). Lane mode (--allow-parallel)
+# raises the cap from one claim to ARB_MAX_PARALLEL_CLAIMS concurrent lanes;
+# each lane owns one worktree + branch and the caller passes the flag
+# deliberately (see the project workflow policy). Both guards count claims
+# BEFORE this one, so the cap is inclusive.
+ISSUE_NUM="${ISSUE##*/}"
+ACTIVE_CLAIMS="$(arb_lib_gh issue list --repo "$REPO" --assignee "$MY_LOGIN" \
+  --state open --limit 200 --json number \
+  | jq -r --argjson self "$ISSUE_NUM" '[.[] | select(.number != $self)] | length')"
 if [ "$OPT_ALLOW_PARALLEL" = true ]; then
-  ACTIVE_CLAIMS="$(arb_lib_gh issue list --repo "$REPO" --assignee "$MY_LOGIN" \
-    --state open --limit 200 --json number | jq -r 'length')"
-  if [ "$ACTIVE_CLAIMS" -gt "$ARB_MAX_PARALLEL_CLAIMS" ]; then
-    echo "error: $ACTIVE_CLAIMS active claims exceed the parallel limit of $ARB_MAX_PARALLEL_CLAIMS. Release a lane with release-issue." >&2
+  if [ "$ACTIVE_CLAIMS" -ge "$ARB_MAX_PARALLEL_CLAIMS" ]; then
+    echo "error: $ACTIVE_CLAIMS active claims already meet the parallel limit of $ARB_MAX_PARALLEL_CLAIMS. Release a lane with release-issue." >&2
     exit "$ARB_ERR_POLICY"
   fi
+elif [ "$ACTIVE_CLAIMS" -gt 0 ]; then
+  echo "error: you already hold $ACTIVE_CLAIMS active claim(s). Release first with release-issue, or pass --allow-parallel for lane mode." >&2
+  exit "$ARB_ERR_POLICY"
 fi
 
 if [ "$OPT_DRY_RUN" = true ]; then

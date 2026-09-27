@@ -67,7 +67,9 @@ The script combines:
 
 - `pr-checks` — all required + non-optional checks pass at current HEAD;
 - `review-threads` — all actionable threads resolved (`isResolved = true`);
-- `reconcile-checklist` — all `<!-- arb:* -->` markers checked based on evidence;
+- `reconcile-checklist` — the managed marker set is present and all checked based on evidence (a marker-less body is `checklist_missing`, not converged);
 - the review-generation state (has a generation run against the current HEAD? did it find new noteworthy findings?).
 
-The script exits `0` only when all four are true. Exit `5` (`ARB_ERR_BLOCKED`) means the loop limit was hit — `blocked`/`needs-human`, not mergeable.
+The script also blocks when the review-thread page is truncated (`has_next_page: true`) — an undercounted thread list is not evidence of resolution.
+
+The script exits `0` only when all of these are true. Exit `5` (`ARB_ERR_BLOCKED`) means the loop limit was hit — `blocked`/`needs-human`, not mergeable.

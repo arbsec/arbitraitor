@@ -92,7 +92,9 @@ A different agent must review the PR and verify:
 
 **Limits are safety valves, not convergence.** Loop limits are config-driven
 (`[review]` in [.agents/project/github-project.example.toml](.agents/project/github-project.example.toml)):
-`max_review_loops = 3` default, `hard_loop_ceiling = 5`, escalation to `@mekwall`. Hitting a limit produces a `blocked`/`needs-human` state — never silent approval, never a merge path:
+`max_review_loops = 3` default, `hard_loop_ceiling = 5`, escalation to `@mekwall`
+(adopted from orchestraitor in the agent-workflow alignment — this halves the old
+default 5 / hard ceiling 10; hitting the limit still blocks, never merges). Hitting a limit produces a `blocked`/`needs-human` state — never silent approval, never a merge path:
 
 1. Add the escalation reviewer: `gh pr edit <number> --repo arbsec/arbitraitor --add-reviewer mekwall`.
 2. Post a comment summarizing remaining findings and what was tried.

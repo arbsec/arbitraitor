@@ -29,11 +29,13 @@ fi
 
 BODY="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
 
-# Extract each checklist line with its orc marker.
+# Extract each checklist line with its arb marker.
 # Pattern: - [ ] <!-- arb:XXX --> description  OR  - [x] <!-- arb:XXX --> description
-# A body with zero markers is legitimate (custom PR bodies): grep matches nothing
-# and would abort under pipefail, so guard it — empty means an empty checklist
-# (all_checked is vacuously true).
+# A body with zero markers means the managed checklist is missing (edited away
+# or never applied): grep matches nothing, so guard it against pipefail — empty
+# is reported as `all_checked: false` with reason `checklist_missing`, NOT as
+# vacuously satisfied. The template is auto-inserted on PR creation; a body
+# without the markers has not been reconciled.
 RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*arb:(\w+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
   CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
   MARKER="$(echo "$line" | grep -oP '(?<=arb:)\w+')"
@@ -50,14 +52,19 @@ if [ "$OPT_JSON" = true ]; then
       description: .[2]
     }) | {
       items: .,
-      all_checked: all(.[]; .checked == true),
+      checklist_missing: (length == 0),
+      all_checked: (length > 0) and all(.[]; .checked == true),
       unchecked: map(select(.checked == false))
     }
   '
 else
   echo "PR checklist reconciliation:"
+  if [ -z "$RESULT" ]; then
+    echo "  checklist_missing: the PR body contains no arb:* managed markers —"
+    echo "  apply the PR template and reconcile the checklist before merge."
+    exit "$ARB_ERR_CONFIG"
+  fi
   echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
-    [ -z "$marker" ] && continue
     if [ "$checked" = "x" ]; then
       echo "  [x] $marker: $desc"
     else

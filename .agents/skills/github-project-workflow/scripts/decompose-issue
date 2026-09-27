@@ -21,6 +21,7 @@ if [ -z "$PARENT" ]; then
 fi
 
 arb_lib_require_gh_scope
+arb_lib_load_project_config
 REPO="$(arb_lib_resolve_repo)"
 
 # Read the decomposition plan from stdin.
