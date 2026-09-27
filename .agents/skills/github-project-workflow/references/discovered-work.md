@@ -6,7 +6,7 @@ Never hide newly discovered work. Create a separate issue for independently test
 
 | Kind | What it is | Where it goes |
 |---|---|---|
-| **Blocker** | Work that MUST land before the current issue/PR can safely complete. The current work cannot proceed without it. | Native `blockedBy` edge. Current issue → `Status = Blocked`. If the blocker is orchestration or model-routing capability, the canonical issue lives in `arbsec/orchestraitor`. |
+| **Blocker** | Work that MUST land before the current issue/PR can safely complete. The current work cannot proceed without it. | Native `blockedBy` edge. The current issue keeps its Status — the unresolved `blockedBy` edge is what excludes it from the ready-queue (no "Blocked" Status exists on the live project). If the blocker is orchestration or model-routing capability, the canonical issue lives in `arbsec/orchestraitor`. |
 | **Follow-up** | Independently testable/revertible work discovered during the current task, but NOT required to complete it safely. | A NEW leaf issue, linked from the current PR's "Newly discovered follow-up work" section. The current work may merge without it. |
 | **Hidden work** (forbidden) | Discovered work stuffed into the current PR to avoid opening an issue. | **Never.** Open a Follow-up instead. |
 
@@ -18,7 +18,8 @@ The rule of thumb: if the PR would be unsafe to merge without the fix, it is a b
 
 ## `create-blocker` (for blockers)
 
-Opens an issue (optionally in `arbsec/orchestraitor` for cross-repo orchestration prerequisites), creates a `blockedBy` edge from the current issue, and sets the current issue's `Status = Blocked`.
+Opens an issue (optionally in `arbsec/orchestraitor` for cross-repo orchestration prerequisites), creates a `blockedBy` edge from the current issue (the issue keeps its current
+Status — there is no "Blocked" Status on the live project).
 
 ```sh
 scripts/create-blocker --repo arbsec/orchestraitor \

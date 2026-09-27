@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# pr-checks: read CI check status and classify each as pass/fail/pending/skip.
-# Wraps gh pr checks --json and adds a classification summary.
+# pr-checks: read CI check status, classify each as pass/fail/pending/skip, and
+# enforce the [checks].required list from the project config — a required check
+# absent from the rollup is a failure unless its workflow is path-gated and the
+# PR diff matches none of its paths.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -9,7 +11,7 @@ source "$SCRIPT_DIR/_lib.sh"
 arb_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
-  arb_lib_print_help "pr-checks" "Read PR CI checks and classify each as pass/fail/pending/skip. Use --required to filter."
+  arb_lib_print_help "pr-checks" "Read PR CI checks, classify each, and enforce the required-check list. Missing required checks fail."
   exit "$ARB_OK"
 fi
 
@@ -20,12 +22,14 @@ if [ -z "$PR" ]; then
 fi
 
 arb_lib_require_gh_scope
+arb_lib_load_project_config
 REPO="$(arb_lib_resolve_repo)"
 
 CHECK_ARGS=(pr checks "$PR" --repo "$REPO" --json name,state,bucket,workflow,link,startedAt,completedAt)
 
 if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh ${CHECK_ARGS[*]}" >&2
+  echo "[dry-run] gh pr diff $PR --repo $REPO --name-only" >&2
   exit "$ARB_OK"
 fi
 
@@ -34,7 +38,7 @@ RAW="$(arb_lib_gh "${CHECK_ARGS[@]}")" || EXIT_CODE=$?
 # gh pr checks exits 8 when pending; capture the JSON regardless.
 EXIT_CODE=${EXIT_CODE:-0}
 if [ -z "$RAW" ] && [ "$EXIT_CODE" -eq 8 ]; then
-  echo '{"checks":[],"all_passed":false,"any_pending":true,"any_failing":false}'
+  echo '{"checks":[],"all_passed":false,"any_pending":true,"any_failing":false,"missing_required":[]}'
   exit 0
 fi
 if [ -z "$RAW" ]; then
@@ -44,45 +48,137 @@ if [ -z "$RAW" ]; then
   exit "$ARB_ERR_UNRECOVERABLE"
 fi
 
-# Known-disabled jobs: workflow jobs deliberately disabled repo-side via `if:`
-# conditions (state SKIPPED, conclusion skipped). They are classified
-# "not-applicable" and excluded from the all_passed gate — they can never report
-# pass. Genuinely skipped-but-optioned checks are NOT in this list and still
-# fail the gate.
-#   - "Documentation": event-gated in code.yml (`if: github.event_name ==
-#     'push'`), so it never runs on pull-request events; excluded only while
-#     it reports the skipped state — a failing or pending run still fails the
-#     gate. Re-enabling on PRs means removing the name from this list.
-#   - "qlty check": external quality gate reported on the qlty dashboard; it is
-#     in [checks].optional in the project config.
-# Keep in sync with [checks].optional in .agents/project/github-project.example.toml.
-KNOWN_DISABLED_JOBS='["Documentation", "qlty check"]'
+# --- Required / optional check lists from the project config -------------------
+read_checks_field() {
+  awk -v field="$1" '
+    function emit(s,   i, n, part) {
+      n = split(s, part, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/"/, "", part[i])
+        sub(/^[[:space:]]+/, "", part[i]); sub(/[[:space:]]+$/, "", part[i])
+        if (part[i] != "") print part[i]
+      }
+    }
+    /^[[:space:]]*\[checks\][[:space:]]*$/ { insec = 1; next }
+    /^[[:space:]]*\[/ { insec = 0 }
+    insec && multi {
+      line = $0
+      if (line ~ /\]/) { sub(/\].*$/, "", line); emit(line); exit }
+      emit(line)
+      next
+    }
+    insec && $0 ~ field "[[:space:]]*=" {
+      line = $0; sub(/^[^=]*=[[:space:]]*/, "", line)
+      if (line ~ /\]/) { sub(/\].*$/, "", line); emit(line); exit }
+      sub(/\[/, "", line)
+      emit(line); multi = 1
+    }
+  ' "$ARB_PROJECT_CONFIG"
+}
+to_json_array() {
+  jq -R . | jq -s .
+}
+REQUIRED_JSON="$(read_checks_field required | to_json_array)"
+OPTIONAL_JSON="$(read_checks_field optional | to_json_array)"
+if [ "$(echo "$REQUIRED_JSON" | jq 'length')" -eq 0 ]; then
+  echo "error: [checks].required is empty or missing in $ARB_PROJECT_CONFIG — cannot enforce the required-check list" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
 
-# Classify checks. The not-applicable exemption requires BOTH the known-disabled
-# name AND the skipped state: a known-disabled job that actually ran and failed
-# is a failure, never a pass (state-blind exemption would launder real failures).
-echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
-  def disabled($name): ($known_disabled | index($name)) != null;
-  def exempt: disabled(.name) and .bucket == "skipping";
+# --- PR diff paths (fail loudly — an unreadable diff must not become "no paths")
+FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'split("\n") | map(select(length > 0))')"
+
+# --- Path-gated required checks ------------------------------------------------
+# Mirror of the `on.pull_request.paths` filters in the workflow files: a
+# path-gated check legitimately never reports when the diff matches none of
+# its paths. KEEP IN SYNC with .github/workflows/{invariants,security}.yml.
+PATH_GATED='[
+  {"name": "Invariant Property Tests",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/invariants.yml"]},
+  {"name": "Dependency Policy",
+   "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]},
+  {"name": "Advisory Check",
+   "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]}
+]'
+
+# Convert one workflow `paths` glob to a regex: protect dots and `**/` from the
+# single-`*` expansion with placeholders, then restore.
+glob_to_regex() {
+  jq -rn --arg g "$1" '
+    $g
+    | gsub("\\."; "\u0001")
+    | gsub("\\*\\*/"; "\u0002")
+    | gsub("\\*"; "[^/]*")
+    | gsub("\u0002"; "(^|.*/)")
+    | gsub("\u0001"; "\\.")'
+}
+
+# Is a required check exempt because its workflow is path-gated and no diff
+# file matches any of its paths? (No path-gate entry → not exempt.)
+path_gate_exempt() {
+  local chk="$1"
+  jq -rn --arg c "$chk" --argjson gated "$PATH_GATED" --argjson files "$FILES_JSON" '
+    ([$gated[] | select(.name == $c) | .paths[]] | length) as $np
+    | if $np == 0 then false
+      else
+        ([$gated[]
+            | select(.name == $c)
+            | .paths[] as $p
+            | select(any($files[]; test($p | gsub("\\."; "\u0001") | gsub("\\*\\*/"; "\u0002") | gsub("\\*"; "[^/]*") | gsub("\u0002"; "(^|.*/)") | gsub("\u0001"; "\\."))
+            ))]
+          | length) == 0
+      end'
+}
+
+# --- Missing required checks (bash loop; fail closed) --------------------------
+MISSING_REQUIRED="[]"
+if [ "$(echo "$RAW" | jq 'length')" -gt 0 ]; then
+  MISSING_LIST=""
+  while IFS= read -r chk; do
+    [ -z "$chk" ] && continue
+    PRESENT="$(echo "$RAW" | jq -r --arg c "$chk" 'any(.[]; .name == $c)')"
+    [ "$PRESENT" = "true" ] && continue
+    if [ "$(path_gate_exempt "$chk")" = "true" ]; then continue; fi
+    MISSING_LIST="${MISSING_LIST}${chk}\n"
+  done < <(echo "$REQUIRED_JSON" | jq -r '.[]')
+  MISSING_REQUIRED="$(printf '%b' "$MISSING_LIST" | sed '/^$/d' | jq -R . | jq -s 'map(select(length > 0))')"
+fi
+
+# --- Classification ------------------------------------------------------------
+# Skipping-state exemption: workflow jobs deliberately disabled repo-side via
+# `if:` conditions (state SKIPPED, conclusion skipped). The exemption requires
+# BOTH the name AND the skipped state — a job that ran and failed is a failure,
+# never a pass. "Documentation" is event-gated in code.yml
+# (`if: github.event_name == 'push'`) and also listed in [checks].optional.
+echo "$RAW" | jq \
+  --argjson optional "$OPTIONAL_JSON" \
+  --argjson missing_required "$MISSING_REQUIRED" '
+  def exempt:
+    .name as $n
+    | (.bucket == "skipping")
+    and (($optional | index($n)) != null);
   {
-  checks: map({
-    name: .name,
-    state: .state,
-    bucket: .bucket,
-    workflow: .workflow,
-    link: .link,
-    classification: (
-      if exempt then "not-applicable"
-      elif .bucket == "pass" then "pass"
-      elif .bucket == "fail" then "fail"
-      elif .bucket == "pending" then "pending"
-      elif .bucket == "skipping" then "skip"
-      elif .bucket == "cancel" then "fail"
-      else "unknown"
-      end
-    )
-  }),
-  all_passed: (length > 0) and all(.[]; .bucket == "pass" or exempt),
-  any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
-  any_pending: any(.[]; .bucket == "pending")
-}'
+    checks: map({
+      name: .name,
+      state: .state,
+      bucket: .bucket,
+      workflow: .workflow,
+      link: .link,
+      classification: (
+        if exempt then "not-applicable"
+        elif .bucket == "pass" then "pass"
+        elif .bucket == "fail" then "fail"
+        elif .bucket == "pending" then "pending"
+        elif .bucket == "skipping" then "skip"
+        elif .bucket == "cancel" then "fail"
+        else "unknown"
+        end
+      )
+    }),
+    missing_required: $missing_required,
+    all_passed: ((length) > 0)
+      and all(.[]; .bucket == "pass" or exempt)
+      and (($missing_required | length) == 0),
+    any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
+    any_pending: any(.[]; .bucket == "pending")
+  }'

@@ -116,10 +116,32 @@ arb_lib_jq_filter() {
 }
 
 # --- Repo resolution (never guess) ---------------------------------------------
-# Exits 2 if --repo was not provided AND no unambiguous default exists.
+# Precedence: --repo flag > [project].repos in the loaded project config (only
+# when unambiguous) > the checkout's git remote. Mutating scripts always load
+# the project config first, so they resolve from config — never from cwd.
+# Exits 2 if nothing resolves.
 arb_lib_resolve_repo() {
   if [ -n "$OPT_REPO" ]; then echo "$OPT_REPO"; return; fi
-  # Try the gh default host/repo detection (requires being inside a repo w/ gh origin).
+  if [ -n "${ARB_PROJECT_CONFIG:-}" ]; then
+    local configured
+    configured="$(awk '
+      /^\[project\][[:space:]]*$/ { in_project = 1; next }
+      /^[[:space:]]*\[/ { if (in_project) exit }
+      in_project && /^[[:space:]]*repos[[:space:]]*=/ {
+        line = $0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/[][]/, "", line)
+        gsub(/"/, "", line)
+        gsub(/[[:space:]]/, "", line)
+        print line
+        exit
+      }' "$ARB_PROJECT_CONFIG")"
+    case "$configured" in
+      *,*) ;;  # multiple repos configured — ambiguous, fall through
+      ?*) echo "$configured"; return ;;
+    esac
+  fi
+  # Fall back to gh default host/repo detection (requires being inside a repo w/ gh origin).
   local detected
   detected="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || true
   if [ -n "$detected" ]; then echo "$detected"; return; fi

@@ -109,7 +109,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 ## Outputs
 
 - Human-readable by default; `--json` for machine consumption and for piping between scripts.
-- `merge-gate` prints a JSON verdict (`mergeable: bool`, `reasons: [...]`) and exits `0` only when mergeable.
+- `convergence-status --json` prints the machine verdict (`mergeable: bool`, `reasons: [...]`); `merge-gate` composes it with a head-SHA race check and exits `0` only when mergeable.
 
 ## Failure states (stable exit codes)
 

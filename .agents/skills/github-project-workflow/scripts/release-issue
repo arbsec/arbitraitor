@@ -28,6 +28,10 @@ REPO="$(arb_lib_resolve_repo)"
 # Read current state to validate: caller must be the assignee.
 CURRENT="$(arb_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,assignees)"
 MY_LOGIN="$(arb_lib_gh api user --jq '.login' 2>/dev/null || echo "")"
+if [ -z "$MY_LOGIN" ]; then
+  echo "error: could not resolve caller identity (gh api user failed)" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+fi
 IS_ASSIGNED="$(echo "$CURRENT" | jq --arg me "$MY_LOGIN" '.assignees | any(.login == $me)')"
 
 if [ "$IS_ASSIGNED" != "true" ]; then

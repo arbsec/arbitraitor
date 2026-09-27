@@ -50,8 +50,10 @@ if [ "$(echo "$CONVERGENCE" | jq -r '.mergeable')" != "true" ]; then
   exit "$ARB_ERR_BLOCKED"
 fi
 
-# Read the head SHA for --match-head-commit.
-HEAD_SHA="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')"
+# Use the head SHA the convergence check verified — NOT a fresh read. A commit
+# pushed between the convergence check and now must fail --match-head-commit,
+# which is the whole point of the race protection.
+HEAD_SHA="$(echo "$CONVERGENCE" | jq -r '.head_sha')"
 
 if [ "$OPT_DRY_RUN" = true ]; then
   echo "[dry-run] gh pr merge $PR --repo $REPO --squash --delete-branch --match-head-commit $HEAD_SHA" >&2

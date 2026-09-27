@@ -43,7 +43,7 @@ The script reads `gh pr diff --name-only` + the diff body, matches against the p
   "public_behavior_changed": true,
   "touched_surfaces": ["CLI behavior", "Configuration"],
   "docs_required": true,
-  "docs_updated_in_pr": null,
+  "changelog_updated_in_pr": null,
   "checklist_marker": "arb:docs"
 }
 ```

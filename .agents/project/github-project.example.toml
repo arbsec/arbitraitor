@@ -111,7 +111,7 @@ optional = ["Documentation", "qlty check"]   # qlty = external quality gate (qlt
 [merge]
 strategy               = "squash"
 delete_branch_on_merge = true
-require_codeowners     = true
+require_codeowners     = false   # live ruleset 18035330 has require_code_owner_review: false — enable in the ruleset once team review flow is validated (follow-up)
 require_linear_history = true
 require_signed_commits = true   # DCO
 
