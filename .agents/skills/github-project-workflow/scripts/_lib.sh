@@ -143,7 +143,7 @@ arb_lib_resolve_repo() {
   fi
   # Fall back to gh default host/repo detection (requires being inside a repo w/ gh origin).
   local detected
-  detected="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || true
+  detected="$(command "${GH_BIN:-gh}" repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" || true
   if [ -n "$detected" ]; then echo "$detected"; return; fi
   echo "error: could not resolve repository. Pass --repo OWNER/REPO explicitly." >&2
   exit "$ARB_ERR_CONFIG"
@@ -153,18 +153,18 @@ arb_lib_resolve_repo() {
 # Verifies gh is installed + authenticated for the required scope.
 arb_lib_require_gh_scope() {
   local required_scope="${1:-}"
-  if ! command -v gh >/dev/null 2>&1; then
+  if ! command -v "${GH_BIN:-gh}" >/dev/null 2>&1; then
     echo "error: gh CLI not found. Install from https://cli.github.com/" >&2
     exit "$ARB_ERR_CONFIG"
   fi
-  if ! gh auth status >/dev/null 2>&1; then
+  if ! command "${GH_BIN:-gh}" auth status >/dev/null 2>&1; then
     echo "error: not authenticated to gh. Run 'gh auth login'." >&2
     exit "$ARB_ERR_CONFIG"
   fi
   if [ -n "$required_scope" ]; then
     # Check scopes from the OAuth token header (gh sets X-Oauth-Scopes).
     local scopes
-    scopes="$(gh auth status 2>&1 | grep -i 'Token scopes' || true)"
+    scopes="$(command "${GH_BIN:-gh}" auth status 2>&1 | grep -i 'Token scopes' || true)"
     if ! echo "$scopes" | grep -q "$required_scope"; then
       echo "error: missing gh OAuth scope '$required_scope'. Run: gh auth refresh -s $required_scope" >&2
       exit "$ARB_ERR_CONFIG"

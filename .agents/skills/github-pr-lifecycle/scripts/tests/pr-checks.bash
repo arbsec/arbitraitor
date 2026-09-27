@@ -46,7 +46,7 @@ run_case() {
   printf '%s' "$fixture" > "$FIXTURE"
   export FIXTURE
   local got want
-  got="$(cd "$REPO" && FAKE_FILES="$files" GH_BIN="$STUB/gh" bash "$PR_CHECKS" 1 --json 2>/dev/null \
+  got="$(cd "$REPO" && FAKE_FILES="$files" GH_BIN="$STUB/gh" bash "$PR_CHECKS" 1 --json \
     | jq -c '{all_passed, any_failing, any_pending, missing_required}')"
   want="$(printf '%s' "$expect" | jq -c '{all_passed, any_failing, any_pending, missing_required}')"
   if [ "$got" != "$want" ]; then
@@ -62,7 +62,7 @@ assert_classification() {
   local name="$1" fixture="$2" check="$3" want="$4"
   printf '%s' "$fixture" > "$FIXTURE"
   local got
-  got="$(cd "$REPO" && FAKE_FILES="AGENTS.md" GH_BIN="$STUB/gh" bash "$PR_CHECKS" 1 --json 2>/dev/null \
+  got="$(cd "$REPO" && FAKE_FILES="AGENTS.md" GH_BIN="$STUB/gh" bash "$PR_CHECKS" 1 --json \
     | jq -r --arg c "$check" '.checks[] | select(.name == $c) | .classification')"
   if [ "$got" != "$want" ]; then
     echo "FAIL $name: expected $check classification=$want, got $got" >&2
