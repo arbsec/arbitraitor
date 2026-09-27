@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# reconcile-checklist: parse the PR body for <!-- arb:* --> markers and report
+# which managed checklist items are checked vs unchecked as verified facts.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "reconcile-checklist" "Parse PR body for <!-- arb:* --> markers and report checked vs unchecked items."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr view $PR --repo $REPO --json body | grep arb:" >&2
+  exit "$ARB_OK"
+fi
+
+BODY="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
+
+# Extract each checklist line with its arb marker.
+# Pattern: - [ ] <!-- arb:XXX --> description  OR  - [x] <!-- arb:XXX --> description
+# A body with zero markers means the managed checklist is missing (edited away
+# or never applied): grep matches nothing, so guard it against pipefail — empty
+# is reported as `all_checked: false` with reason `checklist_missing`, NOT as
+# vacuously satisfied. The template is auto-inserted on PR creation; a body
+# without the markers has not been reconciled.
+RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*arb:(\w+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
+  CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
+  MARKER="$(echo "$line" | grep -oP '(?<=arb:)\w+')"
+  DESC="$(echo "$line" | sed 's/.*arb:\w*\s*-->\s*//' || true)"
+  printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
+done)"
+
+if [ "$OPT_JSON" = true ]; then
+  echo "$RESULT" | jq -R -s '
+    split("\n") | map(select(length > 0)) |
+    map(split("\t")) | map({
+      marker: .[0],
+      checked: (.[1] == "x"),
+      description: .[2]
+    }) | {
+      items: .,
+      checklist_missing: (length == 0),
+      all_checked: ((length > 0) and all(.[]; .checked == true)),
+      unchecked: map(select(.checked == false))
+    }
+  '
+else
+  echo "PR checklist reconciliation:"
+  if [ -z "$RESULT" ]; then
+    echo "  checklist_missing: the PR body contains no arb:* managed markers —"
+    echo "  apply the PR template and reconcile the checklist before merge."
+    exit "$ARB_ERR_CONFIG"
+  fi
+  echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
+    if [ "$checked" = "x" ]; then
+      echo "  [x] $marker: $desc"
+    else
+      echo "  [ ] $marker: $desc"
+    fi
+  done
+fi

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# decompose-issue: create sub-issues under a parent Epic/Feature.
+# Takes a JSON plan on stdin: [{title, body, type, blockedBy:[nums]}, ...]
+# Creates each as a sub-issue of the parent via gh issue create --parent.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "decompose-issue" "Create sub-issues from a JSON plan on stdin under a parent issue. Use --dry-run to preview."
+  exit "$ARB_OK"
+fi
+
+PARENT="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PARENT" ]; then
+  echo "error: parent issue number or URL required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+arb_lib_load_project_config
+REPO="$(arb_lib_resolve_repo)"
+
+# Read the decomposition plan from stdin.
+PLAN="$(cat)"
+
+# Validate it's a JSON array of objects.
+ITEM_COUNT="$(echo "$PLAN" | jq 'if type == "array" then length else error("expected JSON array") end' 2>/dev/null)"
+if [ -z "$ITEM_COUNT" ]; then
+  echo "error: stdin must be a JSON array of issue objects [{title, body, ...}]" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] Would create $ITEM_COUNT sub-issue(s) under $PARENT in $REPO:" >&2
+  echo "$PLAN" | jq -r '.[] | "  - \(.title) [type=\(.type // "Task")]"' >&2
+  exit "$ARB_OK"
+fi
+
+# Create each sub-issue.
+echo "$PLAN" | jq -c '.[]' | while IFS= read -r item; do
+  TITLE="$(echo "$item" | jq -r '.title')"
+  BODY="$(echo "$item" | jq -r '.body // empty')"
+  ITYPE="$(echo "$item" | jq -r '.type // "Task"')"
+  BLOCKED_BY="$(echo "$item" | jq -r '.blockedBy // [] | join(",")')"
+
+  CMD_ARGS=(issue create --repo "$REPO" --parent "$PARENT" --title "$TITLE" --type "$ITYPE")
+  [ -n "$BODY" ] && CMD_ARGS+=(--body "$BODY")
+  [ -n "$BLOCKED_BY" ] && CMD_ARGS+=(--blocked-by "$BLOCKED_BY")
+
+  URL="$(arb_lib_run_or_dry_run CMD_ARGS gh)"
+  echo "  Created: $URL"
+done
+
+echo "Decomposed $PARENT into $ITEM_COUNT sub-issue(s)." >&2

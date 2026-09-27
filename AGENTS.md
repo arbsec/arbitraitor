@@ -5,15 +5,30 @@ Arbitraitor is **a security boundary** — policy-enforced download, inspection,
 **Read before writing code:**
 
 - [Development conventions](docs/conventions.md) — architecture boundaries, security invariants, coding rules.
-- [Architecture Decision Records](docs/adr/README.md) — 37 accepted.
+- [Architecture Decision Records](docs/adr/README.md) — accepted ADRs.
 - [Documentation ownership](docs/doc-ownership.md) — surface ownership map, stability tiers.
+- [Workflow policy](.agents/project/arbitraitor-workflow.md) — scheduling, review domains, service identity, ownership boundaries.
 
----
+**Agent skills** (mechanism; policy in the workflow doc): [github-pr-lifecycle](.agents/skills/github-pr-lifecycle/SKILL.md) drives PRs from draft to gate-checked merge; [github-project-workflow](.agents/skills/github-project-workflow/SKILL.md) manages the issue lifecycle. Mutable config: `.agents/project/github-project.example.toml` (local copy required for mutating scripts).
+
+## Engineering priorities
+
+When rules conflict or trade-offs must be made, resolve in this order:
+
+1. security and containment
+2. correctness and failure safety
+3. provenance and auditability
+4. rollback and recoverability
+5. compatibility
+6. performance
+7. developer experience
+8. convenience
 
 ## Critical rules
 
 - **Use available tools and skills as much as possible.** Prefer instead of bash commands.
 - **Never commit to `main`.** Work in isolated worktree.
+- **Never operate on GitHub as a personal account** when the `arbsec-agent` App service identity is available; personal owner auth is an explicitly labelled fallback only.
 - **Never merge w/ failing CI.** All workflow checks must pass — no exceptions, no admin overrides on red.
 - **Never suppress errors.** No `as any` `@ts-ignore` `unwrap()` in production code, or blanket `#[allow(...)]`.
 - **Never add dependency w/o [admission checklist](docs/conventions.md#dependencies).**
@@ -44,17 +59,17 @@ cargo hakari generate --diff && cargo hakari verify
 
 `cargo-hakari` must be the exact version pinned in `.github/workflows/code.yml` (see `.mise.toml` for the local install command) — canonicity output differs between hakari releases.
 
-5. Open PR w/ Conventional Commits title (e.g., `fix(store): prevent release from stale artifact handle`). **PR description must list dependencies**: any issues, PRs, or ADRs that this work depends on or conflicts with. If the PR is blocked by in-flight work on another branch, name those issues/PRs explicitly so the reviewer knows what must land first.
+5. Open PR w/ Conventional Commits title (e.g., `fix(store): prevent release from stale artifact handle`) using the PR template. The template's `arb:*` markers are machine-readable — the pr-lifecycle skill verifies them based on evidence, not intentions. **PR description must list dependencies**: any issues, PRs, or ADRs that this work depends on or conflicts with. If the PR is blocked by in-flight work on another branch, name those issues/PRs explicitly so the reviewer knows what must land first.
 6. Complete pre-merge gate (below).
 7. Squash merge. Remove the worktree and branch: `cargo run -p xtask -- cleanup worktrees --yes` (removes secondary worktrees whose branch has a merged/closed PR, deletes the branch, refuses dirty/locked trees; dry-run by default).
 
 ## Pre-merge gate
 
-**No PR merges until all three pass:**
+**No PR merges until all three pass.**
 
 ### 1. CI is fully green
 
-Verify every workflow check passes — including Code (fmt, clippy, tests on Ubuntu + macOS, workspace-hack canonicity + feature unification), Markdown (rumdl, book build), Security (cargo-deny, cargo-audit), Invariants, CodeQL. If any check fails, fix root cause. Do not re-run hoping for transient pass; investigate first.
+Verify every workflow check passes — including Code (fmt, clippy, tests on Ubuntu + macOS, workspace-hack canonicity + feature unification), Markdown (rumdl, book build, docs-check), Security (cargo-deny, cargo-audit), Invariants, CodeQL. If any check fails, fix root cause. Do not re-run hoping for transient pass; investigate first.
 
 ### 2. Adversarial review by a different agent
 
@@ -72,8 +87,20 @@ A different agent must review the PR and verify:
 1. Launch adversarial review (Oracle, Momus, or a dedicated reviewer agent) on the PR diff.
 2. Collect findings — every finding tagged CRITICAL, HIGH, MEDIUM, or LOW.
 3. Fix ALL CRITICAL, HIGH, and MEDIUM findings. LOW findings may be deferred only with explicit justification ("This is a stylistic concern that does not affect security, correctness, or the spec's normative claims. Deferred to a follow-up because X.") recorded in a comment on the finding.
-4. Re-launch adversarial review on the updated diff. The reviewer sees the previous findings and fixes, plus the new diff.
-5. Repeat until the reviewer reports "no remaining CRITICAL/HIGH/MEDIUM findings" and every LOW finding has an explicit deferral. No loop ceiling — continue until clean. Security is 101: a known finding shipped without resolution is a defect. If reviewer and fixer disagree on whether a finding is resolved after 5 rounds, escalate to human review — do not silently ship.
+4. Re-launch adversarial review on the updated diff. The reviewer sees the previous findings and fixes, plus the new diff. Every new commit invalidates earlier convergence — reviews target the current HEAD.
+5. Repeat until the reviewer reports "no remaining CRITICAL/HIGH/MEDIUM findings" and every LOW finding has an explicit deferral. Security is 101: a known finding shipped without resolution is a defect.
+
+**Limits are safety valves, not convergence.** Loop limits are config-driven
+(`[review]` in [.agents/project/github-project.example.toml](.agents/project/github-project.example.toml)):
+`max_review_loops = 3` default, `hard_loop_ceiling = 5`, escalation to `@mekwall`
+(adopted from orchestraitor in the agent-workflow alignment — this halves the old
+default 5 / hard ceiling 10; hitting the limit still blocks, never merges). Hitting a limit produces a `blocked`/`needs-human` state — never silent approval, never a merge path:
+
+1. Add the escalation reviewer: `gh pr edit <number> --repo arbsec/arbitraitor --add-reviewer mekwall`.
+2. Post a comment summarizing remaining findings and what was tried.
+3. Move to the next task in the [auto-continuation queue](.agents/project/arbitraitor-workflow.md#scheduling-the-auto-continuation-queue).
+
+If the reviewer and fixer agree the PR is clean before the limit, the loop ends early. Use the pr-lifecycle skill's `convergence-status` and `merge-gate` scripts to compute the verdict mechanically.
 
 This loop applies to every PR, not just large ones. For spec-only PRs (no code changes), the invariants reviewed are §9 security invariants, §26.2 destination safety, §38.3 state-machine correctness, and cross-section consistency (do §33, §40, §41, §9, §31 contradict each other?).
 
@@ -93,70 +120,8 @@ If PR changes anything user sees — CLI commands, flags, config format, install
 
 ## Project board
 
-Tasks are tracked on [Arbitraitor Kanban](https://github.com/orgs/arbsec/projects/1) (project ID `1`). Link PRs to issues so board updates on merge.
-
----
+Tasks are tracked on [Arbsec Development](https://github.com/orgs/arbsec/projects/1) (project ID `1`), shared with `arbsec/orchestraitor`. Link PRs to issues so board updates on merge.
 
 ## Autonomous operation
 
-When a task completes (PR merged) or hits the review loop limit, immediately pick up the next task from the following priority queue. Do not wait for human input unless blocked by a security-sensitive decision, a cross-issue design conflict, or the review loop escalation below.
-
-### Review loop limits
-
-- **Default limit:** 5 rounds per PR.
-- **Hard ceiling:** 10 rounds.
-- When the limit is hit:
-  1. Add `mekwall` as a reviewer: `gh pr edit <number> --repo arbsec/arbitraitor --add-reviewer mekwall`
-  2. Post a comment summarizing remaining findings and what was tried: `gh pr comment <number> --repo arbsec/arbitraitor --body "@mekwall Review loop limit (<N> rounds) hit on this PR. Remaining findings: [list]. Exited to continue with other tasks."`
-  3. Move to the next task in the auto-continuation queue below.
-- If the reviewer and fixer agree the PR is clean before the limit, the loop ends early.
-
-### Auto-continuation queue
-
-When a task completes or exits via the review loop limit, pick the next available task from this priority list:
-
-1. **Pending adversarial reviews** for other agents' open PRs (the pre-merge gate obligates you to review others' work).
-2. **Own PRs with review feedback** to address (CI green + unresolved review comments).
-3. **Open issues** on the project board — P0/P1 priority first, then lowest-numbered issue.
-4. **Stale open PRs** (>48 hours with no activity, no review, not draft) — review them or ping the author.
-5. **Codebase sweep** if nothing else is available:
-   - Search for `TODO`/`FIXME`/`unwrap()` in production code and file issues for findings.
-   - Run `cargo-deny check`, `cargo-audit`, `rumdl check .` on the full repo.
-   - Check for stale Renovate PRs.
-   - Verify `cargo run -p xtask -- docs-check` passes on `main`.
-   - Reclaim disk (build artifacts fill it silently): `cargo run -p xtask -- cleanup artifacts --yes` removes `target/` dirs older than 7 days (`--days` to tune) across the checkout and its worktrees.
-
-### Stale PR detection
-
-Periodically (between tasks or when the queue is empty):
-
-```sh
-gh pr list --repo arbsec/arbitraitor --state open --draft=false \
-  --json number,title,updatedAt,reviewDecision \
-  --search "updated:<48-hours-ago>"
-```
-
-For each stale PR:
-
-- If it has no review comments: review it (adversarial review per the pre-merge gate).
-- If it has unresolved review comments addressed to you: address them.
-- If it has unresolved review comments addressed to the author and the author hasn't responded in >48h: ping the author.
-- If CI is failing: investigate the root cause and either fix it or file an issue.
-
-### Self-assignment rules
-
-- Before starting work on an issue, assign it to yourself: `gh issue edit <number> --repo arbsec/arbitraitor --add-assignee @me`
-- When abandoning an issue (blocked, deprioritized): unassign yourself and leave a comment explaining why.
-- When an issue is blocked by another issue or PR: add a comment linking the blocker and set the issue status to Blocked.
-
-### When to stop and ask
-
-Only stop and request human input when:
-
-1. **Security-sensitive design decision** — e.g., new trust root, new execution context, new invariant, or a change that weakens an existing §9 invariant.
-2. **Cross-issue design conflict** — two in-flight PRs propose contradictory designs and the agent cannot resolve the conflict by reading the spec.
-3. **Review loop limit** — 10 rounds hit, human reviewer added.
-4. **No available tasks** — the entire auto-continuation queue is empty and the codebase sweep found nothing actionable.
-5. **Destructive or irreversible action** — e.g., deleting a branch, force-pushing to `main`, merging with failing CI, publishing to crates.io.
-
-Everything else (naming, defaults, implementation approach, test structure, doc placement) is the agent's decision. Note the choice in the PR description and move on.
+Scheduling, the auto-continuation queue, stale-PR detection, claiming/abandoning rules, failure classification, and when to stop and ask live in the [workflow policy](.agents/project/arbitraitor-workflow.md). When a task completes (PR merged) or hits the review-loop hard ceiling, immediately pick up the next task from that queue — do not wait for human input unless the workflow policy's stop-and-ask conditions apply.

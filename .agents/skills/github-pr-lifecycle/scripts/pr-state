@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# pr-state: read a PR's current state as JSON.
+# Wraps gh pr view --json with the fields relevant to the merge gate.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "pr-state" "Read a PR's state (head SHA, mergeable, reviewDecision, isDraft, checks) as JSON."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number or URL required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+FIELDS="number,title,state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision,url"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr view $PR --repo $REPO --json $FIELDS" >&2
+  exit "$ARB_OK"
+fi
+
+arb_lib_gh pr view "$PR" --repo "$REPO" --json "$FIELDS"

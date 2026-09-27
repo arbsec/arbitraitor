@@ -1,0 +1,135 @@
+# GitHub Project configuration for Arbitraitor.
+#
+# This file mirrors the existing "Arbsec Development" project shared with Orchestraitor
+# (github.com/orgs/arbsec/projects/1). Field names and option names below match the
+# live project exactly — verified 2026-07-23 via the Projects v2 GraphQL API.
+#
+# **Never commit mutable GitHub node IDs.** The github-project-workflow skill's scripts
+# resolve organization/project/field/option IDs at runtime via `gh api graphql` and cache
+# them outside the repo (see the skill's `graphql.md` reference). This file holds only
+# human-readable names, which are stable across project renames.
+
+# --- Identity (human-readable; the skill resolves node IDs at runtime) -----------
+[project]
+organization = "arbsec"
+number       = 1                               # github.com/orgs/arbsec/projects/1
+title        = "Arbsec Development"            # shared with arbsec/orchestraitor
+repos        = ["arbsec/arbitraitor"]
+sibling      = "arbsec/orchestraitor"           # cross-repo blockers link canonical issues here
+
+# --- Issue types ----------------------------------------------------------------
+# GitHub native issue types are configured at the organization level (GA Apr 2025).
+# Configure the org-level types below in the `arbsec` org (follow-up issue).
+[issue_types]
+leaf_implementable = ["Task", "Bug"]
+decomposable       = ["Epic", "Feature", "Spike"]
+
+# --- Project fields (single-select options are the human-readable names) ---------
+# Verified against the live project on 2026-07-23.
+
+[fields.Repository]
+# Built-in field, not single-select. Auto-populated from the issue's source repo.
+# Distinguishes arbsec/arbitraitor items from arbsec/orchestraitor items on the shared board.
+type = "repository"
+
+[fields.Status]
+# No "Blocked" Status exists on the live project. Blocking is tracked via the native
+# `blockedBy` edge (GA Aug 2025), which the ready-queue script filters on directly.
+# Optionally add a "Blocked" Status option for visual workflow state (follow-up).
+options = ["Triage", "Backlog", "Ready", "In Progress", "In Review", "Done"]
+# `Ready` is the only schedulable state; ready-queue lists Status=Ready issues.
+
+[fields.Target]
+# Exists on the shared board (set by orchestraitor work). Arbitraitor does NOT gate
+# scheduling on it — scheduling order comes from the auto-continuation queue in
+# arbitraitor-workflow.md. `ready-queue` supports an optional label gate
+# ($ARB_MVP_LABEL, empty by default) if a label-based gate is ever needed.
+options = ["MVP", "Next", "Later", "Icebox"]
+
+[fields.Risk]
+# `Critical` forces human review before release (arbitraitor-workflow.md "Security-first
+# review") and routes to `@arbsec/security` via CODEOWNERS.
+options = ["Low", "Medium", "High", "Critical"]
+
+[fields.Priority]
+options = ["P0", "P1", "P2", "P3"]
+
+[fields.Size]
+options = ["XS", "S", "M", "L", "XL"]
+
+[fields.Estimate]
+type = "number"                              # story points / effort estimate
+
+[fields.Start]
+type  = "date"
+field = "Start date"
+
+[fields.Target_date]
+type  = "date"
+field = "Target date"
+
+# --- Service identities (arbitraitor-workflow.md "Service identity") -------------
+# Bot logins granted service-identity scheduling: the ready queue excludes items
+# assigned to humans but keeps items assigned to these identities schedulable.
+# GitHub App logins render as `<slug>[bot]`; both that and the bare slug form
+# match.
+[service_identities]
+slugs = ["arbsec-agent"]
+
+# --- Labels (advisory; the project fields above are authoritative) ---------------
+[labels]
+blocked_orchestraitor = "blocked:orchestraitor"  # cross-repo Orchestraitor upstream blocker
+spec_section          = "spec"                   # carries the spec § reference
+needs_human_review    = "needs-human-review"     # security-sensitive; requires human sign-off
+stale_claim           = "stale-claim"            # claim released by release-issue
+security_sensitive    = "security-sensitive"     # mirrors conventions.md "Security-sensitive paths"
+
+# --- Required checks (merge gate) ------------------------------------------------
+# Must match the ruleset's required-status-checks. Check NAMES (GitHub status
+# check context names as reported by `gh pr checks`), not node IDs.
+# `Documentation` is event-gated (`if: github.event_name == 'push'` in code.yml),
+# so it never reports on pull-request events; pr-checks exempts checks in
+# `optional` while they report the skipped state.
+[checks]
+required = [
+  "Check & Lint",
+  "Workspace Hack (ubuntu-latest)",
+  "Workspace Hack (macos-latest)",
+  "Test (ubuntu-latest)",
+  "Test (macos-latest)",
+  "Invariant Property Tests",
+  "Markdown Lint",
+  "Book Build",
+  "Docs Consistency",
+  "Dependency Policy",
+  "Advisory Check",
+  "CodeQL Analysis",
+  "Agent Skills Tests",
+]
+optional = ["Documentation", "qlty check"]   # qlty = external quality gate (qlty.sh)
+
+# --- Merge + review policy -----------------------------------------------------
+[merge]
+strategy               = "squash"
+delete_branch_on_merge = true
+require_codeowners     = false   # live ruleset 18035330 has require_code_owner_review: false — enable in the ruleset once team review flow is validated (follow-up)
+require_linear_history = true
+require_signed_commits = true   # DCO
+
+[review]
+# Adversarial review convergence (AGENTS.md "Pre-merge gate" + pr-lifecycle skill).
+max_review_loops             = 3       # default; overridable per-issue
+max_reviewers                = 5
+minimum_severity_to_block    = "medium"   # CRITICAL/HIGH/MEDIUM all block merge
+required_reviewer_domains    = ["security"]
+allow_same_model             = false
+require_provider_diversity   = false
+require_human_review         = false         # true for Risk=Critical changes
+stop_when_no_blocking_findings = true
+# Hard ceiling: hitting it produces blocked/needs-human, never silent approval.
+hard_loop_ceiling            = 5
+escalation_reviewers         = ["@mekwall"]
+
+[docs]
+public_behavior_doc_required  = true
+changelog_unreleased_required = true

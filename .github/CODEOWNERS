@@ -1,0 +1,42 @@
+# CODEOWNERS for arbsec/arbitraitor
+#
+# Arbitraitor is a security boundary — every crate is attack surface. Security-
+# sensitive paths (docs/conventions.md "Security-sensitive paths") are routed to
+# the security team; governance surfaces to maintainers.
+
+# Repo governance + workflow automation belong to maintainers.
+/.github/                     @arbsec/maintainers
+/.agents/                     @arbsec/maintainers
+/AGENTS.md                    @arbsec/maintainers
+/CONTRIBUTING.md              @arbsec/maintainers
+/SECURITY.md                  @arbsec/maintainers
+/GOVERNANCE.md                @arbsec/maintainers
+/docs/spec/                   @arbsec/maintainers
+/docs/adr/                    @arbsec/maintainers
+/docs/conventions.md          @arbsec/maintainers
+/docs/doc-ownership.md        @arbsec/maintainers
+
+# Dependency + license policy is security-sensitive regardless of where the lockfile lives.
+/Cargo.lock                   @arbsec/security
+/deny.toml                    @arbsec/security
+
+# Security-sensitive paths (docs/conventions.md "Security-sensitive paths").
+# State machine and invariants.
+/crates/arbitraitor-core/     @arbsec/security
+# Transport, SSRF, redirect, TLS policy.
+/crates/arbitraitor-fetch/    @arbsec/security
+# CAS, digest verification, release.
+/crates/arbitraitor-store/    @arbsec/security
+# Execution broker, environment construction.
+/crates/arbitraitor-exec/     @arbsec/security
+# TUF metadata, update verification.
+/crates/arbitraitor-update/   @arbsec/security
+# Wasmtime runtime, capability enforcement.
+/crates/arbitraitor-plugin-host/ @arbsec/security
+# Plugin interface definitions.
+/wit/                         @arbsec/security
+# YARA-X rule packs.
+/rules/                       @arbsec/security
+
+# CI/release trust boundaries.
+/.github/workflows/           @arbsec/security

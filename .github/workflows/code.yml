@@ -84,6 +84,22 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features
 
+  agent-skills:
+    name: Agent Skills Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Syntax-check skill scripts
+        run: |
+          find .agents -type f \( -name "*.sh" -o -name "*.bash" \) -exec bash -n {} +
+          find .agents -type f -perm -u+x ! -name "*.sh" ! -name "*.bash" ! -name "*.md" ! -name "*.toml" ! -name "*.jq" -exec bash -n {} +
+      - name: Run skill script tests
+        run: |
+          for t in .agents/skills/*/scripts/tests/*.bash; do
+            bash "$t"
+          done
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest
