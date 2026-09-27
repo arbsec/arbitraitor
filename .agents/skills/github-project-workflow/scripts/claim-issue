@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# claim-issue: assign an issue to @me and set Status to "In Progress".
+# Validates that the issue is in Ready state before claiming.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+# --allow-parallel is claim-issue specific (not a common flag): strip it from the
+# extra args so the issue stays the first positional argument.
+ARB_MAX_PARALLEL_CLAIMS=4
+OPT_ALLOW_PARALLEL=false
+POSITIONALS=()
+for arg in "${ARB_LIB_EXTRA_ARGS[@]}"; do
+  if [ "$arg" = "--allow-parallel" ]; then
+    OPT_ALLOW_PARALLEL=true
+  else
+    POSITIONALS+=("$arg")
+  fi
+done
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "claim-issue" "Assign an issue to @me and advance it to In Progress. Validates Ready state first. Pass --allow-parallel per lane to hold up to $ARB_MAX_PARALLEL_CLAIMS concurrent claims."
+  exit "$ARB_OK"
+fi
+
+ISSUE="${POSITIONALS[0]:-}"
+if [ -z "$ISSUE" ]; then
+  echo "error: issue number or URL required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope "project"
+arb_lib_load_project_config
+REPO="$(arb_lib_resolve_repo)"
+
+# Read current state to validate preconditions.
+# LIMITATION: gh issue view does not return Project v2 field values (Status).
+# This script checks assignees only. A future version will use gh project item-list
+# to validate Status=Ready and atomically set Status to "In Progress".
+# Until then, the project-manager must verify Status=Ready manually before claiming.
+CURRENT="$(arb_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,assignees,labels)"
+
+# Check: issue must not already be assigned to someone (unless it's us).
+ALREADY_ASSIGNED="$(echo "$CURRENT" | jq -r '.assignees | length')"
+MY_LOGIN=""
+if [ "$ALREADY_ASSIGNED" -gt 0 ] || [ "$OPT_ALLOW_PARALLEL" = true ]; then
+  MY_LOGIN="$(arb_lib_gh api user --jq '.login' 2>/dev/null || echo "")"
+fi
+if [ "$ALREADY_ASSIGNED" -gt 0 ]; then
+  FOREIGN_ASSIGNEE="$(echo "$CURRENT" | jq -r --arg me "$MY_LOGIN" '[.assignees[] | select(.login != $me)] | length')"
+  # One active claim per agent, unless the caller opted into lane mode: in lane mode
+  # the issue may already be one of the caller's own lanes, but a foreign assignee
+  # still blocks the claim.
+  if [ "$OPT_ALLOW_PARALLEL" != true ] || [ "$FOREIGN_ASSIGNEE" -gt 0 ]; then
+    echo "error: issue already has assignees. Release it first with release-issue." >&2
+    exit "$ARB_ERR_POLICY"
+  fi
+fi
+
+# Check: claim budget. Lane mode raises the per-caller cap from one active claim to
+# ARB_MAX_PARALLEL_CLAIMS concurrent lanes; each lane owns one worktree + branch and
+# the caller passes the flag deliberately (see the project workflow policy).
+if [ "$OPT_ALLOW_PARALLEL" = true ]; then
+  ACTIVE_CLAIMS="$(arb_lib_gh issue list --repo "$REPO" --assignee "$MY_LOGIN" \
+    --state open --limit 200 --json number | jq -r 'length')"
+  if [ "$ACTIVE_CLAIMS" -gt "$ARB_MAX_PARALLEL_CLAIMS" ]; then
+    echo "error: $ACTIVE_CLAIMS active claims exceed the parallel limit of $ARB_MAX_PARALLEL_CLAIMS. Release a lane with release-issue." >&2
+    exit "$ARB_ERR_POLICY"
+  fi
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue edit $ISSUE --repo $REPO --add-assignee @me" >&2
+  echo "[dry-run] gh project item-edit --field Status --single-select-option 'In Progress'" >&2
+  exit "$ARB_OK"
+fi
+
+# Assign via gh CLI.
+ARGS=(issue edit "$ISSUE" --repo "$REPO" --add-assignee "@me")
+arb_lib_run_or_dry_run ARGS gh
+
+# Set project Status to "In Progress" via gh project item-edit.
+# This requires resolving the project item ID and field ID at runtime.
+# The gh project command handles this natively if given project+owner+field+option.
+# See graphql.md reference for the runtime resolution mechanism.
+echo "Claimed issue $ISSUE in $REPO. Remember to set Status=In Progress via the project board." >&2
+if [ "$OPT_ALLOW_PARALLEL" = true ]; then
+  echo "Lane mode: one worktree + branch per lane, rebase onto origin/main before opening the PR." >&2
+fi

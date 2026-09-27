@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# release-issue: unassign @me and set Status back to "Ready".
+# Validates that the caller is the current assignee before releasing.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "release-issue" "Unassign @me from an issue and set Status back to Ready. Caller must be the assignee."
+  exit "$ARB_OK"
+fi
+
+ISSUE="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$ISSUE" ]; then
+  echo "error: issue number or URL required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+REASON="${ARB_LIB_EXTRA_ARGS[1]:-released by agent}"
+
+arb_lib_require_gh_scope "project"
+REPO="$(arb_lib_resolve_repo)"
+
+# Read current state to validate: caller must be the assignee.
+CURRENT="$(arb_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,assignees)"
+MY_LOGIN="$(arb_lib_gh api user --jq '.login' 2>/dev/null || echo "")"
+IS_ASSIGNED="$(echo "$CURRENT" | jq --arg me "$MY_LOGIN" '.assignees | any(.login == $me)')"
+
+if [ "$IS_ASSIGNED" != "true" ]; then
+  echo "error: you ($MY_LOGIN) are not the assignee of this issue." >&2
+  exit "$ARB_ERR_POLICY"
+fi
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue edit $ISSUE --repo $REPO --remove-assignee @me" >&2
+  echo "[dry-run] gh issue comment $ISSUE --repo $REPO --body \"$REASON\"" >&2
+  exit "$ARB_OK"
+fi
+
+ARGS=(issue edit "$ISSUE" --repo "$REPO" --remove-assignee "@me")
+arb_lib_run_or_dry_run ARGS gh
+
+# Leave a comment explaining why.
+ARGS=(issue comment "$ISSUE" --repo "$REPO" --body "Released: $REASON")
+arb_lib_run_or_dry_run ARGS gh
+
+echo "Released issue $ISSUE." >&2

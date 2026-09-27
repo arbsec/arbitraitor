@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Agent docs/workflows aligned with `arbsec/orchestraitor`: two-tier
+  `.agents/` layout (project workflow policy + `github-pr-lifecycle` /
+  `github-project-workflow` skills with gate scripts), machine-readable
+  `arb:*` PR-template checklist markers, `CODEOWNERS` routing security-
+  sensitive paths to `@arbsec/security`, and config-driven review-loop
+  limits (default 3 rounds, hard ceiling 5, escalation to `@mekwall`) in
+  `.agents/project/github-project.example.toml`. The `arbsec-agent` GitHub
+  App is the service identity for agent-driven GitHub operations; personal
+  owner auth is a labelled fallback only.
+
 ### Added
 
 - `arbitraitor-engine` crate (ADR-0038, accepted): the single consolidated

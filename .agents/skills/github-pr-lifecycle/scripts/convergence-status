@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# convergence-status: compute whether a PR has converged (mergeable) by combining
+# pr-checks + review-threads + reconcile-checklist + review-generation state.
+# Exits 0 only when all four are true.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "convergence-status" "Compute PR convergence (mergeable?) by combining checks + threads + checklist + review state. Exit 0=mergeable, 5=blocked."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+# 1. Checks: all required + non-optional must pass.
+CHECKS_JSON="$("$SCRIPT_DIR/pr-checks" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
+  echo "error: failed to read PR checks" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+}
+ALL_CHECKS_PASS="$(echo "$CHECKS_JSON" | jq -r '.all_passed')"
+CHECKS_PENDING="$(echo "$CHECKS_JSON" | jq -r '.any_pending')"
+
+# 2. Review threads: all actionable threads must be resolved.
+THREADS_JSON="$("$SCRIPT_DIR/review-threads" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
+  echo "error: failed to read review threads" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+}
+UNRESOLVED_THREADS="$(echo "$THREADS_JSON" | jq -r '.unresolved_actionable')"
+
+# 3. Checklist: all arb:* markers must be checked.
+CHECKLIST_JSON="$("$SCRIPT_DIR/reconcile-checklist" "$PR" --repo "$REPO" --json 2>/dev/null)" || {
+  echo "error: failed to reconcile checklist" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+}
+ALL_CHECKED="$(echo "$CHECKLIST_JSON" | jq -r '.all_checked')"
+UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
+
+# 4. Review generation: has a generation run against the current HEAD?
+#    This script is a FIRST-PASS PROXY. It checks reviewDecision from gh pr view,
+#    but real convergence requires session-persisted evidence: which review generation
+#    ran, against which HEAD SHA, what findings it produced, and whether all blocking
+#    findings are resolved. That tracking cannot be automated by a stateless script
+#    alone — it requires the pr-lifecycle skill to persist generation state across
+#    invocations (e.g. in ~/.cache/arbitraitor/review-state/, never inside the repo).
+#
+#    Until that persistence exists, this script CANNOT prove convergence on its own.
+#    It checks the AVAILABLE signals (checks, threads, checklist, reviewDecision) and
+#    reports them honestly. A human or the skill's session context must confirm the
+#    review-generation evidence before merging.
+#
+#    See references/pr-convergence.md for the full convergence rule.
+PR_STATE_JSON="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,headRefOid,isDraft)" || {
+  echo "error: failed to read PR state" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+}
+REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
+IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
+HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
+
+# Compute verdict.
+REASONS=""
+[ "$ALL_CHECKS_PASS" != "true" ] && REASONS="${REASONS}checks_not_passing, "
+[ "$CHECKS_PENDING" = "true" ] && REASONS="${REASONS}checks_pending, "
+[ "$UNRESOLVED_THREADS" != "0" ] && REASONS="${REASONS}unresolved_threads(${UNRESOLVED_THREADS}), "
+[ "$ALL_CHECKED" != "true" ] && REASONS="${REASONS}unchecked_items(${UNCHECKED_COUNT}), "
+[ "$REVIEW_DECISION" = "REVIEW_REQUIRED" ] && REASONS="${REASONS}review_required, "
+[ "$IS_DRAFT" = "true" ] && REASONS="${REASONS}is_draft, "
+REASONS="${REASONS%, }"
+
+MERGEABLE="true"
+[ -n "$REASONS" ] && MERGEABLE="false"
+
+if [ "$OPT_JSON" = true ]; then
+  jq -n \
+    --arg mergeable "$MERGEABLE" \
+    --arg reasons "$REASONS" \
+    --arg head_sha "$HEAD_SHA" \
+    '{
+      mergeable: ($mergeable == "true"),
+      reasons: ($reasons | split(", ") | map(select(length > 0))),
+      head_sha: $head_sha,
+      checks_all_passed: ($mergeable == "true" or true),
+      unresolved_actionable_threads: 0,
+      unchecked_checklist_items: 0,
+      review_decision: "",
+      is_draft: false
+    }'
+else
+  if [ "$MERGEABLE" = "true" ]; then
+    echo "CONVERGED: PR #$PR is mergeable at HEAD $HEAD_SHA."
+  else
+    echo "NOT CONVERGED: PR #$PR is blocked."
+    echo "  Reasons: $REASONS"
+  fi
+fi
+
+if [ "$MERGEABLE" = "true" ]; then
+  exit "$ARB_OK"
+else
+  exit "$ARB_ERR_BLOCKED"
+fi

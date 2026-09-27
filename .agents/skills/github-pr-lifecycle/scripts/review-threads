@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# review-threads: fetch PR review threads via GraphQL (gh pr view --json reviewThreads DOES NOT EXIST).
+# Read-only: lists threads with isResolved, isOutdated, path, line, and comment bodies.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "review-threads" "Fetch PR review threads via GraphQL (reviewThreads is not available via gh pr view --json)."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+# Parse OWNER/REPO from the --repo flag for the GraphQL query.
+OWNER="$(echo "$REPO" | cut -d/ -f1)"
+NAME="$(echo "$REPO" | cut -d/ -f2)"
+
+QUERY='
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          isCollapsed
+          path
+          line
+          startLine
+          diffSide
+          comments(first: 50) {
+            nodes {
+              databaseId
+              body
+              path
+              line
+              createdAt
+              author { login }
+              url
+            }
+          }
+        }
+      }
+    }
+  }
+}'
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh api graphql -f query='<reviewThreads query>' -F owner=$OWNER -F name=$NAME -F number=$PR" >&2
+  exit "$ARB_OK"
+fi
+
+RAW="$(arb_lib_gh api graphql -f query="$QUERY" -F owner="$OWNER" -F name="$NAME" -F number="$PR")"
+
+# Extract and summarize the threads.
+echo "$RAW" | jq '{
+  threads: [.data.repository.pullRequest.reviewThreads.nodes[] | {
+    id: .id,
+    is_resolved: .isResolved,
+    is_outdated: .isOutdated,
+    path: .path,
+    line: .line,
+    diff_side: .diffSide,
+    is_actionable: (.isResolved == false and .isOutdated == false),
+    comments: [.comments.nodes[] | {
+      database_id: .databaseId,
+      body: .body,
+      author: .author.login,
+      created_at: .createdAt,
+      url: .url
+    }]
+  }],
+  total_threads: [.data.repository.pullRequest.reviewThreads.nodes[]] | length,
+  unresolved_actionable: [.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false)] | length,
+  has_next_page: .data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage
+}' 2>/dev/null || {
+  echo "error: failed to parse review threads GraphQL response" >&2
+  echo "$RAW" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+}

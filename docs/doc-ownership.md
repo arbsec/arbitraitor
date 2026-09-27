@@ -14,6 +14,9 @@ surface must update the owner file in the same PR.
 | README | `README.md` | This file (handwritten) | Markdown |
 | Contributor guide | `CONTRIBUTING.md` | This file (handwritten) | Markdown |
 | Agent guide | `AGENTS.md` | This file (handwritten) | Markdown |
+| Agent workflow policy | `.agents/project/arbitraitor-workflow.md` | This file (handwritten) | Markdown |
+| Agent project config | `.agents/project/github-project.example.toml` | This file (handwritten) — mirror of the live board | TOML |
+| Agent skills | `.agents/skills/*/SKILL.md` + `references/` + `scripts/` | Handwritten — generic mechanism, kept aligned with `arbsec/orchestraitor` | Agent Skills spec |
 | Development conventions | `docs/conventions.md` | This file (handwritten) | Markdown |
 | ADRs | `docs/adr/*.md` | **Canonical source** — copied to book at build time | Markdown |
 | Published book | `book/src/*.md` | Handwritten (except ADRs and generated pages) | mdBook |

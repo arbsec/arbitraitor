@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# merge-gate: final merge-eligibility check. Exits 0 ONLY when the PR is safe to merge.
+# Combines convergence-status with a head-SHA match check (refuse merge if head moved
+# between the gate check and the merge call). Never uses --admin.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "merge-gate" "Check if a PR is safe to squash-merge. Exits 0=mergeable. Never uses --admin."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+# Run convergence-status first (once; stderr captured for diagnostics).
+# NOTE: convergence-status is a first-pass proxy — it checks available GitHub
+# signals but cannot prove review-generation evidence on its own. The caller
+# (the pr-lifecycle skill's session) must confirm a full review generation ran
+# against the current HEAD and found no new noteworthy findings.
+CONV_ERR_FILE="$(mktemp)"
+CONVERGENCE=""
+CONV_EXIT=0
+CONVERGENCE="$("$SCRIPT_DIR/convergence-status" "$PR" --repo "$REPO" --json 2>"$CONV_ERR_FILE")" || CONV_EXIT=$?
+if ! echo "$CONVERGENCE" | jq -e . >/dev/null 2>&1; then
+  # convergence-status hard-failed (no usable JSON) — surface the sub-check's
+  # name and stderr instead of reporting an empty reason list.
+  echo "error: sub-check 'convergence-status' failed (exit $CONV_EXIT):" >&2
+  sed 's/^/  /' "$CONV_ERR_FILE" >&2
+  rm -f "$CONV_ERR_FILE"
+  exit "$ARB_ERR_UNRECOVERABLE"
+fi
+rm -f "$CONV_ERR_FILE"
+if [ "$(echo "$CONVERGENCE" | jq -r '.mergeable')" != "true" ]; then
+  REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons // [] | join(", ")')"
+  echo "error: PR has not converged. Reasons: $REASONS" >&2
+  if [ "$OPT_DRY_RUN" = true ]; then
+    echo "[dry-run] Would NOT merge: convergence check failed." >&2
+  fi
+  exit "$ARB_ERR_BLOCKED"
+fi
+
+# Read the head SHA for --match-head-commit.
+HEAD_SHA="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr merge $PR --repo $REPO --squash --delete-branch --match-head-commit $HEAD_SHA" >&2
+  echo "[dry-run] PR is mergeable at HEAD $HEAD_SHA." >&2
+  exit "$ARB_OK"
+fi
+
+# Perform the merge.
+echo "Merging PR #$PR (squash, HEAD=$HEAD_SHA)..." >&2
+ARGS=(pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA")
+arb_lib_run_or_dry_run ARGS gh
+
+echo "Merged. Cleaning up worktree..." >&2
+echo "Done. Post-merge: close linked issue, run `cargo run -p xtask -- cleanup worktrees --yes`, set issue Status=Done." >&2

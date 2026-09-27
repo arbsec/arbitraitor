@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# classify-docs-impact: read the PR diff and classify whether public behavior changed.
+# Uses gh pr diff --name-only + pattern matching against the documentation-gate reference.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "classify-docs-impact" "Read PR diff and classify whether public behavior changed (requires doc updates)."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr diff $PR --repo $REPO --name-only" >&2
+  exit "$ARB_OK"
+fi
+
+CHANGED="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only 2>/dev/null || true)"
+
+# Classify against public-behavior surfaces using file paths.
+# See references/documentation-gate.md for the full surface list.
+#
+# LIMITATION: this script checks file paths only (--name-only). Changes to env var
+# references, public API signatures, or error codes inside file bodies will be missed
+# unless the file path itself matches a known pattern. A future version will also
+# inspect the full diff content for env-var and API-surface patterns. Until then,
+# the reviewer must manually verify doc impact for body-level changes.
+TOUCHED_SURFACES=""
+
+echo "$CHANGED" | grep -qE 'crates/arbitraitor-cli/|crates/arbitraitor-wrapper/' && TOUCHED_SURFACES="${TOUCHED_SURFACES}CLI/wrappers behavior, "
+echo "$CHANGED" | grep -qE 'crates/arbitraitor-(core|policy)/|config\.toml' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Configuration, "
+echo "$CHANGED" | grep -qE 'ARBITRAITOR_|URLHAUS_API_KEY' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Environment variables, "
+echo "$CHANGED" | grep -qE 'crates/arbitraitor-(core|model|policy|plugin-api|engine)/' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Public APIs, "
+echo "$CHANGED" | grep -qE 'crates/arbitraitor-daemon/' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Daemon protocols, "
+echo "$CHANGED" | grep -qE 'crates/arbitraitor-mcp/' && TOUCHED_SURFACES="${TOUCHED_SURFACES}MCP tools, "
+echo "$CHANGED" | grep -qE 'crates/arbitraitor-(sandbox|exec|fetch|store)/' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Security guarantees, "
+echo "$CHANGED" | grep -qE 'SECURITY\.md|AGENTS\.md|docs/conventions\.md' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Security guarantees, "
+echo "$CHANGED" | grep -qE 'README\.md|CHANGELOG\.md|book/|docs/' && TOUCHED_SURFACES="${TOUCHED_SURFACES}Documentation, "
+
+# Trim trailing comma+space.
+TOUCHED_SURFACES="${TOUCHED_SURFACES%, }"
+
+# Check if CHANGELOG.md was updated in the diff.
+DOCS_UPDATED="false"
+echo "$CHANGED" | grep -qE 'CHANGELOG\.md' && DOCS_UPDATED="true"
+
+PUBLIC_BEHAVIOR_CHANGED="false"
+[ -n "$TOUCHED_SURFACES" ] && PUBLIC_BEHAVIOR_CHANGED="true"
+
+if [ "$OPT_JSON" = true ]; then
+  jq -n \
+    --arg surfaces "$TOUCHED_SURFACES" \
+    --arg changed "$PUBLIC_BEHAVIOR_CHANGED" \
+    --arg docs "$DOCS_UPDATED" \
+    '{
+      public_behavior_changed: ($changed == "true"),
+      touched_surfaces: ($surfaces | split(", ") | map(select(length > 0))),
+      docs_required: ($changed == "true"),
+      docs_updated_in_pr: ($docs == "true"),
+      checklist_marker: "arb:docs"
+    }'
+else
+  echo "Documentation impact:"
+  echo "  Public behavior changed: $PUBLIC_BEHAVIOR_CHANGED"
+  [ -n "$TOUCHED_SURFACES" ] && echo "  Touched surfaces: $TOUCHED_SURFACES"
+  echo "  Docs updated in PR: $DOCS_UPDATED"
+  [ "$PUBLIC_BEHAVIOR_CHANGED" = "true" ] && [ "$DOCS_UPDATED" = "false" ] && \
+    echo "  WARNING: Public behavior changed but CHANGELOG.md not updated in this PR."
+fi

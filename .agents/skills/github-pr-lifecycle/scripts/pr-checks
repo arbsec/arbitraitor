@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# pr-checks: read CI check status and classify each as pass/fail/pending/skip.
+# Wraps gh pr checks --json and adds a classification summary.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "pr-checks" "Read PR CI checks and classify each as pass/fail/pending/skip. Use --required to filter."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number or URL required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+CHECK_ARGS=(pr checks "$PR" --repo "$REPO" --json name,state,bucket,workflow,link,startedAt,completedAt)
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh ${CHECK_ARGS[*]}" >&2
+  exit "$ARB_OK"
+fi
+
+RAW="$(arb_lib_gh "${CHECK_ARGS[@]}")" || EXIT_CODE=$?
+
+# gh pr checks exits 8 when pending; capture the JSON regardless.
+EXIT_CODE=${EXIT_CODE:-0}
+if [ -z "$RAW" ] && [ "$EXIT_CODE" -eq 8 ]; then
+  echo '{"checks":[],"all_passed":false,"pending":true}'
+  exit 0
+fi
+
+# Known-disabled jobs: workflow jobs deliberately disabled repo-side via `if:`
+# conditions (state SKIPPED, conclusion skipped). They are classified
+# "not-applicable" and excluded from the all_passed gate — they can never report
+# pass. Genuinely skipped-but-optioned checks are NOT in this list and still
+# fail the gate.
+#   - "Documentation": event-gated in code.yml (`if: github.event_name ==
+#     'push'`), so it never runs on pull-request events; excluded only while
+#     it reports the skipped state — a failing or pending run still fails the
+#     gate. Re-enabling on PRs means removing the name from this list.
+KNOWN_DISABLED_JOBS='["Documentation"]'
+
+# Classify checks. The not-applicable exemption requires BOTH the known-disabled
+# name AND the skipped state: a known-disabled job that actually ran and failed
+# is a failure, never a pass (state-blind exemption would launder real failures).
+echo "$RAW" | jq --argjson known_disabled "$KNOWN_DISABLED_JOBS" '
+  def disabled($name): ($known_disabled | index($name)) != null;
+  def exempt: disabled(.name) and .bucket == "skipping";
+  {
+  checks: map({
+    name: .name,
+    state: .state,
+    bucket: .bucket,
+    workflow: .workflow,
+    link: .link,
+    classification: (
+      if exempt then "not-applicable"
+      elif .bucket == "pass" then "pass"
+      elif .bucket == "fail" then "fail"
+      elif .bucket == "pending" then "pending"
+      elif .bucket == "skipping" then "skip"
+      elif .bucket == "cancel" then "fail"
+      else "unknown"
+      end
+    )
+  }),
+  all_passed: all(.[]; .bucket == "pass" or exempt),
+  any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
+  any_pending: any(.[]; .bucket == "pending")
+}'

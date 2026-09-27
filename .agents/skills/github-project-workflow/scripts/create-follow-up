@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# create-follow-up: open a separate leaf issue for independently testable
+# discovered work, linked from the current PR.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "create-follow-up" "Open a follow-up issue for discovered work, linked from a PR."
+  exit "$ARB_OK"
+fi
+
+# Extract --from-pr, --title, --spec-ref from args.
+PR_NUM=""
+TITLE=""
+SPEC_REF=""
+while [ "${#ARB_LIB_EXTRA_ARGS[@]}" -gt 0 ]; do
+  case "${ARB_LIB_EXTRA_ARGS[0]}" in
+    --from-pr) PR_NUM="${ARB_LIB_EXTRA_ARGS[1]}"; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
+    --title)   TITLE="${ARB_LIB_EXTRA_ARGS[1]}"; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
+    --spec-ref) SPEC_REF="${ARB_LIB_EXTRA_ARGS[1]}"; ARB_LIB_EXTRA_ARGS=("${ARB_LIB_EXTRA_ARGS[@]:2}") ;;
+    *) break ;;
+  esac
+done
+
+[ -z "$PR_NUM" ] && PR_NUM="${ARB_LIB_EXTRA_ARGS[0]:-}"
+[ -z "$TITLE" ] && TITLE="${ARB_LIB_EXTRA_ARGS[1]:-}"
+
+if [ -z "$PR_NUM" ] || [ -z "$TITLE" ]; then
+  echo "error: --from-pr <num> and --title <text> required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+BODY="Follow-up discovered during work on #$PR_NUM."
+[ -n "$SPEC_REF" ] && BODY="$BODY
+
+Specification reference: $SPEC_REF"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue create --repo $REPO --title \"$TITLE\" --body \"$BODY\" --type Task" >&2
+  exit "$ARB_OK"
+fi
+
+ARGS=(issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --type "Task")
+ISSUE_URL="$(arb_lib_run_or_dry_run ARGS gh)"
+echo "Created follow-up: $ISSUE_URL" >&2
+echo "Add this URL to PR #$PR_NUM 'Newly discovered follow-up work' section." >&2

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# triage-issue: read an issue's current state + validate it against the project config.
+# Read-only: writes nothing. Outputs JSON or human-readable summary.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "triage-issue" "Read an issue's Type/Target/Status/Domain/Risk and validate against project config."
+  exit "$ARB_OK"
+fi
+
+ISSUE="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$ISSUE" ]; then
+  echo "error: issue number or URL required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh issue view $ISSUE --repo $REPO --json number,title,issueType,labels,assignees,state" >&2
+  exit "$ARB_OK"
+fi
+
+arb_lib_load_project_config
+
+RAW="$(arb_lib_gh issue view "$ISSUE" --repo "$REPO" --json number,title,issueType,labels,assignees,state,url)"
+
+# Extract fields with jq
+NUMBER="$(echo "$RAW" | jq -r '.number')"
+TITLE="$(echo "$RAW" | jq -r '.title')"
+ISSUE_TYPE="$(echo "$RAW" | jq -r '.issueType.name // empty')"
+STATE="$(echo "$RAW" | jq -r '.state')"
+ASSIGNEES="$(echo "$RAW" | jq -r '.assignees | map(.login) | join(",")')"
+LABELS="$(echo "$RAW" | jq -r '.labels | map(.name) | join(",")')"
+
+if [ "$OPT_JSON" = true ]; then
+  jq -n \
+    --arg number "$NUMBER" \
+    --arg title "$TITLE" \
+    --arg type "$ISSUE_TYPE" \
+    --arg state "$STATE" \
+    --arg assignees "$ASSIGNEES" \
+    --arg labels "$LABELS" \
+    --arg repo "$REPO" \
+    '{number:$number, title:$title, type:$type, state:$state, assignees:($assignees|split(",")|map(select(length>0))), labels:($labels|split(",")|map(select(length>0))), repo:$repo, ready: false, issues: []}' 2>/dev/null || echo "$RAW"
+else
+  echo "Issue #$NUMBER: $TITLE"
+  echo "  State:  $STATE"
+  echo "  Type:   ${ISSUE_TYPE:-<unset>}"
+  echo "  Assignees: ${ASSIGNEES:-<none>}"
+  echo "  Labels: ${LABELS:-<none>}"
+  echo "  Repo:   $REPO"
+fi

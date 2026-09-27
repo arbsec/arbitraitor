@@ -53,13 +53,22 @@ This installs the correct versions of Rust, lefthook, cocogitto, and all other t
    rumdl check .
    ```
 
-5. **Open a PR** with a Conventional Commits title, security impact assessment, and linked issue.
+5. **Open a PR** with a Conventional Commits title, security impact assessment, and linked issue. The PR template's `arb:*` checklist markers are verified by the [pr-lifecycle skill](.agents/skills/github-pr-lifecycle/SKILL.md) based on evidence — check them only when the underlying fact holds.
 
 6. **Clean up** after merge:
 
    ```sh
-   git worktree remove ../arbitraitor-<task-slug>
+   cargo run -p xtask -- cleanup worktrees --yes
    ```
+
+## Agent-assisted contributions
+
+Agent-driven delivery rules — scheduling, review domains, service identity, ownership
+boundaries — live in the [workflow policy](.agents/project/arbitraitor-workflow.md). The
+[github-pr-lifecycle](.agents/skills/github-pr-lifecycle/SKILL.md) and
+[github-project-workflow](.agents/skills/github-project-workflow/SKILL.md) skills define
+the PR and issue mechanics. Human contributions follow the same gates: no merge on red,
+adversarial review before merge, docs updated in the same PR.
 
 ## Conventional Commits
 

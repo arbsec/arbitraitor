@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# reconcile-checklist: parse the PR body for <!-- arb:* --> markers and report
+# which managed checklist items are checked vs unchecked as verified facts.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+arb_lib_parse_common "$@"
+
+if [ "$OPT_HELP" = true ]; then
+  arb_lib_print_help "reconcile-checklist" "Parse PR body for <!-- arb:* --> markers and report checked vs unchecked items."
+  exit "$ARB_OK"
+fi
+
+PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
+if [ -z "$PR" ]; then
+  echo "error: PR number required" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
+
+arb_lib_require_gh_scope
+REPO="$(arb_lib_resolve_repo)"
+
+if [ "$OPT_DRY_RUN" = true ]; then
+  echo "[dry-run] gh pr view $PR --repo $REPO --json body | grep arb:" >&2
+  exit "$ARB_OK"
+fi
+
+BODY="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json body | jq -r '.body')"
+
+# Extract each checklist line with its orc marker.
+# Pattern: - [ ] <!-- arb:XXX --> description  OR  - [x] <!-- arb:XXX --> description
+# A body with zero markers is legitimate (custom PR bodies): grep matches nothing
+# and would abort under pipefail, so guard it — empty means an empty checklist
+# (all_checked is vacuously true).
+RESULT="$(echo "$BODY" | { grep -oP '^\s*-\s*\[(.)\]\s*<!--\s*arb:(\w+)\s*-->\s*(.*)$' || true; } | while IFS= read -r line; do
+  CHECKED="$(echo "$line" | grep -oP '^\s*-\s*\[(.)\]' | grep -oP '(?<=\[).' || echo " ")"
+  MARKER="$(echo "$line" | grep -oP '(?<=arb:)\w+')"
+  DESC="$(echo "$line" | sed 's/.*arb:\w*\s*-->\s*//' || true)"
+  printf '%s\t%s\t%s\n' "$MARKER" "$CHECKED" "$DESC"
+done)"
+
+if [ "$OPT_JSON" = true ]; then
+  echo "$RESULT" | jq -R -s '
+    split("\n") | map(select(length > 0)) |
+    map(split("\t")) | map({
+      marker: .[0],
+      checked: (.[1] == "x"),
+      description: .[2]
+    }) | {
+      items: .,
+      all_checked: all(.[]; .checked == true),
+      unchecked: map(select(.checked == false))
+    }
+  '
+else
+  echo "PR checklist reconciliation:"
+  echo "$RESULT" | while IFS=$'\t' read -r marker checked desc; do
+    [ -z "$marker" ] && continue
+    if [ "$checked" = "x" ]; then
+      echo "  [x] $marker: $desc"
+    else
+      echo "  [ ] $marker: $desc"
+    fi
+  done
+fi
