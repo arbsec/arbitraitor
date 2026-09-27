@@ -164,9 +164,9 @@ echo "$RAW" | jq \
       )
     }),
     missing_required: $missing_required,
-    all_passed: ((length) > 0)
+    all_passed: (((length) > 0)
       and all(.[]; .bucket == "pass" or exempt)
-      and (($missing_required | length) == 0),
+      and (($missing_required | length) == 0)),
     any_failing: any(.[]; .bucket == "fail" or .bucket == "cancel"),
     any_pending: any(.[]; .bucket == "pending")
   }'
