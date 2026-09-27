@@ -21,6 +21,7 @@ if [ -z "$PR" ]; then
 fi
 
 arb_lib_require_gh_scope
+arb_lib_load_project_config
 REPO="$(arb_lib_resolve_repo)"
 
 # Run convergence-status first (once; stderr captured for diagnostics).

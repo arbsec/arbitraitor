@@ -69,8 +69,8 @@ read_checks_field() {
     }
     insec && $0 ~ field "[[:space:]]*=" {
       line = $0; sub(/^[^=]*=[[:space:]]*/, "", line)
-      if (line ~ /\]/) { sub(/\].*$/, "", line); emit(line); exit }
       sub(/\[/, "", line)
+      if (line ~ /\]/) { sub(/\].*$/, "", line); emit(line); exit }
       emit(line); multi = 1
     }
   ' "$ARB_PROJECT_CONFIG"
@@ -100,18 +100,6 @@ PATH_GATED='[
   {"name": "Advisory Check",
    "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]}
 ]'
-
-# Convert one workflow `paths` glob to a regex: protect dots and `**/` from the
-# single-`*` expansion with placeholders, then restore.
-glob_to_regex() {
-  jq -rn --arg g "$1" '
-    $g
-    | gsub("\\."; "\u0001")
-    | gsub("\\*\\*/"; "\u0002")
-    | gsub("\\*"; "[^/]*")
-    | gsub("\u0002"; "(^|.*/)")
-    | gsub("\u0001"; "\\.")'
-}
 
 # Is a required check exempt because its workflow is path-gated and no diff
 # file matches any of its paths? (No path-gate entry → not exempt.)

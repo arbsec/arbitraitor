@@ -47,8 +47,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                                                               rerun until green (AGENTS.md "CI is fully green")
                   Required AND non-optional checks must ALL pass. A missing/skipped
                   check is a failure, not a pass — except workflow jobs deliberately
-                  disabled repo-side (the `KNOWN_DISABLED_JOBS` allowlist in
-                  `pr-checks`), which are not-applicable and excluded from the gate.
+                  disabled repo-side (listed in `[checks].optional` of the project
+                  config, which `pr-checks` reads), which are not-applicable and
+                  excluded from the gate while skipped.
 
 3. REVIEW         Select reviewers by changed area (arbitraitor-workflow.md "Required review domains"):
                     general, security, backend, frontend, data, devops, testing,

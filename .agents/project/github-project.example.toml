@@ -88,8 +88,8 @@ security_sensitive    = "security-sensitive"     # mirrors conventions.md "Secur
 # Must match the ruleset's required-status-checks. Check NAMES (GitHub status
 # check context names as reported by `gh pr checks`), not node IDs.
 # `Documentation` is event-gated (`if: github.event_name == 'push'` in code.yml),
-# so it never reports on pull-request events; pr-checks excludes it via
-# KNOWN_DISABLED_JOBS while skipped.
+# so it never reports on pull-request events; pr-checks exempts checks in
+# `optional` while they report the skipped state.
 [checks]
 required = [
   "Check & Lint",
@@ -104,6 +104,7 @@ required = [
   "Dependency Policy",
   "Advisory Check",
   "CodeQL Analysis",
+  "Agent Skills Tests",
 ]
 optional = ["Documentation", "qlty check"]   # qlty = external quality gate (qlty.sh)
 
