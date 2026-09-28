@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 hex = { workspace = true }
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
