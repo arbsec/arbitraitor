@@ -36,6 +36,7 @@ fn http_policy() -> FetchPolicy {
         proxy_url: None,
         behind_proxy: false,
         first_byte_timeout: None,
+        http_error_status_is_failure: true,
     }
 }
 
@@ -168,6 +169,53 @@ async fn http_fetch_streams_exact_response_bytes() -> Result<(), Box<dyn std::er
     );
     assert!(receipt.metadata.connected_ip.is_some());
     assert!(!receipt.metadata.resolved_ips.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_error_status_fails_by_default() -> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let url = server.not_found_response("gone").await;
+    let mut sink = VecSink::new();
+
+    let result = HttpFetcher::new()
+        .fetch(
+            FetchRequest::url(FetchUrl::parse(&url)?, http_policy()),
+            &mut sink,
+        )
+        .await;
+    let Err(error) = result else {
+        // Fail-closed default must abort on HTTP error status.
+        return Err("fetch unexpectedly succeeded against a 404 response".into());
+    };
+
+    assert!(matches!(error, FetchError::HttpStatus { status: 404 }));
+    assert!(sink.as_bytes().is_empty(), "no bytes may be delivered");
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_error_status_streams_body_when_policy_accepts_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = MockHttpServer::start().await;
+    let url = server.not_found_response("gone").await;
+    let mut sink = VecSink::new();
+
+    let policy = FetchPolicy {
+        http_error_status_is_failure: false,
+        ..http_policy()
+    };
+    let receipt = HttpFetcher::new()
+        .fetch(FetchRequest::url(FetchUrl::parse(&url)?, policy), &mut sink)
+        .await?;
+
+    // The 404 body is a successfully transferred artifact: streamed through
+    // the same bounded sink, digest-verified, and recorded with its real
+    // response status (curl-without--f semantics).
+    assert_eq!(sink.as_bytes(), b"gone");
+    assert_eq!(receipt.bytes_written, 4);
+    assert_eq!(receipt.sha256, sha256(b"gone"));
+    assert_eq!(receipt.metadata.response_status, Some(404));
     Ok(())
 }
 

@@ -184,6 +184,19 @@ impl MockHttpServer {
         self.absolute_url(&route_path)
     }
 
+    /// Configures a `404 Not Found` response with a body, for tests that
+    /// exercise HTTP-error-status handling (`curl` without `-f` semantics:
+    /// the error-status body is still a transferred artifact).
+    pub async fn not_found_response(&self, body: &str) -> String {
+        let route_path = self.unique_path("not-found-response");
+        Mock::given(method("GET"))
+            .and(path(route_path.as_str()))
+            .respond_with(ResponseTemplate::new(404).set_body_string(body))
+            .mount(&self.server)
+            .await;
+        self.absolute_url(&route_path)
+    }
+
     /// Configures headers mimicking a cloud instance metadata service response.
     ///
     /// This provides metadata for header-based SSRF detection tests only. `WireMock` still accepts

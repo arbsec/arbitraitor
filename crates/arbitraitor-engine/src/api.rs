@@ -25,16 +25,30 @@ use arbitraitor_policy::{EvalContext, PolicyEngine, PolicyTrace};
 use arbitraitor_receipt::Receipt;
 use sha2::{Digest as _, Sha256};
 
-use crate::EngineError;
 use crate::pipeline::{
     ReceiptInput, analysis_retrieval_info, build_receipt, default_cas_dir, default_receipts_dir,
     discover_and_store_children, parse_fetch_source, read_stored_bytes, receipt_timestamp_seconds,
 };
 use crate::signatures::SignatureInputs;
+use crate::{EngineError, FetchFailureKind, FetchTransportError};
 
 mod builder;
 
 pub use builder::{Arbitraitor, ArbitraitorBuilder};
+
+/// Converts a fetch-layer error into an [`EngineError`], preserving the
+/// curl-mappable failure class when one exists (HTTP error status, DNS,
+/// connection refused, timeout, TLS certificate) so tool-emulating callers
+/// can produce the real tool's exit code instead of parsing diagnostics.
+fn classify_fetch_error(error: &arbitraitor_fetch::FetchError) -> EngineError {
+    match FetchFailureKind::classify(error) {
+        Some(kind) => EngineError::FetchTransport(FetchTransportError {
+            kind,
+            message: error.to_string(),
+        }),
+        None => EngineError::Fetch(error.to_string()),
+    }
+}
 
 /// Fail-closed policy for non-interactive surfaces.
 ///
@@ -719,7 +733,11 @@ impl ArbitraitorApi {
         let mut sink = VecSink::new();
         let receipt = match &request.source {
             FetchSource::File(_) => FileFetcher::new().fetch(request, &mut sink).await?,
-            FetchSource::Url(_) => self.fetcher.fetch(request, &mut sink).await?,
+            FetchSource::Url(_) => self
+                .fetcher
+                .fetch(request, &mut sink)
+                .await
+                .map_err(|error| classify_fetch_error(&error))?,
             FetchSource::Stdin => {
                 return Err(EngineError::Config(
                     "stdin source is not supported by the engine; use 'arbitraitor scan --stdin'"

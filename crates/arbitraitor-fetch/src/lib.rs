@@ -458,6 +458,17 @@ pub struct FetchPolicy {
     /// deadline; callers that need an upper bound on time-to-first-byte for
     /// hung or extremely slow servers set this explicitly.
     pub first_byte_timeout: Option<Duration>,
+    /// Whether a 4xx/5xx response aborts retrieval with
+    /// [`FetchError::HttpStatus`].
+    ///
+    /// Fail-closed by default (`true`): an HTTP error status is treated as a
+    /// retrieval failure and no bytes are delivered. Callers that model
+    /// `curl` without `--fail` semantics set this to `false` — the error
+    /// status response body is then streamed as the artifact, the response
+    /// status is still recorded in [`FetchMetadata::response_status`] and
+    /// the receipt, and every downstream inspection/verdict gate applies
+    /// unchanged.
+    pub http_error_status_is_failure: bool,
 }
 
 impl Default for FetchPolicy {
@@ -479,6 +490,7 @@ impl Default for FetchPolicy {
             behind_proxy: false,
             require_digest: false,
             first_byte_timeout: None,
+            http_error_status_is_failure: true,
         }
     }
 }
@@ -996,10 +1008,18 @@ impl HttpFetcher {
                 continue;
             }
 
-            if status.is_client_error() || status.is_server_error() {
+            if (status.is_client_error() || status.is_server_error())
+                && policy.http_error_status_is_failure
+            {
                 return Err(FetchError::HttpStatus {
                     status: status.as_u16(),
                 });
+                // `http_error_status_is_failure == false`: the error-status
+                // response body is still a successfully transferred
+                // artifact. It streams through the same bounded sink,
+                // receipt, and inspection path as any other response
+                // (invariants 1 and 2), and the status remains visible in
+                // `FetchMetadata::response_status` for the verdict/receipt.
             }
 
             return stream_response(
