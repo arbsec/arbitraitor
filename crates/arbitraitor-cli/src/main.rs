@@ -22,6 +22,7 @@ use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{
     Daemon, DaemonInfo, DaemonRequest, RecentOperation, default_socket_path, request_once,
 };
+use arbitraitor_engine::EngineError;
 use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
 use arbitraitor_intel::{
     IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
@@ -523,6 +524,7 @@ async fn run_main() -> Result<()> {
                 &config,
                 explain_format,
                 true,
+                false,
             )
             .await
             .map(|outcome| {
@@ -726,32 +728,62 @@ pub(crate) fn write_stdout_or_exit_on_broken_pipe(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// True when the wrapped tool itself requested quiet output: `curl -s`
-/// without `-S` (errors still wanted), or `wget -q` / `--quiet`, including
-/// short-option clusters where `-q` leads (e.g. `-qO-`). A trailing `q`
-/// inside another cluster (e.g. `-Oq`, an appended filename) intentionally
-/// does NOT count, so an unrelated `q` in an option value cannot silence
-/// the report.
-fn wrapper_tool_requested_quiet(tool: Option<&str>, args: &[String]) -> bool {
+/// True when a 4xx/5xx response body should be retrieved as a normal
+/// artifact instead of aborting the fetch. Mirrors real `curl` without
+/// `-f`/`--fail`: the error-status body is a successfully transferred
+/// response, the exit code is 0, and the verdict/receipt still record the
+/// truth about what came back. Only the curl shim gets these semantics;
+/// first-class fetch and the wget path keep the fail-closed default.
+fn wrapper_accepts_http_error_status(tool: Option<&str>, args: &[String]) -> bool {
     match tool.and_then(WrapperTarget::from_binary_name) {
-        Some(WrapperTarget::Curl) => {
-            parse_curl_args(args).is_ok_and(|parsed| parsed.silent && !parsed.show_error)
-        }
-        Some(WrapperTarget::Wget) => args.iter().any(|arg| {
-            arg == "-q"
-                || arg == "--quiet"
-                || (arg.starts_with("-q") && !arg.starts_with("-q-") && arg.len() > 2)
-        }),
-        None => false,
+        Some(WrapperTarget::Curl) => parse_curl_args(args).is_ok_and(|parsed| !parsed.fail),
+        Some(WrapperTarget::Wget) | None => false,
     }
 }
 
-/// Human interception report is printed only when stderr is attached to a
-/// terminal and the wrapped tool did not ask for quiet output. Captured
-/// stderr (agent shells, `2>&1` merges) never receives the report, keeping
-/// released artifact streams byte-clean even when stdout/stderr merge.
-fn wrapper_human_report_requested(tool: Option<&str>, args: &[String]) -> bool {
-    std::io::stderr().is_terminal() && !wrapper_tool_requested_quiet(tool, args)
+/// Maps an engine error to the exit code real `curl` would produce for the
+/// same transport failure. Returns `None` when the failure has no
+/// curl-specific exit code; the caller then falls back to Arbitraitor's
+/// own stable exit-code surface.
+fn curl_exit_code_from_engine_error(error: &EngineError) -> Option<i32> {
+    match error {
+        EngineError::FetchTransport(transport) => Some(transport.kind.curl_exit_code()),
+        _ => None,
+    }
+}
+
+/// Human interception report (the `verdict:` banner) is always requested
+/// for wrapper fetches — stderr is the diagnostics channel and the
+/// documented contract is banner-then-bytes on every successful verified
+/// fetch. The wrapped tool's quiet flags (`-s`, `-q`) silence real curl's
+/// progress and error noise; they do not silence a security gate's verdict,
+/// which is exactly the signal a caller needs to tell a mediated fetch from
+/// a direct one. `stdout` stays byte-clean: the banner never touches it,
+/// even when a caller merges `2>&1` (the banner precedes the payload on a
+/// different descriptor).
+fn wrapper_human_report_requested(_tool: Option<&str>, _args: &[String]) -> bool {
+    true
+}
+
+/// Exits the process with the exit code real `curl` would produce for a
+/// classified transport failure (22 with `-f`, 6 DNS, 7 refused, 28
+/// timeout, 60 TLS), so callers that branch on curl's exit status see
+/// identical behavior. Returns without exiting when the failure has no
+/// curl-specific code or the wrapper is not curl; the caller then falls
+/// back to Arbitraitor's own exit surface (the main error path exits 1).
+fn exit_with_curl_code_if_mapped(tool: Option<&str>, error: &miette::Report) {
+    let is_curl = tool
+        .and_then(WrapperTarget::from_binary_name)
+        .is_some_and(|target| matches!(target, WrapperTarget::Curl));
+    if !is_curl {
+        return;
+    }
+    if let Some(exit_code) = error
+        .downcast_ref::<EngineError>()
+        .and_then(curl_exit_code_from_engine_error)
+    {
+        std::process::exit(exit_code);
+    }
 }
 
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
@@ -826,8 +858,17 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         config,
         None,
         wrapper_human_report_requested(command.tool.as_deref(), &command.args),
+        wrapper_accepts_http_error_status(command.tool.as_deref(), &command.args),
     )
-    .await?;
+    .await;
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            exit_with_curl_code_if_mapped(command.tool.as_deref(), &error);
+            return Err(error);
+        }
+    };
 
     if outcome.verdict != Verdict::Pass {
         let mut stderr = std::io::stderr().lock();
@@ -969,6 +1010,7 @@ async fn wrap_fetch_single(
         config,
         None,
         wrapper_human_report_requested(tool, args),
+        wrapper_accepts_http_error_status(tool, args),
     )
     .await?;
 
@@ -1007,6 +1049,7 @@ async fn wrap_bash(command: &WrapCommand, config: &Config) -> Result<()> {
         config,
         None,
         std::io::stderr().is_terminal(),
+        false,
     )
     .await?;
     if outcome.verdict != Verdict::Pass {

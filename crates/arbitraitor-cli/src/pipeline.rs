@@ -43,9 +43,17 @@ pub(crate) struct InspectOutcome {
 /// receipt through the pipeline engine.
 ///
 /// `emit_human_report` controls the human-readable interception report on
-/// stderr. Wrapper invocations (shim mode) pass `false` whenever stderr is
-/// captured — piped agents merge stdout and stderr, so reports must not
-/// interleave with released artifact streams.
+/// stderr. Wrapper invocations (shim mode) always pass `true`: the
+/// documented contract is banner-then-bytes, and stderr is the diagnostics
+/// channel — the banner never touches stdout, so piped artifact streams
+/// stay byte-clean even when a caller merges `2>&1`. First-class fetch
+/// gates the report on the caller.
+///
+/// `accept_http_error_status` mirrors `curl` without `-f`/`--fail`: when
+/// `true`, a 4xx/5xx response body is retrieved as a successfully
+/// transferred artifact (the response status remains in the fetch receipt
+/// and every inspection/verdict gate still applies). When `false`, an HTTP
+/// error status aborts retrieval with the standard network-failure error.
 #[allow(
     clippy::too_many_arguments,
     reason = "pipeline inputs mirror the CLI flag surface; grouping would hide the contract"
@@ -60,6 +68,7 @@ pub(crate) async fn inspect(
     config: &Config,
     explain_format: Option<crate::ExplainFormat>,
     emit_human_report: bool,
+    accept_http_error_status: bool,
 ) -> Result<InspectOutcome> {
     // Validate the source before opening the store so malformed URLs fail
     // fast with the parse error, exactly as the pre-engine pipeline did.
@@ -79,6 +88,7 @@ pub(crate) async fn inspect(
         require_digest: config.integrity.require_digest,
         allow_cross_origin_redirect: config.fetch.allow_cross_origin,
         forward_authorization_cross_origin: config.fetch.forward_authorization_cross_origin,
+        http_error_status_is_failure: !accept_http_error_status,
         ..FetchPolicy::default()
     };
     // ADR-0038: the CLI now honors configured policy (closing the coverage

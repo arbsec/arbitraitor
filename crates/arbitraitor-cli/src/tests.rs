@@ -2419,46 +2419,6 @@ fn fresh_stdout_pipe_delivers_bytes_verbatim() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn curl_silent_without_show_error_is_quiet() {
-    use crate::wrapper_tool_requested_quiet;
-    let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
-
-    assert!(wrapper_tool_requested_quiet(
-        Some("curl"),
-        &a(&["curl", "-s", "https://example.com"])
-    ));
-    assert!(!wrapper_tool_requested_quiet(
-        Some("curl"),
-        &a(&["curl", "-sS", "https://example.com"])
-    ));
-    assert!(!wrapper_tool_requested_quiet(
-        Some("curl"),
-        &a(&["curl", "-fsSL", "https://example.com"])
-    ));
-    assert!(wrapper_tool_requested_quiet(
-        Some("wget"),
-        &a(&["wget", "-qO-", "https://example.com"])
-    ));
-    // `q` in value position of another option must not silence the report.
-    assert!(!wrapper_tool_requested_quiet(
-        Some("wget"),
-        &a(&["wget", "-Oq", "https://example.com"])
-    ));
-    assert!(wrapper_tool_requested_quiet(
-        Some("wget"),
-        &a(&["wget", "--quiet", "https://example.com"])
-    ));
-    assert!(!wrapper_tool_requested_quiet(
-        Some("wget"),
-        &a(&["wget", "https://example.com"])
-    ));
-    assert!(!wrapper_tool_requested_quiet(
-        None,
-        &a(&["https://example.com"])
-    ));
-}
-
-#[test]
 fn first_class_output_extracted_after_url() {
     use crate::first_class_output_from_args;
     let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
@@ -2488,5 +2448,121 @@ fn first_class_output_extracted_after_url() {
         first_class_output_from_args(&a(&["-o", "/lead", "https://example.com/x"])),
         None,
         "clap already captured flags before the URL"
+    );
+}
+
+#[test]
+fn wrapper_banner_is_emitted_unconditionally() {
+    use crate::wrapper_human_report_requested;
+    let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+
+    // The documented contract is banner-then-bytes on every successful
+    // verified fetch: stderr is the diagnostics channel and the verdict
+    // banner must appear even when the wrapped tool requested quiet mode
+    // or stderr is captured (`2>file`, agent shells, `2>&1` merges).
+    // stdout stays byte-clean; only the banner's presence is decided here.
+    assert!(wrapper_human_report_requested(
+        Some("curl"),
+        &a(&["curl", "-s", "https://example.com"])
+    ));
+    assert!(wrapper_human_report_requested(
+        Some("curl"),
+        &a(&["curl", "-fsSL", "https://example.com"])
+    ));
+    assert!(wrapper_human_report_requested(
+        Some("wget"),
+        &a(&["wget", "-q", "https://example.com"])
+    ));
+    assert!(wrapper_human_report_requested(
+        None,
+        &a(&["https://example.com"])
+    ));
+}
+
+#[test]
+fn wrapper_accepts_http_error_status_tracks_curl_fail_flag() {
+    use crate::wrapper_accepts_http_error_status;
+    let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+
+    // curl without -f: a 4xx/5xx body is a successfully transferred
+    // artifact; fetch it, inspect it, exit 0 (real curl semantics).
+    assert!(wrapper_accepts_http_error_status(
+        Some("curl"),
+        &a(&[
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "https://example.com/missing"
+        ])
+    ));
+    assert!(wrapper_accepts_http_error_status(
+        Some("curl"),
+        &a(&["curl", "https://example.com/missing"])
+    ));
+    // curl with -f/--fail: HTTP error status fails with exit 22.
+    assert!(!wrapper_accepts_http_error_status(
+        Some("curl"),
+        &a(&["curl", "-f", "https://example.com/missing"])
+    ));
+    assert!(!wrapper_accepts_http_error_status(
+        Some("curl"),
+        &a(&["curl", "-fsSL", "https://example.com/missing"])
+    ));
+    assert!(!wrapper_accepts_http_error_status(
+        Some("curl"),
+        &a(&["curl", "--fail", "https://example.com/missing"])
+    ));
+    // First-class fetch and the wget path keep the fail-closed default.
+    assert!(!wrapper_accepts_http_error_status(
+        None,
+        &a(&["https://example.com"])
+    ));
+    assert!(!wrapper_accepts_http_error_status(
+        Some("wget"),
+        &a(&["wget", "https://example.com/missing"])
+    ));
+}
+
+#[test]
+fn curl_exit_codes_match_real_curl_table() {
+    use crate::curl_exit_code_from_engine_error;
+    use arbitraitor_engine::{EngineError, FetchFailureKind, FetchTransportError};
+
+    let transport = |kind: FetchFailureKind| {
+        EngineError::FetchTransport(FetchTransportError {
+            kind,
+            message: "test".to_owned(),
+        })
+    };
+
+    // curl(1) exit codes: 22 HTTP error with -f, 6 DNS, 7 refused,
+    // 28 timeout, 60 TLS certificate failure.
+    assert_eq!(
+        curl_exit_code_from_engine_error(&transport(FetchFailureKind::HttpErrorStatus {
+            status: 404
+        })),
+        Some(22)
+    );
+    assert_eq!(
+        curl_exit_code_from_engine_error(&transport(FetchFailureKind::DnsResolution)),
+        Some(6)
+    );
+    assert_eq!(
+        curl_exit_code_from_engine_error(&transport(FetchFailureKind::ConnectionRefused)),
+        Some(7)
+    );
+    assert_eq!(
+        curl_exit_code_from_engine_error(&transport(FetchFailureKind::Timeout)),
+        Some(28)
+    );
+    assert_eq!(
+        curl_exit_code_from_engine_error(&transport(FetchFailureKind::TlsCertificate)),
+        Some(60)
+    );
+    // Non-transport engine errors keep Arbitraitor's own exit surface.
+    assert_eq!(
+        curl_exit_code_from_engine_error(&EngineError::Store("corrupt".to_owned())),
+        None
     );
 }
