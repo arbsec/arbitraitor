@@ -99,6 +99,9 @@ overridable via `$ARB_SERVICE_IDENTITIES`).
 - Mint per operation (tokens expire after ~1 hour; never cached on disk):
   `GH_TOKEN="$(cargo run -p xtask -- mint-github-token)" gh ...`. The subcommand prints
   only the token to stdout; diagnostics go to stderr and never carry secret material.
+  PATH caveat: a `curl` shim on PATH (arbitraitor wrappers) can intercept the minting
+  POST and swallow the response — invoke a real curl (`/usr/bin/curl`) or bypass the
+  shim for that command if the token request fails with no detail.
 - PEM resolution order (fail-closed — no token, no fallback attempt inside the tool):
   `$ARBSEC_APP_PEM` / `$ORCHESTRAITOR_APP_PEM`, then the platform keyring entry
   `secret://keyring/orchestraitor-app-pem` (service `orchestraitor`). Installation id

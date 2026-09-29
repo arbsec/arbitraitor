@@ -17,9 +17,11 @@
 //! require the full dependency admission checklist for a developer-only
 //! tool. xtask stays zero-dependency: the JWT is assembled in pure Rust
 //! and the RSA signature is produced by the system `openssl` binary; the
-//! token request goes through the system `curl` binary. The PEM travels
-//! to `openssl` via a 0600 file in a 0700 private temp directory (never
-//! argv/env, never inside the repo) and is removed when the command ends.
+//! token request goes through the system `curl` binary. On unix the PEM
+//! travels to `openssl` via a 0600 file in a 0700 private temp directory
+//! (never argv/env, never inside the repo) and is removed when the command
+//! ends; non-unix platforms fail closed — they cannot enforce POSIX file
+//! modes and are therefore unsupported for secret material handling.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -233,9 +235,17 @@ fn request_token(jwt: &str, installation_id: u64, dir: &Path) -> Result<String, 
     if !out.status.success() {
         // --fail-with-body prints the JSON error body on failure; its
         // `message` field is safe diagnostics (GitHub error text only).
+        // The body may be empty when the failing binary is not real curl
+        // (e.g. an arbitraitor shim on PATH), so the exit code and a shim
+        // hint are surfaced too. Neither carries secret material.
         let detail = crate::extract_json_string_field(&body, "message")
             .unwrap_or_else(|| "no detail returned".to_string());
-        return Err(format!("token request failed: {detail}"));
+        return Err(format!(
+            "token request failed (curl exit {}): {detail}. If a curl shim is on PATH \
+             (arbitraitor wrappers), it may intercept this request — invoke /usr/bin/curl \
+             or disable the shim for this command",
+            out.status.code().unwrap_or(-1)
+        ));
     }
     let token = crate::extract_json_string_field(&body, "token")
         .filter(|t| !t.is_empty())
@@ -259,6 +269,11 @@ struct TempDir {
 impl TempDir {
     fn create() -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!("arbitraitor-mint-{}", std::process::id()));
+        // The PID-derived name is predictable, but on a sticky-bit /tmp
+        // (the standard for every unix multi-user tmpdir) another user can
+        // neither read nor replace this user's directory, so pre-creation
+        // removal of own leftovers is safe. The dir is recreated 0700
+        // immediately after.
         // A leftover from a crashed run must never carry stale secrets into
         // a new run; it is removed before the fresh (empty) dir is created.
         let _ = fs::remove_dir_all(&path);
@@ -272,8 +287,14 @@ impl TempDir {
         }
         #[cfg(not(unix))]
         {
-            fs::create_dir(&path)
-                .map_err(|e| format!("cannot create temp dir {}: {e}", path.display()))?;
+            // Fail closed: without POSIX modes there is no way to enforce
+            // the 0700 directory guarantee required for secret material.
+            let _ = fs::remove_dir_all(&path);
+            return Err(
+                "non-unix platforms are unsupported for secret material handling \
+                 (no POSIX file modes to enforce 0700/0600)"
+                    .to_string(),
+            );
         }
         Ok(Self { path })
     }
@@ -289,8 +310,9 @@ impl Drop for TempDir {
     }
 }
 
-/// A 0600 file holding secret bytes for the duration of one subprocess
-/// call, removed on drop (all error paths included).
+/// A 0600 file (unix) holding secret bytes for the duration of one
+/// subprocess call, removed on drop (all error paths included). Only
+/// reachable on unix: `TempDir::create` fails closed elsewhere.
 struct SecretFile {
     path: PathBuf,
 }
