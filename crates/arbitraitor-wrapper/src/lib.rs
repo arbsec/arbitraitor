@@ -10,11 +10,6 @@ pub mod init;
 pub mod shim;
 pub mod wget;
 
-use arbitraitor_plugin_api::{
-    CapabilitySet, FilesystemCapability, NetworkCapability, OPERATION_PLAN_PROTOCOL_VERSION,
-    OperationPlan, PlannedOperation, PluginIdentity, PluginTrustClass, ProcessCapability,
-    SemanticConfidence,
-};
 use thiserror::Error;
 
 /// Parsed subset of a curl invocation supported by the download wrapper.
@@ -66,6 +61,15 @@ pub struct CurlArgs {
     /// being silently downgraded to a full GET.
     pub head: bool,
     /// Unsupported options observed while parsing.
+    ///
+    /// This field is the enforcement channel for security-critical options:
+    /// the CLI's `bail_on_critical` path filters these strings through
+    /// [`is_critical_unsupported_option`] and hard-rejects the invocation
+    /// before any network access. TLS-verification-disabling flags
+    /// (`-k`/`--insecure`) are both parsed into [`CurlArgs::insecure`] and
+    /// recorded here so that rejection fires — parsing alone is not
+    /// enforcement. Mirrors `WgetRequest::unsupported_options` on the wget
+    /// side.
     pub unsupported_options: Vec<String>,
 }
 
@@ -96,98 +100,9 @@ pub fn parse_curl_args(argv: &[String]) -> Result<CurlArgs, WrapperError> {
     let mut parser = CurlParser::new(argv);
     parser.parse()
 }
-/// Converts parsed curl arguments to an Arbitraitor operation plan.
-///
-/// # Errors
-///
-/// Returns [`WrapperError`] if the invocation is opaque or does not contain a
-/// supported download URL.
-pub fn curl_to_operation_plan(args: &CurlArgs) -> Result<OperationPlan, WrapperError> {
-    let url = args
-        .url
-        .as_ref()
-        .ok_or_else(|| WrapperError::InvalidArguments {
-            reason: "curl invocation does not contain a URL".to_owned(),
-        })?;
-    let confidence = assess_semantic_confidence(args)?;
-    let release_path = release_path(args, url)?;
-
-    let mut operations = vec![PlannedOperation::Retrieve {
-        url: url.clone(),
-        headers: request_headers(args),
-    }];
-    if let Some(path) = release_path {
-        operations.push(PlannedOperation::ReleaseToFile { path });
-    }
-
-    Ok(OperationPlan {
-        protocol_version: OPERATION_PLAN_PROTOCOL_VERSION,
-        plugin: curl_plugin_identity(),
-        original_tool: "curl".to_owned(),
-        operations,
-        requested_capabilities: requested_capabilities(
-            url,
-            args.output.is_some() || args.remote_name,
-        ),
-        semantic_confidence: confidence,
-    })
-}
-
-fn assess_semantic_confidence(args: &CurlArgs) -> Result<SemanticConfidence, WrapperError> {
-    if let Some(reason) = opaque_reason(args) {
-        return Err(WrapperError::OpaqueTranslation { reason });
-    }
-
-    if args.retry.is_some() || args.compressed {
-        return Ok(SemanticConfidence::Equivalent);
-    }
-
-    if args.unsupported_options.is_empty()
-        && args.output.is_some()
-        && args.fail
-        && args.silent
-        && args.show_error
-        && args.follow_redirects
-    {
-        return Ok(SemanticConfidence::Exact);
-    }
-
-    Ok(SemanticConfidence::Partial)
-}
-
-fn opaque_reason(args: &CurlArgs) -> Option<String> {
-    let url = args.url.as_deref()?;
-    if url.starts_with("ftp://") || url.starts_with("ftps://") {
-        return Some("FTP URLs are outside the download wrapper model".to_owned());
-    }
-    if args.data.is_some() {
-        return Some("request bodies are unsupported by the download wrapper".to_owned());
-    }
-    if args.insecure {
-        return Some("TLS verification disabling cannot be represented safely".to_owned());
-    }
-    if let Some(method) = args.request_method.as_deref() {
-        let normalized = method.to_ascii_uppercase();
-        if matches!(normalized.as_str(), "POST" | "PUT" | "DELETE" | "PATCH") {
-            return Some("state-changing HTTP methods are unsupported".to_owned());
-        }
-    }
-    if args.head || normalized_request_method_is_head(args.request_method.as_deref()) {
-        return Some(
-            "header-only requests (-I/--head) cannot be represented by the download wrapper; \
-             the artifact pipeline returns response bodies, not response headers"
-                .to_owned(),
-        );
-    }
-    args.unsupported_options
-        .iter()
-        .find(|option| is_critical_unsupported_option(option))
-        .map(|option| format!("critical unsupported option {option}"))
-}
-
 /// Returns `true` if an unsupported curl option is security-critical — i.e. it
-/// can bypass the inspection boundary (proxy redirection, config file reads,
-/// credential injection, socket binding, etc.).
+/// can bypass the inspection boundary (TLS verification disabling, proxy
+/// redirection, config file reads, credential injection, socket binding, etc.).
 ///
 /// Callers use this to decide whether to hard-reject an invocation instead of
 /// allowing the option to pass through with reduced confidence.
@@ -219,6 +134,10 @@ pub fn is_critical_unsupported_option(option: &str) -> bool {
             | "--interface"
             | "--unix-socket"
             | "--abstract-unix-socket"
+            // TLS verification disabling — removes the boundary's
+            // man-in-the-middle protection guarantee (§4.3, §39.9)
+            | "-k"
+            | "--insecure"
             // Config / trust store manipulation
             | "-K"
             | "--config"
@@ -238,51 +157,6 @@ pub fn is_critical_unsupported_option(option: &str) -> bool {
     )
 }
 
-/// Returns `true` when an explicit `-X` request method means a header-only
-/// response. `-I`/`--head` set `CurlArgs::head` directly; `-X HEAD` (and
-/// case variants) route through here so both spellings fail explicitly
-/// instead of silently returning a body.
-fn normalized_request_method_is_head(method: Option<&str>) -> bool {
-    method.is_some_and(|method| method.eq_ignore_ascii_case("HEAD"))
-}
-
-fn request_headers(args: &CurlArgs) -> Vec<(String, String)> {
-    let mut headers = args
-        .headers
-        .iter()
-        .map(|(name, value)| (name.clone(), redact_header_value(name, value)))
-        .collect::<Vec<_>>();
-    if let Some(user_agent) = &args.user_agent {
-        headers.push(("user-agent".to_owned(), user_agent.clone()));
-    }
-    headers
-}
-
-fn redact_header_value(name: &str, value: &str) -> String {
-    if is_sensitive_header(name) {
-        "<redacted>".to_owned()
-    } else {
-        value.to_owned()
-    }
-}
-
-fn is_sensitive_header(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "authorization" | "cookie" | "proxy-authorization" | "set-cookie"
-    )
-}
-
-fn release_path(args: &CurlArgs, url: &str) -> Result<Option<String>, WrapperError> {
-    if let Some(output) = &args.output {
-        return Ok(Some(output.clone()));
-    }
-    if args.remote_name {
-        return remote_name_from_url(url).map(Some);
-    }
-    Ok(None)
-}
-
 /// Derives a filename from the last path segment of a URL, stripping
 /// query and fragment components.
 ///
@@ -300,32 +174,6 @@ pub fn remote_name_from_url(url: &str) -> Result<String, WrapperError> {
             reason: "--remote-name URL does not contain a file name".to_owned(),
         })?;
     Ok(name.to_owned())
-}
-
-fn requested_capabilities(url: &str, writes_file: bool) -> CapabilitySet {
-    CapabilitySet {
-        network: if url.starts_with("https://") {
-            NetworkCapability::OutboundHttps
-        } else {
-            NetworkCapability::Full
-        },
-        filesystem: if writes_file {
-            FilesystemCapability::ReadWrite
-        } else {
-            FilesystemCapability::None
-        },
-        process: ProcessCapability::None,
-        max_memory_bytes: None,
-        max_cpu_ms: None,
-    }
-}
-
-fn curl_plugin_identity() -> PluginIdentity {
-    PluginIdentity {
-        id: "arbitraitor.wrapper.curl".to_owned(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        trust_class: PluginTrustClass::BuiltIn,
-    }
 }
 
 struct CurlParser<'a> {
@@ -382,7 +230,10 @@ impl<'a> CurlParser<'a> {
                 let header = self.option_value(name, inline_value)?;
                 self.args.headers.push(parse_header(&header));
             }
-            "--insecure" => self.args.insecure = true,
+            "--insecure" => {
+                self.args.insecure = true;
+                self.args.unsupported_options.push("--insecure".to_owned());
+            }
             "--retry" => self.args.retry = Some(self.parse_retry(name, inline_value)?),
             "--user-agent" => self.args.user_agent = Some(self.option_value(name, inline_value)?),
             "--data" | "--data-raw" | "--data-binary" | "--data-urlencode" => {
@@ -464,7 +315,10 @@ impl<'a> CurlParser<'a> {
                 'S' => self.args.show_error = true,
                 'f' => self.args.fail = true,
                 'I' => self.args.head = true,
-                'k' => self.args.insecure = true,
+                'k' => {
+                    self.args.insecure = true;
+                    self.args.unsupported_options.push("-k".to_owned());
+                }
                 'O' => self.args.remote_name = true,
                 _ => {
                     self.args.unsupported_options.push(format!("-{flag}"));
@@ -553,69 +407,9 @@ fn parse_header(header: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurlArgs, WrapperError, curl_to_operation_plan, is_critical_unsupported_option,
-        parse_curl_args, remote_name_from_url,
+        CurlArgs, WrapperError, is_critical_unsupported_option, parse_curl_args,
+        remote_name_from_url,
     };
-    use arbitraitor_plugin_api::{
-        FilesystemCapability, NetworkCapability, PlannedOperation, SemanticConfidence,
-    };
-
-    #[test]
-    fn fs_sl_output_translates_to_exact_plan() -> Result<(), WrapperError> {
-        let args = parse(&["curl", "-fsSL", "https://example.com/file", "-o", "output"])?;
-        let plan = curl_to_operation_plan(&args)?;
-
-        assert_eq!(plan.semantic_confidence, SemanticConfidence::Exact);
-        assert_eq!(
-            plan.requested_capabilities.network,
-            NetworkCapability::OutboundHttps
-        );
-        assert_eq!(
-            plan.requested_capabilities.filesystem,
-            FilesystemCapability::ReadWrite
-        );
-        assert_eq!(
-            plan.operations,
-            vec![
-                PlannedOperation::Retrieve {
-                    url: "https://example.com/file".to_owned(),
-                    headers: Vec::new(),
-                },
-                PlannedOperation::ReleaseToFile {
-                    path: "output".to_owned(),
-                },
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn plain_url_translates_to_partial_retrieve_only_plan() -> Result<(), WrapperError> {
-        let args = parse(&["curl", "https://example.com"])?;
-        let plan = curl_to_operation_plan(&args)?;
-
-        assert_eq!(plan.semantic_confidence, SemanticConfidence::Partial);
-        assert_eq!(
-            plan.operations,
-            vec![PlannedOperation::Retrieve {
-                url: "https://example.com".to_owned(),
-                headers: Vec::new(),
-            }]
-        );
-        Ok(())
-    }
-    #[test]
-    fn post_data_is_rejected_as_opaque() -> Result<(), WrapperError> {
-        let args = parse(&["curl", "-X", "POST", "-d", "data", "https://example.com"])?;
-
-        assert_eq!(
-            curl_to_operation_plan(&args),
-            Err(WrapperError::OpaqueTranslation {
-                reason: "request bodies are unsupported by the download wrapper".to_owned(),
-            })
-        );
-        Ok(())
-    }
 
     #[test]
     fn head_short_flag_is_parsed_and_rejected_explicitly() -> Result<(), WrapperError> {
@@ -630,34 +424,21 @@ mod tests {
                 .any(|opt| opt == "-I" || opt == "--head"),
             "-I must be recognized, not fall into the unsupported catch-all"
         );
-        assert!(matches!(
-            curl_to_operation_plan(&args),
-            Err(WrapperError::OpaqueTranslation { reason })
-                if reason.contains("header-only requests")
-        ));
         Ok(())
     }
 
     #[test]
-    fn head_long_option_is_parsed_and_rejected_explicitly() -> Result<(), WrapperError> {
+    fn head_long_option_is_parsed() -> Result<(), WrapperError> {
         let args = parse(&["curl", "--head", "https://example.com"])?;
-
         assert!(args.head);
-        assert!(matches!(
-            curl_to_operation_plan(&args),
-            Err(WrapperError::OpaqueTranslation { .. })
-        ));
         Ok(())
     }
 
     #[test]
-    fn explicit_head_method_is_rejected_explicitly() -> Result<(), WrapperError> {
+    fn explicit_head_method_is_parsed() -> Result<(), WrapperError> {
         for method in ["HEAD", "head", "Head"] {
             let args = parse(&["curl", "-X", method, "https://example.com"])?;
-            assert!(matches!(
-                curl_to_operation_plan(&args),
-                Err(WrapperError::OpaqueTranslation { .. })
-            ));
+            assert_eq!(args.request_method.as_deref(), Some(method));
         }
         Ok(())
     }
@@ -671,16 +452,6 @@ mod tests {
         assert!(args.silent);
         assert!(args.show_error);
         assert!(args.follow_redirects);
-        Ok(())
-    }
-
-    #[test]
-    fn retry_translates_to_equivalent_plan() -> Result<(), WrapperError> {
-        let args = parse(&["curl", "--retry", "3", "https://example.com", "-o", "file"])?;
-        let plan = curl_to_operation_plan(&args)?;
-
-        assert_eq!(args.retry, Some(3));
-        assert_eq!(plan.semantic_confidence, SemanticConfidence::Equivalent);
         Ok(())
     }
 
@@ -734,31 +505,6 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn redacts_sensitive_headers_in_operation_plan() -> Result<(), WrapperError> {
-        let args = parse(&[
-            "curl",
-            "https://example.com/file",
-            "-H",
-            "Authorization: Bearer secret",
-            "-H",
-            "X-Test: visible",
-        ])?;
-        let plan = curl_to_operation_plan(&args)?;
-
-        assert_eq!(
-            plan.operations[0],
-            PlannedOperation::Retrieve {
-                url: "https://example.com/file".to_owned(),
-                headers: vec![
-                    ("authorization".to_owned(), "<redacted>".to_owned()),
-                    ("x-test".to_owned(), "visible".to_owned()),
-                ],
-            }
-        );
-        Ok(())
-    }
-
-    #[test]
     fn remote_name_from_url_strips_query_and_fragment() -> Result<(), WrapperError> {
         // Query and fragments (which may carry secrets) must not leak into
         // the derived filename. Fragment '#' stripping was previously
@@ -779,59 +525,17 @@ mod tests {
     }
 
     #[test]
-    fn remote_name_derives_release_path_from_url() -> Result<(), WrapperError> {
+    fn remote_name_flag_is_parsed() -> Result<(), WrapperError> {
         let args = parse(&[
             "curl",
             "-O",
             "https://example.com/downloads/tool.tar.gz?x=1",
         ])?;
-        let plan = curl_to_operation_plan(&args)?;
-
+        assert!(args.remote_name);
         assert_eq!(remote_name_from_url("https://example.com/a/b")?, "b");
-        assert_eq!(
-            plan.operations[1],
-            PlannedOperation::ReleaseToFile {
-                path: "tool.tar.gz".to_owned(),
-            }
-        );
         Ok(())
     }
 
-    #[test]
-    fn unsupported_noncritical_option_yields_partial_confidence() -> Result<(), WrapperError> {
-        let args = parse(&[
-            "curl",
-            "--verbose",
-            "https://example.com/file",
-            "-o",
-            "file",
-        ])?;
-        let plan = curl_to_operation_plan(&args)?;
-
-        assert_eq!(args.unsupported_options, vec!["--verbose".to_owned()]);
-        assert_eq!(plan.semantic_confidence, SemanticConfidence::Partial);
-        Ok(())
-    }
-
-    #[test]
-    fn critical_options_and_ftp_are_rejected_as_opaque() -> Result<(), WrapperError> {
-        let critical = CurlArgs {
-            url: Some("https://example.com".to_owned()),
-            unsupported_options: vec!["--proxy".to_owned()],
-            ..CurlArgs::default()
-        };
-        let ftp = parse(&["curl", "ftp://example.com/file"])?;
-
-        assert!(matches!(
-            curl_to_operation_plan(&critical),
-            Err(WrapperError::OpaqueTranslation { .. })
-        ));
-        assert!(matches!(
-            curl_to_operation_plan(&ftp),
-            Err(WrapperError::OpaqueTranslation { .. })
-        ));
-        Ok(())
-    }
     #[test]
     fn missing_required_value_is_an_error() {
         assert_eq!(
@@ -1048,6 +752,60 @@ mod tests {
             args.unsupported_options
                 .iter()
                 .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn insecure_long_option_is_parsed_and_critical() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "--insecure", "https://example.com/"])?;
+
+        assert!(args.insecure);
+        assert!(
+            args.unsupported_options.contains(&"--insecure".to_owned()),
+            "--insecure must be both parsed and recorded as an unsupported \
+             option so the critical-option bail can fire"
+        );
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn insecure_short_flag_is_parsed_and_critical() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "-ksSL", "https://example.com/"])?;
+
+        assert!(args.insecure);
+        assert!(args.silent);
+        assert!(args.show_error);
+        assert!(args.follow_redirects);
+        assert!(
+            args.unsupported_options.contains(&"-k".to_owned()),
+            "-k must be both parsed and recorded as an unsupported option so \
+             the critical-option bail can fire"
+        );
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_tls_invocation_does_not_trip_insecure_critical_check() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "-fsSL", "https://example.com/file"])?;
+
+        assert!(!args.insecure);
+        assert!(
+            !args
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt)),
+            "negative control: plain -fsSL must pass the critical check"
         );
         Ok(())
     }

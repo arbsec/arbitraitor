@@ -319,6 +319,12 @@ silently receive HTML. The wget shim behaves the same for `--spider`: an
 availability probe fails loudly instead of silently downloading the
 document it was only supposed to check for existence.
 
+TLS-verification-disabling flags are hard-rejected on both wrapper paths:
+`curl -k` / `--insecure` and wget `--no-check-certificate` fail with the
+critical-options error before any network access. Certificate validation
+is mandatory (§4.3), so these flags can never be proxied into a `Pass`
+receipt.
+
 ### Interception metadata (the human report)
 
 Every successful verified wrapper fetch prints a verdict banner to stderr

@@ -160,6 +160,19 @@ caps pending record files at
 
 ### Fixed
 
+- **TLS-verification-disabling flags are rejected by the curl/wget
+  wrappers** (#769) — `curl -k` / `--insecure` and wget
+  `--no-check-certificate` previously passed `arbitraitor wrap` (and the
+  curl/wget shims) silently: the receipt read `verdict: Pass` with an empty
+  findings list while the fetch's man-in-the-middle protection was gone.
+  The wrapper parsers now record these flags as unsupported options and
+  classify them as critical, so the existing critical-options bail
+  hard-rejects the invocation on both wrapper paths before any network
+  access. The wget parser keeps emitting its High-severity
+  `wget-no-check-certificate` finding. The dead `curl_to_operation_plan`
+  plan builder (and its unreachable `--insecure` hard-reject) was removed —
+  it had no non-test callers, and dead enforcement surface on a security
+  boundary is its own defect.
 - **wget wrapper: `--spider` is rejected explicitly** (#765) — the wget
   argument parser now recognizes `--spider` (a headers-only availability
   probe) instead of letting it fall into the unsupported catch-all, and

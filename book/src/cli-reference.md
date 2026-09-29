@@ -199,8 +199,10 @@ wrapped tool's semantics where the security pipeline can represent them:
 - `-I` / `--head` / `-X HEAD` (curl) and `--spider` (wget) are rejected
   with an explicit opaque-translation error; the pipeline returns artifact
   bodies, not response headers or availability probes.
-- Critical curl options (`--proxy`, `--config`, `--cacert`, `--user`,
-  upload flags, …) are rejected before any network access.
+- Critical curl options (`-k`/`--insecure`, `--proxy`, `--config`,
+  `--cacert`, `--user`, upload flags, …) are rejected before any network
+  access; wget's `--no-check-certificate` is rejected the same way. TLS
+  verification disabling never produces a `Pass` receipt.
 
 First-class `arbitraitor fetch` keeps the fail-closed default: an HTTP
 error status aborts retrieval and the command exits 1 (general

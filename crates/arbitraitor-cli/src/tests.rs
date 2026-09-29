@@ -2657,3 +2657,81 @@ fn reject_spider_request_flags_spider_invocations() {
         "plain wget download must not be rejected"
     );
 }
+
+#[test]
+fn bail_on_critical_rejects_tls_verification_disabling_flags() {
+    use crate::bail_on_critical;
+    use arbitraitor_wrapper::wget::translate_wget_args;
+    use arbitraitor_wrapper::{parse_curl_args, wget};
+
+    // curl -k / --insecure and wget --no-check-certificate disable TLS
+    // certificate verification — the exact downgrade class spec §39.9 and
+    // §4.3 forbid. Both must be hard-rejected with the critical-options
+    // message on both wrapper paths, never silently proxied to a Pass
+    // receipt with empty findings (#769).
+    for argv in [
+        vec!["curl", "-k", "https://example.com"],
+        vec!["curl", "--insecure", "https://example.com"],
+        vec!["curl", "-ksSL", "https://example.com"],
+    ] {
+        let parsed = parse_curl_args(&argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            .unwrap_or_else(|error| panic!("{argv:?} must parse: {error}"));
+        let Err(error) = bail_on_critical("curl", &parsed.unsupported_options) else {
+            panic!("{argv:?} must be rejected as a TLS-verification-disabling invocation");
+        };
+        assert!(
+            error.to_string().contains("cannot be safely proxied"),
+            "rejection must use the critical-options message: {error}"
+        );
+    }
+
+    for argv in [
+        vec!["wget", "--no-check-certificate", "https://example.com"],
+        vec![
+            "wget",
+            "-q",
+            "--no-check-certificate",
+            "https://example.com",
+        ],
+    ] {
+        let parsed = translate_wget_args(&argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            .unwrap_or_else(|error| panic!("{argv:?} must parse: {error}"));
+        // The High-severity TLS finding stays populated for wrapper-crate
+        // consumers; the CLI rejection flows through the critical-options
+        // bail on the recorded unsupported option.
+        assert!(
+            !parsed.findings.is_empty(),
+            "{argv:?} must carry the TLS-disable finding"
+        );
+        let Err(error) = bail_on_critical("wget", &parsed.unsupported_options) else {
+            panic!("{argv:?} must be rejected as a TLS-verification-disabling invocation");
+        };
+        assert!(
+            error.to_string().contains("cannot be safely proxied"),
+            "rejection must use the critical-options message: {error}"
+        );
+    }
+
+    // Negative controls: ordinary invocations must pass the critical check.
+    let curl_plain = parse_curl_args(&[
+        "curl".to_owned(),
+        "-fsSL".to_owned(),
+        "https://example.com/file".to_owned(),
+    ])
+    .unwrap_or_else(|error| panic!("curl -fsSL must parse: {error}"));
+    assert!(
+        bail_on_critical("curl", &curl_plain.unsupported_options).is_ok(),
+        "curl -fsSL must not be rejected"
+    );
+
+    let wget_plain = wget::translate_wget_args(&[
+        "wget".to_owned(),
+        "-q".to_owned(),
+        "https://example.com/file".to_owned(),
+    ])
+    .unwrap_or_else(|error| panic!("wget -q must parse: {error}"));
+    assert!(
+        bail_on_critical("wget", &wget_plain.unsupported_options).is_ok(),
+        "wget -q must not be rejected"
+    );
+}

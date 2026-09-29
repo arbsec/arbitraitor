@@ -2471,7 +2471,11 @@ Wrapper invocations that the pipeline can represent follow the wrapped tool's ob
   the pipeline models a single Retrieve operation returning bytes; a
   header probe or availability check must fail loudly, never silently
   receive a body.
-- **Critical options** (proxy, config, trust-store, credential injection) are rejected before any network access.
+- **Critical options** (TLS verification disabling, proxy, config,
+  trust-store, credential injection) are rejected before any network
+  access: `curl -k` / `--insecure` and wget `--no-check-certificate`
+  disable the boundary's certificate-validation guarantee (§4.3, §39.9)
+  and must fail explicitly, never produce a clean `Pass` receipt.
 
 ### 28.7.1 Shell integration
 
