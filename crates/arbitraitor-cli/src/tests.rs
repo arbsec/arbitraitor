@@ -788,12 +788,20 @@ async fn status_query_returns_info_from_real_daemon() -> Result<(), Box<dyn std:
     assert!(
         info.recent_operations
             .iter()
+            .any(|op| op.operation == "health" && op.outcome == "success"),
+        "Health request must be recorded in the recent-operations ring: {info:?}",
+    );
+    assert!(
+        info.recent_operations
+            .iter()
             .all(|op| op.operation != "status"),
         "Status must not self-record: {info:?}",
     );
 
-    // Shutdown the daemon so the spawned task can finish.
-    let _ = arbitraitor_daemon::request_once(
+    // Shutdown the daemon so the spawned task can finish. Propagate failure:
+    // a failed shutdown would otherwise hang the spawned task until the
+    // nextest timeout.
+    arbitraitor_daemon::request_once(
         &socket,
         &arbitraitor_daemon::DaemonRequest::Shutdown {
             caller_origin: CallerOrigin::HumanTty,
@@ -1692,9 +1700,9 @@ fn wrapper_output_destination_wget_output_document() {
 
 #[test]
 fn emit_output_writes_bytes_to_file() -> std::io::Result<()> {
-    let dir = std::env::temp_dir().join("arb_test_emit_file");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("output.bin");
+    // Hermetic: per-test temp dir, no fixed shared path across processes.
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("output.bin");
     let path_str = path.to_string_lossy().into_owned();
     let bytes = b"hello world";
     emit_wrapper_output(
@@ -1704,17 +1712,16 @@ fn emit_output_writes_bytes_to_file() -> std::io::Result<()> {
         "https://example.com/file.bin",
     )
     .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let read_back = std::fs::read(&path)?;
-    assert_eq!(read_back, bytes);
-    std::fs::remove_file(path)?;
-    std::fs::remove_dir(dir)?;
+    assert_eq!(std::fs::read(&path)?, bytes);
     Ok(())
 }
 
 #[test]
-fn emit_output_remote_name_derives_filename() -> std::io::Result<()> {
-    // Hermetic: pass the destination as an explicit output path instead of
-    // changing the process-wide CWD, which races across parallel tests.
+fn emit_output_writes_derived_remote_name_to_explicit_path() -> std::io::Result<()> {
+    // Hermetic I/O smoke test for the remote-name emit path: the URL-derived
+    // filename is written to an explicit destination. The derivation itself
+    // (including query/fragment stripping) is covered by
+    // `remote_name_from_url_strips_query_and_fragment` in the wrapper crate.
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("tool.tar.gz");
     let bytes = b"remote content";
@@ -1730,10 +1737,10 @@ fn emit_output_remote_name_derives_filename() -> std::io::Result<()> {
 }
 
 #[test]
-fn emit_output_remote_name_strips_query_and_fragment() -> std::io::Result<()> {
-    // The filename must be derived from the URL path alone: query strings
-    // and fragments (which may carry secrets) must not leak into the name.
-    // Hermetic: explicit output path, no process-wide CWD change.
+fn emit_output_writes_derived_remote_name_with_query_url_to_explicit_path() -> std::io::Result<()> {
+    // Hermetic I/O smoke test: a URL with query/fragment must still emit to
+    // the explicit destination. Filename derivation from such URLs is
+    // asserted directly on `remote_name_from_url` in the wrapper crate.
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("file.bin");
     let bytes = b"data";
