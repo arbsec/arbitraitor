@@ -2462,6 +2462,13 @@ command /usr/bin/curl --version
 
 Policy determines whether unsupported operations are blocked, passed through to the real tool, or require interactive approval. Any operation that may feed uninspected network content into execution must fail closed.
 
+Wrapper invocations that the pipeline can represent follow the wrapped tool's observable semantics:
+
+- **Verdict banner:** a successful verified fetch prints `verdict: Pass` with `artifact_sha256`, `cas_dir`, and `artifact_type` on stderr before the payload — unconditionally, regardless of the wrapped tool's quiet flags (`-s`/`-q`) or whether stderr is captured. stderr is the diagnostics channel; stdout stays byte-clean payload.
+- **HTTP error status:** without `-f`/`--fail`, a 4xx/5xx response body is a successfully transferred artifact — it is fetched, stored, inspected, and released through the full verdict pipeline, and the shim exits 0. With `-f`/`--fail`, an HTTP error status aborts with the wrapped tool's exit code (curl 22). Transport failures with a tool-expressible class map to the tool's exit code (curl: 6 DNS, 7 connection refused, 28 timeout, 60 TLS certificate). The artifact always flows through the same inspect/verdict path; a Fail verdict still blocks release.
+- **Header-only requests:** `-I` / `--head` / `-X HEAD` are rejected explicitly (opaque translation) because the pipeline models a single Retrieve operation returning bytes; a header probe must fail loudly, never silently receive a body.
+- **Critical options** (proxy, config, trust-store, credential injection) are rejected before any network access.
+
 ### 28.7.1 Shell integration
 
 The `wrappers` surface is supported by `arbitraitor wrappers init <shell>` and a hidden alias `arbitraitor env`:
