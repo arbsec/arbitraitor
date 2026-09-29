@@ -19,10 +19,17 @@ yanked = "deny"
 # above all fix versions. The 43.x copy cannot be bumped without upstream
 # yara-x releasing a version with a newer wasmtime dep (yara-x 1.20.0 still
 # pins wasmtime ^45.0.3, inside 0269's affected range).
+# RUSTSEC-2026-0316 affects that same yara-x 1.20.0 wasmtime 45.0.3 copy
+# (dynamic record lifting can allocate beyond the hostcall fuel limit,
+# low severity). No patched 45.x exists — fixes landed in >=36.0.16,
+# >=48.0.3, and >=49.0.1 — so it cannot be resolved by cargo update until
+# yara-x bumps wasmtime. Same yara-x pin as the high-severity
+# RUSTSEC-2026-0269 ignore above.
 ignore = [
     "RUSTSEC-2025-0141",
     "RUSTSEC-2026-0222",
     { id = "RUSTSEC-2026-0269", reason = "yara-x 1.19.0 requires wasmtime ^43.0.2, resolving the transitive copy to 43.0.2; no yara-x release with a fixed wasmtime range exists yet (1.20.0 requires wasmtime ^45.0.3, still affected). Our direct wasmtime floor is 47.0.4 (patched). Drop this ignore when yara-x requires a patched wasmtime." },
+    { id = "RUSTSEC-2026-0316", reason = "yara-x 1.20.0 requires wasmtime ^45.0.3, resolving the transitive copy to 45.0.3 (dynamic record lifting can allocate beyond the hostcall fuel limit, low severity). No patched 45.x exists — fixes are in >=36.0.16, >=48.0.3, >=49.0.1 — so this is not resolvable by cargo update. High-severity sibling RUSTSEC-2026-0269 for the same yara-x wasmtime pin is already ignored. Drop this ignore when yara-x requires a patched wasmtime." },
 ]
 
 [licenses]
