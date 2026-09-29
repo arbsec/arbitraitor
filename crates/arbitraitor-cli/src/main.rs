@@ -741,17 +741,22 @@ fn wrapper_accepts_http_error_status(tool: Option<&str>, args: &[String]) -> boo
     }
 }
 
-/// Human interception report (the `verdict:` banner) is always requested
-/// for wrapper fetches — stderr is the diagnostics channel and the
+/// Human interception report (the `verdict:` banner) emission policy.
+///
+/// Wrapper invocations (curl/wget shims) always request the report: the
 /// documented contract is banner-then-bytes on every successful verified
-/// fetch. The wrapped tool's quiet flags (`-s`, `-q`) silence real curl's
-/// progress and error noise; they do not silence a security gate's verdict,
-/// which is exactly the signal a caller needs to tell a mediated fetch from
-/// a direct one. `stdout` stays byte-clean: the banner never touches it,
-/// even when a caller merges `2>&1` (the banner precedes the payload on a
-/// different descriptor).
-fn wrapper_human_report_requested(_tool: Option<&str>, _args: &[String]) -> bool {
-    true
+/// fetch, and stderr is the diagnostics channel. The banner never touches
+/// stdout, so piped artifact streams stay byte-clean even when a caller
+/// merges `2>&1`. The wrapped tool's quiet flags (`-s`, `-q`) silence the
+/// tool's progress and error noise, not a security gate's verdict.
+///
+/// First-class (non-wrapper) fetches keep the historical behavior: the
+/// report is gated on stderr being attached to a terminal.
+fn wrapper_human_report_requested(tool: Option<&str>, _args: &[String]) -> bool {
+    match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl | WrapperTarget::Wget) => true,
+        None => std::io::stderr().is_terminal(),
+    }
 }
 
 /// Exits the process with the exit code real `curl` would produce for a

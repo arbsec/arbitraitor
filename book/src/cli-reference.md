@@ -203,7 +203,8 @@ wrapped tool's semantics where the security pipeline can represent them:
   upload flags, …) are rejected before any network access.
 
 First-class `arbitraitor fetch` keeps the fail-closed default: an HTTP
-error status is a network retrieval failure (exit 40).
+error status aborts retrieval and the command exits 1 (general
+operational error) with a diagnostic on stderr.
 
 ### Flags
 

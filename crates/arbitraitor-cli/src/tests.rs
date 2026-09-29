@@ -2457,9 +2457,9 @@ fn wrapper_banner_is_emitted_unconditionally() {
     let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
 
     // The documented contract is banner-then-bytes on every successful
-    // verified fetch: stderr is the diagnostics channel and the verdict
-    // banner must appear even when the wrapped tool requested quiet mode
-    // or stderr is captured (`2>file`, agent shells, `2>&1` merges).
+    // verified wrapper fetch: stderr is the diagnostics channel and the
+    // verdict banner must appear even when the wrapped tool requested quiet
+    // mode or stderr is captured (`2>file`, agent shells, `2>&1` merges).
     // stdout stays byte-clean; only the banner's presence is decided here.
     assert!(wrapper_human_report_requested(
         Some("curl"),
@@ -2473,10 +2473,13 @@ fn wrapper_banner_is_emitted_unconditionally() {
         Some("wget"),
         &a(&["wget", "-q", "https://example.com"])
     ));
-    assert!(wrapper_human_report_requested(
-        None,
-        &a(&["https://example.com"])
-    ));
+    // First-class (non-wrapper) fetch keeps the historical terminal gate.
+    // In-process test stderr is captured (not a TTY), so this must be false
+    // here; a TTY would yield true.
+    assert!(
+        !wrapper_human_report_requested(None, &a(&["https://example.com"])),
+        "first-class fetch must stay terminal-gated, not always-on"
+    );
 }
 
 #[test]
@@ -2563,4 +2566,41 @@ fn transport_error_is_recoverable_from_miette_report_chain() {
         panic!("FetchTransportError must be reachable through the report chain");
     };
     assert_eq!(recovered.kind.curl_exit_code(), 22);
+}
+
+#[test]
+fn reject_header_only_request_flags_head_spellings() {
+    use crate::reject_header_only_request;
+    use arbitraitor_wrapper::parse_curl_args;
+
+    // -I, --head, and -X HEAD (any case) must all be rejected explicitly;
+    // a plain GET must pass through untouched.
+    for argv in [
+        vec!["curl", "-I", "https://example.com"],
+        vec!["curl", "--head", "https://example.com"],
+        vec!["curl", "-X", "HEAD", "https://example.com"],
+        vec!["curl", "-X", "head", "https://example.com"],
+        vec!["curl", "-X", "Head", "https://example.com"],
+    ] {
+        let parsed = parse_curl_args(&argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            .unwrap_or_else(|error| panic!("{argv:?} must parse: {error}"));
+        let Err(error) = reject_header_only_request("curl", &parsed) else {
+            panic!("{argv:?} must be rejected as header-only");
+        };
+        assert!(
+            error.to_string().contains("header-only request"),
+            "rejection must name the header-only limitation: {error}"
+        );
+    }
+
+    let plain_get = parse_curl_args(&[
+        "curl".to_owned(),
+        "-fsSL".to_owned(),
+        "https://example.com/file".to_owned(),
+    ])
+    .unwrap_or_else(|error| panic!("plain GET must parse: {error}"));
+    assert!(
+        reject_header_only_request("curl", &plain_get).is_ok(),
+        "plain GET must not be rejected"
+    );
 }

@@ -307,9 +307,9 @@ branch on curl's status see identical results:
 Other detectable transport failures also map to curl's table regardless of
 `-f`: 6 (could not resolve host), 7 (connection refused), 28 (timeout),
 60 (TLS certificate validation failure). Unmapped failures (redirect or
-SSRF policy violations, size limits, integrity failures) keep
-Arbitraitor's own stable exit codes (40/41/42/32), which is strictly more
-informative than curl's generic codes for the same conditions.
+SSRF policy violations, size limits, integrity failures) exit 1 (general
+operational error) with the specific diagnostic on stderr — the receipt
+and store metadata still record exactly what happened.
 
 Unsupported request shapes are rejected explicitly instead of being
 silently downgraded: `-I` / `--head` / `-X HEAD` fail with an
