@@ -759,6 +759,26 @@ mod tests {
     }
 
     #[test]
+    fn remote_name_from_url_strips_query_and_fragment() -> Result<(), WrapperError> {
+        // Query and fragments (which may carry secrets) must not leak into
+        // the derived filename. Fragment '#' stripping was previously
+        // covered by no test anywhere.
+        assert_eq!(
+            remote_name_from_url("https://example.com/file.bin?token=secret#frag")?,
+            "file.bin"
+        );
+        assert_eq!(
+            remote_name_from_url("https://example.com/a/b/tool.tar.gz?x=1")?,
+            "tool.tar.gz"
+        );
+        assert_eq!(
+            remote_name_from_url("https://example.com/plain.tar.gz#frag")?,
+            "plain.tar.gz"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn remote_name_derives_release_path_from_url() -> Result<(), WrapperError> {
         let args = parse(&[
             "curl",
