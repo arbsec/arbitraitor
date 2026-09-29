@@ -2526,43 +2526,41 @@ fn wrapper_accepts_http_error_status_tracks_curl_fail_flag() {
 
 #[test]
 fn curl_exit_codes_match_real_curl_table() {
-    use crate::curl_exit_code_from_engine_error;
-    use arbitraitor_engine::{EngineError, FetchFailureKind, FetchTransportError};
-
-    let transport = |kind: FetchFailureKind| {
-        EngineError::FetchTransport(FetchTransportError {
-            kind,
-            message: "test".to_owned(),
-        })
-    };
+    use arbitraitor_engine::FetchFailureKind;
 
     // curl(1) exit codes: 22 HTTP error with -f, 6 DNS, 7 refused,
     // 28 timeout, 60 TLS certificate failure.
     assert_eq!(
-        curl_exit_code_from_engine_error(&transport(FetchFailureKind::HttpErrorStatus {
-            status: 404
-        })),
-        Some(22)
+        FetchFailureKind::HttpErrorStatus { status: 404 }.curl_exit_code(),
+        22
     );
-    assert_eq!(
-        curl_exit_code_from_engine_error(&transport(FetchFailureKind::DnsResolution)),
-        Some(6)
-    );
-    assert_eq!(
-        curl_exit_code_from_engine_error(&transport(FetchFailureKind::ConnectionRefused)),
-        Some(7)
-    );
-    assert_eq!(
-        curl_exit_code_from_engine_error(&transport(FetchFailureKind::Timeout)),
-        Some(28)
-    );
-    assert_eq!(
-        curl_exit_code_from_engine_error(&transport(FetchFailureKind::TlsCertificate)),
-        Some(60)
-    );
-    // Non-transport engine errors keep Arbitraitor's own exit surface.
-    assert_eq!(
-        curl_exit_code_from_engine_error(&EngineError::Store("corrupt".to_owned())),
-        None
-    );
+    assert_eq!(FetchFailureKind::DnsResolution.curl_exit_code(), 6);
+    assert_eq!(FetchFailureKind::ConnectionRefused.curl_exit_code(), 7);
+    assert_eq!(FetchFailureKind::Timeout.curl_exit_code(), 28);
+    assert_eq!(FetchFailureKind::TlsCertificate.curl_exit_code(), 60);
+}
+
+#[test]
+fn transport_error_is_recoverable_from_miette_report_chain() {
+    use arbitraitor_engine::{EngineError, FetchFailureKind, FetchTransportError};
+
+    // The CLI maps exit codes by scanning the miette report chain:
+    // `into_diagnostic` hides the typed EngineError behind a private
+    // adapter, but thiserror's `#[from]` exposes the inner
+    // FetchTransportError as the source. This pins that recovery path.
+    let engine_error: Result<(), EngineError> =
+        Err(EngineError::FetchTransport(FetchTransportError {
+            kind: FetchFailureKind::HttpErrorStatus { status: 404 },
+            message: "HTTP error status 404".to_owned(),
+        }));
+    let Err(report) = miette::IntoDiagnostic::into_diagnostic(engine_error) else {
+        panic!("engine error must convert into a diagnostic report");
+    };
+    let Some(recovered) = report
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FetchTransportError>())
+    else {
+        panic!("FetchTransportError must be reachable through the report chain");
+    };
+    assert_eq!(recovered.kind.curl_exit_code(), 22);
 }

@@ -22,7 +22,7 @@ use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{
     Daemon, DaemonInfo, DaemonRequest, RecentOperation, default_socket_path, request_once,
 };
-use arbitraitor_engine::EngineError;
+use arbitraitor_engine::FetchTransportError;
 use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
 use arbitraitor_intel::{
     IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
@@ -38,7 +38,7 @@ use arbitraitor_wrapper::shim::{
     uninstall_shims,
 };
 use arbitraitor_wrapper::{
-    is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
+    CurlArgs, is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
     wget::{is_critical_wget_option, translate_wget_args},
 };
 use clap::{Args, Parser, Subcommand};
@@ -741,17 +741,6 @@ fn wrapper_accepts_http_error_status(tool: Option<&str>, args: &[String]) -> boo
     }
 }
 
-/// Maps an engine error to the exit code real `curl` would produce for the
-/// same transport failure. Returns `None` when the failure has no
-/// curl-specific exit code; the caller then falls back to Arbitraitor's
-/// own stable exit-code surface.
-fn curl_exit_code_from_engine_error(error: &EngineError) -> Option<i32> {
-    match error {
-        EngineError::FetchTransport(transport) => Some(transport.kind.curl_exit_code()),
-        _ => None,
-    }
-}
-
 /// Human interception report (the `verdict:` banner) is always requested
 /// for wrapper fetches — stderr is the diagnostics channel and the
 /// documented contract is banner-then-bytes on every successful verified
@@ -778,10 +767,16 @@ fn exit_with_curl_code_if_mapped(tool: Option<&str>, error: &miette::Report) {
     if !is_curl {
         return;
     }
-    if let Some(exit_code) = error
-        .downcast_ref::<EngineError>()
-        .and_then(curl_exit_code_from_engine_error)
-    {
+    // `into_diagnostic` wraps non-Diagnostic errors in a private adapter
+    // that only exposes the cause chain, so the typed engine error may sit
+    // anywhere in the report's chain — scan it. The chain also yields the
+    // inner `FetchTransportError` via thiserror's `#[from]` source, which
+    // covers both direct and wrapped construction.
+    let mapped = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FetchTransportError>())
+        .map(|transport| transport.kind.curl_exit_code());
+    if let Some(exit_code) = mapped {
         std::process::exit(exit_code);
     }
 }
@@ -809,6 +804,7 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
                         .cloned()
                         .collect::<Vec<_>>(),
                 )?;
+                reject_header_only_request("curl", &parsed)?;
             }
             Some(WrapperTarget::Wget) => {
                 let parsed = translate_wget_args(&command.args).into_diagnostic()?;
@@ -937,6 +933,7 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
                     .cloned()
                     .collect::<Vec<_>>(),
             )?;
+            reject_header_only_request("curl", &parsed)?;
         }
         Some(WrapperTarget::Wget) => {
             let parsed = translate_wget_args(&command.args).into_diagnostic()?;
@@ -1099,6 +1096,26 @@ fn wrapper_fetch_target(tool: Option<&str>) -> Result<Option<WrapperTarget>> {
             .ok_or_else(|| miette::miette!("unsupported wrapper target: {name}"))
     })
     .transpose()
+}
+
+/// Rejects header-only curl requests (`-I`, `--head`, `-X HEAD`) with a
+/// clear error. The wrapper pipeline models a single Retrieve operation
+/// returning artifact bytes; a header-only response cannot be represented,
+/// and silently downgrading to a GET would hand header probes an HTML body
+/// as if it were the response headers.
+fn reject_header_only_request(tool: &str, parsed: &CurlArgs) -> Result<()> {
+    if parsed.head
+        || parsed
+            .request_method
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case("HEAD"))
+    {
+        miette::bail!(
+            "{tool} header-only request (-I/--head/-X HEAD) cannot be proxied: the \
+             wrapper pipeline returns artifact bodies, not response headers"
+        );
+    }
+    Ok(())
 }
 
 fn bail_on_critical(tool: &str, unsupported: &[String]) -> Result<()> {
@@ -1791,5 +1808,9 @@ fn write_explainability(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    reason = "test module: panic!/unwrap are the conventional assertion failure path"
+)]
 #[path = "tests.rs"]
 mod tests;
