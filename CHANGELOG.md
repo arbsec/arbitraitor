@@ -189,6 +189,21 @@ caps pending record files at
     `artifact_type` / `verdict: Pass` so a caller can tell a mediated
     fetch from a direct one. First-class (non-wrapper) fetch output is
     unchanged.
+- **ADR-0037 wasmtime risk register refreshed** (#771) — the register's
+  pinned-version table said the direct wasmtime copy resolved to 47.0.4 and
+  the yara-x transitive copy to 43.0.2 via yara-x 1.19.0; the lockfile has
+  since moved to **49.0.1** direct (floor `>=47.0.4` unchanged) and
+  **45.0.3** transitive via yara-x 1.20.0. The register now reflects both
+  copies in every "Affected?" assessment and adds the missing
+  RUSTSEC-2026-0316 Low row (dynamic record lifting can allocate beyond the
+  hostcall fuel limit; the 45.0.3 transitive copy is affected, ignored in
+  `deny.toml` per #770 since no patched 45.x exists, direct copy at 49.0.1
+  is patched; ignore drops when yara-x requires a patched wasmtime, same
+  removal condition as the sibling RUSTSEC-2026-0269 ignore). The
+  cargo-audit comment in `.github/workflows/security.yml` now says the
+  0222/0269/0316 ignores apply to the yara-x-pinned wasmtime 45.0.3 copy
+  (was 43.0.2); the ignore list itself is unchanged. ADR-0040's historical
+  43.0.2 narrative is intentionally left as a point-in-time record.
 - **Sandbox effective-controls matrix no longer claims filesystem isolation
   without an enforcing Landlock ABI** (`arbitraitor_sandbox`): on the
   `linux` branch, `compute_effective_controls` reported
