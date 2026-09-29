@@ -22,6 +22,7 @@ use arbitraitor_core::health::HealthChecker;
 use arbitraitor_daemon::{
     Daemon, DaemonInfo, DaemonRequest, RecentOperation, default_socket_path, request_once,
 };
+use arbitraitor_engine::FetchTransportError;
 use arbitraitor_fetch::{FetchPolicy, HttpFetcher};
 use arbitraitor_intel::{
     IngestionReport, IntelStore, OssfMaliciousPackagesAdapter, UrlhausAdapter, ingest_feed,
@@ -37,7 +38,7 @@ use arbitraitor_wrapper::shim::{
     uninstall_shims,
 };
 use arbitraitor_wrapper::{
-    is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
+    CurlArgs, is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
     wget::{is_critical_wget_option, translate_wget_args},
 };
 use clap::{Args, Parser, Subcommand};
@@ -523,6 +524,7 @@ async fn run_main() -> Result<()> {
                 &config,
                 explain_format,
                 true,
+                false,
             )
             .await
             .map(|outcome| {
@@ -726,32 +728,62 @@ pub(crate) fn write_stdout_or_exit_on_broken_pipe(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// True when the wrapped tool itself requested quiet output: `curl -s`
-/// without `-S` (errors still wanted), or `wget -q` / `--quiet`, including
-/// short-option clusters where `-q` leads (e.g. `-qO-`). A trailing `q`
-/// inside another cluster (e.g. `-Oq`, an appended filename) intentionally
-/// does NOT count, so an unrelated `q` in an option value cannot silence
-/// the report.
-fn wrapper_tool_requested_quiet(tool: Option<&str>, args: &[String]) -> bool {
+/// True when a 4xx/5xx response body should be retrieved as a normal
+/// artifact instead of aborting the fetch. Mirrors real `curl` without
+/// `-f`/`--fail`: the error-status body is a successfully transferred
+/// response, the exit code is 0, and the verdict/receipt still record the
+/// truth about what came back. Only the curl shim gets these semantics;
+/// first-class fetch and the wget path keep the fail-closed default.
+fn wrapper_accepts_http_error_status(tool: Option<&str>, args: &[String]) -> bool {
     match tool.and_then(WrapperTarget::from_binary_name) {
-        Some(WrapperTarget::Curl) => {
-            parse_curl_args(args).is_ok_and(|parsed| parsed.silent && !parsed.show_error)
-        }
-        Some(WrapperTarget::Wget) => args.iter().any(|arg| {
-            arg == "-q"
-                || arg == "--quiet"
-                || (arg.starts_with("-q") && !arg.starts_with("-q-") && arg.len() > 2)
-        }),
-        None => false,
+        Some(WrapperTarget::Curl) => parse_curl_args(args).is_ok_and(|parsed| !parsed.fail),
+        Some(WrapperTarget::Wget) | None => false,
     }
 }
 
-/// Human interception report is printed only when stderr is attached to a
-/// terminal and the wrapped tool did not ask for quiet output. Captured
-/// stderr (agent shells, `2>&1` merges) never receives the report, keeping
-/// released artifact streams byte-clean even when stdout/stderr merge.
-fn wrapper_human_report_requested(tool: Option<&str>, args: &[String]) -> bool {
-    std::io::stderr().is_terminal() && !wrapper_tool_requested_quiet(tool, args)
+/// Human interception report (the `verdict:` banner) emission policy.
+///
+/// Wrapper invocations (curl/wget shims) always request the report: the
+/// documented contract is banner-then-bytes on every successful verified
+/// fetch, and stderr is the diagnostics channel. The banner never touches
+/// stdout, so piped artifact streams stay byte-clean even when a caller
+/// merges `2>&1`. The wrapped tool's quiet flags (`-s`, `-q`) silence the
+/// tool's progress and error noise, not a security gate's verdict.
+///
+/// First-class (non-wrapper) fetches keep the historical behavior: the
+/// report is gated on stderr being attached to a terminal.
+fn wrapper_human_report_requested(tool: Option<&str>, _args: &[String]) -> bool {
+    match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl | WrapperTarget::Wget) => true,
+        None => std::io::stderr().is_terminal(),
+    }
+}
+
+/// Exits the process with the exit code real `curl` would produce for a
+/// classified transport failure (22 with `-f`, 6 DNS, 7 refused, 28
+/// timeout, 60 TLS), so callers that branch on curl's exit status see
+/// identical behavior. Returns without exiting when the failure has no
+/// curl-specific code or the wrapper is not curl; the caller then falls
+/// back to Arbitraitor's own exit surface (the main error path exits 1).
+fn exit_with_curl_code_if_mapped(tool: Option<&str>, error: &miette::Report) {
+    let is_curl = tool
+        .and_then(WrapperTarget::from_binary_name)
+        .is_some_and(|target| matches!(target, WrapperTarget::Curl));
+    if !is_curl {
+        return;
+    }
+    // `into_diagnostic` wraps non-Diagnostic errors in a private adapter
+    // that only exposes the cause chain, so the typed engine error may sit
+    // anywhere in the report's chain — scan it. The chain also yields the
+    // inner `FetchTransportError` via thiserror's `#[from]` source, which
+    // covers both direct and wrapped construction.
+    let mapped = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FetchTransportError>())
+        .map(|transport| transport.kind.curl_exit_code());
+    if let Some(exit_code) = mapped {
+        std::process::exit(exit_code);
+    }
 }
 
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
@@ -777,6 +809,7 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
                         .cloned()
                         .collect::<Vec<_>>(),
                 )?;
+                reject_header_only_request("curl", &parsed)?;
             }
             Some(WrapperTarget::Wget) => {
                 let parsed = translate_wget_args(&command.args).into_diagnostic()?;
@@ -826,8 +859,17 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         config,
         None,
         wrapper_human_report_requested(command.tool.as_deref(), &command.args),
+        wrapper_accepts_http_error_status(command.tool.as_deref(), &command.args),
     )
-    .await?;
+    .await;
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            exit_with_curl_code_if_mapped(command.tool.as_deref(), &error);
+            return Err(error);
+        }
+    };
 
     if outcome.verdict != Verdict::Pass {
         let mut stderr = std::io::stderr().lock();
@@ -896,6 +938,7 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
                     .cloned()
                     .collect::<Vec<_>>(),
             )?;
+            reject_header_only_request("curl", &parsed)?;
         }
         Some(WrapperTarget::Wget) => {
             let parsed = translate_wget_args(&command.args).into_diagnostic()?;
@@ -969,6 +1012,7 @@ async fn wrap_fetch_single(
         config,
         None,
         wrapper_human_report_requested(tool, args),
+        wrapper_accepts_http_error_status(tool, args),
     )
     .await?;
 
@@ -1007,6 +1051,7 @@ async fn wrap_bash(command: &WrapCommand, config: &Config) -> Result<()> {
         config,
         None,
         std::io::stderr().is_terminal(),
+        false,
     )
     .await?;
     if outcome.verdict != Verdict::Pass {
@@ -1056,6 +1101,26 @@ fn wrapper_fetch_target(tool: Option<&str>) -> Result<Option<WrapperTarget>> {
             .ok_or_else(|| miette::miette!("unsupported wrapper target: {name}"))
     })
     .transpose()
+}
+
+/// Rejects header-only curl requests (`-I`, `--head`, `-X HEAD`) with a
+/// clear error. The wrapper pipeline models a single Retrieve operation
+/// returning artifact bytes; a header-only response cannot be represented,
+/// and silently downgrading to a GET would hand header probes an HTML body
+/// as if it were the response headers.
+fn reject_header_only_request(tool: &str, parsed: &CurlArgs) -> Result<()> {
+    if parsed.head
+        || parsed
+            .request_method
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case("HEAD"))
+    {
+        miette::bail!(
+            "{tool} header-only request (-I/--head/-X HEAD) cannot be proxied: the \
+             wrapper pipeline returns artifact bodies, not response headers"
+        );
+    }
+    Ok(())
 }
 
 fn bail_on_critical(tool: &str, unsupported: &[String]) -> Result<()> {
@@ -1748,5 +1813,9 @@ fn write_explainability(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    reason = "test module: panic!/unwrap are the conventional assertion failure path"
+)]
 #[path = "tests.rs"]
 mod tests;

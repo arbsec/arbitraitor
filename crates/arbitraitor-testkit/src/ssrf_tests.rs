@@ -34,6 +34,7 @@ fn ssrf_policy() -> FetchPolicy {
         proxy_url: None,
         behind_proxy: false,
         first_byte_timeout: None,
+        http_error_status_is_failure: true,
     }
 }
 

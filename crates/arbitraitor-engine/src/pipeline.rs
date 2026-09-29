@@ -205,6 +205,9 @@ pub(crate) fn receipt_retrieval_info(
     if let Some(tls_version) = &fetch_receipt.metadata.tls_version {
         retrieval = retrieval.with_tls_version(tls_version.clone());
     }
+    if let Some(status) = fetch_receipt.metadata.response_status {
+        retrieval = retrieval.with_status_code(status);
+    }
     if let Some(fingerprint) = &fetch_receipt.metadata.peer_certificate_fingerprint {
         retrieval = retrieval.with_peer_cert_fingerprint(format!("sha256:{fingerprint}"));
     }

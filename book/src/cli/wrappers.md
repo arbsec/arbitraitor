@@ -294,14 +294,49 @@ Incomplete):
   verdict's exit code (Warn → 10, Prompt in non-interactive sessions → 21,
   Block → 30, Error → 33, Incomplete → 34). Scripts can branch on the code.
 
+### Exit codes match the wrapped tool
+
+The curl shim reproduces real `curl`'s exit-code behavior so scripts that
+branch on curl's status see identical results:
+
+| Invocation | HTTP 4xx/5xx behavior |
+|---|---|
+| `curl` (no `-f`) | Body is fetched, inspected, and released; exit 0 — the response status is still recorded in the receipt |
+| `curl -f` / `--fail` | Transfer aborts; exit 22 |
+
+Other detectable transport failures also map to curl's table regardless of
+`-f`: 6 (could not resolve host), 7 (connection refused), 28 (timeout),
+60 (TLS certificate validation failure). Unmapped failures (redirect or
+SSRF policy violations, size limits, integrity failures) exit 1 (general
+operational error) with the specific diagnostic on stderr — the receipt
+and store metadata still record exactly what happened.
+
+Unsupported request shapes are rejected explicitly instead of being
+silently downgraded: `-I` / `--head` / `-X HEAD` fail with an
+opaque-translation error because the wrapper pipeline returns artifact
+bodies, not response headers — a header probe through the shim can never
+silently receive HTML.
+
 ### Interception metadata (the human report)
 
-The digest/CAS/verdict report is printed to stderr **only when stderr is a
-terminal**. Captured stderr — agent shells, CI logs, `2>&1` merges — never
-receives it, so piped artifact streams stay byte-clean even when stdout and
-stderr are merged by the capturing tool. The wrapped tool's own quiet flags
-are honored: `curl -s` (without `-S`) and `wget -q` / `--quiet` suppress the
-report too. Full audit data remains available via
+Every successful verified wrapper fetch prints a verdict banner to stderr
+**before** the payload:
+
+```text
+artifact_sha256: <hex digest>
+cas_dir: <CAS root>
+artifact_type: <classification>
+verdict: Pass
+findings: 0
+```
+
+stderr is the diagnostics channel; stdout stays byte-clean payload. The
+banner is emitted unconditionally — even when the wrapped tool passed
+`-s`/`-q` (those flags silence the *tool's* progress and error noise, not a
+security gate's verdict) and even when stderr is captured (`2>file`, agent
+shells, `2>&1` merges). The banner precedes the payload on a different
+descriptor, so a caller that inspects only stdout still receives exactly
+the artifact bytes. Full audit data remains available via
 `arbitraitor store list` / `store inspect`, and `fetch --receipt PATH`
 writes the same data as a receipt file.
 

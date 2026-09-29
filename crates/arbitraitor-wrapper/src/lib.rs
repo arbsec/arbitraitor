@@ -58,6 +58,13 @@ pub struct CurlArgs {
     pub compressed: bool,
     /// Explicit HTTP method from `-X` or `--request`.
     pub request_method: Option<String>,
+    /// Whether a header-only request was requested (`-I`, `--head`).
+    ///
+    /// Header-only responses cannot be represented by the download wrapper
+    /// model (a single Retrieve operation returning artifact bytes), so
+    /// invocations carrying this flag are rejected explicitly instead of
+    /// being silently downgraded to a full GET.
+    pub head: bool,
     /// Unsupported options observed while parsing.
     pub unsupported_options: Vec<String>,
 }
@@ -165,6 +172,13 @@ fn opaque_reason(args: &CurlArgs) -> Option<String> {
             return Some("state-changing HTTP methods are unsupported".to_owned());
         }
     }
+    if args.head || normalized_request_method_is_head(args.request_method.as_deref()) {
+        return Some(
+            "header-only requests (-I/--head) cannot be represented by the download wrapper; \
+             the artifact pipeline returns response bodies, not response headers"
+                .to_owned(),
+        );
+    }
     args.unsupported_options
         .iter()
         .find(|option| is_critical_unsupported_option(option))
@@ -223,6 +237,15 @@ pub fn is_critical_unsupported_option(option: &str) -> bool {
             | "--proxy-crlfile"
     )
 }
+
+/// Returns `true` when an explicit `-X` request method means a header-only
+/// response. `-I`/`--head` set `CurlArgs::head` directly; `-X HEAD` (and
+/// case variants) route through here so both spellings fail explicitly
+/// instead of silently returning a body.
+fn normalized_request_method_is_head(method: Option<&str>) -> bool {
+    method.is_some_and(|method| method.eq_ignore_ascii_case("HEAD"))
+}
+
 fn request_headers(args: &CurlArgs) -> Vec<(String, String)> {
     let mut headers = args
         .headers
@@ -368,6 +391,7 @@ impl<'a> CurlParser<'a> {
             "--remote-name" => self.args.remote_name = true,
             "--compressed" => self.args.compressed = true,
             "--request" => self.args.request_method = Some(self.option_value(name, inline_value)?),
+            "--head" => self.args.head = true,
             "--url" => self.args.url = Some(self.option_value(name, inline_value)?),
             "--form"
             | "--upload-file"
@@ -439,6 +463,7 @@ impl<'a> CurlParser<'a> {
                 's' => self.args.silent = true,
                 'S' => self.args.show_error = true,
                 'f' => self.args.fail = true,
+                'I' => self.args.head = true,
                 'k' => self.args.insecure = true,
                 'O' => self.args.remote_name = true,
                 _ => {
@@ -589,6 +614,63 @@ mod tests {
                 reason: "request bodies are unsupported by the download wrapper".to_owned(),
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn head_short_flag_is_parsed_and_rejected_explicitly() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "-sI", "--max-time", "20", "https://example.com"])?;
+
+        assert!(args.head);
+        assert!(args.silent);
+        assert!(
+            !args
+                .unsupported_options
+                .iter()
+                .any(|opt| opt == "-I" || opt == "--head"),
+            "-I must be recognized, not fall into the unsupported catch-all"
+        );
+        assert!(matches!(
+            curl_to_operation_plan(&args),
+            Err(WrapperError::OpaqueTranslation { reason })
+                if reason.contains("header-only requests")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn head_long_option_is_parsed_and_rejected_explicitly() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "--head", "https://example.com"])?;
+
+        assert!(args.head);
+        assert!(matches!(
+            curl_to_operation_plan(&args),
+            Err(WrapperError::OpaqueTranslation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_head_method_is_rejected_explicitly() -> Result<(), WrapperError> {
+        for method in ["HEAD", "head", "Head"] {
+            let args = parse(&["curl", "-X", method, "https://example.com"])?;
+            assert!(matches!(
+                curl_to_operation_plan(&args),
+                Err(WrapperError::OpaqueTranslation { .. })
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn head_flag_in_cluster_is_parsed() -> Result<(), WrapperError> {
+        let args = parse(&["curl", "-sSIfL", "https://example.com"])?;
+
+        assert!(args.head);
+        assert!(args.fail);
+        assert!(args.silent);
+        assert!(args.show_error);
+        assert!(args.follow_redirects);
         Ok(())
     }
 

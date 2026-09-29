@@ -53,7 +53,7 @@ pub use api::{
     FetchResult, InspectionResult, InspectionResultReceipt, ReceiptFilter, ReceiptSummary,
     ReleaseResult, SignatureVerificationSummary,
 };
-pub use error::EngineError;
+pub use error::{EngineError, FetchFailureKind, FetchTransportError};
 pub use pipeline::{default_cas_dir, default_receipts_dir, parse_fetch_source, receipt_timestamp};
 pub use signatures::{CosignBundleInput, MinisignSignatureInput, SignatureInputs};
 

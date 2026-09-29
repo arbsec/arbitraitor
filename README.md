@@ -121,7 +121,14 @@ arbitraitor wrappers status
 
 After step 2, restart your shell (or `eval "$(arbitraitor wrappers init)"`)
 and `curl https://example.com/install.sh | sh` is transparently
-intercepted and inspected before any bytes reach the shell.
+intercepted and inspected before any bytes reach the shell. Every
+successful verified fetch prints a `verdict: Pass` banner (`artifact_sha256`,
+`cas_dir`, `artifact_type`) on stderr before the payload — stdout stays
+byte-clean — and the curl shim keeps real curl's exit-code semantics
+(4xx/5xx bodies pass through with exit 0 unless `-f` is given; `-f` exits
+22; DNS/refused/timeout/TLS failures map to curl's 6/7/28/60). Unsupported
+invocations such as `-I`/`--head` are rejected explicitly rather than
+silently downgraded.
 
 For users who prefer `~/.local/bin`, override the default:
 `arbitraitor wrappers install --shim-dir ~/.local/bin`.

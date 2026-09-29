@@ -151,6 +151,34 @@ caps pending record files at
 
 ### Fixed
 
+- **curl PATH shim is argument-transparent** (#761) — three fixes to the
+  `curl`/`wget` wrapper surface:
+  - `-I` / `--head` (and `-X HEAD`) are now recognized by the curl
+    argument parser and rejected with an explicit opaque-translation
+    error instead of being silently dropped and downgraded to a GET.
+    Header probes (health checks, content-type/redirect parsing) fail
+    loudly instead of consuming an HTML body.
+  - **Exit codes follow real `curl` semantics on HTTP error status.**
+    Without `-f`/`--fail`, a 4xx/5xx response body is a successfully
+    transferred artifact: it is fetched, stored, inspected, and released
+    through the full verdict pipeline (the receipt still records the real
+    response status), and the shim exits 0 — matching `curl -s -o
+    /dev/null <404-url>` exiting 0. With `-f`/`--fail`, an HTTP error
+    status aborts and exits 22. Other detectable transport failures map
+    to curl's table too: 6 (DNS resolution), 7 (connection refused), 28
+    (timeout), 60 (TLS certificate failure). The fail-closed default is
+    unchanged for first-class `fetch`, the `wget` path, and all engine
+    consumers (`FetchPolicy::http_error_status_is_failure` defaults to
+    `true`); only the curl shim's interpretation differs.
+  - **The `verdict:` banner is now emitted on every successful verified
+    wrapper fetch**, unconditionally on stderr before the payload —
+    including when the wrapped tool passed `-s`/`-q` or stderr is
+    captured (`2>file`, agent shells, `2>&1` merges). stderr is the
+    diagnostics channel; stdout stays byte-clean payload. `curl -s ...`
+    through the shim now reports `artifact_sha256` / `cas_dir` /
+    `artifact_type` / `verdict: Pass` so a caller can tell a mediated
+    fetch from a direct one. First-class (non-wrapper) fetch output is
+    unchanged.
 - **Sandbox effective-controls matrix no longer claims filesystem isolation
   without an enforcing Landlock ABI** (`arbitraitor_sandbox`): on the
   `linux` branch, `compute_effective_controls` reported

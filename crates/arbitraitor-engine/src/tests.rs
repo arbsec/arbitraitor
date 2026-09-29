@@ -382,3 +382,49 @@ fn store_max_bytes_is_enforced_by_scan_path_sink() {
         "expected SizeExceeded surfaced via EngineError::Store, got: {rendered}"
     );
 }
+
+#[test]
+fn receipt_retrieval_info_records_response_status_code() {
+    use crate::pipeline::receipt_retrieval_info;
+
+    // Released HTTP error-status bodies (curl without -f semantics) must
+    // carry the real response status in the receipt — otherwise the audit
+    // trail cannot distinguish a 404 body from a 200 body.
+    let digest = test_digest(1);
+    let metadata = arbitraitor_fetch::FetchMetadata {
+        response_status: Some(404),
+        ..arbitraitor_fetch::FetchMetadata::default()
+    };
+    let receipt = arbitraitor_fetch::FetchReceipt {
+        artifact_id: arbitraitor_model::ids::ArtifactId(digest.clone()),
+        sha256: digest,
+        bytes_written: 4,
+        metadata,
+        child_artifacts: Vec::new(),
+    };
+
+    let retrieval = receipt_retrieval_info("https://example.com/missing", &receipt);
+    let json = serde_json::to_value(&retrieval).unwrap();
+    assert_eq!(
+        json.get("status_code"),
+        Some(&serde_json::json!(404)),
+        "receipt must record the real HTTP response status: {json}"
+    );
+
+    // Non-HTTP sources (no status) must leave the field absent, not zero.
+    let digest = test_digest(2);
+    let receipt = arbitraitor_fetch::FetchReceipt {
+        artifact_id: arbitraitor_model::ids::ArtifactId(digest.clone()),
+        sha256: digest,
+        bytes_written: 0,
+        metadata: arbitraitor_fetch::FetchMetadata::default(),
+        child_artifacts: Vec::new(),
+    };
+    let retrieval = receipt_retrieval_info("/local/path", &receipt);
+    let json = serde_json::to_value(&retrieval).unwrap();
+    assert_eq!(
+        json.get("status_code"),
+        Some(&serde_json::Value::Null),
+        "no status must serialize as null (absent), never a fabricated code: {json}"
+    );
+}
