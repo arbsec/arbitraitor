@@ -61,6 +61,15 @@ pub struct CurlArgs {
     /// being silently downgraded to a full GET.
     pub head: bool,
     /// Unsupported options observed while parsing.
+    ///
+    /// This field is the enforcement channel for security-critical options:
+    /// the CLI's `bail_on_critical` path filters these strings through
+    /// [`is_critical_unsupported_option`] and hard-rejects the invocation
+    /// before any network access. TLS-verification-disabling flags
+    /// (`-k`/`--insecure`) are both parsed into [`CurlArgs::insecure`] and
+    /// recorded here so that rejection fires — parsing alone is not
+    /// enforcement. Mirrors `WgetRequest::unsupported_options` on the wget
+    /// side.
     pub unsupported_options: Vec<String>,
 }
 
