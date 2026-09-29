@@ -89,6 +89,13 @@ pub struct WgetRequest {
     pub max_redirect: Option<u32>,
     /// Whether `--no-check-certificate` disabled TLS verification.
     pub no_check_certificate: bool,
+    /// Whether `--spider` requested a headers-only availability probe.
+    ///
+    /// Spider invocations cannot be represented by the download wrapper
+    /// model (a single Retrieve operation returning artifact bytes), so
+    /// callers must reject them explicitly instead of silently performing
+    /// a full GET and releasing the response body.
+    pub spider: bool,
     /// Findings produced during argv translation. Callers must
     /// surface these so dangerous flags cannot be silently dropped.
     pub findings: Vec<Finding>,
@@ -138,6 +145,7 @@ struct WgetParser<'a> {
     timeout_secs: Option<u64>,
     max_redirect: Option<u32>,
     no_check_certificate: bool,
+    spider: bool,
     after_separator: bool,
     unsupported_options: Vec<String>,
 }
@@ -156,6 +164,7 @@ impl<'a> WgetParser<'a> {
             timeout_secs: None,
             max_redirect: None,
             no_check_certificate: false,
+            spider: false,
             after_separator: false,
             unsupported_options: Vec::new(),
         }
@@ -186,6 +195,7 @@ impl<'a> WgetParser<'a> {
             timeout_secs: self.timeout_secs,
             max_redirect: self.max_redirect,
             no_check_certificate: self.no_check_certificate,
+            spider: self.spider,
             findings,
             unsupported_options: self.unsupported_options,
         })
@@ -234,6 +244,10 @@ impl<'a> WgetParser<'a> {
             "no-check-certificate" => {
                 reject_inline_value(&canonical, inline_value)?;
                 self.no_check_certificate = true;
+            }
+            "spider" => {
+                reject_inline_value(&canonical, inline_value)?;
+                self.spider = true;
             }
             "quiet" | "verbose" => {
                 reject_inline_value(&canonical, inline_value)?;
@@ -470,6 +484,81 @@ mod tests {
     }
 
     #[test]
+    fn spider_long_flag_is_parsed() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "--spider", "https://example.com/file"])?;
+        assert!(result.spider);
+        assert_eq!(result.url, "https://example.com/file");
+        assert!(
+            !result
+                .unsupported_options
+                .iter()
+                .any(|opt| opt == "--spider"),
+            "--spider must be recognized, not fall into the unsupported catch-all"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn spider_absent_by_default() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "-q", "https://example.com/file"])?;
+        assert!(!result.spider);
+        Ok(())
+    }
+
+    #[test]
+    fn spider_takes_no_value_and_does_not_swallow_the_url() -> Result<(), WrapperError> {
+        // The URL must survive as the positional URL, not be consumed as a
+        // value for --spider (which is a boolean flag).
+        let result = parse(&["wget", "--spider", "https://example.com/file"])?;
+        assert!(result.spider);
+        assert_eq!(result.url, "https://example.com/file");
+        assert_eq!(result.urls, vec!["https://example.com/file"]);
+        Ok(())
+    }
+
+    #[test]
+    fn spider_rejects_inline_value() {
+        assert!(matches!(
+            parse(&["wget", "--spider=true", "https://example.com/file"]),
+            Err(WrapperError::InvalidValue { flag, message })
+                if flag == "--spider" && message.contains("does not take a value")
+        ));
+    }
+
+    #[test]
+    fn spider_combines_with_other_flags() -> Result<(), WrapperError> {
+        // Common link-check shape: quiet spider with output discarded. All
+        // flags must parse independently and --spider must still be set so
+        // the caller rejects the invocation.
+        let result = parse(&[
+            "wget",
+            "-q",
+            "--spider",
+            "-O",
+            "/dev/null",
+            "https://example.com/file",
+        ])?;
+        assert!(result.spider);
+        assert_eq!(result.output_path.as_deref(), Some(Path::new("/dev/null")));
+        assert_eq!(result.url, "https://example.com/file");
+        Ok(())
+    }
+
+    #[test]
+    fn server_response_short_flag_is_not_spider() -> Result<(), WrapperError> {
+        // wget -S is --server-response (prints headers to the log), a
+        // separate logging option with no effect on the download itself.
+        // It must NOT set the spider flag.
+        let result = parse(&["wget", "-S", "https://example.com/file"])?;
+        assert!(!result.spider);
+        assert!(
+            result.unsupported_options.iter().any(|opt| opt == "-S"),
+            "unrecognized -S must land in the unsupported catch-all"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn translates_user_agent() -> Result<(), WrapperError> {
         let result = parse(&["wget", "-U", "MyAgent", "https://example.com/file"])?;
         assert_eq!(result.user_agent.as_deref(), Some("MyAgent"));
@@ -603,6 +692,7 @@ mod tests {
             timeout_secs: Some(30),
             max_redirect: Some(5),
             no_check_certificate: true,
+            spider: false,
             findings: Vec::new(),
             unsupported_options: Vec::new(),
         };

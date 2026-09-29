@@ -315,7 +315,9 @@ Unsupported request shapes are rejected explicitly instead of being
 silently downgraded: `-I` / `--head` / `-X HEAD` fail with an
 opaque-translation error because the wrapper pipeline returns artifact
 bodies, not response headers — a header probe through the shim can never
-silently receive HTML.
+silently receive HTML. The wget shim behaves the same for `--spider`: an
+availability probe fails loudly instead of silently downloading the
+document it was only supposed to check for existence.
 
 ### Interception metadata (the human report)
 

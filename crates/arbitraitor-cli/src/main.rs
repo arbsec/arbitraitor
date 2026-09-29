@@ -39,7 +39,7 @@ use arbitraitor_wrapper::shim::{
 };
 use arbitraitor_wrapper::{
     CurlArgs, is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
-    wget::{is_critical_wget_option, translate_wget_args},
+    wget::{WgetRequest, is_critical_wget_option, translate_wget_args},
 };
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
@@ -814,6 +814,7 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
             Some(WrapperTarget::Wget) => {
                 let parsed = translate_wget_args(&command.args).into_diagnostic()?;
                 bail_on_critical("wget", &parsed.unsupported_options)?;
+                reject_spider_request("wget", &parsed)?;
             }
             None => {}
         }
@@ -943,6 +944,7 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
         Some(WrapperTarget::Wget) => {
             let parsed = translate_wget_args(&command.args).into_diagnostic()?;
             bail_on_critical("wget", &parsed.unsupported_options)?;
+            reject_spider_request("wget", &parsed)?;
         }
         None => {}
     }
@@ -1118,6 +1120,25 @@ fn reject_header_only_request(tool: &str, parsed: &CurlArgs) -> Result<()> {
         miette::bail!(
             "{tool} header-only request (-I/--head/-X HEAD) cannot be proxied: the \
              wrapper pipeline returns artifact bodies, not response headers"
+        );
+    }
+    Ok(())
+}
+
+/// Rejects `wget --spider` invocations with a clear error. `--spider` means
+/// "check the URL exists, do not download the page" — a headers-only probe.
+/// The wrapper pipeline models a single Retrieve operation returning artifact
+/// bytes; silently downgrading the probe to a full GET would release the
+/// response body as if it were the spider result.
+///
+/// This is a semantic rejection, not a critical-options bail: `--spider`
+/// does not bypass any inspection boundary, it requests a response shape the
+/// pipeline cannot represent.
+fn reject_spider_request(tool: &str, parsed: &WgetRequest) -> Result<()> {
+    if parsed.spider {
+        miette::bail!(
+            "{tool} spider request (--spider) cannot be proxied: the wrapper \
+             pipeline returns artifact bodies, not availability probes"
         );
     }
     Ok(())
