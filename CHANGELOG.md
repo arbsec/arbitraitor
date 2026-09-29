@@ -89,6 +89,15 @@ caps pending record files at
   (main checkout plus every unlocked worktree) older than `--days`
   (default 7) and reports reclaimed bytes. Both phases dry-run by
   default; `--yes` applies.
+- `xtask mint-github-token` (`cargo run -p xtask -- mint-github-token`):
+  contributor/agent tooling that mints a ~1h `arbsec-agent` GitHub App
+  installation token so agent-driven GitHub operations attribute to the
+  service identity instead of a personal account (see AGENTS.md). The
+  token — and only the token — is printed to stdout for
+  `GH_TOKEN="$(...)" gh ...`; the App private key is resolved fail-closed
+  from `$ARBSEC_APP_PEM`/`$ORCHESTRAITOR_APP_PEM` or the platform keyring,
+  secret material never reaches argv, stderr, or files inside the repo,
+  and the keyring being unreachable is an error (no fallback).
 
 ### Changed
 
