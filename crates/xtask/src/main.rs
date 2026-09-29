@@ -6,7 +6,10 @@ use std::time::{Duration, SystemTime};
 
 const REPO_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-const USAGE: &str = "usage: xtask docs-check | cleanup [worktrees|artifacts] [--yes] [--days <n>]";
+const USAGE: &str = "usage: xtask docs-check | cleanup [worktrees|artifacts] [--yes] [--days <n>] | \
+     mint-github-token";
+
+mod github_mint;
 
 fn repo_root() -> PathBuf {
     Path::new(REPO_ROOT)
@@ -796,6 +799,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("mint-github-token") => github_mint::run(),
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
             eprintln!("{USAGE}");

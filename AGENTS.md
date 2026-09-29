@@ -28,7 +28,16 @@ When rules conflict or trade-offs must be made, resolve in this order:
 
 - **Use available tools and skills as much as possible.** Prefer instead of bash commands.
 - **Never commit to `main`.** Work in isolated worktree.
-- **Never operate on GitHub as a personal account** when the `arbsec-agent` App service identity is available; personal owner auth is an explicitly labelled fallback only.
+- **Never operate on GitHub as a personal account.** Agent-driven GitHub
+  operations (issues, PRs, comments, reviews) MUST authenticate as the
+  `arbsec-agent` GitHub App service identity — mint an installation token
+  via `cargo run -p xtask -- mint-github-token` and use
+  `GH_TOKEN=<token> gh ...`; git commits from agent worktrees use
+  `user.name=arbsec-agent[bot]`,
+  `user.email=334074867+arbsec-agent[bot]@users.noreply.github.com`.
+  Personal owner auth is a labelled fallback only when the App identity is
+  unavailable (e.g. keyring unreachable) — if used, note it in the PR body.
+  Mechanics: [workflow policy](.agents/project/arbitraitor-workflow.md#github-service-identity).
 - **Never merge w/ failing CI.** All workflow checks must pass — no exceptions, no admin overrides on red.
 - **Never suppress errors.** No `as any` `@ts-ignore` `unwrap()` in production code, or blanket `#[allow(...)]`.
 - **Never add dependency w/o [admission checklist](docs/conventions.md#dependencies).**

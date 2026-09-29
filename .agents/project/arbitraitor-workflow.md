@@ -94,6 +94,30 @@ items assigned to a declared service identity schedulable
 (`[service_identities].slugs` in the project config, default `arbsec-agent`;
 overridable via `$ARB_SERVICE_IDENTITIES`).
 
+### Token minting mechanics
+
+- Mint per operation (tokens expire after ~1 hour; never cached on disk):
+  `GH_TOKEN="$(cargo run -p xtask -- mint-github-token)" gh ...`. The subcommand prints
+  only the token to stdout; diagnostics go to stderr and never carry secret material.
+- PEM resolution order (fail-closed — no token, no fallback attempt inside the tool):
+  `$ARBSEC_APP_PEM` / `$ORCHESTRAITOR_APP_PEM`, then the platform keyring entry
+  `secret://keyring/orchestraitor-app-pem` (service `orchestraitor`). Installation id
+  defaults to the arbsec org installation (`165043398`); override with
+  `$ARBSEC_INSTALLATION_ID`.
+- Minting follows the runbook (orchestraitor `.omo/drafts/github-app-setup.md` §5):
+  RS256 JWT, claims `{ iat, exp: iat+10min, iss: <client ID> }` — the **client ID**
+  (`Iv23linxUDbcc53QbFVK`) is the issuer; the App ID (`5082653`) is rejected with 401
+  (verified 2026-09-26). The JWT is exchanged at
+  `POST /app/installations/<id>/access_tokens`.
+- Verification limits: installation tokens are **not** user tokens — REST `GET /user`
+  returns 403 ("not accessible by integration") even though attribution works; check
+  identity via GraphQL `viewer.login` (returns `arbsec-agent[bot]`).
+- Git identity for commits from agent worktrees:
+  `user.name=arbsec-agent[bot]`,
+  `user.email=334074867+arbsec-agent[bot]@users.noreply.github.com` (bot user id
+  `334074867` — verified against real bot commits; the App id is not part of the
+  noreply address).
+
 ## Security-first review
 
 - **Arbitraitor implements every security primitive in the arbsec stack.** Changes to
