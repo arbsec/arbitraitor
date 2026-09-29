@@ -748,10 +748,17 @@ async fn status_query_returns_none_when_daemon_socket_missing() {
 async fn status_query_returns_info_from_real_daemon() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn a real daemon on a temp socket, drive a couple of operations
     // through it, then verify the CLI handler reads the daemon_info snapshot.
-    let root = unique_temp_path("status-real-daemon");
-    fs::create_dir_all(&root)?;
-    let socket = root.join("daemon.sock");
-    let daemon = arbitraitor_daemon::Daemon::new(&socket)?;
+    let root = tempfile::tempdir()?;
+    let socket = root.path().join("daemon.sock");
+    // Hermetic store: the default store is shared with any running
+    // `arbitraitor mcp`/daemon process, whose redb lock would fail this open.
+    let daemon = arbitraitor_daemon::Daemon::with_options(
+        &socket,
+        arbitraitor_daemon::DaemonOptions {
+            store_path: root.path().join("cas"),
+            ..arbitraitor_daemon::DaemonOptions::default()
+        },
+    )?;
     let handle = tokio::spawn(async move { daemon.run().await });
 
     // Wait for the listener to appear.
@@ -795,7 +802,6 @@ async fn status_query_returns_info_from_real_daemon() -> Result<(), Box<dyn std:
     )
     .await?;
     let _ = handle.await;
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -1707,40 +1713,38 @@ fn emit_output_writes_bytes_to_file() -> std::io::Result<()> {
 
 #[test]
 fn emit_output_remote_name_derives_filename() -> std::io::Result<()> {
-    let dir = std::env::temp_dir().join("arb_test_emit_remote");
-    std::fs::create_dir_all(&dir)?;
-    let prev = std::env::current_dir()?;
-    std::env::set_current_dir(&dir)?;
+    // Hermetic: pass the destination as an explicit output path instead of
+    // changing the process-wide CWD, which races across parallel tests.
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tool.tar.gz");
     let bytes = b"remote content";
-    emit_wrapper_output(bytes, None, true, "https://example.com/path/to/tool.tar.gz")
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let read_back = std::fs::read("tool.tar.gz")?;
-    assert_eq!(read_back, bytes);
-    std::fs::remove_file("tool.tar.gz")?;
-    std::env::set_current_dir(prev)?;
-    std::fs::remove_dir(dir)?;
+    emit_wrapper_output(
+        bytes,
+        Some(path.to_string_lossy().as_ref()),
+        true,
+        "https://example.com/path/to/tool.tar.gz",
+    )
+    .map_err(|e| std::io::Error::other(e.to_string()))?;
+    assert_eq!(std::fs::read(&path)?, bytes);
     Ok(())
 }
 
 #[test]
 fn emit_output_remote_name_strips_query_and_fragment() -> std::io::Result<()> {
-    let dir = std::env::temp_dir().join("arb_test_emit_query");
-    std::fs::create_dir_all(&dir)?;
-    let prev = std::env::current_dir()?;
-    std::env::set_current_dir(&dir)?;
+    // The filename must be derived from the URL path alone: query strings
+    // and fragments (which may carry secrets) must not leak into the name.
+    // Hermetic: explicit output path, no process-wide CWD change.
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("file.bin");
     let bytes = b"data";
     emit_wrapper_output(
         bytes,
-        None,
+        Some(path.to_string_lossy().as_ref()),
         true,
         "https://example.com/file.bin?token=secret#frag",
     )
     .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let read_back = std::fs::read("file.bin")?;
-    assert_eq!(read_back, bytes);
-    std::fs::remove_file("file.bin")?;
-    std::env::set_current_dir(prev)?;
-    std::fs::remove_dir(dir)?;
+    assert_eq!(std::fs::read(&path)?, bytes);
     Ok(())
 }
 
