@@ -243,6 +243,15 @@ caps pending record files at
   the configured bound to `sink_with_limits` on every engine-managed
   write; the CLI passes `store.max_bytes` through, so identical config
   now means identical enforcement across `scan` and `inspect`.
+- `cargo deny check` advisories section passes again: RUSTSEC-2026-0316
+  (wasmtime, low severity — dynamic record lifting can allocate beyond
+  the hostcall fuel limit) is now ignored. The advisory hits the
+  wasmtime 45.0.3 copy pulled in transitively via yara-x 1.20.0
+  (`wasmtime ^45.0.3`); no patched 45.x exists (fixes are in >=36.0.16,
+  >=48.0.3, >=49.0.1), so it is not resolvable by `cargo update` until
+  yara-x bumps wasmtime. Same yara-x pin as the existing
+  RUSTSEC-2026-0269 ignore; both drop when yara-x requires a patched
+  wasmtime.
 
 ### Changed (CI)
 
