@@ -9,9 +9,13 @@
 //! reduced confidence.
 //!
 //! Flags that disable transport safety guarantees (currently
-//! `--no-check-certificate`) are surfaced as [`arbitraitor_model::Finding`]
-//! entries on the returned [`WgetRequest`] instead of being silently dropped,
-//! so the wrapper caller can raise the appropriate verdict.
+//! `--no-check-certificate`) are both parsed into
+//! [`WgetRequest::no_check_certificate`] — which feeds a
+//! [`arbitraitor_model::Finding`] entry on the returned [`WgetRequest`] — and
+//! recorded in [`WgetRequest::unsupported_options`], where
+//! [`is_critical_wget_option`] classifies them as critical so callers can
+//! hard-reject the invocation instead of silently proxying a fetch with
+//! certificate verification disabled.
 
 use std::path::PathBuf;
 
@@ -30,8 +34,17 @@ pub const WGET_WRAPPER_DETECTOR: &str = "arbitraitor-wrapper";
 const WGET_NO_CHECK_CERTIFICATE_FINDING_ID: &str = "wget-no-check-certificate";
 
 /// Returns `true` if an unsupported wget option is security-critical — i.e. it
-/// can bypass the inspection boundary (proxy redirection, config file reads,
-/// credential injection, TLS trust store manipulation, etc.).
+/// can bypass the inspection boundary (TLS verification disabling, proxy
+/// redirection, config file reads, credential injection, TLS trust store
+/// manipulation, etc.).
+///
+/// `--no-check-certificate` is deliberately listed even though the parser
+/// recognizes it (recording it in [`WgetRequest::no_check_certificate`] and a
+/// High-severity entry in [`WgetRequest::findings`]): the parser also emits
+/// the option into [`WgetRequest::unsupported_options`] so the CLI's
+/// `bail_on_critical` path rejects the invocation on both wrapper paths
+/// instead of silently proxying a fetch with certificate verification
+/// disabled.
 ///
 /// Callers use this to decide whether to hard-reject an invocation instead of
 /// allowing the option to pass through with reduced confidence.
@@ -52,6 +65,9 @@ pub fn is_critical_wget_option(option: &str) -> bool {
             | "--execute"
             | "--no-proxy"
             | "--input-file"
+            // TLS verification disabling — removes the boundary's
+            // man-in-the-middle protection guarantee (§4.3, §39.9)
+            | "--no-check-certificate"
             // Config / trust store manipulation
             | "--config"
             | "--load-cookies"
@@ -244,6 +260,11 @@ impl<'a> WgetParser<'a> {
             "no-check-certificate" => {
                 reject_inline_value(&canonical, inline_value)?;
                 self.no_check_certificate = true;
+                // Recorded both as a parsed flag (feeding the High-severity
+                // finding) and as an unsupported option so the CLI's
+                // `bail_on_critical` path hard-rejects the invocation —
+                // TLS verification disabling must never be silently proxied.
+                self.unsupported_options.push(canonical);
             }
             "spider" => {
                 reject_inline_value(&canonical, inline_value)?;
@@ -678,6 +699,47 @@ mod tests {
         assert_eq!(result.findings.len(), 1);
         assert_eq!(result.findings[0].category, FindingCategory::Transport);
         assert_eq!(result.findings[0].severity, Severity::High);
+        Ok(())
+    }
+
+    #[test]
+    fn no_check_certificate_is_also_recorded_as_unsupported_critical() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "--no-check-certificate", "https://example.com/file"])?;
+
+        assert!(result.no_check_certificate);
+        assert_eq!(result.findings.len(), 1);
+        // The option must land in unsupported_options so the CLI's
+        // `bail_on_critical` path hard-rejects the invocation on both
+        // wrapper paths — the finding alone is dead surface there.
+        assert!(
+            result
+                .unsupported_options
+                .contains(&"--no-check-certificate".to_owned()),
+            "--no-check-certificate must be recorded as an unsupported option \
+             so the critical-option bail can fire"
+        );
+        assert!(
+            result
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_wget_option(opt))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plain_invocation_does_not_trip_wget_critical_check() -> Result<(), WrapperError> {
+        let result = parse(&["wget", "-q", "https://example.com/file"])?;
+
+        assert!(!result.no_check_certificate);
+        assert!(result.findings.is_empty());
+        assert!(
+            !result
+                .unsupported_options
+                .iter()
+                .any(|opt| is_critical_wget_option(opt)),
+            "negative control: plain wget -q must pass the critical check"
+        );
         Ok(())
     }
 
