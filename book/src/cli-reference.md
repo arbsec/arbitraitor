@@ -196,9 +196,9 @@ wrapped tool's semantics where the security pipeline can represent them:
   response status). With `-f`/`--fail`, an HTTP error status exits 22.
   Transport failures map to curl's table (6 DNS, 7 refused, 28 timeout,
   60 TLS certificate).
-- `-I` / `--head` / `-X HEAD` are rejected with an explicit
-  opaque-translation error; the pipeline returns artifact bodies, not
-  response headers.
+- `-I` / `--head` / `-X HEAD` (curl) and `--spider` (wget) are rejected
+  with an explicit opaque-translation error; the pipeline returns artifact
+  bodies, not response headers or availability probes.
 - Critical curl options (`--proxy`, `--config`, `--cacert`, `--user`,
   upload flags, …) are rejected before any network access.
 

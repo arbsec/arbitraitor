@@ -2604,3 +2604,45 @@ fn reject_header_only_request_flags_head_spellings() {
         "plain GET must not be rejected"
     );
 }
+
+#[test]
+fn reject_spider_request_flags_spider_invocations() {
+    use crate::reject_spider_request;
+    use arbitraitor_wrapper::wget::translate_wget_args;
+
+    // --spider (alone or combined with other flags, e.g. the common
+    // `wget -q --spider -O /dev/null <url>` link-check shape) must be
+    // rejected explicitly; a plain download must pass through untouched.
+    for argv in [
+        vec!["wget", "--spider", "https://example.com"],
+        vec![
+            "wget",
+            "-q",
+            "--spider",
+            "-O",
+            "/dev/null",
+            "https://example.com",
+        ],
+    ] {
+        let parsed = translate_wget_args(&argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            .unwrap_or_else(|error| panic!("{argv:?} must parse: {error}"));
+        let Err(error) = reject_spider_request("wget", &parsed) else {
+            panic!("{argv:?} must be rejected as a spider probe");
+        };
+        assert!(
+            error.to_string().contains("spider request"),
+            "rejection must name the spider limitation: {error}"
+        );
+    }
+
+    let plain_get = translate_wget_args(&[
+        "wget".to_owned(),
+        "-q".to_owned(),
+        "https://example.com/file".to_owned(),
+    ])
+    .unwrap_or_else(|error| panic!("plain wget -q <url> must parse: {error}"));
+    assert!(
+        reject_spider_request("wget", &plain_get).is_ok(),
+        "plain wget download must not be rejected"
+    );
+}

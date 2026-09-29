@@ -151,6 +151,16 @@ caps pending record files at
 
 ### Fixed
 
+- **wget wrapper: `--spider` is rejected explicitly** (#765) — the wget
+  argument parser now recognizes `--spider` (a headers-only availability
+  probe) instead of letting it fall into the unsupported catch-all, and
+  spider invocations are rejected with an explicit opaque-translation error
+  on both the shim path and `arbitraitor wrap wget`, mirroring the curl
+  `-I`/`--head` fix: the wrapper pipeline returns artifact bodies, not
+  availability probes, so a link check must fail loudly instead of
+  silently receiving a full downloaded document. `wget -S`
+  (`--server-response`, a logging option) is unaffected and remains an
+  unsupported pass-through flag.
 - **curl PATH shim is argument-transparent** (#761) — three fixes to the
   `curl`/`wget` wrapper surface:
   - `-I` / `--head` (and `-X HEAD`) are now recognized by the curl
