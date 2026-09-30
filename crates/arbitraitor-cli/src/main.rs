@@ -801,9 +801,12 @@ fn exit_with_curl_code_if_mapped(tool: Option<&str>, error: &miette::Report) {
     }
 }
 
-// 101 lines against a 100-line limit: the wrapper URL diagnostics below
-// (#763) spell out every accepted URL form, and extracting them would move
-// the user-facing message away from the validation it describes.
+// This function remains over the 100-line function limit (~110 lines) even
+// after the accepted-URL-forms diagnostic was extracted to
+// `WRAPPER_URL_FORMS` (review round 1, LOW-2): the remaining lines are the
+// shim/curl/wget validation fan-out itself, and splitting that apart would
+// trade a readable linear sequence for indirection on a security-gate
+// surface. The scoped allow is retained deliberately.
 #[allow(clippy::too_many_lines)]
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
     let (url, output_path, remote_name) = if command.tool.is_some() {
