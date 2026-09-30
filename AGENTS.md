@@ -32,9 +32,16 @@ When rules conflict or trade-offs must be made, resolve in this order:
   operations (issues, PRs, comments, reviews) MUST authenticate as the
   `arbsec-agent` GitHub App service identity — mint an installation token
   via `cargo run -p xtask -- mint-github-token` and use
-  `GH_TOKEN=<token> gh ...`; git commits from agent worktrees use
-  `user.name=arbsec-agent[bot]`,
-  `user.email=334074867+arbsec-agent[bot]@users.noreply.github.com`.
+  `GH_TOKEN=<token> gh ...`; git commits from agent worktrees carry
+  author=`arbsec-agent[bot]`
+  (`--author='arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>'`)
+  plus the DCO `Signed-off-by:` trailer, while the **committer stays the
+  ambient local git identity of the operator** (whose registered SSH
+  signing key satisfies required_signatures) — never the bot, which owns
+  no signing key and would fail verification as `UNKNOWN_KEY`; matching
+  the verified `arbsec/orchestraitor` precedent. `user.name`/`user.email`
+  MUST stay the operator's — never `-c` them to the bot. Never use
+  `--admin` to work around signature verification.
   Personal owner auth is a labelled fallback only when the App identity is
   unavailable (e.g. keyring unreachable) — if used, note it in the PR body.
   Mechanics: [workflow policy](.agents/project/arbitraitor-workflow.md#github-service-identity).

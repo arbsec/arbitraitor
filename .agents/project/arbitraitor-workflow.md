@@ -115,11 +115,53 @@ overridable via `$ARB_SERVICE_IDENTITIES`).
 - Verification limits: installation tokens are **not** user tokens — REST `GET /user`
   returns 403 ("not accessible by integration") even though attribution works; check
   identity via GraphQL `viewer.login` (returns `arbsec-agent[bot]`).
-- Git identity for commits from agent worktrees:
-  `user.name=arbsec-agent[bot]`,
-  `user.email=334074867+arbsec-agent[bot]@users.noreply.github.com` (bot user id
-  `334074867` — verified against real bot commits; the App id is not part of the
-  noreply address).
+- Git identity for commits from agent worktrees: **author** = `arbsec-agent[bot]`
+  (set via `--author='arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>'`
+  — bot user id `334074867`, verified against real bot commits; the App id is not part
+  of the noreply address) plus the DCO `Signed-off-by:` trailer (`-s`); **committer**
+  = the ambient local git identity of the operator (its `user.name`/`user.email` must
+  remain the operator's personal identity — NEVER pass `-c user.name`/`-c user.email`
+  set to the bot, since git derives the committer from those and the bot owns no
+  signing key).
+- **Commit shape under required_signatures** (verified live; the org ruleset requires
+  verified signatures): GitHub verifies SSH signatures against keys registered to the
+  **committer's** identity when committer ≠ author. The working shape:
+  - **author** = `arbsec-agent[bot]` + DCO `Signed-off-by:` trailer (`-s`),
+  - **committer** = the ambient local git identity of the operator — the personal
+    `user.name`/`user.email` whose registered SSH signing key
+    (`SHA256:TwGlTWKwN7VjHbONYK7mJN11fFqWvDYT3/qmKsYpXBk`, mekwall) GitHub marks
+    `verification: valid` → the ruleset passes with **no** admin bypass. (The push
+    credential itself is the bot installation token and is unrelated to commit
+    identity; do not conflate the two.)
+  - **NEVER set committer to the bot**: no bot-owned signing key exists, so GitHub
+    yields `UNKNOWN_KEY` and blocks merge (verified: PR #776 initially needed
+    `--admin` because both author and committer were the bot). Concretely:
+    `user.name`/`user.email` MUST remain the operator's — never pass
+    `-c user.name='arbsec-agent[bot]'`/`-c user.email='...bot...'` to `git commit`,
+    because git derives the committer from those values.
+  - Git command (ambient identity untouched → committer = the operator; only the
+    author is overridden, and `-s` adds the DCO trailer):
+
+    ```sh
+    git commit \
+        --author='arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>' \
+        -s -m "..."
+    ```
+
+  - Squash merges via the GitHub API merge endpoint carry GitHub's own web-flow
+    signature (committer `GitHub <noreply@github.com>`), so merged squashes verify
+    regardless of the branch commits' shape. That is a merge-time exception only —
+    the shape above is what branch commits must follow. API-created commits are
+    **not** signed by GitHub at creation time.
+  - Precedent: the author=bot + DCO convention originates from `arbsec/orchestraitor`
+    (`delivery.rs commit_all` + SKILL.md "Service identity") — note `commit_all` sets
+    GIT_AUTHOR_* and GIT_COMMITTER_* from one caller identity, so used verbatim it
+    would also produce committer=bot and fail; it is the origin of the author=bot
+    convention, not the committer mechanics. The only verified live commit-shape
+    example (author=bot + DCO, committer=pusher, passes `required_signatures`) is
+    orchestraitor commit `734f17c8`. (`06a07ea4` and `61a656df` are squash merges —
+    committer=GitHub web-flow, i.e. squash-exception evidence, not committer=pusher
+    examples.)
 
 ## Security-first review
 

@@ -97,7 +97,14 @@ caps pending record files at
   `GH_TOKEN="$(...)" gh ...`; the App private key is resolved fail-closed
   from `$ARBSEC_APP_PEM`/`$ORCHESTRAITOR_APP_PEM` or the platform keyring,
   secret material never reaches argv, stderr, or files inside the repo,
-  and the keyring being unreachable is an error (no fallback).
+  and the keyring being unreachable is an error (no fallback). The
+  documented commit shape for agent work satisfies `required_signatures`
+  without an admin bypass: author = `arbsec-agent[bot]` (via `--author`) +
+  DCO `Signed-off-by:`, committer = the ambient local git identity of the
+  operator (the identity whose registered SSH signing key GitHub verifies;
+  `user.name`/`user.email` stay the operator's — never `-c` them to the
+  bot); setting the committer to the bot fails as `UNKNOWN_KEY` (no
+  bot-owned signing key).
 
 ### Changed
 
