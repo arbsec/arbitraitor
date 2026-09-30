@@ -75,11 +75,12 @@ pub const DEFAULT_SCAN_MAX_BYTES: u64 = 256 * 1024 * 1024;
 ///
 /// Composes fetcher, content store, analysis coordinator, policy engine,
 /// provenance verification, and receipt builder into a single in-process
-/// interface. Instances are cheap to clone internally (the store and
-/// coordinator are behind `Arc`) and safe to share across tasks via `&self`.
+/// interface. Instances are cheap to clone internally (the per-operation
+/// store handle and the coordinator are behind `Arc`) and safe to share
+/// across tasks via `&self`.
 #[derive(Clone)]
 pub struct ArbitraitorApi {
-    store: arbitraitor_store::ContentStore,
+    store: StoreHandle,
     fetcher: HttpFetcher,
     policy: Option<PolicyEngine>,
     coordinator: std::sync::Arc<AnalysisCoordinator>,
@@ -89,6 +90,49 @@ pub struct ArbitraitorApi {
     emit_partial_receipt_on_cancel: bool,
     signatures: SignatureInputs,
     store_max_bytes: u64,
+}
+
+/// Operation-scoped access to the content store behind an API instance.
+///
+/// redb's metadata index takes a whole-file lock, so a store held open for
+/// the lifetime of a long-lived surface (MCP stdio server, daemon) would
+/// make the CAS root unusable for every other process. Instead, the handle
+/// opens the [`ContentStore`] inside [`Self::with_store`] and **drops** it
+/// when the operation ends: the file lock is acquired per operation and
+/// released by the drop. Idle surfaces hold no lock, so a CLI fetch can
+/// always open the same store. redb opens at millisecond scale, which is
+/// acceptable at agent-frequency call rates (#762).
+#[derive(Clone)]
+struct StoreHandle {
+    path: PathBuf,
+}
+
+impl StoreHandle {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Runs `f` with a freshly opened store, dropping it when `f` returns.
+    ///
+    /// The store (and with it the redb whole-file lock) is closed when this
+    /// method returns — including on the error path — so no lock survives
+    /// an idle period between requests. The closure keeps its native error
+    /// type (`E`); the caller converts store-level errors (`From<
+    /// StoreError>`) at the single site that knows the user-facing
+    /// semantics, so no foreign error is re-wrapped into a misleading
+    /// `StoreError::Index`.
+    fn with_store<T, E>(
+        &self,
+        f: impl FnOnce(&arbitraitor_store::ContentStore) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<arbitraitor_store::StoreError>,
+    {
+        let store = arbitraitor_store::ContentStore::open(&self.path)?;
+        let result = f(&store);
+        drop(store);
+        result
+    }
 }
 
 /// Tunable construction options for [`ArbitraitorApi`].
@@ -411,13 +455,15 @@ impl ArbitraitorApi {
         // transition records the retrieval stage.
         operation = operation.transition_to(PipelineState::Retrieving)?;
 
-        let stored = self.store.store_with_metadata_and_limits(
-            bytes.clone(),
-            Some(redact_url(source)),
-            fetch_receipt.metadata.content_type.clone(),
-            arbitraitor_store::RetentionMode::Cache,
-            self.store_max_bytes,
-        )?;
+        let stored = self.store.with_store(|store| {
+            store.store_with_metadata_and_limits(
+                bytes.clone(),
+                Some(redact_url(source)),
+                fetch_receipt.metadata.content_type.clone(),
+                arbitraitor_store::RetentionMode::Cache,
+                self.store_max_bytes,
+            )
+        })?;
         if stored.0 != digest {
             return Err(EngineError::Store(format!(
                 "CAS digest mismatch: stored={}, expected={}",
@@ -472,14 +518,16 @@ impl ArbitraitorApi {
             .map_or_else(|| url.to_owned(), ToString::to_string);
         let size = receipt.bytes_written;
         let digest = receipt.sha256.clone();
-        self.store.store_with_metadata_and_limits(
-            bytes.clone(),
-            Some(redact_url(url)),
-            content_type.clone(),
-            arbitraitor_store::RetentionMode::Cache,
-            self.store_max_bytes,
-        )?;
-        discover_and_store_children(&self.store, &bytes, self.store_max_bytes)?;
+        self.store.with_store(|store| -> Result<(), EngineError> {
+            store.store_with_metadata_and_limits(
+                bytes.clone(),
+                Some(redact_url(url)),
+                content_type.clone(),
+                arbitraitor_store::RetentionMode::Cache,
+                self.store_max_bytes,
+            )?;
+            discover_and_store_children(store, &bytes, self.store_max_bytes).map(|_| ())
+        })?;
         Ok(FetchResult {
             sha256: digest.to_string(),
             size_bytes: size,
@@ -495,12 +543,15 @@ impl ArbitraitorApi {
     /// Returns [`EngineError::NotFound`] when the digest is absent or invalid.
     pub fn scan(&self, sha256: &str) -> Result<InspectionResult, EngineError> {
         let digest = parse_digest(sha256)?;
-        self.store
-            .get(&digest)
+        let (bytes, entry) = self
+            .store
+            .with_store(|store| -> Result<_, arbitraitor_store::StoreError> {
+                store.get(&digest)?;
+                let bytes = read_stored_bytes(store, &digest)?;
+                let entry = store.metadata_index().get(sha256)?;
+                Ok((bytes, entry))
+            })
             .map_err(not_found_if_missing(sha256))?;
-        let bytes =
-            read_stored_bytes(&self.store, &digest).map_err(not_found_if_missing(sha256))?;
-        let entry = self.store.metadata_index().get(sha256)?;
         let requested = entry
             .as_ref()
             .and_then(|m| m.source_url.clone())
@@ -540,13 +591,15 @@ impl ArbitraitorApi {
         operation = operation
             .transition_to(PipelineState::Retrieving)?
             .transition_to(PipelineState::Stored)?;
-        self.store.store_with_metadata_and_limits(
-            bytes.clone(),
-            Some(path.to_string_lossy().into_owned()),
-            None,
-            arbitraitor_store::RetentionMode::Cache,
-            self.store_max_bytes,
-        )?;
+        self.store.with_store(|store| {
+            store.store_with_metadata_and_limits(
+                bytes.clone(),
+                Some(path.to_string_lossy().into_owned()),
+                None,
+                arbitraitor_store::RetentionMode::Cache,
+                self.store_max_bytes,
+            )
+        })?;
         let (inspection, _operation) = self.analyze_and_finalize(
             operation,
             &bytes,
@@ -569,7 +622,9 @@ impl ArbitraitorApi {
     /// Returns [`EngineError::NotFound`] when the digest is absent or invalid.
     pub fn read_artifact(&self, sha256: &str) -> Result<Vec<u8>, EngineError> {
         let digest = parse_digest(sha256)?;
-        read_stored_bytes(&self.store, &digest).map_err(not_found_if_missing(sha256))
+        self.store
+            .with_store(|store| read_stored_bytes(store, &digest))
+            .map_err(not_found_if_missing(sha256))
     }
 
     /// Releases a stored artifact to `dest` through the ADR-0015 safe-release
@@ -601,12 +656,15 @@ impl ArbitraitorApi {
         operation = operation
             .approve()
             .map_err(|error| policy_blocked(&error, verdict))?;
-        let receipt = arbitraitor_exec::release::release_artifact(
-            &self.store,
-            &digest,
-            dest,
-            &arbitraitor_exec::release::ReleasePolicy::default(),
-        )?;
+        let receipt = self.store.with_store(|store| {
+            arbitraitor_exec::release::release_artifact(
+                store,
+                &digest,
+                dest,
+                &arbitraitor_exec::release::ReleasePolicy::default(),
+            )
+            .map_err(|error| EngineError::Release(error.to_string()))
+        })?;
         let _completed = operation.release()?.complete()?;
         Ok(ReleaseResult {
             path: receipt.destination,
@@ -693,7 +751,9 @@ impl ArbitraitorApi {
     ///
     /// Returns [`EngineError::Store`] when the metadata index cannot be read.
     pub fn list_artifacts(&self) -> Result<Vec<ArtifactSummary>, EngineError> {
-        let entries = self.store.metadata_index().list()?;
+        let entries = self
+            .store
+            .with_store(|store| store.metadata_index().list())?;
         Ok(entries
             .into_iter()
             .map(
@@ -791,7 +851,8 @@ impl ArbitraitorApi {
         let result = self.coordinator.analyze_with_retrieval(bytes, retrieval);
         operation = operation.transition_to(PipelineState::Analyzing)?;
 
-        discover_and_store_children(&self.store, bytes, self.store_max_bytes)?;
+        self.store
+            .with_store(|store| discover_and_store_children(store, bytes, self.store_max_bytes))?;
         operation = operation.transition_to(PipelineState::Expanding)?;
 
         let (verdict, policy_trace) = self.resolve_verdict(&result);

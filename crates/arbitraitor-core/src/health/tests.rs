@@ -363,3 +363,97 @@ fn parse_version_tuple_rejects_invalid_versions() {
     assert_eq!(parse_version_tuple("abc"), None);
     assert_eq!(parse_version_tuple(""), None);
 }
+
+#[test]
+fn legacy_store_warns_when_legacy_meta_db_exists() {
+    let root = unique_temp_dir("legacy-warn");
+    let active = root.join("active-cas");
+    let legacy = root.join("home").join(".arbitraitor").join("cas");
+    fs::create_dir_all(&active).unwrap();
+    fs::create_dir_all(&legacy).unwrap();
+    // The probe keys on the legacy metadata index existing.
+    fs::write(legacy.join("meta.db"), b"legacy redb bytes").unwrap();
+
+    let result = HealthChecker::new()
+        .with_store(active.clone())
+        .with_legacy_store(legacy.clone())
+        .check_legacy_store();
+
+    assert_eq!(result.status, HealthStatus::Warn);
+    let message = result.message.unwrap_or_default();
+    assert!(message.contains("legacy store"), "message: {message}");
+    assert!(message.contains(&legacy.display().to_string()));
+    assert!(message.contains(&active.display().to_string()));
+    // Diagnostic only: the check must not migrate, move, or delete anything.
+    assert!(legacy.join("meta.db").is_file());
+    let details = result.details.expect("details payload present");
+    assert_eq!(details["legacy_store"], legacy.display().to_string());
+    assert_eq!(details["active_store"], active.display().to_string());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_store_passes_when_no_legacy_meta_db() {
+    let root = unique_temp_dir("legacy-absent");
+    let active = root.join("active-cas");
+    let legacy = root.join("home").join(".arbitraitor").join("cas");
+    fs::create_dir_all(&active).unwrap();
+    fs::create_dir_all(&legacy).unwrap();
+
+    let result = HealthChecker::new()
+        .with_store(active)
+        .with_legacy_store(legacy)
+        .check_legacy_store();
+
+    assert_eq!(result.status, HealthStatus::Pass);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_store_passes_when_active_store_is_legacy_location() {
+    let root = unique_temp_dir("legacy-same");
+    let legacy = root.join("home").join(".arbitraitor").join("cas");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("meta.db"), b"legacy redb bytes").unwrap();
+
+    let result = HealthChecker::new()
+        .with_store(legacy.clone())
+        .with_legacy_store(legacy)
+        .check_legacy_store();
+
+    assert_eq!(result.status, HealthStatus::Pass);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_store_skips_without_store_configured() {
+    let checker = HealthChecker::new();
+    assert_eq!(checker.check_legacy_store().status, HealthStatus::Skipped);
+}
+
+#[test]
+fn legacy_store_resolves_default_from_home() {
+    // No override: the check must resolve ~/.arbitraitor/cas from HOME.
+    // The developer or CI environment may legitimately have a legacy store
+    // (that is exactly what this check detects), so the only assertion is
+    // that the check returns a typed status that proves the default path
+    // ran: Warn when the environment's HOME really has a legacy store,
+    // Pass when it does not, and Skipped when HOME is unset.
+    let root = unique_temp_dir("legacy-home");
+    let active = root.join("active-cas");
+    fs::create_dir_all(&active).unwrap();
+
+    let result = HealthChecker::new().with_store(active).check_legacy_store();
+
+    assert!(matches!(
+        result.status,
+        HealthStatus::Pass | HealthStatus::Warn | HealthStatus::Skipped
+    ));
+    if result.status == HealthStatus::Warn {
+        // A Warn can only come from the default resolution path: it must
+        // name the real $HOME legacy location, never the (unused) override.
+        let message = result.message.unwrap_or_default();
+        assert!(message.contains(".arbitraitor/cas"), "message: {message}");
+    }
+    let _ = fs::remove_dir_all(root);
+}

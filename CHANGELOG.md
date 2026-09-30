@@ -237,6 +237,34 @@ caps pending record files at
   `Unavailable`. The #755 fail-closed behavior is unchanged — a host without
   a Landlock ABI still reports `filesystem_isolation: Unavailable` — but
   the reporting and the hook can no longer disagree.
+- **Long-lived MCP server and daemon no longer hold an exclusive lock on the
+  CAS metadata store** (#762) — three coordinated fixes for the
+  "metadata index failure during open: Database already open. Cannot acquire
+  lock." failure that made every fetch through the curl/wget wrapper and the
+  CLI fail while `arbitraitor mcp` (or the daemon) was running:
+  - The engine now opens the content store **per operation** instead of
+    once at API construction: `ArbitraitorApi` opens the store inside each
+    inspect/fetch/scan/release/list call and closes it when the call ends,
+    so long-lived surfaces (the MCP stdio server, the Unix-socket daemon)
+    hold the redb whole-file lock only for the duration of a request and
+    never while idle. An MCP server and concurrent CLI fetches now
+    coexist; the daemon and MCP server no longer exclude each other.
+    Startup no longer fails when the store is briefly locked by another
+    process — the failure, if any, moves to the request that actually
+    needs the store.
+  - A contended metadata-database open (two Arbitraitor processes opening
+    the same store within milliseconds, e.g. two concurrent fetches) now
+    retries with a short backoff for a bounded window instead of failing
+    on the first attempt. If another process still holds the store after
+    the retry budget, the operation fails closed with a diagnostic that
+    names the situation and how to find the holder
+    (`pgrep -af arbitraitor`) instead of the raw redb lock message. The
+    same treatment applies to the durable spent-nonce store.
+  - `arbitraitor doctor` gains a `legacy_store` check that warns when the
+    pre-cache-root store location `~/.arbitraitor/cas` still exists
+    alongside the active `$XDG_CACHE_HOME/arbitraitor/cas` store. The
+    check is diagnostic only: it never migrates, moves, or deletes the
+    legacy store.
 - **curl/wget wrapper: scheme-less `host[:port]/path` arguments are
   normalized to `http://`, the wrapper's URL diagnostic states every
   accepted form, and `-f`/`-s` no longer silence the gate's own
