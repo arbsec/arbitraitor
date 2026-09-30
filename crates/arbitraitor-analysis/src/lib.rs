@@ -690,11 +690,26 @@ fn derive_verdict(findings: &[Finding], detector_results: &[DetectorResult]) -> 
         .any(|finding| finding.severity == Severity::High)
     {
         Verdict::Prompt
-    } else if findings.is_empty() {
-        Verdict::Pass
-    } else {
+    } else if findings
+        .iter()
+        .any(|finding| severity_gates_release(finding.severity))
+    {
+        // Medium or Low: findings at or above the Warn threshold, human
+        // review recommended.
         Verdict::Warn
+    } else {
+        // Only Informational observations (e.g. template URLs inside a
+        // downloaded document's content, issue #751): recorded on the
+        // receipt, but they do not hold the artifact from release —
+        // matching the documented severity→action table (Medium→Warn,
+        // Low→Pass) in the inspect guide.
+        Verdict::Pass
     }
+}
+
+/// Returns `true` for severities that gate release behind a warning.
+fn severity_gates_release(severity: Severity) -> bool {
+    matches!(severity, Severity::Medium | Severity::Low)
 }
 
 /// Detector that records artifact-classifier coverage and basic artifact hazards.

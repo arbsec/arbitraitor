@@ -11,11 +11,17 @@
 //! exhaustion through hostile inputs.
 //!
 //! The [`UrlDiscoveryDetector`] implements the [`crate::Detector`] trait so
-//! that HTML and JSON artifacts pass the mandatory-coverage gate. The detector
-//! reports dynamic URL expressions
-//! — URLs containing unresolved template placeholders — as Medium-severity
-//! findings. Static URLs are not findings; wiring them into the recursive
-//! retrieval policy remains future work.
+//! that HTML and JSON artifacts pass the mandatory-coverage gate. Dynamic URL
+//! expressions — URLs containing unresolved template placeholders — are
+//! reported as findings whose severity matches how the artifact is consumed:
+//! a Medium execution hazard on executable sources (Python, JavaScript), where
+//! a resolved template URL is a live second-stage fetch the script will
+//! perform; an Informational content observation on data documents (HTML,
+//! JSON, XML), where the URL is inert content that informs downstream
+//! handling but does not gate the fetch of the document itself (issue #751:
+//! a fetched JSON schema full of template-shaped URI *examples* must not
+//! reject the caller's static-URL download). Static URLs are not findings;
+//! wiring them into the recursive retrieval policy remains future work.
 
 #![forbid(unsafe_code)]
 
@@ -68,6 +74,20 @@ pub enum UrlSource {
     Config,
     /// Shell AST literal argument.
     ShellAst,
+}
+
+/// How the analyzed artifact is consumed, scoping finding severity.
+///
+/// A dynamic URL expression in an executable source is an execution
+/// hazard: the script resolves and fetches the URL at runtime. In a data
+/// document it is inert content — recorded as an observation on the
+/// receipt, never used to gate the caller's fetch of the document itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Consumption {
+    /// Executable source (Python, JavaScript): Medium hazard finding.
+    ExecutableSource,
+    /// Data document (HTML, JSON, XML): Informational observation finding.
+    DataDocument,
 }
 
 /// A URL discovered during content analysis.
@@ -414,13 +434,23 @@ fn line_location(source: &str, offset: usize) -> String {
 // Detector
 // ---------------------------------------------------------------------------
 
-/// Detector that scans HTML and JSON artifacts for dynamic URL expressions
+/// Detector that scans HTML, JSON, Python, and JavaScript artifacts for
+/// dynamic URL expressions
 ///
 /// Static URLs are not findings — they are discovery data available to the
 /// recursive retrieval policy and receipt generation. Only URLs
 /// containing unresolved template placeholders (e.g. `${HOST}`, `{{base}}`,
 /// `#{var}`) are reported, because they cannot be statically inspected and
 /// may resolve to untrusted second-stage payloads.
+///
+/// Severity is scoped by how the artifact is consumed: on executable
+/// sources (Python, JavaScript) the expression is a Medium
+/// [`FindingCategory::SuspiciousScriptBehavior`] hazard — the script will
+/// resolve and fetch the URL at runtime. On data documents (HTML, JSON,
+/// XML) it is an Informational [`FindingCategory::NetworkBehavior`]
+/// observation: the URL is inert content of the downloaded artifact, so it
+/// is recorded on the receipt but must not gate the caller's fetch of the
+/// document itself (issue #751).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UrlDiscoveryDetector;
 
@@ -429,7 +459,12 @@ impl Detector for UrlDiscoveryDetector {
         DetectorMetadata {
             id: URL_DISCOVERY_DETECTOR_ID.to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            supported_artifact_kinds: vec![ArtifactKind::Html, ArtifactKind::Json],
+            supported_artifact_kinds: vec![
+                ArtifactKind::Html,
+                ArtifactKind::Json,
+                ArtifactKind::PythonScript,
+                ArtifactKind::JavaScript,
+            ],
             capabilities: vec!["url-discovery".to_owned()],
             is_local: true,
             may_upload: false,
@@ -442,9 +477,16 @@ impl Detector for UrlDiscoveryDetector {
         let source = std::str::from_utf8(ctx.artifact_bytes)
             .map_err(|_| DetectorError::ParseError("artifact is not valid UTF-8".to_owned()))?;
 
-        let source_kind = match ctx.classification.artifact_type {
-            ArtifactType::HtmlDocument | ArtifactType::XmlDocument => UrlSource::Html,
-            ArtifactType::JsonDocument => UrlSource::Json,
+        let (source_kind, consumption) = match ctx.classification.artifact_type {
+            ArtifactType::HtmlDocument | ArtifactType::XmlDocument => {
+                (UrlSource::Html, Consumption::DataDocument)
+            }
+            ArtifactType::JsonDocument => (UrlSource::Json, Consumption::DataDocument),
+            // Executable sources: a resolved template URL is a live
+            // second-stage fetch the script will perform at runtime, so a
+            // discovered expression is an execution hazard (issue #751).
+            ArtifactType::PythonScript => (UrlSource::Python, Consumption::ExecutableSource),
+            ArtifactType::JavaScript => (UrlSource::JavaScript, Consumption::ExecutableSource),
             _ => return Ok(Vec::new()),
         };
 
@@ -481,7 +523,7 @@ impl Detector for UrlDiscoveryDetector {
                     continue;
                 }
                 seen.push(key.clone());
-                findings.push(dynamic_url_finding(ctx, &key.1, source_kind));
+                findings.push(dynamic_url_finding(ctx, &key.1, consumption));
                 if findings.len() >= MAX_URLS {
                     break;
                 }
@@ -513,24 +555,57 @@ fn max_scan_window_stride() -> usize {
 fn dynamic_url_finding(
     ctx: &AnalysisContext<'_>,
     expression: &str,
-    source_kind: UrlSource,
+    consumption: Consumption,
 ) -> Finding {
+    // Executable sources present a real execution hazard: the script will
+    // resolve the template and fetch the URL at runtime. Data documents do
+    // not — the URL is inert content of the already-downloaded artifact
+    // (#751), so the finding informs downstream handling without gating the
+    // caller's fetch of the document itself.
+    let (severity, confidence, category, title, description) = match consumption {
+        Consumption::ExecutableSource => (
+            Severity::Medium,
+            Confidence::Medium,
+            FindingCategory::SuspiciousScriptBehavior,
+            "Dynamic URL expression in script",
+            format!(
+                "A URL containing an unresolved template expression was discovered \
+                 in the script. The placeholder '{expression}' prevents static \
+                 inspection of the final destination. Policy may require sandbox \
+                 execution or block unresolved executable downloads."
+            ),
+        ),
+        Consumption::DataDocument => (
+            Severity::Informational,
+            Confidence::Medium,
+            FindingCategory::NetworkBehavior,
+            "Dynamic URL expression in document",
+            format!(
+                "A URL containing an unresolved template expression was discovered \
+                 in the artifact content. The placeholder '{expression}' is part of \
+                 the document data, not the fetch of this artifact; it is recorded \
+                 as an observation for downstream handling of the content (e.g. do \
+                 not dereference unresolved template URLs)."
+            ),
+        ),
+    };
     Finding {
         id: "url-discovery.dynamic-url-expression".to_owned(),
         detector: URL_DISCOVERY_DETECTOR_ID.to_owned(),
-        category: FindingCategory::SuspiciousScriptBehavior,
-        severity: Severity::Medium,
-        confidence: Confidence::Medium,
-        title: "Dynamic URL expression in artifact".to_owned(),
-        description: format!(
-            "A URL containing an unresolved template expression was discovered in \
-             the artifact. The placeholder '{expression}' prevents static inspection \
-             of the final destination. Policy may require sandbox \
-             execution or block unresolved executable downloads."
-        ),
+        category,
+        severity,
+        confidence,
+        title: title.to_owned(),
+        description,
         evidence: vec![Evidence {
             kind: EvidenceKind::Other,
-            description: format!("dynamic URL template in {source_kind:?} artifact"),
+            description: format!(
+                "dynamic URL template in {} artifact",
+                match consumption {
+                    Consumption::ExecutableSource => "executable-source",
+                    Consumption::DataDocument => "data-document",
+                }
+            ),
             content: Some(expression.to_owned()),
         }],
         artifact_sha256: ctx.artifact_sha256.clone(),
@@ -889,6 +964,16 @@ url = "https://example.com/api"
             meta.supported_artifact_kinds.contains(&ArtifactKind::Json),
             "must support Json"
         );
+        assert!(
+            meta.supported_artifact_kinds
+                .contains(&ArtifactKind::PythonScript),
+            "must support PythonScript"
+        );
+        assert!(
+            meta.supported_artifact_kinds
+                .contains(&ArtifactKind::JavaScript),
+            "must support JavaScript"
+        );
     }
 
     #[test]
@@ -922,7 +1007,10 @@ url = "https://example.com/api"
             .analyze(&test_ctx(html))
             .expect("detector should analyze HTML with dynamic URL");
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Medium);
+        // HTML is a data document: the URL is inert content of the
+        // downloaded artifact (#751), recorded as an Informational
+        // observation rather than a fetch-gating hazard.
+        assert_eq!(findings[0].severity, Severity::Informational);
         assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
         assert_eq!(findings[0].id, "url-discovery.dynamic-url-expression");
         assert!(
@@ -934,14 +1022,65 @@ url = "https://example.com/api"
     }
 
     #[test]
-    fn dynamic_url_in_json_emits_finding() {
+    fn dynamic_url_in_json_emits_informational_observation() {
         let json = br#"{"url": "https://{{base}}/tool"}"#;
         let findings = UrlDiscoveryDetector
             .analyze(&test_ctx(json))
             .expect("detector should analyze JSON with dynamic URL");
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Medium);
+        // #751: a template URL inside a downloaded document is inert
+        // content, not a fetch-gating hazard — recorded as an
+        // Informational observation.
+        assert_eq!(findings[0].severity, Severity::Informational);
+        assert_eq!(findings[0].category, FindingCategory::NetworkBehavior);
         assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
+    }
+
+    #[test]
+    fn dynamic_url_in_python_emits_medium_hazard() {
+        // Python shebang required: without it the bytes classify as
+        // GenericText and the detector's type dispatch returns no findings.
+        let source = b"#!/usr/bin/env python3\nurl = 'https://${HOST}/payload'";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(source))
+            .expect("detector should analyze Python with dynamic URL");
+        assert_eq!(findings.len(), 1);
+        // Executable source: the script resolves and fetches the URL at
+        // runtime, so the finding remains a Medium execution hazard.
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(
+            findings[0].category,
+            FindingCategory::SuspiciousScriptBehavior
+        );
+        assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
+    }
+
+    #[test]
+    fn dynamic_url_in_javascript_emits_medium_hazard() {
+        // Node shebang required: without it the bytes classify as
+        // GenericText and no script-kind detector runs.
+        let source = b"#!/usr/bin/env node\nconst u = `https://#{env}/payload`;";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(source))
+            .expect("detector should analyze JavaScript with dynamic URL");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(
+            findings[0].category,
+            FindingCategory::SuspiciousScriptBehavior
+        );
+    }
+
+    #[test]
+    fn static_urls_in_python_emit_no_findings() {
+        let source = b"url = 'https://example.com/static'";
+        let findings = UrlDiscoveryDetector
+            .analyze(&test_ctx(source))
+            .expect("detector should analyze benign Python");
+        assert!(
+            findings.is_empty(),
+            "static URLs in scripts are discovery data, not findings, got: {findings:?}"
+        );
     }
 
     #[test]
@@ -976,7 +1115,7 @@ url = "https://example.com/api"
             1,
             "template URL past 1 MiB must still be discovered, got: {findings:?}"
         );
-        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].severity, Severity::Informational);
         assert_eq!(findings[0].detector, URL_DISCOVERY_DETECTOR_ID);
     }
 

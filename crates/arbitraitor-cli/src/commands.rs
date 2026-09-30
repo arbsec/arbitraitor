@@ -509,11 +509,22 @@ fn verdict_from_findings(
         .any(|finding| finding.severity == Severity::High)
     {
         Verdict::Prompt
-    } else if findings.is_empty() {
-        fallback
-    } else {
+    } else if findings
+        .iter()
+        .any(|finding| severity_gates_release(finding.severity))
+    {
         Verdict::Warn
+    } else {
+        // No findings, or only Informational observations — the fallback
+        // verdict stands.
+        fallback
     }
+}
+
+/// Returns `true` for severities that gate release behind a warning
+/// (Medium or Low). Informational observations are pass-equivalent (#751).
+fn severity_gates_release(severity: Severity) -> bool {
+    matches!(severity, Severity::Medium | Severity::Low)
 }
 
 fn artifact_type_matches(expected: ArtifactType, actual: ArtifactType) -> bool {

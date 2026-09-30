@@ -141,13 +141,14 @@ arbitraitor inspect https://example.com/install.sh --output json
 | Critical | Block (unless explicitly allowed) |
 | High | Prompt |
 | Medium | Warn |
-| Low | Pass |
+| Low | Warn |
+| Informational | Pass (recorded on the receipt) |
 
 **Verdicts:**
 
 | Verdict | Meaning |
 |---------|---------|
-| Pass | All findings below policy thresholds |
+| Pass | No findings, or only Informational observations |
 | Warn | Findings at or above thresholds, human review recommended |
 | Incomplete | A detector could not complete, blocking by default |
 | Block | Findings exceeded block thresholds |
