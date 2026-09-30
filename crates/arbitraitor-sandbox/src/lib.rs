@@ -10,7 +10,9 @@ mod resource_limits;
 mod seccomp;
 
 pub use landlock::{
-    LandlockAbiVersion, PathRule, access_fs, configure_filesystem_isolation,
+    LandlockAbiVersion, LandlockInstallOutcome, LandlockInstallPlan, LandlockProbe, PathRule,
+    access_fs, capture_landlock_install_plan, capture_landlock_probe,
+    configure_filesystem_isolation, configure_filesystem_isolation_with_plan,
     probe_landlock_abi_version,
 };
 pub use observed::{FileOperation, OBSERVED_EVENT_SCHEMA_VERSION, ObservedEvent, ObservedEventLog};
@@ -431,8 +433,14 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
         // pid/user namespaces (process tree + privilege suppression),
         // `no_new_privs`, and `RLIMIT_*` for both Restricted and Disposable.
         // The filesystem-isolation claim is probe-coupled below (#755).
+        //
+        // The probe verdict is captured through the same
+        // `LandlockProbe` type the `pre_exec` hook consults when deciding
+        // whether to install a ruleset (#754): `Supported` is the only
+        // verdict under which the hook installs anything, so the matrix
+        // and the hook can no longer diverge.
         effective_restricted_controls_on_linux(
-            probe_landlock_abi_version(),
+            capture_landlock_probe(),
             probe_io_uring_available(),
             probe_userns_available(),
             probe_container_runtime(),
@@ -454,17 +462,21 @@ fn effective_restricted_controls(platform: &str) -> EffectiveControls {
 /// unit-testable on hosts whose kernel answer is out of the test's control.
 #[must_use]
 fn effective_restricted_controls_on_linux(
-    landlock_abi_version: Option<LandlockAbiVersion>,
+    landlock_probe: LandlockProbe,
     io_uring_available: Option<bool>,
     userns_available: Option<bool>,
     container_runtime: Option<ContainerRuntime>,
 ) -> EffectiveControls {
     let mut controls = EffectiveControls::all_available();
-    controls.landlock_abi_version = landlock_abi_version;
+    controls.landlock_abi_version = landlock_probe.abi_version();
     controls.io_uring_available = io_uring_available;
     controls.userns_available = userns_available;
     controls.container_runtime = container_runtime;
-    controls.filesystem_isolation = if landlock_abi_version.is_some() {
+    // Mirror the hook's decision exactly: a `Supported` probe is the only
+    // verdict under which `configure_filesystem_isolation` installs a
+    // ruleset (#754). `No` means the hook installs nothing, so the matrix
+    // reports `Unavailable` (fail closed, #755 / ADR-0028).
+    controls.filesystem_isolation = if landlock_probe.is_supported() {
         ControlState::Available
     } else {
         ControlState::Unavailable
@@ -980,7 +992,7 @@ mod tests {
         // The matrix must not claim Available for a control the platform
         // will not deliver, and must keep the None probe datum so consumers
         // can distinguish this host state from arbitrary misconfiguration.
-        let controls = effective_restricted_controls_on_linux(None, None, None, None);
+        let controls = effective_restricted_controls_on_linux(LandlockProbe::No, None, None, None);
         assert_eq!(controls.filesystem_isolation, ControlState::Unavailable);
         assert_eq!(controls.landlock_abi_version, None);
         assert!(controls.has_unavailable());
@@ -1003,7 +1015,7 @@ mod tests {
     #[test]
     fn linux_branch_reports_filesystem_isolation_available_with_landlock_probe() {
         let controls = effective_restricted_controls_on_linux(
-            Some(LandlockAbiVersion::V6),
+            LandlockProbe::Supported(LandlockAbiVersion::V6),
             Some(true),
             Some(true),
             None,

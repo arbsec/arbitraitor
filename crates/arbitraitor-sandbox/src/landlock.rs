@@ -222,25 +222,153 @@ pub const fn probe_landlock_abi_version() -> Option<LandlockAbiVersion> {
     None
 }
 
+/// Captures the running kernel's Landlock ABI probe at ruleset-configuration
+/// time so the effective-controls matrix can be derived from the same probe
+/// the `pre_exec` hook will act on (#754).
+///
+/// The probe is a pure kernel query with no side effects, so calling it
+/// during command configuration (before `fork`) and again inside the child
+/// yields the same answer on a static kernel; capturing once here removes
+/// even that assumption.
+///
+/// Non-Linux platforms have no Landlock UAPI and always report [`Probe::No`].
+#[must_use]
+pub fn capture_landlock_probe() -> LandlockProbe {
+    LandlockProbe::from_probe(probe_landlock_abi_version())
+}
+
+/// The recorded outcome of the Landlock kernel probe backing a ruleset
+/// installation (#754).
+///
+/// This is the single source of truth shared by the `pre_exec` hook and the
+/// effective-controls matrix: probe once, decide enforcement from it, and
+/// report exactly what was decided. Before this type existed the matrix
+/// called [`probe_landlock_abi_version`] while the hook silently no-oped on
+/// the same host, so the reported controls could diverge from enforcement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LandlockProbe {
+    /// The kernel reported an ABI version; rulesets can be installed.
+    Supported(LandlockAbiVersion),
+    /// The kernel has no Landlock UAPI (Linux < 5.13, Landlock LSM
+    /// disabled, or non-Linux platform); ruleset installation no-ops.
+    No,
+}
+
+impl LandlockProbe {
+    /// Classifies a raw [`probe_landlock_abi_version`] result.
+    #[must_use]
+    pub fn from_probe(abi: Option<LandlockAbiVersion>) -> Self {
+        match abi {
+            Some(version) => Self::Supported(version),
+            None => Self::No,
+        }
+    }
+
+    /// Returns the ABI version when the probe succeeded, else `None`.
+    #[must_use]
+    pub const fn abi_version(self) -> Option<LandlockAbiVersion> {
+        match self {
+            Self::Supported(version) => Some(version),
+            Self::No => None,
+        }
+    }
+
+    /// Returns `true` when the probe succeeded and rulesets will be
+    /// installed.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported(_))
+    }
+}
+
+/// The outcome of one ruleset installation recorded by the `pre_exec` hook.
+///
+/// Returned through the hook's error channel: the `Ok` variant reports
+/// successful enforcement, the `Err` variant reports a degraded or absent
+/// installation so the parent can record the truth instead of assuming.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LandlockInstallOutcome {
+    /// The ruleset was created and `landlock_restrict_self` succeeded; the
+    /// child runs under active Landlock confinement.
+    Enforced {
+        /// The kernel ABI version the installed ruleset was built against.
+        abi_version: LandlockAbiVersion,
+    },
+    /// The kernel probe reported no Landlock support, so no ruleset was
+    /// installed (documented degradation, ADR-0021).
+    NoKernelSupport,
+}
+
+/// A Landlock ruleset installation plan captured before `fork`.
+///
+/// Created by [`capture_landlock_install_plan`] and handed to
+/// [`configure_filesystem_isolation_with_plan`]. Keeping the probe verdict in
+/// the plan (instead of re-probing inside the child) is what lets the parent
+/// report the same enforcement state the child will actually run under (#754).
+#[derive(Clone, Debug)]
+pub struct LandlockInstallPlan {
+    captured: Vec<(CString, u64)>,
+    probe: LandlockProbe,
+}
+
+impl LandlockInstallPlan {
+    /// Returns the kernel probe verdict backing this plan.
+    #[must_use]
+    pub const fn probe(&self) -> LandlockProbe {
+        self.probe
+    }
+
+    /// Returns the captured rules as raw path/access pairs.
+    ///
+    /// Empty on non-Linux platforms (no Landlock UAPI to capture against).
+    #[must_use]
+    pub fn captured(&self) -> &[(CString, u64)] {
+        &self.captured
+    }
+
+    /// Maps the plan's probe verdict to the effective-controls state for
+    /// filesystem isolation.
+    ///
+    /// This is the enforcement-truthful mapping: `Supported` is the only
+    /// verdict under which the hook will install a ruleset.
+    #[must_use]
+    pub const fn filesystem_isolation_state(&self) -> crate::ControlState {
+        if self.probe.is_supported() {
+            crate::ControlState::Available
+        } else {
+            crate::ControlState::Unavailable
+        }
+    }
+}
+
+/// Captures a ruleset installation plan: the path rules plus the live
+/// kernel Landlock probe verdict, probed once at configuration time (#754).
+///
+/// Pass the returned plan to [`configure_filesystem_isolation_with_plan`]
+/// and derive the reported `filesystem_isolation` control from
+/// [`LandlockInstallPlan::filesystem_isolation_state`] so the matrix and
+/// the hook act on the same probe answer.
+#[must_use]
+pub fn capture_landlock_install_plan(rules: &[PathRule]) -> LandlockInstallPlan {
+    LandlockInstallPlan {
+        captured: capture_rules(rules),
+        probe: capture_landlock_probe(),
+    }
+}
+
 /// Registers a `pre_exec` closure that installs a Landlock ruleset.
 ///
 /// On Linux kernels that support Landlock (5.13+), the child is denied all
 /// governed filesystem access except the rights explicitly granted by `rules`.
 /// On unsupported kernels, the hook returns success without installing a
 /// ruleset so subprocess plugins degrade gracefully instead of failing to start.
+///
+/// Callers that must report what was actually enforced should use
+/// [`configure_filesystem_isolation_with_plan`] instead, which also returns
+/// the probe verdict backing the installation (#754).
 #[cfg(target_os = "linux")]
 pub fn configure_filesystem_isolation(command: &mut Command, rules: &[PathRule]) {
-    use std::os::unix::process::CommandExt;
-
-    let captured = capture_rules(rules);
-
-    // SAFETY: The registered closure runs in the forked child between `fork`
-    // and `execve`. It calls only async-signal-safe libc/kernel operations:
-    // raw `syscall(2)`, `open(2)`, and `close(2)`. All allocation and path
-    // conversion happen above, before the closure is registered.
-    unsafe {
-        command.pre_exec(move || install_landlock_ruleset(&captured));
-    }
+    configure_filesystem_isolation_with_plan(command, &capture_landlock_install_plan(rules));
 }
 
 /// Registers a filesystem-isolation hook on unsupported platforms.
@@ -249,6 +377,40 @@ pub fn configure_filesystem_isolation(command: &mut Command, rules: &[PathRule])
 /// this unconditionally, but filesystem isolation is enforced only on Linux.
 #[cfg(not(target_os = "linux"))]
 pub fn configure_filesystem_isolation(_command: &mut Command, _rules: &[PathRule]) {}
+
+/// Registers a `pre_exec` closure that installs the Landlock ruleset from
+/// `plan` and reports the installation outcome (#754).
+///
+/// On Linux the returned probe verdict is exactly what the hook will act on:
+/// [`LandlockProbe::Supported`] means the child will run under an installed
+/// ruleset, [`LandlockProbe::No`] means no ruleset will be installed (the
+/// documented kernel-lacking degradation) and the caller must report
+/// filesystem isolation as unavailable. Any hook-internal failure still
+/// surfaces through [`std::process::Command::spawn`] as before — the
+/// spawn fails closed rather than starting an unconstrained child.
+///
+/// On non-Linux platforms the plan is accepted and its probe reported, but
+/// no hook is registered (filesystem isolation is enforced only on Linux).
+pub fn configure_filesystem_isolation_with_plan(
+    command: &mut Command,
+    plan: &LandlockInstallPlan,
+) -> LandlockProbe {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let captured = plan.captured.clone();
+
+        // SAFETY: The registered closure runs in the forked child between `fork`
+        // and `execve`. It calls only async-signal-safe libc/kernel operations:
+        // raw `syscall(2)`, `open(2)`, and `close(2)`. All allocation and path
+        // conversion happen above, before the closure is registered.
+        unsafe {
+            command.pre_exec(move || install_landlock_ruleset(&captured));
+        }
+    }
+    plan.probe
+}
 
 #[cfg(target_os = "linux")]
 fn capture_rules(rules: &[PathRule]) -> Vec<(CString, u64)> {
@@ -262,18 +424,33 @@ fn capture_rules(rules: &[PathRule]) -> Vec<(CString, u64)> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
-fn install_landlock_ruleset(rules: &[(CString, u64)]) -> io::Result<()> {
-    install_landlock_ruleset_with_abi(rules, probe_landlock_abi_version())
+/// Non-Linux platforms have no Landlock UAPI, so no rules are ever
+/// captured; the plan exists for type-consistent probe reporting and its
+/// `captured` field is never read (`configure_filesystem_isolation_with_plan`
+/// registers no hook without a Linux Landlock adapter).
+#[cfg(not(target_os = "linux"))]
+fn capture_rules(_rules: &[PathRule]) -> Vec<(CString, u64)> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
-fn install_landlock_ruleset_with_abi(
+fn install_landlock_ruleset(rules: &[(CString, u64)]) -> io::Result<()> {
+    install_landlock_ruleset_plan(rules, capture_landlock_probe()).map(|_| ())
+}
+
+/// Installs the ruleset for `rules` under `probe`'s verdict, reporting the
+/// recorded outcome on success. The outcome is observable only in-process
+/// (tests, callers running the install directly); the `pre_exec` hook path
+/// discards it because the hook runs in the forked child. Hook failures
+/// still propagate as errors so the spawn fails closed instead of running
+/// an unconstrained child (#754).
+#[cfg(target_os = "linux")]
+fn install_landlock_ruleset_plan(
     rules: &[(CString, u64)],
-    abi: Option<LandlockAbiVersion>,
-) -> io::Result<()> {
-    let Some(abi) = abi else {
-        return Ok(());
+    probe: LandlockProbe,
+) -> io::Result<LandlockInstallOutcome> {
+    let Some(abi) = probe.abi_version() else {
+        return Ok(LandlockInstallOutcome::NoKernelSupport);
     };
     let access_mask = supported_access_mask(abi.get());
     let ruleset_fd = create_ruleset(access_mask)?;
@@ -295,7 +472,8 @@ fn install_landlock_ruleset_with_abi(
         )?;
     }
 
-    restrict_self(ruleset_fd.as_raw_fd())
+    restrict_self(ruleset_fd.as_raw_fd())?;
+    Ok(LandlockInstallOutcome::Enforced { abi_version: abi })
 }
 
 #[cfg(target_os = "linux")]
@@ -399,6 +577,8 @@ fn restrict_self(ruleset_fd: RawFd) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -412,6 +592,95 @@ mod tests {
             PathRule::read_write_execute(path).access,
             access_fs::READ_WRITE_EXECUTE
         );
+    }
+
+    #[test]
+    fn landlock_probe_classifies_probe_results() {
+        assert_eq!(
+            LandlockProbe::from_probe(Some(LandlockAbiVersion::V3)),
+            LandlockProbe::Supported(LandlockAbiVersion::V3)
+        );
+        assert_eq!(LandlockProbe::from_probe(None), LandlockProbe::No);
+        assert_eq!(
+            LandlockProbe::Supported(LandlockAbiVersion::V1).abi_version(),
+            Some(LandlockAbiVersion::V1)
+        );
+        assert_eq!(LandlockProbe::No.abi_version(), None);
+        assert!(LandlockProbe::Supported(LandlockAbiVersion::V2).is_supported());
+        assert!(!LandlockProbe::No.is_supported());
+    }
+
+    #[test]
+    fn capture_landlock_probe_agrees_with_direct_probe() {
+        assert_eq!(
+            capture_landlock_probe().abi_version(),
+            probe_landlock_abi_version(),
+            "capture_landlock_probe must report exactly the direct probe result"
+        );
+    }
+
+    #[test]
+    fn install_plan_reports_enforcement_truthful_state() {
+        // Whatever the host answers, the plan's state must match its probe:
+        // Supported -> Available (hook installs), No -> Unavailable (hook
+        // no-ops). This is the #754 contract between matrix and hook.
+        let plan = capture_landlock_install_plan(&[]);
+        match plan.probe() {
+            LandlockProbe::Supported(abi) => {
+                assert_eq!(
+                    plan.filesystem_isolation_state(),
+                    crate::ControlState::Available
+                );
+                assert_eq!(plan.probe().abi_version(), Some(abi));
+            }
+            LandlockProbe::No => {
+                assert_eq!(
+                    plan.filesystem_isolation_state(),
+                    crate::ControlState::Unavailable
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_plan_probe_matches_live_kernel() {
+        // On a live Linux host the captured plan's probe must equal a fresh
+        // kernel probe: the capture is a pure kernel query.
+        let plan = capture_landlock_install_plan(&[]);
+        assert_eq!(
+            plan.probe().abi_version(),
+            probe_landlock_abi_version(),
+            "captured plan probe diverged from the live kernel probe"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_plan_outcome_matches_probe_on_this_host() {
+        // The plan path records what the hook actually did: Enforced only
+        // when the probe was Supported, NoKernelSupport only when it was No.
+        // `landlock_restrict_self` requires `no_new_privs` in the calling
+        // thread; every production call site registers the
+        // `configure_command` (NNP) hook before the Landlock hook, so this
+        // in-process test mirrors that ordering.
+        let nnp = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1_u64, 0_u64, 0_u64, 0_u64) };
+        assert_eq!(
+            nnp, 0,
+            "PR_SET_NO_NEW_PRIVS must succeed in the test thread"
+        );
+        let plan = capture_landlock_install_plan(&[]);
+        let outcome = install_landlock_ruleset_plan(&plan.captured, plan.probe())
+            .expect("ruleset install must not fail");
+        match (plan.probe(), outcome) {
+            (LandlockProbe::Supported(abi), LandlockInstallOutcome::Enforced { abi_version }) => {
+                assert_eq!(abi_version, abi);
+            }
+            (LandlockProbe::No, LandlockInstallOutcome::NoKernelSupport) => {}
+            (probe, outcome) => {
+                panic!("probe/outcome mismatch: probe={probe:?} outcome={outcome:?}")
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -486,7 +755,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn graceful_degradation_on_unsupported_kernel() -> Result<(), Box<dyn std::error::Error>> {
-        install_landlock_ruleset_with_abi(&[], None)?;
+        // Probe = No must install nothing and report the degradation instead
+        // of silently claiming success with an empty ruleset (#754).
+        let outcome = install_landlock_ruleset_plan(&[], LandlockProbe::No)?;
+        assert_eq!(outcome, LandlockInstallOutcome::NoKernelSupport);
         Ok(())
     }
 
