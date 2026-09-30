@@ -26,8 +26,10 @@
 //! through [`ArbitraitorBuilder::policy`]), the engine applies its built-in
 //! verdict derivation over the analysis findings: any detector failure
 //! produces [`Verdict::Incomplete`] (fail-closed, spec §18.3), a critical
-//! finding blocks, a high finding prompts, no findings pass, and anything
-//! else warns. Non-interactive surfaces that need a stricter default pass
+//! finding blocks, a high finding prompts, a Medium or Low finding warns, and
+//! no findings — or only Informational observations, which are content
+//! annotations rather than execution hazards (issue #751) — passes.
+//! Non-interactive surfaces that need a stricter default pass
 //! [`FAIL_CLOSED_POLICY_TOML`] instead.
 //!
 //! # State machine

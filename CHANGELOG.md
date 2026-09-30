@@ -167,6 +167,41 @@ caps pending record files at
 
 ### Fixed
 
+- **url-discovery: template URLs inside a downloaded data document no longer
+  reject the caller's static-URL fetch** (#751) — fetching a static, literal
+  URL whose response is a data document full of template-shaped URI examples
+  (e.g. `curl -o x.json https://docs.renovatebot.com/renovate-schema.json`)
+  deterministically failed with `verdict: Warn` and 4×
+  `url-discovery.dynamic-url-expression` Medium findings: the detector
+  attributed URL-shaped strings found *inside* the downloaded artifact to the
+  fetch being wrapped, and the built-in verdict ladder warned on any
+  non-Informational finding, so the transfer was hard-rejected (exit 10) and
+  the consumer never received the bytes. Two coordinated changes:
+  - **Detector severity is scoped by how the artifact is consumed.** On
+    executable sources (Python, JavaScript — newly added to
+    `UrlDiscoveryDetector`'s supported kinds) a resolved template URL is a
+    live second-stage fetch the script will perform, so the finding stays a
+    Medium `SuspiciousScriptBehavior` hazard. On data documents (HTML, JSON,
+    XML) the URL is inert content of the already-downloaded artifact: the
+    finding is now Informational `NetworkBehavior` — still recorded on the
+    receipt (mandatory coverage for HTML/JSON is unchanged), but no longer
+    gating the fetch of the document itself. `curl URL | bash`-style
+    download-to-execute hazards are unaffected: they fire via the AST-based
+    shell detector (`download-pipe-execute`, Critical), not via
+    url-discovery.
+  - **Informational findings are pass-equivalent in the built-in verdict
+    ladder** (`AnalysisCoordinator::derive_verdict` and the CLI's
+    `verdict_from_findings`), matching the documented severity→action table
+    (Medium→Warn). The configured-policy path is untouched: repos that want
+    Informational findings to block can express that with a policy rule.
+  Regression tests reproduce the #751 scenario (JSON schema fixture with 4
+  template URI examples → `Verdict::Pass`, all 4 findings recorded) and the
+  negative case (Python/JavaScript script with a dynamic URL construction →
+  Medium finding, `Verdict::Warn`). The inspect guide's severity→action
+  table now also documents the pre-existing built-in behavior for Low
+  (Warn — previously the table claimed Pass, contradicting the shipped
+  derivation; no Low-severity producer exists in the default detector set,
+  so observed behavior is unchanged) and adds the Informational row.
 - **curl/wget wrapper: scheme-less `host[:port]/path` arguments are
   normalized to `http://`, the wrapper's URL diagnostic states every
   accepted form, and `-f`/`-s` no longer silence the gate's own

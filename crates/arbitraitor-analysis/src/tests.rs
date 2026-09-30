@@ -1019,17 +1019,93 @@ fn json_artifact_does_not_block_when_url_discovery_registered() {
 }
 
 #[test]
-fn html_with_dynamic_url_expression_emits_warn_not_pass() {
+fn html_with_dynamic_url_expression_emits_hazard_finding() -> Result<(), Box<dyn std::error::Error>>
+{
     let coordinator = AnalysisCoordinator::new();
     let html = b"<!DOCTYPE html>\n<a href=\"https://${HOST}/install.sh\">link</a>\n";
     let result = coordinator.analyze(html);
 
-    assert_eq!(result.verdict, Verdict::Warn);
-    assert!(
-        result
-            .findings
-            .iter()
-            .any(|f| f.id == "url-discovery.dynamic-url-expression"),
-        "dynamic URL expression should produce a finding"
+    // #751: the template URL is content of the already-downloaded document,
+    // so the finding is an Informational observation and the document's own
+    // fetch verdict stays Pass.
+    assert_eq!(result.verdict, Verdict::Pass);
+    let finding = result
+        .findings
+        .iter()
+        .find(|f| f.id == "url-discovery.dynamic-url-expression")
+        .ok_or("dynamic URL expression should still be recorded")?;
+    assert_eq!(finding.severity, Severity::Informational);
+    Ok(())
+}
+
+#[test]
+fn json_with_template_uri_examples_passes_with_findings_recorded() {
+    // Regression for issue #751: `curl -o x.json https://docs.renovatebot.com/
+    // renovate-schema.json` — the caller's URL is a static literal, but the
+    // downloaded Renovate JSON schema contains template-shaped URI examples.
+    // The artifact-content findings are recorded on the receipt while the
+    // fetch of the requested URL itself passes.
+    let coordinator = AnalysisCoordinator::new();
+    let json = br#"{
+        "type": "object",
+        "properties": {
+            "example1": { "type": "string", "format": "uri", "examples": ["https://${endpoint}/api/v1"] },
+            "example2": { "type": "string", "format": "uri", "examples": ["https://{{registry}}/v2/repo"] },
+            "example3": { "type": "string", "format": "uri", "examples": ["https://#{mirror}/pkg"] },
+            "example4": { "type": "string", "format": "uri", "examples": ["https://${host}/files"] }
+        }
+    }"#;
+    let result = coordinator.analyze(json);
+
+    assert_eq!(
+        result.classification.artifact_type,
+        ArtifactType::JsonDocument
     );
+    let findings: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| f.id == "url-discovery.dynamic-url-expression")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        4,
+        "all four template URI examples must be recorded, got: {findings:?}"
+    );
+    for finding in &findings {
+        assert_eq!(finding.severity, Severity::Informational);
+        assert_eq!(finding.category, FindingCategory::NetworkBehavior);
+    }
+    assert_eq!(
+        result.verdict,
+        Verdict::Pass,
+        "artifact-content observations must not reject the fetch of a \
+         static caller URL (#751)"
+    );
+}
+
+#[test]
+fn python_script_with_dynamic_url_still_warns() -> Result<(), Box<dyn std::error::Error>> {
+    // Negative test: on executable sources a resolved template URL is a live
+    // second-stage fetch, so the hazard finding still gates the artifact.
+    let coordinator = AnalysisCoordinator::new();
+    let script = b"#!/usr/bin/env python3\nurl = 'https://${HOST}/payload'\n";
+    let result = coordinator.analyze(script);
+
+    let finding = result
+        .findings
+        .iter()
+        .find(|f| f.id == "url-discovery.dynamic-url-expression")
+        .ok_or("script hazard finding must fire")?;
+    assert_eq!(finding.severity, Severity::Medium);
+    assert_eq!(result.verdict, Verdict::Warn);
+    Ok(())
+}
+
+#[test]
+fn informational_findings_are_pass_equivalent() {
+    // Only Informational observations — no Critical/High/Medium/Low
+    // findings — must not hold the artifact from release.
+    let coordinator = AnalysisCoordinator::with_detectors(vec![]);
+    let result = coordinator.analyze(b"plain text");
+    assert_eq!(result.verdict, Verdict::Pass);
 }
