@@ -167,6 +167,37 @@ caps pending record files at
 
 ### Fixed
 
+- **curl/wget wrapper: scheme-less `host[:port]/path` arguments are
+  normalized to `http://`, the wrapper's URL diagnostic states every
+  accepted form, and `-f`/`-s` no longer silence the gate's own
+  diagnostic** (#763) — three fixes to the wrapper diagnostics path:
+  - A scheme-less `host:port/path` argument (the shape of countless health
+    checks, `curl localhost:8123/health`) is now defaulted to `http://` by
+    the wrapper parsers — the same default real `curl`/`wget` apply — so it
+    flows through the normal parse/FetchPolicy/SSRF pipeline instead of
+    being rejected as a missing URL. Recognition covers dotted hosts,
+    `localhost`, `host:port`, and bracketed IPv6 (`[::1]:8080/x`), and is
+    deliberately conservative elsewhere: option values (`-o
+    download.log`) are never mistaken for URLs, a scheme-qualified
+    positional always outranks an earlier scheme-less one for the
+    single-URL accessor, and userinfo form (`user:pass@host`) needs an
+    explicit `http://` prefix. Whether plaintext `http` is fetchable
+    remains governed entirely by fetch policy; the normalization only
+    supplies the default scheme, it does not weaken any policy check
+    (`ftp://` and other opaque schemes are still rejected).
+  - The wrapper's missing-URL diagnostic no longer self-contradicts: it
+    previously demanded "an `http://` or `https://` URL argument" while the
+    same invocation's fetch policy refused plaintext `http`. It now states
+    the actual accepted forms: `http://host[:port]/path`,
+    `https://host[:port]/path`, or `host[:port]/path` (scheme-less defaults
+    to `http`).
+  - `curl -sf <url>` no longer fails with a bare non-zero exit and an empty
+    stderr: the CLI's mapped-exit-code path (`curl` exit 6/7/22/28/60) used
+    to call `std::process::exit` before `main`'s error printer ran, so the
+    rejection diagnostic vanished exactly when `-s`/`-f` were present. The
+    diagnostic is now printed before the mapped exit — quiet flags silence
+    the *tool's* output, not a security gate's verdict (same reasoning as
+    the unconditional #761 verdict banner).
 - **TLS-verification-disabling flags are rejected by the curl/wget
   wrappers** (#769) — `curl -k` / `--insecure` and wget
   `--no-check-certificate` previously passed `arbitraitor wrap` (and the

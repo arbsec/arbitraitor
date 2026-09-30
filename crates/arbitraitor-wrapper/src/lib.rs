@@ -176,10 +176,39 @@ pub fn remote_name_from_url(url: &str) -> Result<String, WrapperError> {
     Ok(name.to_owned())
 }
 
+/// How a parsed URL was sourced, tracked so a scheme-qualified URL outranks
+/// an earlier scheme-less one for the single-URL accessor. Decided on raw
+/// tokens because normalization erases the distinction (a scheme-less
+/// `host:8080/x` becomes `http://…`-prefixed).
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum UrlExplicitness {
+    /// A scheme-less positional, normalized to `http://…`.
+    #[default]
+    Schemeless,
+    /// A token with an explicit scheme prefix.
+    Explicit,
+}
+
+impl UrlExplicitness {
+    /// Classifies a raw token by whether it carries an explicit scheme
+    /// prefix. Must be called before normalization, which erases the
+    /// scheme-less/explicit distinction for `http://` results.
+    fn from_raw(token: &str) -> Self {
+        if looks_like_explicit_url(token) {
+            Self::Explicit
+        } else {
+            Self::Schemeless
+        }
+    }
+}
+
 struct CurlParser<'a> {
     argv: &'a [String],
     index: usize,
     args: CurlArgs,
+    /// How the URL in `args.url` was sourced, tracked so a scheme-qualified
+    /// URL outranks an earlier scheme-less one for the single-URL accessor.
+    url_explicit: UrlExplicitness,
 }
 impl<'a> CurlParser<'a> {
     fn new(argv: &'a [String]) -> Self {
@@ -188,6 +217,7 @@ impl<'a> CurlParser<'a> {
             argv,
             index,
             args: CurlArgs::default(),
+            url_explicit: UrlExplicitness::default(),
         }
     }
 
@@ -200,7 +230,7 @@ impl<'a> CurlParser<'a> {
             } else if token.starts_with('-') && token != "-" {
                 self.parse_short_options(&token)?;
             } else if looks_like_url(&token) {
-                self.set_positional_url(token);
+                self.set_positional_url(&token);
             }
         }
         Ok(std::mem::take(&mut self.args))
@@ -214,7 +244,7 @@ impl<'a> CurlParser<'a> {
 
     fn parse_positionals_after_separator(&mut self) {
         while let Some(token) = self.next_token() {
-            self.set_positional_url(token);
+            self.set_positional_url(&token);
         }
     }
 
@@ -243,7 +273,10 @@ impl<'a> CurlParser<'a> {
             "--compressed" => self.args.compressed = true,
             "--request" => self.args.request_method = Some(self.option_value(name, inline_value)?),
             "--head" => self.args.head = true,
-            "--url" => self.args.url = Some(self.option_value(name, inline_value)?),
+            "--url" => {
+                let value = self.option_value(name, inline_value)?;
+                self.args.url = Some(normalize_wrapper_url(&value));
+            }
             "--form"
             | "--upload-file"
             | "--user"
@@ -349,7 +382,7 @@ impl<'a> CurlParser<'a> {
     fn consume_unknown_option_value(&mut self) {
         if let Some(next) = self.argv.get(self.index)
             && !is_flag_like(next)
-            && !looks_like_url(next)
+            && !looks_like_explicit_url(next)
         {
             let _ = self.next_token();
         }
@@ -373,11 +406,25 @@ impl<'a> CurlParser<'a> {
             })
     }
 
-    fn set_positional_url(&mut self, token: String) {
-        if self.args.url.is_none() {
-            self.args.url = Some(token.clone());
+    fn set_positional_url(&mut self, token: &str) {
+        // Explicitness is decided on the RAW token: after normalization a
+        // scheme-less `host:8080/x` is also `http://…`-prefixed and would
+        // be indistinguishable from an explicit `http://` URL.
+        let url_explicit = UrlExplicitness::from_raw(token);
+        let url = normalize_wrapper_url(token);
+        // A scheme-qualified URL always wins the single-URL accessor, even
+        // if a scheme-less positional appeared first (`curl host:8080/x
+        // https://real/x` mirrors curl fetching both, with `url` reporting
+        // the explicitly-schemed one). Two scheme-less positionals keep
+        // first-wins.
+        let replaces = self.args.url.is_none()
+            || (url_explicit == UrlExplicitness::Explicit
+                && self.url_explicit != UrlExplicitness::Explicit);
+        if replaces {
+            self.url_explicit = url_explicit;
+            self.args.url = Some(url.clone());
         }
-        self.args.urls.push(token);
+        self.args.urls.push(url);
     }
 }
 
@@ -392,6 +439,96 @@ fn looks_like_url(token: &str) -> bool {
         || token.starts_with("https://")
         || token.starts_with("ftp://")
         || token.starts_with("ftps://")
+        || is_schemeless_host_url(token)
+}
+
+/// Conservative URL predicate for *option-value consumption* decisions.
+///
+/// Unknown options consume their value unless it is flag-like or a
+/// scheme-qualified URL. The scheme-less heuristic is deliberately excluded
+/// here: an unknown option's value (e.g. `-o download.log`, `-Z file.txt`)
+/// must be consumed as a value, never mistaken for a fetch target, even
+/// though the same token in a genuine positional slot would be a URL.
+fn looks_like_explicit_url(token: &str) -> bool {
+    token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("ftp://")
+        || token.starts_with("ftps://")
+}
+
+/// True when `token` is a scheme-less `host[:port][/path]` argument that real
+/// `curl`/`wget` would treat as an `http://` URL (curl's default protocol).
+///
+/// Recognizes dotted hosts (`example.com`), `localhost`, port syntax
+/// (`host:8080`), and bracketed IPv6 (`[::1]:8080/x`). userinfo form
+/// (`user:pass@host`) is deliberately NOT recognized — the parser cannot
+/// reliably separate credentials from `host:port` shape, and such URLs are
+/// rare in wrapper invocations; callers needing them should use an explicit
+/// `http://` prefix.
+///
+/// Deliberately conservative to avoid misclassifying plain option values:
+/// the token must carry one of the shapes above. A bare single label
+/// without separators (`5`) is left alone even though real curl would
+/// resolve it as a hostname — the parser cannot distinguish that from an
+/// unknown option's value, and failing to fetch is safer than consuming an
+/// option value as a fetch target. Tokens with an explicit `scheme:` prefix
+/// are excluded here; they are handled by the exact prefix checks in
+/// [`looks_like_url`] / [`looks_like_explicit_url`] or by the fetch layer's
+/// own scheme policy.
+fn is_schemeless_host_url(token: &str) -> bool {
+    if token.contains("://") {
+        return false;
+    }
+    let authority = token.split(['/', '?', '#']).next().unwrap_or("");
+    // Bracketed IPv6 literal: `[addr]` or `[addr]:port`. The address itself
+    // may contain colons, so the host is the bracketed span, not the text
+    // before the last colon.
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((addr, port_part)) = rest.split_once(']') else {
+            return false;
+        };
+        if addr.is_empty()
+            || !addr
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return false;
+        }
+        // Optional `:port` after the closing bracket must be numeric.
+        return port_part.is_empty()
+            || port_part
+                .strip_prefix(':')
+                .is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    }
+    if authority.contains('@') {
+        return false;
+    }
+    // Port syntax requires an actual port after the colon (`host:8080`); a
+    // bare trailing colon (`8080:`) does not carry the host:port signal on
+    // its own.
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(h, p)| (h, Some(p)));
+    let has_port = port.is_some_and(|p| !p.is_empty());
+    let plausible_host = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | '%'));
+    plausible_host && (has_port || host.contains('.') || host.eq_ignore_ascii_case("localhost"))
+}
+
+/// Normalizes a scheme-less `host[:port][/path]` argument to the `http://`
+/// URL that real `curl`/`wget` would fetch (their default protocol), so the
+/// argument flows through the same parse/FetchPolicy/SSRF pipeline as an
+/// explicit `http://` URL. Scheme-qualified URLs pass through unchanged;
+/// whether plaintext `http` is fetchable remains governed by fetch policy.
+#[must_use]
+pub fn normalize_wrapper_url(url: &str) -> String {
+    if looks_like_url(url) && !url.contains("://") {
+        format!("http://{url}")
+    } else {
+        url.to_owned()
+    }
 }
 
 fn is_flag_like(token: &str) -> bool {
@@ -407,8 +544,8 @@ fn parse_header(header: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurlArgs, WrapperError, is_critical_unsupported_option, parse_curl_args,
-        remote_name_from_url,
+        CurlArgs, WrapperError, is_critical_unsupported_option, is_schemeless_host_url,
+        normalize_wrapper_url, parse_curl_args, remote_name_from_url,
     };
 
     #[test]
@@ -452,6 +589,123 @@ mod tests {
         assert!(args.silent);
         assert!(args.show_error);
         assert!(args.follow_redirects);
+        Ok(())
+    }
+
+    #[test]
+    fn schemeless_host_url_is_normalized_to_http() -> Result<(), WrapperError> {
+        // Real curl defaults a scheme-less argument to http; the wrapper
+        // must do the same so the URL flows through the normal
+        // FetchPolicy/SSRF pipeline instead of being rejected outright.
+        let args: Vec<String> = ["localhost:8123/health"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&args)?;
+        assert_eq!(parsed.url.as_deref(), Some("http://localhost:8123/health"));
+        assert_eq!(parsed.urls, ["http://localhost:8123/health"]);
+
+        let dotted: Vec<String> = ["example.com/path?q=1"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&dotted)?;
+        assert_eq!(parsed.url.as_deref(), Some("http://example.com/path?q=1"));
+
+        // Scheme-qualified URLs pass through byte-for-byte.
+        let explicit: Vec<String> = ["https://example.com/x"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&explicit)?;
+        assert_eq!(parsed.url.as_deref(), Some("https://example.com/x"));
+
+        // The --url= form is normalized too.
+        let inline: Vec<String> = ["--url=example.com:8080/x"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&inline)?;
+        assert_eq!(parsed.url.as_deref(), Some("http://example.com:8080/x"));
+        Ok(())
+    }
+
+    #[test]
+    fn schemeless_normalization_stays_conservative() {
+        use super::{is_schemeless_host_url, normalize_wrapper_url};
+
+        // Accepted shapes: port syntax, dotted host, localhost.
+        assert!(is_schemeless_host_url("host:8080/path"));
+        assert!(is_schemeless_host_url("example.com"));
+        assert!(is_schemeless_host_url("localhost"));
+        assert_eq!(
+            normalize_wrapper_url("host:8080/path"),
+            "http://host:8080/path"
+        );
+        assert_eq!(normalize_wrapper_url("example.com"), "http://example.com");
+
+        // Not URL-shaped: unknown-option values must never become fetch
+        // targets. A bare token with no dot/port (`5`) is left untouched;
+        // dotted tokens like `install.sh` look like a hostname to curl too
+        // (same recognition risk the pre-existing ftp:// prefix check
+        // carried), so they are accepted as URLs.
+        assert!(!is_schemeless_host_url("5"));
+        assert!(is_schemeless_host_url("install.sh"));
+        assert_eq!(normalize_wrapper_url("5"), "5");
+        assert_eq!(normalize_wrapper_url("install.sh"), "http://install.sh");
+
+        // Explicit non-default schemes are never rewritten; the fetch
+        // layer's scheme policy governs them (ftp:// stays opaque).
+        assert_eq!(
+            normalize_wrapper_url("ftp://example.com/f"),
+            "ftp://example.com/f"
+        );
+        assert_eq!(
+            normalize_wrapper_url("https://example.com/x"),
+            "https://example.com/x"
+        );
+        assert_eq!(
+            normalize_wrapper_url("http://example.com/x"),
+            "http://example.com/x"
+        );
+    }
+
+    #[test]
+    fn unknown_option_values_are_never_mistaken_for_schemeless_urls() -> Result<(), WrapperError> {
+        // Regression (review round 1, HIGH-1): the scheme-less heuristic
+        // must not apply to option-value consumption — `-o download.log` is
+        // a value, and the later scheme-qualified positional must survive
+        // as the parsed URL.
+        let args: Vec<String> = ["-o", "download.log", "https://real/x"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&args)?;
+        assert_eq!(parsed.output.as_deref(), Some("download.log"));
+        assert_eq!(parsed.url.as_deref(), Some("https://real/x"));
+        assert_eq!(parsed.urls, ["https://real/x"]);
+        Ok(())
+    }
+
+    #[test]
+    fn scheme_qualified_url_outranks_earlier_schemeless_positional() -> Result<(), WrapperError> {
+        // When both appear, the single-URL accessor reports the
+        // explicitly-schemed URL; all positionals stay in urls[].
+        let args: Vec<String> = ["host:8080/x", "https://real/x"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&args)?;
+        assert_eq!(parsed.url.as_deref(), Some("https://real/x"));
+        assert_eq!(parsed.urls, ["http://host:8080/x", "https://real/x"]);
+
+        // Scheme-less remains the URL when it is the only positional.
+        let only: Vec<String> = ["host:8080/x"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let parsed = parse_curl_args(&only)?;
+        assert_eq!(parsed.url.as_deref(), Some("http://host:8080/x"));
         Ok(())
     }
 
@@ -823,5 +1077,101 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<CurlArgs, WrapperError> {
         parse_curl_args(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    }
+
+    mod url_normalization_proptests {
+        use super::{is_schemeless_host_url, normalize_wrapper_url};
+        use proptest::prelude::*;
+        proptest! {
+            /// Scheme-qualified URLs pass through normalization byte-for-byte,
+            /// regardless of scheme spelling (including case, which URL
+            /// parsing would canonicalize — the wrapper does not).
+            #[test]
+            fn scheme_qualified_urls_pass_through_unchanged(
+                scheme in "(?:http|https|ftp|ftps|HTTP|HTTPS|Ftp)",
+                rest in "[A-Za-z0-9._~:/?#@!$&'()*+,;=%\\[\\]-]{0,80}",
+            ) {
+                let url = format!("{scheme}://{rest}");
+                prop_assert_eq!(normalize_wrapper_url(&url), url);
+            }
+
+            /// Normalization is idempotent: the normalized form of a
+            /// normalized URL is itself.
+            #[test]
+            fn normalization_is_idempotent(
+                host in "[a-z0-9][a-z0-9.-]{0,40}",
+                port in 1u16..=65535,
+                path in "[a-z0-9/._-]{0,40}",
+            ) {
+                let url = format!("{host}:{port}/{path}");
+                let once = normalize_wrapper_url(&url);
+                prop_assert_eq!(normalize_wrapper_url(&once), once);
+            }
+
+            /// No host rewriting: normalization only prepends the default
+            /// scheme to recognized host[:port] shapes; the authority
+            /// substring is preserved byte-for-byte after the prefix.
+            #[test]
+            fn authority_preserved_byte_for_byte(
+                host in "[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+",
+                port in proptest::option::of(1u16..=65535u16),
+                path in "[a-z0-9/._?-]{0,40}",
+            ) {
+                let authority = match port {
+                    Some(p) => format!("{host}:{p}"),
+                    None => host.clone(),
+                };
+                let url = format!("{authority}{path}");
+                let normalized = normalize_wrapper_url(&url);
+                prop_assert_eq!(&normalized, &format!("http://{url}"));
+                prop_assert!(normalized[7..].starts_with(&authority));
+            }
+
+            /// Recognition is conservative: tokens are classified as
+            /// scheme-less URLs exactly when they carry port syntax, a
+            /// dotted host, or the localhost label (digits-only tokens are
+            /// ports-or-numbers: `5` is not, `host:5` is).
+            #[test]
+            fn bare_labels_without_url_shape_are_not_urls(
+                token in "(?:[a-z][a-z0-9_-]{0,20}|[0-9]{1,5}|[a-z]+\\.(?:txt|log|json|bin))",
+            ) {
+                let dotted = token.contains('.');
+                let is_localhost = token == "localhost";
+                prop_assert_eq!(is_schemeless_host_url(&token), dotted || is_localhost);
+            }
+        }
+
+        /// Pinned edge shapes from adversarial review round 1: IPv6
+        /// literals, userinfo, and colon-heavy ambiguity.
+        #[test]
+        fn pinned_edge_shapes() {
+            // Bracketed IPv6 is recognized and normalized.
+            assert!(is_schemeless_host_url("[::1]:8080/x"));
+            assert_eq!(normalize_wrapper_url("[::1]:8080/x"), "http://[::1]:8080/x");
+            assert_eq!(normalize_wrapper_url("[::1]/x"), "http://[::1]/x");
+            // Malformed brackets are not URLs.
+            assert!(!is_schemeless_host_url("[::1:8080/x"));
+            assert!(!is_schemeless_host_url("[]:8080/x"));
+            assert!(!is_schemeless_host_url("[zz]:8080/x"));
+            // Non-numeric port after bracket rejected.
+            assert!(!is_schemeless_host_url("[::1]:port/x"));
+            // userinfo form is deliberately unsupported (documented); use
+            // an explicit http:// prefix instead.
+            assert!(!is_schemeless_host_url("user:pass@host/x"));
+            assert_eq!(
+                normalize_wrapper_url("user:pass@host/x"),
+                "user:pass@host/x"
+            );
+            // Ambiguous colon shapes are not URLs.
+            assert!(!is_schemeless_host_url(":8080"));
+            assert!(!is_schemeless_host_url(":"));
+            assert!(!is_schemeless_host_url("a:b:c"));
+            // Trailing-colon shapes: the pre-colon text is the host, and the
+            // host's own dotted/localhost shape decides. `8080:` (bare
+            // numeric label) is not recognized; `example.com:` is (a real
+            // curl would parse it as `example.com` with an empty port).
+            assert!(!is_schemeless_host_url("8080:"));
+            assert!(is_schemeless_host_url("example.com:"));
+        }
     }
 }

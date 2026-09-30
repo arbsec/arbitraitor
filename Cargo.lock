@@ -679,6 +679,7 @@ version = "0.1.0"
 dependencies = [
  "arbitraitor-model",
  "arbitraitor-workspace-hack",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

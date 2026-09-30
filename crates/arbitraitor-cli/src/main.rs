@@ -38,7 +38,8 @@ use arbitraitor_wrapper::shim::{
     uninstall_shims,
 };
 use arbitraitor_wrapper::{
-    CurlArgs, is_critical_unsupported_option, parse_curl_args, remote_name_from_url,
+    CurlArgs, is_critical_unsupported_option, normalize_wrapper_url, parse_curl_args,
+    remote_name_from_url,
     wget::{WgetRequest, is_critical_wget_option, translate_wget_args},
 };
 use clap::{Args, Parser, Subcommand};
@@ -676,6 +677,13 @@ where
 /// wrapper exists to prevent.
 const PIPE_EXIT_CODE: i32 = 141;
 
+/// Accepted URL forms for wrapper invocations, used verbatim in every
+/// missing-URL diagnostic (#763): it must name every form the wrapper
+/// accepts — including the scheme-less default — so the guidance is
+/// satisfiable and never contradicts the fetch policy's scheme verdicts.
+const WRAPPER_URL_FORMS: &str = "http://host[:port]/path, https://host[:port]/path, \
+     or host[:port]/path (the scheme-less form defaults to http)";
+
 /// Extracts `-o PATH` / `--output PATH` / `--output=PATH` / `-oPATH` from
 /// first-class fetch positional arguments (everything after the URL token).
 #[must_use]
@@ -782,10 +790,24 @@ fn exit_with_curl_code_if_mapped(tool: Option<&str>, error: &miette::Report) {
         .find_map(|cause| cause.downcast_ref::<FetchTransportError>())
         .map(|transport| transport.kind.curl_exit_code());
     if let Some(exit_code) = mapped {
+        // Emit the diagnostic here: `std::process::exit` below bypasses
+        // `main`'s error printer, which previously silenced the gate's
+        // verdict whenever the failure mapped to a curl exit code. The
+        // wrapped tool's quiet flags (`-s`, `-f`) silence curl's own
+        // progress and error output, not a security gate's rejection
+        // (same reasoning as the unconditional #761/#764 verdict banner).
+        let _ = writeln!(std::io::stderr().lock(), "{error:?}");
         std::process::exit(exit_code);
     }
 }
 
+// This function remains over the 100-line function limit (~110 lines) even
+// after the accepted-URL-forms diagnostic was extracted to
+// `WRAPPER_URL_FORMS` (review round 1, LOW-2): the remaining lines are the
+// shim/curl/wget validation fan-out itself, and splitting that apart would
+// trade a readable linear sequence for indirection on a security-gate
+// surface. The scoped allow is retained deliberately.
+#[allow(clippy::too_many_lines)]
 async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
     let (url, output_path, remote_name) = if command.tool.is_some() {
         let target = wrapper_fetch_target(command.tool.as_deref())?;
@@ -820,11 +842,13 @@ async fn wrapper_fetch(command: &FetchCommand, config: &Config) -> Result<()> {
         }
         let url =
             wrapper_url_argument(command.tool.as_deref(), &command.args).ok_or_else(|| {
-                miette::miette!("curl/wget wrapper requires an http:// or https:// URL argument")
+                miette::miette!(
+                    "curl/wget wrapper requires a URL argument in the form {WRAPPER_URL_FORMS}"
+                )
             })?;
         let (output_path, remote_name) =
             wrapper_output_destination(command.tool.as_deref(), &command.args);
-        (url.to_owned(), output_path, remote_name)
+        (url, output_path, remote_name)
     } else {
         let url = command
             .args
@@ -951,7 +975,9 @@ async fn wrap_downloader(command: &WrapCommand, config: &Config) -> Result<()> {
 
     let urls = wrapper_url_arguments(tool, &command.args);
     if urls.is_empty() {
-        miette::bail!("curl/wget wrapper requires at least one http:// or https:// URL argument");
+        miette::bail!(
+            "curl/wget wrapper requires at least one URL argument in the form {WRAPPER_URL_FORMS}"
+        );
     }
 
     let (output_path, remote_name) = wrapper_output_destination(tool, &command.args);
@@ -1186,12 +1212,16 @@ fn wrapper_output_destination(tool: Option<&str>, args: &[String]) -> (Option<St
     }
 }
 
-fn wrapper_url_argument<'a>(tool: Option<&str>, args: &'a [String]) -> Option<&'a str> {
-    match tool.and_then(WrapperTarget::from_binary_name) {
-        Some(WrapperTarget::Curl) => curl_url_argument(args),
-        Some(WrapperTarget::Wget) => wget_url_argument(args),
-        None => curl_url_argument(args).or_else(|| wget_url_argument(args)),
-    }
+fn wrapper_url_argument(tool: Option<&str>, args: &[String]) -> Option<String> {
+    let url = match tool.and_then(WrapperTarget::from_binary_name) {
+        Some(WrapperTarget::Curl) => curl_url_argument(args)?,
+        Some(WrapperTarget::Wget) => wget_url_argument(args)?,
+        None => curl_url_argument(args).or_else(|| wget_url_argument(args))?,
+    };
+    // Emit the parser's normalized form so a scheme-less `host:port/path`
+    // argument flows into the fetch pipeline as the `http://` URL real
+    // curl would fetch, instead of being re-parsed as an unknown scheme.
+    Some(normalize_wrapper_url(url))
 }
 
 /// Returns true if the arguments are a known-safe non-networking invocation
@@ -1229,18 +1259,25 @@ fn curl_url_argument(args: &[String]) -> Option<&str> {
     let url = parsed.url.as_deref()?;
     args.iter()
         .map(String::as_str)
-        .find(|arg| *arg == url)
+        // Scheme-less arguments are normalized to `http://…` by the parser,
+        // so match the original token through the same normalization.
+        .find(|arg| *arg == url || normalize_wrapper_url(arg) == url)
         .or_else(|| {
-            args.iter()
-                .find_map(|arg| arg.strip_prefix("--url=").filter(|v| *v == url))
+            args.iter().find_map(|arg| {
+                arg.strip_prefix("--url=")
+                    .filter(|v| *v == url || normalize_wrapper_url(v) == url)
+            })
         })
 }
 
 fn wget_url_argument(args: &[String]) -> Option<&str> {
     let parsed = translate_wget_args(args).ok()?;
+    let url = parsed.url.as_str();
     args.iter()
         .map(String::as_str)
-        .find(|arg| *arg == parsed.url.as_str())
+        // Scheme-less arguments are normalized to `http://…` by the parser,
+        // so match the original token through the same normalization.
+        .find(|arg| *arg == url || normalize_wrapper_url(arg) == url)
 }
 
 async fn daemon(command: DaemonCommand) -> Result<()> {

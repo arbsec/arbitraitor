@@ -27,6 +27,8 @@ use arbitraitor_model::{
 
 pub use crate::error::WrapperError;
 
+use crate::{is_schemeless_host_url, looks_like_explicit_url, normalize_wrapper_url};
+
 /// Detector identifier reported on findings produced by this wrapper.
 pub const WGET_WRAPPER_DETECTOR: &str = "arbitraitor-wrapper";
 
@@ -149,11 +151,40 @@ pub fn to_fetch_request(wget: &WgetRequest) -> (String, Vec<(String, String)>) {
     (wget.url.clone(), headers)
 }
 
+/// How a parsed URL was sourced, tracked so a scheme-qualified URL outranks
+/// an earlier scheme-less one for the single-URL accessor. Decided on raw
+/// tokens because normalization erases the distinction (a scheme-less
+/// `host:8080/x` becomes `http://…`-prefixed).
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum UrlExplicitness {
+    /// A scheme-less positional, normalized to `http://…`.
+    #[default]
+    Schemeless,
+    /// A token with an explicit scheme prefix.
+    Explicit,
+}
+
+impl UrlExplicitness {
+    /// Classifies a raw token by whether it carries an explicit scheme
+    /// prefix. Must be called before normalization, which erases the
+    /// scheme-less/explicit distinction for `http://` results.
+    fn from_raw(token: &str) -> Self {
+        if looks_like_explicit_url(token) {
+            Self::Explicit
+        } else {
+            Self::Schemeless
+        }
+    }
+}
+
 /// Stateful wget argv parser.
 struct WgetParser<'a> {
     args: &'a [String],
     index: usize,
     url: Option<String>,
+    /// How `url` was sourced, tracked so a scheme-qualified URL outranks an
+    /// earlier scheme-less one for the single-URL accessor.
+    url_explicit: UrlExplicitness,
     urls: Vec<String>,
     output_path: Option<PathBuf>,
     headers: Vec<(String, String)>,
@@ -173,6 +204,7 @@ impl<'a> WgetParser<'a> {
             args,
             index,
             url: None,
+            url_explicit: UrlExplicitness::default(),
             urls: Vec::new(),
             output_path: None,
             headers: Vec::new(),
@@ -189,7 +221,7 @@ impl<'a> WgetParser<'a> {
     fn parse(mut self) -> Result<WgetRequest, WrapperError> {
         while let Some(token) = self.next_token() {
             if self.after_separator {
-                self.set_url(token);
+                self.set_url(&token);
             } else if token == "--" {
                 self.after_separator = true;
             } else if let Some(body) = token.strip_prefix("--") {
@@ -197,7 +229,7 @@ impl<'a> WgetParser<'a> {
             } else if token.len() > 1 && token.starts_with('-') {
                 self.parse_short_options(&token[1..])?;
             } else if looks_like_url(&token) {
-                self.set_url(token);
+                self.set_url(&token);
             }
         }
         let url = self.url.clone().ok_or(WrapperError::MissingUrl)?;
@@ -223,11 +255,23 @@ impl<'a> WgetParser<'a> {
         Some(token)
     }
 
-    fn set_url(&mut self, token: String) {
-        if self.url.is_none() {
-            self.url = Some(token.clone());
+    fn set_url(&mut self, token: &str) {
+        // Explicitness is decided on the RAW token: after normalization a
+        // scheme-less `host:8080/x` is also `http://…`-prefixed and would
+        // be indistinguishable from an explicit `http://` URL.
+        let url_explicit = UrlExplicitness::from_raw(token);
+        let url = normalize_wrapper_url(token);
+        // A scheme-qualified URL always wins the single-URL accessor, even
+        // if a scheme-less positional appeared first. Two scheme-less
+        // positionals keep first-wins.
+        let replaces = self.url.is_none()
+            || (url_explicit == UrlExplicitness::Explicit
+                && self.url_explicit != UrlExplicitness::Explicit);
+        if replaces {
+            self.url_explicit = url_explicit;
+            self.url = Some(url.clone());
         }
-        self.urls.push(token);
+        self.urls.push(url);
     }
 
     fn parse_long_option(&mut self, body: &str) -> Result<(), WrapperError> {
@@ -318,7 +362,11 @@ impl<'a> WgetParser<'a> {
     fn consume_unknown_value(&mut self) {
         if let Some(next) = self.args.get(self.index)
             && !is_flag_like(next)
-            && !looks_like_url(next)
+            // Option-value decisions use the scheme-qualified-only
+            // predicate: an unknown option's value (`-o download.log`) is
+            // a value, never a fetch target. The scheme-less heuristic
+            // applies only to genuine positional URL slots.
+            && !looks_like_explicit_url(next)
         {
             let _ = self.next_token();
         }
@@ -359,6 +407,7 @@ fn looks_like_url(token: &str) -> bool {
         || token.starts_with("https://")
         || token.starts_with("ftp://")
         || token.starts_with("ftps://")
+        || is_schemeless_host_url(token)
 }
 
 fn is_flag_like(token: &str) -> bool {
@@ -869,6 +918,32 @@ mod tests {
                 "https://example.com/c"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn schemeless_host_url_is_normalized_to_http_wget() -> Result<(), WrapperError> {
+        // wget also defaults a scheme-less argument to http.
+        let result = parse(&["wget", "localhost:8123/health"])?;
+        assert_eq!(result.url, "http://localhost:8123/health");
+        assert_eq!(result.urls, ["http://localhost:8123/health"]);
+
+        // Scheme-qualified URLs pass through byte-for-byte.
+        let result = parse(&["wget", "ftp://example.com/f"])?;
+        assert_eq!(result.url, "ftp://example.com/f");
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_option_values_are_never_mistaken_for_schemeless_urls_wget()
+    -> Result<(), WrapperError> {
+        // Regression (review round 1, HIGH-1): `-Z file.txt` consumes its
+        // value as an option value; the later scheme-qualified positional
+        // is the URL, and `file.txt` never becomes `http://file.txt`.
+        let result = parse(&["wget", "-Z", "file.txt", "https://real/x"])?;
+        assert_eq!(result.url, "https://real/x");
+        assert!(!result.urls.contains(&"http://file.txt".to_owned()));
+        assert!(!result.urls.contains(&"file.txt".to_owned()));
         Ok(())
     }
 

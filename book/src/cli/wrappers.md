@@ -319,6 +319,32 @@ silently receive HTML. The wget shim behaves the same for `--spider`: an
 availability probe fails loudly instead of silently downloading the
 document it was only supposed to check for existence.
 
+### URL forms
+
+A URL argument may be scheme-qualified (`http://…` / `https://…`) or
+scheme-less (`host[:port]/path`). A scheme-less argument defaults to
+`http://` — the same default real `curl`/`wget` apply — and then flows
+through the normal fetch pipeline. Whether plaintext `http` is fetchable
+is decided by fetch policy, exactly as for an explicit `http://` URL;
+other schemes (`ftp://`, …) are rejected as unsupported.
+
+Recognition of the scheme-less form is deliberately conservative: dotted
+hosts, `localhost`, `host:port`, and bracketed IPv6 (`[::1]:8080/x`) are
+recognized; a bare single label (`5`) is not. Userinfo URLs
+(`user:pass@host`) are not recognized in the scheme-less form — pass them
+with an explicit `http://` prefix. Option values (`-o download.log`) are
+never mistaken for URLs.
+
+### Diagnostics
+
+The wrapper's rejection diagnostics are always written to stderr, even
+when the wrapped tool passed quiet flags (`-s`, `-q`, `-f`): those flags
+silence the tool's own progress and error output, not a security gate's
+verdict. This includes mapped transport failures (`curl -sf` still prints
+its rejection before exiting with curl's exit code) and the missing-URL
+error, which states every accepted URL form (scheme-qualified and the
+scheme-less `host[:port]/path` default).
+
 TLS-verification-disabling flags are hard-rejected on both wrapper paths:
 `curl -k` / `--insecure` and wget `--no-check-certificate` fail with the
 critical-options error before any network access. Certificate validation
