@@ -7,6 +7,11 @@ compatibility: Requires gh CLI v2.94.0+ (issue types, sub-issues, dependencies),
 
 # github-project-workflow
 
+> **`gh` authentication note**: all `gh` invocations assume `GH_TOKEN` is set from the
+> minting tool (see project workflow policy) — agent sessions MUST prefix every call
+> with `GH_TOKEN="$(cargo run -q -p xtask -- mint-github-token)"`; bare `gh` defaults
+> to personal auth and is the labelled fallback only.
+
 Manages the **issue lifecycle** half of spec-driven delivery: triage → decomposition → ready-queue → claim → block/unblock → reconcile. The sibling skill `github-pr-lifecycle` owns the PR half. This skill is **generic mechanism**; project-specific policy (P0/P1 auto-continuation scheduling, required reviewer domains, security-sensitive path policy) lives in `.agents/project/arbitraitor-workflow.md` and the project config file, never in these instructions.
 
 ## When to use

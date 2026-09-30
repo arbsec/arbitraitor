@@ -96,6 +96,11 @@ overridable via `$ARB_SERVICE_IDENTITIES`).
 
 ### Token minting mechanics
 
+- **Every `gh` invocation in agent sessions MUST be prefixed**
+  `GH_TOKEN="$(cargo run -q -p xtask -- mint-github-token)"` — mint fresh per batch of
+  calls (tokens live ~1 hour; never cached on disk). Bare `gh` defaults to the
+  operator's personal auth and is the labelled-fallback ONLY; an unprefixed `gh ...`
+  command in agent work is a defect, not a shortcut.
 - Mint per operation (tokens expire after ~1 hour; never cached on disk):
   `GH_TOKEN="$(cargo run -p xtask -- mint-github-token)" gh ...`. The subcommand prints
   only the token to stdout; diagnostics go to stderr and never carry secret material.
