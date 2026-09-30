@@ -2327,9 +2327,37 @@ fn wrapper_url_argument_finds_inline_url_option() {
         .collect();
     let url = wrapper_url_argument(Some("curl"), &args);
     assert_eq!(
-        url,
+        url.as_deref(),
         Some("https://example.com/script.sh"),
         "curl --url= must be detected as a URL, not treated as passthrough"
+    );
+}
+
+#[test]
+fn wrapper_url_argument_returns_schemeless_url_normalized_to_http() {
+    let a = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+
+    // A scheme-less host:port argument must surface as the http:// URL real
+    // curl would fetch, so it flows through the normal fetch/SSRF pipeline
+    // instead of being re-parsed as an unknown URI scheme.
+    assert_eq!(
+        wrapper_url_argument(Some("curl"), &a(&["curl", "-sf", "localhost:8123/health"]))
+            .as_deref(),
+        Some("http://localhost:8123/health")
+    );
+    assert_eq!(
+        wrapper_url_argument(Some("wget"), &a(&["wget", "example.com/path"])).as_deref(),
+        Some("http://example.com/path")
+    );
+    // Scheme-qualified URLs are returned unchanged.
+    assert_eq!(
+        wrapper_url_argument(Some("curl"), &a(&["curl", "https://example.com/x"])).as_deref(),
+        Some("https://example.com/x")
+    );
+    // Plain option values are not misread as URLs.
+    assert_eq!(
+        wrapper_url_argument(Some("curl"), &a(&["curl", "-o", "/dev/null", "-s"])),
+        None
     );
 }
 
