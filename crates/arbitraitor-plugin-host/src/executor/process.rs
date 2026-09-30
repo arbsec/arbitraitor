@@ -79,7 +79,11 @@ pub(super) fn plugin_resource_limits() -> ResourceLimits {
         fd_count: Some(FD_LIMIT),
         output_size_bytes: Some(OUTPUT_LIMIT_BYTES),
         // Plugin wall-clock is bounded by wasmtime fuel/epoch interruption,
-        // not a parent-side process-group kill.
+        // not a parent-side process-group kill. Fuel/epoch does not bound a
+        // guest blocked inside a host call (spec §9.1: every host call needs
+        // its own deadline and cancellation), so host calls must stay
+        // individually bounded; a parent-side group kill would not help —
+        // the guest runs in-process, not as a child process.
         wall_clock_secs: None,
     }
 }

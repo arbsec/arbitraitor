@@ -223,20 +223,27 @@ pub enum ExecError {
     },
     /// The child exceeded its wall-clock deadline.
     ///
-    /// The child's entire process group was killed at the deadline and the
-    /// direct child has been reaped. Distinguishing expiry from ordinary
-    /// failure lets callers record "stopped at deadline" rather than a
-    /// crash — see spec §26.3 "complete process tree under … resource
-    /// control" and §9 subprocess controls (timeout and kill-tree).
+    /// The watchdog fired at the deadline, the child's process group was
+    /// killed (the direct child and every descendant that remained in its
+    /// default group; a script that deliberately calls `setsid`/`setpgid`
+    /// creates a session the fence does not reach), and the direct child
+    /// has been reaped — so death is confirmed. Distinguishing expiry from
+    /// ordinary failure lets callers record "stopped at deadline" rather
+    /// than a crash — see spec §26.3 "complete process tree under …
+    /// resource control" and §9 subprocess controls (timeout and
+    /// kill-tree).
     #[error("child exceeded wall-clock deadline of {limit_secs}s and was killed")]
     WallClockExpired {
         /// Configured wall-clock deadline in seconds.
         limit_secs: u64,
     },
-    /// Killing the child's process group at the wall-clock deadline failed.
+    /// Killing the child's process group at the wall-clock deadline failed
+    /// and the child could not be confirmed dead.
     ///
-    /// Fail closed: the child group could not be confirmed dead, so the
-    /// execution is an error, never a silent continuation.
+    /// Fail closed: death is not confirmed, so the execution is an error,
+    /// never a silent continuation. When the direct child is reaped (death
+    /// confirmed), expiry is reported as [`ExecError::WallClockExpired`]
+    /// instead.
     #[error("failed to kill child process group at wall-clock deadline: {source}")]
     WallClockKillFailed {
         /// Source I/O error from the group kill.
@@ -634,9 +641,17 @@ pub struct ResourceLimits {
     ///
     /// Unlike [`Self::cpu_time_secs`] (which does not bound a child that
     /// sleeps or blocks on I/O), this deadline fires even when the child
-    /// consumes no CPU. On expiry the child's entire process group is
-    /// killed (so shell-spawned grandchildren cannot outlive the deadline)
-    /// and the execution fails with [`ExecError::WallClockExpired`].
+    /// consumes no CPU. On expiry the child's process group is killed —
+    /// the direct child and every descendant that remained in its default
+    /// group (a script that deliberately calls `setsid`/`setpgid` creates
+    /// a new session the fence does not reach; that is observable
+    /// malicious behavior, addressed by shell analysis rather than this
+    /// deadline) — and the execution fails with
+    /// [`ExecError::WallClockExpired`].
+    ///
+    /// The deadline is enforced on **every Unix platform** for the script,
+    /// PowerShell, and native paths. The other limits in this struct are
+    /// Linux-only (applied via `prlimit`/`setrlimit`).
     /// `None` disables the deadline — use only for explicitly trusted,
     /// caller-driven paths; mediated execution of untrusted scripts must
     /// keep the default.

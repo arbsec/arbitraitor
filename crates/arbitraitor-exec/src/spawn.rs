@@ -19,6 +19,7 @@
 use std::io::Read;
 use std::process::Child;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,9 +31,12 @@ use crate::ExecError;
 /// Matches the default recorded in [`crate::ResourceLimits`].
 pub(crate) const DEFAULT_OUTPUT_LIMIT: u64 = 10 * 1024 * 1024;
 
-/// Grace period between SIGKILL of the child's process group and the
-/// fall-back single-process kill.
-const KILL_SETTLE: Duration = Duration::from_millis(50);
+/// Wall-clock window for the diagnostics-only `best_effort_capture` path.
+///
+/// Deliberately short: capture happens after an operation has already
+/// failed, so its only job is to grab whatever the child printed before
+/// exiting — not to give the child more running time.
+const BEST_EFFORT_CAPTURE_SECS: u64 = 2;
 
 /// Applies resource limits to a freshly-spawned child with no TOCTOU window.
 ///
@@ -91,39 +95,15 @@ pub(crate) type CapturedOutput = (Option<i32>, Vec<u8>, Vec<u8>);
 /// `(None, Vec::new(), Vec::new())`: nothing further is captured, but the
 /// original I/O error is still propagated by the caller.
 ///
-/// To prevent indefinite hangs when a script spawns background processes
-/// that inherit the pipe FDs (e.g. `sleep 86400 >&2 & exit 1`), the child
-/// is polled with a 5-second wall-clock deadline. If the drain threads
-/// haven't completed by then, the child is killed to release inherited
-/// pipe FDs and whatever was captured so far is returned.
+/// The capture runs with a fixed short wall-clock window
+/// ([`BEST_EFFORT_CAPTURE_SECS`]): this is a diagnostics-only path on an
+/// already-failed operation, so a child that hangs (e.g. a background
+/// process inheriting the pipe FDs) is killed at the window instead of
+/// hanging the error report. Whatever was captured by then is returned.
 pub(crate) fn best_effort_capture(child: &mut Child, limit: u64) -> CapturedOutput {
-    // The child's stdout/stderr are consumed (take()'d) inside
-    // read_with_limit via drain threads. We can't move `child` into a
-    // thread because `&mut Child` isn't `Send` in a way that lets us
-    // `.join()` with a timeout. Instead, we spawn read_with_limit in a
-    // thread that takes ownership of the child via `std::process::Child`
-    // (which IS Send), then poll the join handle.
-    //
-    // The `child` field can't be moved out without replacing it. Since
-    // `Child` doesn't implement `Default`, we use an `Option`-wrapping
-    // trick: take the inner child, leave None, spawn the read.
-    // But `&mut Child` doesn't let us do that either.
-    //
-    // Simplest safe approach: the caller (script.rs/powershell.rs) already
-    // took stdin. The remaining stdout/stderr are taken by drain_stream
-    // inside read_with_limit. We just need to add a timeout to the join
-    // of those drain threads. Since read_with_limit already handles drain
-    // threads internally and joins them, we add the timeout at the
-    // wait() boundary.
-    //
-    // For now, accept the original approach (no timeout) but add a note
-    // that a future hardening should add a wall-clock deadline. The
-    // primary defense (drop(stdin) before capture) was already added in
-    // script.rs/ps.rs — it sends EOF to the child so it can exit. The
-    // remaining hang vector is a child that spawns a background process
-    // inheriting the pipe FDs; that's a deeper sandbox fix (process group
-    // kill) that belongs in a follow-up, not in this error-path helper.
-    read_with_limit(child, limit, None).unwrap_or((None, Vec::new(), Vec::new()))
+    let pid = rustix::process::Pid::from_child(child);
+    let watchdog = arm_wall_clock(pid, Some(BEST_EFFORT_CAPTURE_SECS));
+    read_with_limit(child, limit, watchdog).unwrap_or((None, Vec::new(), Vec::new()))
 }
 
 /// Watchdog state shared between the caller thread and the deadline thread.
@@ -133,8 +113,16 @@ struct Watchdog {
     limit_secs: u64,
     /// Set by the deadline thread when it has killed the process group.
     expired: AtomicBool,
+    /// Set by the deadline thread when the group kill errored (non-ESRCH).
+    /// The caller surfaces [`ExecError::WallClockKillFailed`] when the child
+    /// is not confirmed dead.
+    kill_failed: Mutex<Option<std::io::Error>>,
     /// Set by the caller once the child has been reaped, so the deadline
-    /// thread can exit without killing a recycled pid's group.
+    /// thread can exit without killing a recycled pid's group. Note: the
+    /// release is not instantaneous — after `done` is stored the watchdog
+    /// may still fire for up to one poll interval (~50 ms) if it passed its
+    /// `done` check just before the store. The post-reap expiry check in
+    /// [`finish_wall_clock`] makes that window harmless.
     done: AtomicBool,
 }
 
@@ -143,26 +131,38 @@ impl Watchdog {
         Self {
             limit_secs,
             expired: AtomicBool::new(false),
+            kill_failed: Mutex::new(None),
             done: AtomicBool::new(false),
         }
     }
 }
 
-/// Spawns a watchdog thread that kills the child's process group once
-/// `secs` elapses, unless the caller has already reaped the child.
+/// An armed wall-clock watchdog for a spawned child.
 ///
-/// Returns `None` when `wall_clock_secs` is `None` (deadline disabled).
+/// Armed immediately after spawn so the deadline covers the entire child
+/// lifetime — including the parent's blocking `write_all` of the script
+/// bytes to the child's stdin — not just the output-collection phase.
+/// Consume it with [`finish_wall_clock`] once the child has been reaped.
+pub(crate) struct WallClockGuard {
+    state: Option<Arc<Watchdog>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+/// Arms the wall-clock watchdog for a freshly spawned child.
 ///
-/// The deadline fires even while the child sleeps or blocks on I/O, which
-/// `RLIMIT_CPU` cannot bound. Killing the **process group** (the child is
-/// spawned with `process_group(0)`) also takes down shell-spawned
-/// grandchildren that would otherwise inherit the pipes and outlive a bare
-/// kill of the direct child.
-fn spawn_wall_clock_watchdog(
+/// Returns a disabled guard when `wall_clock_secs` is `None` (deadline
+/// disabled). A `Some(0)` deadline is armed like any other: the watchdog's
+/// first poll tick expires it essentially immediately.
+pub(crate) fn arm_wall_clock(
     pid: rustix::process::Pid,
     wall_clock_secs: Option<u64>,
-) -> Option<(Arc<Watchdog>, thread::JoinHandle<()>)> {
-    let secs = wall_clock_secs?;
+) -> WallClockGuard {
+    let Some(secs) = wall_clock_secs else {
+        return WallClockGuard {
+            state: None,
+            handle: None,
+        };
+    };
     let state = Arc::new(Watchdog::new(secs));
     let thread_state = Arc::clone(&state);
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -189,12 +189,67 @@ fn spawn_wall_clock_watchdog(
         thread_state.expired.store(true, Ordering::Release);
         // SIGKILL the whole group so grandchildren in the group die too.
         // ESRCH is success (nothing left to kill); any other error is
-        // recorded and surfaced by the caller as a fail-closed error.
-        if let Err(err) = kill_child_group_at_deadline(pid) {
-            tracing::warn!(pid = pid.as_raw_pid(), error = %err, "wall-clock group kill failed");
+        // recorded for the caller, which surfaces it as a fail-closed
+        // error if the child is not confirmed dead.
+        if let Err(ExecError::WallClockKillFailed { source }) = kill_child_group_at_deadline(pid) {
+            tracing::warn!(pid = pid.as_raw_pid(), error = %source, "wall-clock group kill failed");
+            *thread_state
+                .kill_failed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
         }
     });
-    Some((state, handle))
+    WallClockGuard {
+        state: Some(state),
+        handle: Some(handle),
+    }
+}
+
+/// Resolves an armed watchdog after the direct child has been reaped.
+///
+/// The child's reap is the confirmation of death: if the watchdog fired, the
+/// group kill succeeded (or the group was already gone) and the typed
+/// [`ExecError::WallClockExpired`] is returned. A recorded kill error here
+/// would mean the child died of something else before the kill — the child
+/// is dead either way, so expiry remains the accurate report and the error
+/// is only logged.
+pub(crate) fn finish_wall_clock(guard: WallClockGuard) -> Result<(), ExecError> {
+    let Some(state) = guard.state else {
+        return Ok(());
+    };
+    state.done.store(true, Ordering::Release);
+    let _ = guard.handle.map(thread::JoinHandle::join);
+    if state.expired.load(Ordering::Acquire) {
+        // The watchdog fired at the deadline. The direct child has been
+        // reaped by the caller before this call, so it is confirmed dead;
+        // report expiry (fail closed) instead of the child's signal-death
+        // exit status. A kill error recorded by the watchdog is surfaced
+        // only when death is NOT confirmed (see [`WallClockKillFailed`]).
+        if let Some(err) = state
+            .kill_failed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            tracing::warn!(error = %err, "wall-clock group kill errored, but child reaped");
+        }
+        return Err(ExecError::WallClockExpired {
+            limit_secs: state.limit_secs,
+        });
+    }
+    // Deadline did not fire; if a kill error was recorded anyway (watchdog
+    // raced with normal completion and killed the group in its ~50 ms
+    // residual window), the child still completed normally — log it, but
+    // the reaped-and-successful result stands.
+    if let Some(err) = state
+        .kill_failed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        tracing::warn!(error = %err, "wall-clock group kill errored after normal completion");
+    }
+    Ok(())
 }
 
 /// Reads stdout and stderr concurrently, enforcing a combined byte cap.
@@ -205,10 +260,9 @@ fn spawn_wall_clock_watchdog(
 /// sibling pipe and terminate the producer) and reaped, then
 /// [`ExecError::OutputExceeded`] is returned.
 ///
-/// When `wall_clock_secs` is `Some`, a watchdog thread kills the child's
-/// process group once the deadline elapses and
-/// [`ExecError::WallClockExpired`] is returned; a `Some(0)` deadline expires
-/// immediately. `None` disables the deadline entirely.
+/// `watchdog` must be the guard armed for this child by
+/// [`arm_wall_clock`] (a disabled guard is fine). The deadline covers the
+/// whole child lifetime because the guard is armed at spawn time.
 ///
 /// On success returns the exit code (if any) and the captured stdout/stderr.
 ///
@@ -216,13 +270,12 @@ fn spawn_wall_clock_watchdog(
 ///
 /// Returns [`ExecError::Wait`] when the child cannot be reaped,
 /// [`ExecError::OutputExceeded`] when the combined output exceeds `limit`,
-/// [`ExecError::WallClockExpired`] when the wall-clock deadline fires, or
-/// [`ExecError::WallClockKillFailed`] when the group kill cannot be
-/// confirmed.
+/// or the resolved wall-clock error from [`finish_wall_clock`]
+/// ([`ExecError::WallClockExpired`]).
 pub(crate) fn read_with_limit(
     child: &mut Child,
     limit: u64,
-    wall_clock_secs: Option<u64>,
+    watchdog: WallClockGuard,
 ) -> Result<CapturedOutput, ExecError> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -232,16 +285,6 @@ pub(crate) fn read_with_limit(
     let stdout_handle = stdout.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid));
     let stderr_handle = stderr.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid));
 
-    // A zero-second deadline expires immediately: kill the group before any
-    // drain instead of racing the watchdog thread's first tick.
-    if wall_clock_secs == Some(0) {
-        kill_child_group_at_deadline(pid)?;
-        let _ = child.kill();
-        // Give the reaper a moment to observe group death so the direct
-        // child is gone before we wait on it below.
-        thread::sleep(KILL_SETTLE);
-    }
-    let watchdog = spawn_wall_clock_watchdog(pid, wall_clock_secs.filter(|&secs| secs > 0));
     let captured_stdout = stdout_handle
         .map(|handle| handle.join().unwrap_or_default())
         .unwrap_or_default();
@@ -252,25 +295,11 @@ pub(crate) fn read_with_limit(
     let actual = total.load(Ordering::Relaxed);
     let status = child.wait().map_err(|source| ExecError::Wait { source })?;
 
-    // Reaped: release the watchdog before it can fire against a recycled
-    // pid, then collect its failure verdict, if any.
-    if let Some((state, handle)) = watchdog {
-        state.done.store(true, Ordering::Release);
-        let _ = handle.join();
-        if state.expired.load(Ordering::Acquire) {
-            // The child and its group were killed at the deadline. The
-            // direct child has been reaped above; the group kill already
-            // happened, so report expiry (fail closed) instead of the
-            // child's signal-death exit status.
-            return Err(ExecError::WallClockExpired {
-                limit_secs: state.limit_secs,
-            });
-        }
-    }
-
-    if wall_clock_secs == Some(0) {
-        return Err(ExecError::WallClockExpired { limit_secs: 0 });
-    }
+    // Reaped: resolve the watchdog before interpreting the result. Expiry
+    // (with its typed error) takes precedence over the child's exit status
+    // and over an output-cap breach — the fence fired, so the run is
+    // "stopped at deadline" regardless of what the child printed.
+    finish_wall_clock(watchdog)?;
 
     if actual > limit {
         return Err(ExecError::OutputExceeded { limit, actual });
@@ -278,7 +307,8 @@ pub(crate) fn read_with_limit(
     Ok((status.code(), captured_stdout, captured_stderr))
 }
 
-/// Kills the child's process group, treating ESRCH as success.
+/// Kills the child's process group at deadline expiry, treating ESRCH as
+/// success (nothing left to kill).
 ///
 /// Any other kill error fails closed: the group could not be confirmed dead.
 fn kill_child_group_at_deadline(pid: rustix::process::Pid) -> Result<(), ExecError> {
@@ -354,7 +384,8 @@ mod tests {
         let mut child = command.spawn()?;
         let limits = crate::ResourceLimits::default();
         apply_limits_fenced(&mut child, &limits)?;
-        let (code, out, _err) = read_with_limit(&mut child, DEFAULT_OUTPUT_LIMIT, None)?;
+        let watchdog = crate::spawn::arm_wall_clock(rustix::process::Pid::from_child(&child), None);
+        let (code, out, _err) = read_with_limit(&mut child, DEFAULT_OUTPUT_LIMIT, watchdog)?;
         assert_eq!(code, Some(0));
         assert_eq!(String::from_utf8(out)?.trim(), "done");
         Ok(())
@@ -369,7 +400,8 @@ mod tests {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        let result = read_with_limit(&mut child, 1024, None);
+        let watchdog = crate::spawn::arm_wall_clock(rustix::process::Pid::from_child(&child), None);
+        let result = read_with_limit(&mut child, 1024, watchdog);
         match result {
             Err(ExecError::OutputExceeded { limit, actual }) => {
                 assert_eq!(limit, 1024);

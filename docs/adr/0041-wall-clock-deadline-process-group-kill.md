@@ -35,31 +35,54 @@ so the harness can record "stopped at deadline" (spec §9.24-style
    deadline; this escape hatch exists for explicitly trusted, caller-driven
    paths only. A `Some(0)` deadline expires immediately (useful for tests
    and fail-closed probes).
-2. **Watchdog thread.** `read_with_limit` spawns a watchdog when a deadline
-   is configured. It polls the deadline (50 ms granularity) and is released
-   the moment the direct child is reaped, so it never fires against a
-   recycled pid.
+2. **Watchdog thread.** The watchdog is armed immediately after spawn (it
+   covers the parent's blocking `write_all` of the script bytes to the
+   child's stdin, not only output collection), polls the deadline
+   (50 ms granularity), and is released the moment the direct child is
+   reaped, so it never fires against a recycled pid.
 3. **Process-group kill.** The child is spawned with
    `process_group(0)` (mirroring the plugin host's `configure_process_group`),
    so on expiry the watchdog `SIGKILL`s the child's **process group** —
-   shell-spawned grandchildren die with the interpreter instead of surviving
-   a bare kill and holding the inherited pipe FDs (spec §9 subprocess
-   controls: "process group … timeout and kill-tree behavior"). `ESRCH`
+   the interpreter and every descendant that remained in its default
+   process group die together instead of surviving a bare kill and holding
+   the inherited pipe FDs (spec §9 subprocess controls: "process group …
+   timeout and kill-tree behavior").
+   **Scope, stated honestly:** the group kill covers the direct child and
+   the descendants that inherited its default group. A script that
+   deliberately calls `setsid(2)`/`setpgid(2)` (or `set -m`) creates a new
+   session or group the fence does not reach; such a script opts out of
+   the group kill, and doing so is observable malicious behavior worth
+   flagging in analysis. Technical completeness (subreaper + tree walk, or
+   seccomp denial of `setsid`/`setpgid`) was rejected: the fence's purpose
+   is a resource backstop, not containment — filesystem, network, and
+   process containment are Landlock/unshare/seccomp's job
+   (ADR-0008/0020/0021), and a detached survivor holds no parent resources
+   (its inherited pipe FDs close when the reaped parent group dies).
+   `ESRCH`
    from the group kill is treated as success (the goal — a dead group — is
    met); any other kill error is surfaced as
    `ExecError::WallClockKillFailed` (fail closed), after a best-effort
    single-process kill of the direct child.
-4. **Typed expiry.** Expiry reports `ExecError::WallClockExpired { limit_secs }`
-   rather than the child's signal-death exit status, so callers distinguish
-   "stopped at deadline" from an ordinary crash. The CLI `run` pipeline maps
-   expiry (and kill failure) to `RunFailure::AnalysisIncomplete` — exit code
-   34, "analysis incomplete due to resource limit" (spec §29) — because the
-   run was aborted by a resource fence, not by the child's own behavior.
+4. **Typed expiry, and kill failure only when death is unconfirmed.**
+   Expiry reports `ExecError::WallClockExpired { limit_secs }` rather than
+   the child's signal-death exit status, so callers distinguish "stopped at
+   deadline" from an ordinary crash. `ExecError::WallClockKillFailed` is
+   reserved for the case where the group kill errored (non-ESRCH) **and**
+   the child is not confirmed dead (for example the pre-drain zero-deadline
+   path): death unconfirmed → fail closed. When the direct child has been
+   reaped, death is confirmed and `WallClockExpired` is the accurate
+   report. The CLI `run` pipeline maps expiry (and kill failure) to
+   `RunFailure::AnalysisIncomplete` — exit code 34, "analysis incomplete
+   due to resource limit" (spec §29) — because the run was aborted by a
+   resource fence, not by the child's own behavior.
 
 ## Consequences
 
-- Mediated script and PowerShell execution can no longer run unboundedly by
-  default: a hung agent dies at the 300 s fence without caller action.
+- Mediated script, PowerShell, **and native** execution can no longer run
+  unboundedly by default: a hung agent dies at the 300 s fence without
+  caller action. The fence is enforced on every Unix platform (the
+  watchdog uses only std threads + POSIX `killpg`); only the
+  `prlimit`-based CPU/memory/process/fd limits remain Linux-only.
 - Callers can tighten (`wall_clock_secs = Some(n)`), loosen, or disable
   (`None`) the deadline per execution via
   `ScriptExecution::with_resource_limits` / `with_environment_policy`.
@@ -76,7 +99,12 @@ so the harness can record "stopped at deadline" (spec §9.24-style
     bounded.
   - *cgroup freezer/timeout* — rejected: requires root or delegated
     cgroup control and is platform-specific; process groups cover the
-    grandchild-reaping need portably on Unix.
+    default-group descendant kill portably on Unix.
+  - *Seccomp denial of `setsid`/`setpgid` or subreaper + tree-walk kill* —
+    rejected for this fence (see Decision 3 scope note): containment
+    belongs to the sandbox layer; the fence is a resource backstop. The
+    `setsid` escape is observable malicious behavior, in scope for shell
+    analysis, not for this deadline.
 
 ## References
 

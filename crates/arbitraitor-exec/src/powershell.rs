@@ -214,7 +214,6 @@ pub struct PowerShellExecution {
     network_isolated: bool,
     sandbox_config: arbitraitor_sandbox::SandboxConfig,
     execution_policy: PowerShellPolicy,
-    #[cfg(target_os = "linux")]
     resource_limits: ResourceLimits,
 }
 
@@ -269,7 +268,6 @@ impl PowerShellExecution {
             network_isolated: true,
             sandbox_config: arbitraitor_sandbox::SandboxConfig::default(),
             execution_policy: policy,
-            #[cfg(target_os = "linux")]
             resource_limits: ResourceLimits::default(),
         })
     }
@@ -299,7 +297,10 @@ impl PowerShellExecution {
     }
 
     /// Sets the resource limits applied to the child process.
-    #[cfg(target_os = "linux")]
+    ///
+    /// The wall-clock deadline ([`ResourceLimits::wall_clock_secs`]) is
+    /// enforced on every Unix platform; the CPU/memory/process/fd limits are
+    /// Linux-only (applied via `prlimit`/`setrlimit`).
     #[must_use]
     pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.resource_limits = limits;
@@ -397,11 +398,28 @@ impl PowerShellExecution {
             .spawn()
             .map_err(|source| PowerShellError::Spawn { source })?;
 
-        // SIGSTOP the child, apply prlimit while frozen, then SIGCONT. If the
-        // limits cannot be applied the child is killed and reaped (see
-        // apply_limits_fenced) so it can never run unbounded.
+        // Arm the wall-clock watchdog immediately after spawn so the
+        // deadline covers the whole child lifetime — including this
+        // function's blocking write of the script bytes to the child's
+        // stdin, where a child that never reads would otherwise hang the
+        // parent before the watchdog in read_with_limit ever starts.
         #[cfg(target_os = "linux")]
-        crate::spawn::apply_limits_fenced(&mut child, &self.resource_limits)?;
+        let watchdog = {
+            // SIGSTOP the child, apply prlimit while frozen, then SIGCONT.
+            // If the limits cannot be applied the child is killed and
+            // reaped (see apply_limits_fenced) so it can never run
+            // unbounded.
+            crate::spawn::apply_limits_fenced(&mut child, &self.resource_limits)?;
+            crate::spawn::arm_wall_clock(
+                rustix::process::Pid::from_child(&child),
+                self.resource_limits.wall_clock_secs,
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        let watchdog = crate::spawn::arm_wall_clock(
+            rustix::process::Pid::from_child(&child),
+            self.resource_limits.wall_clock_secs,
+        );
 
         // Drop our write end of the stdin pipe as soon as the script bytes are
         // written so the interpreter observes EOF and completes any pending
@@ -410,37 +428,65 @@ impl PowerShellExecution {
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(source) = stdin.write_all(script_bytes) {
                 drop(stdin);
-                let (child_exit_code, _, child_stderr) =
-                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
-                return Err(PowerShellError::script_io(
+                return Err(Self::resolve_ps_stdin_write_failure(
                     "write-script-stdin",
                     source,
-                    child_exit_code,
-                    child_stderr,
+                    &mut child,
+                    self.output_limit(),
+                    watchdog,
                 ));
             }
             if let Err(source) = stdin.flush() {
                 drop(stdin);
-                let (child_exit_code, _, child_stderr) =
-                    crate::spawn::best_effort_capture(&mut child, self.output_limit());
-                return Err(PowerShellError::script_io(
+                return Err(Self::resolve_ps_stdin_write_failure(
                     "flush-script-stdin",
                     source,
-                    child_exit_code,
-                    child_stderr,
+                    &mut child,
+                    self.output_limit(),
+                    watchdog,
                 ));
             }
         }
 
-        let wall_clock_secs = self.resource_limits.wall_clock_secs;
         let (exit_code, stdout, stderr) =
-            crate::spawn::read_with_limit(&mut child, self.output_limit(), wall_clock_secs)?;
+            crate::spawn::read_with_limit(&mut child, self.output_limit(), watchdog)?;
 
         Ok(ExecutionResult {
             exit_code,
             stdout,
             stderr,
         })
+    }
+
+    /// Resolves a stdin write/flush failure into the PowerShell error.
+    ///
+    /// Mirrors `script.rs::resolve_stdin_write_failure`: when the
+    /// wall-clock watchdog fired while the write was blocked (child never
+    /// reading stdin), the child has been killed and the expiry is
+    /// reported instead of a misleading `ScriptIo`.
+    fn resolve_ps_stdin_write_failure(
+        stage: &'static str,
+        source: std::io::Error,
+        child: &mut std::process::Child,
+        output_limit: u64,
+        watchdog: crate::spawn::WallClockGuard,
+    ) -> PowerShellError {
+        let (child_exit_code, _, child_stderr) =
+            crate::spawn::best_effort_capture(child, output_limit);
+        if child_exit_code.is_none() {
+            // Killed by a signal or could not be reaped — if the watchdog
+            // fired while the write was blocked, report expiry.
+            if let Err(err) = crate::spawn::finish_wall_clock(watchdog) {
+                return PowerShellError::Execution {
+                    message: err.to_string(),
+                };
+            }
+        } else {
+            // Child exited on its own terms; a late watchdog expiry must
+            // not override the child's own result.
+            crate::spawn::finish_wall_clock(watchdog).ok();
+        }
+        PowerShellError::script_io(stage, source, child_exit_code, child_stderr)
     }
 
     fn build_command(&self) -> Command {

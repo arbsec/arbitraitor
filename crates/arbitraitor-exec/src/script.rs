@@ -70,7 +70,6 @@ pub struct ScriptExecution {
     environment: ExecutionContext,
     network_isolated: bool,
     sandbox_config: arbitraitor_sandbox::SandboxConfig,
-    #[cfg(target_os = "linux")]
     resource_limits: crate::ResourceLimits,
 }
 
@@ -128,7 +127,6 @@ impl ScriptExecution {
             environment,
             network_isolated: true,
             sandbox_config: arbitraitor_sandbox::SandboxConfig::default(),
-            #[cfg(target_os = "linux")]
             resource_limits: crate::ResourceLimits::default(),
         })
     }
@@ -192,7 +190,10 @@ impl ScriptExecution {
     }
 
     /// Sets the resource limits applied to the child process.
-    #[cfg(target_os = "linux")]
+    ///
+    /// The wall-clock deadline ([`ResourceLimits::wall_clock_secs`]) is
+    /// enforced on every Unix platform; the CPU/memory/process/fd limits are
+    /// Linux-only (applied via `prlimit`/`setrlimit`).
     #[must_use]
     pub fn with_resource_limits(mut self, limits: crate::ResourceLimits) -> Self {
         self.resource_limits = limits;
@@ -233,14 +234,7 @@ impl ScriptExecution {
 
     /// Returns the wall-clock deadline in seconds that will be enforced.
     fn wall_clock_secs(&self) -> Option<u64> {
-        #[cfg(target_os = "linux")]
-        {
-            self.resource_limits.wall_clock_secs
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
+        self.resource_limits.wall_clock_secs
     }
 
     /// Returns the configured interpreter executable path.
@@ -286,11 +280,28 @@ impl ScriptExecution {
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
 
-        // SIGSTOP the child, apply prlimit while frozen, then SIGCONT. If the
-        // limits cannot be applied the child is killed and reaped (see
-        // apply_limits_fenced) so it can never run unbounded.
+        // Arm the wall-clock watchdog immediately after spawn so the
+        // deadline covers the whole child lifetime — including this
+        // function's blocking write of the script bytes to the child's
+        // stdin, where a child that never reads would otherwise hang the
+        // parent before the watchdog in read_with_limit ever starts.
         #[cfg(target_os = "linux")]
-        crate::spawn::apply_limits_fenced(&mut child, &self.resource_limits)?;
+        let watchdog = {
+            // SIGSTOP the child, apply prlimit while frozen, then SIGCONT.
+            // If the limits cannot be applied the child is killed and
+            // reaped (see apply_limits_fenced) so it can never run
+            // unbounded.
+            crate::spawn::apply_limits_fenced(&mut child, &self.resource_limits)?;
+            crate::spawn::arm_wall_clock(
+                rustix::process::Pid::from_child(&child),
+                self.wall_clock_secs(),
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        let watchdog = crate::spawn::arm_wall_clock(
+            rustix::process::Pid::from_child(&child),
+            self.wall_clock_secs(),
+        );
 
         // Drop our write end of the stdin pipe as soon as the script bytes are
         // written so the interpreter observes EOF and completes any pending
@@ -311,6 +322,7 @@ impl ScriptExecution {
                     "write-script-stdin",
                     &mut child,
                     self.output_limit(),
+                    watchdog,
                 );
             }
             if let Err(source) = stdin.flush() {
@@ -320,12 +332,13 @@ impl ScriptExecution {
                     "flush-script-stdin",
                     &mut child,
                     self.output_limit(),
+                    watchdog,
                 );
             }
         }
 
         let (exit_code, stdout, stderr) =
-            crate::spawn::read_with_limit(&mut child, self.output_limit(), self.wall_clock_secs())?;
+            crate::spawn::read_with_limit(&mut child, self.output_limit(), watchdog)?;
 
         Ok(ExecutionResult {
             exit_code,
@@ -407,6 +420,10 @@ impl ScriptExecution {
 /// Returning `Ok` lets callers act on the real exit code instead of a
 /// misleading "script input I/O failure" error.
 ///
+/// When the wall-clock watchdog fired while the write was blocked (child
+/// never reading stdin), the child has been killed and the typed
+/// [`ExecError::WallClockExpired`] is returned.
+///
 /// When the write failed for other reasons (e.g. the child was killed by a
 /// signal, leaving no exit code), the failure is a genuine broker I/O error
 /// and is returned as `Err(ExecError::ScriptIo)` with the best-effort
@@ -416,9 +433,20 @@ fn resolve_stdin_write_failure(
     stage: &'static str,
     child: &mut Child,
     output_limit: u64,
+    watchdog: crate::spawn::WallClockGuard,
 ) -> Result<ExecutionResult, ExecError> {
     let (child_exit_code, child_stdout, child_stderr) =
         crate::spawn::best_effort_capture(child, output_limit);
+    if child_exit_code.is_none() {
+        // The child was killed by a signal or could not be reaped. If the
+        // wall-clock watchdog fired while the write was blocked, report
+        // expiry rather than a misleading ScriptIo.
+        crate::spawn::finish_wall_clock(watchdog)?;
+    } else {
+        // The child exited on its own terms (reaped); resolve the watchdog
+        // without letting a late expiry override the child's own result.
+        crate::spawn::finish_wall_clock(watchdog).ok();
+    }
     if source.kind() == std::io::ErrorKind::BrokenPipe && child_exit_code.is_some() {
         return Ok(ExecutionResult {
             exit_code: child_exit_code,
@@ -1407,6 +1435,40 @@ mod tests {
     }
 
     #[test]
+    fn deadline_covers_blocked_stdin_write() -> Result<(), Box<dyn std::error::Error>> {
+        // Regression test for the pre-watchdog hang: the watchdog must be
+        // armed BEFORE the parent's blocking write_all of the script bytes.
+        // A child that never reads stdin blocks the >64 KiB write in the
+        // parent forever unless the fence fires during the write.
+        let script = bash_with_deadline(1)?;
+        // 256 KiB of padding so the write blocks once the 64 KiB pipe
+        // buffer fills; the child (bash with --noprofile --norc) receives
+        // an empty command list and exits immediately... instead, keep it
+        // alive: run a command that never consumes the remaining stdin.
+        let mut script_bytes: Vec<u8> = Vec::with_capacity(256 * 1024);
+        script_bytes.extend_from_slice(b"sleep 30 # ");
+        script_bytes.resize(256 * 1024, b'x');
+        script_bytes.extend_from_slice(b"\n");
+        let started = std::time::Instant::now();
+        let error = match script.execute(&script_bytes) {
+            Err(err) => err,
+            Ok(result) => {
+                return Err(format!("expected deadline expiry, got Ok: {result:?}").into());
+            }
+        };
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(error, ExecError::WallClockExpired { limit_secs: 1 }),
+            "expected WallClockExpired{{limit_secs: 1}}, got {error:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "deadline must fire near the 1s mark even while the stdin write is blocked: {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn normal_completion_unaffected_by_deadline() -> Result<(), Box<dyn std::error::Error>> {
         // A script that finishes well within the deadline must produce a
         // normal result — the watchdog must not misfire.
@@ -1424,8 +1486,15 @@ mod tests {
         // holding the inherited pipe FDs. The child runs with
         // process_group(0), so its pgid equals its own pid ($$). After
         // expiry, no process may remain in that group.
+        //
+        // The grandchild carries a unique marker argument so the /proc scan
+        // matches exactly the process this test spawned (no false failure
+        // from an unrelated `sleep` on the machine, no vacuous pass from a
+        // scan that cannot see processes).
+        const MARKER: &str = "arbitraitor-760-grandchild-marker";
         let script = bash_with_deadline(1)?;
-        let error = match script.execute(b"echo $$\nexec sleep 30 &\nsleep 30\n") {
+        let script_text = format!("exec sleep 30 {MARKER} &\nsleep 30 {MARKER}\n");
+        let error = match script.execute(script_text.as_bytes()) {
             Err(err) => err,
             Ok(result) => {
                 return Err(format!("expected deadline expiry, got Ok: {result:?}").into());
@@ -1435,20 +1504,17 @@ mod tests {
             matches!(error, ExecError::WallClockExpired { .. }),
             "expected WallClockExpired, got {error:?}"
         );
-        // The stdout buffer may not survive the error path, so re-derive
-        // the group from /proc instead: poll briefly for the kernel to
-        // finish reaping (SIGKILL is fast but not instantaneous for a
-        // grandchild the parent never waited on). We assert there is no
-        // surviving `sleep` process at all — flake risk only if an
-        // unrelated process on the machine runs `sleep`, and the window is
-        // a couple of hundred milliseconds.
+        // The stdout buffer may not survive the error path, so scan /proc
+        // for the marker: poll briefly for the kernel to finish reaping
+        // (SIGKILL is fast but not instantaneous for a grandchild the
+        // parent never waited on).
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if surviving_sleep_pids().is_empty() {
+            if surviving_marker_pids(MARKER)?.is_empty() {
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                let stray = surviving_sleep_pids();
+                let stray = surviving_marker_pids(MARKER)?;
                 assert!(
                     stray.is_empty(),
                     "grandchildren survived the wall-clock group kill: {stray:?}"
@@ -1459,33 +1525,32 @@ mod tests {
         Ok(())
     }
 
-    /// Finds pids running `sleep` (the grandchild marker used by
-    /// [`deadline_kills_grandchildren_in_process_group`]).
-    fn surviving_sleep_pids() -> Vec<u32> {
+    /// Finds pids whose command line contains `marker` (the grandchild
+    /// spawned by [`deadline_kills_grandchildren_in_process_group`]).
+    ///
+    /// Fails loudly when /proc is unreadable — a scan that cannot see
+    /// processes must not make the test pass vacuously.
+    fn surviving_marker_pids(marker: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
         let mut pids = Vec::new();
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return pids;
-        };
-        for entry in entries.flatten() {
+        let entries = std::fs::read_dir("/proc")
+            .map_err(|e| format!("/proc unreadable; grandchild scan is vacuous: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("/proc entry unreadable: {e}"))?;
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
             let Ok(pid) = name.parse::<u32>() else {
                 continue;
             };
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
+                // The process exited between the readdir and the read; not
+                // a scan failure.
                 continue;
             };
-            let Some(comm_start) = stat.find('(') else {
-                continue;
-            };
-            let Some(comm_end) = stat.rfind(')') else {
-                continue;
-            };
-            if &stat[comm_start + 1..comm_end] == "sleep" {
+            if cmdline.contains(marker) {
                 pids.push(pid);
             }
         }
-        pids
+        Ok(pids)
     }
 }
