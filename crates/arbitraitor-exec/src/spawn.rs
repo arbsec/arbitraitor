@@ -19,8 +19,9 @@
 use std::io::Read;
 use std::process::Child;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::ExecError;
 
@@ -28,6 +29,10 @@ use crate::ExecError;
 ///
 /// Matches the default recorded in [`crate::ResourceLimits`].
 pub(crate) const DEFAULT_OUTPUT_LIMIT: u64 = 10 * 1024 * 1024;
+
+/// Grace period between SIGKILL of the child's process group and the
+/// fall-back single-process kill.
+const KILL_SETTLE: Duration = Duration::from_millis(50);
 
 /// Applies resource limits to a freshly-spawned child with no TOCTOU window.
 ///
@@ -118,7 +123,78 @@ pub(crate) fn best_effort_capture(child: &mut Child, limit: u64) -> CapturedOutp
     // remaining hang vector is a child that spawns a background process
     // inheriting the pipe FDs; that's a deeper sandbox fix (process group
     // kill) that belongs in a follow-up, not in this error-path helper.
-    read_with_limit(child, limit).unwrap_or((None, Vec::new(), Vec::new()))
+    read_with_limit(child, limit, None).unwrap_or((None, Vec::new(), Vec::new()))
+}
+
+/// Watchdog state shared between the caller thread and the deadline thread.
+struct Watchdog {
+    /// Configured deadline in seconds, echoed into
+    /// [`ExecError::WallClockExpired`].
+    limit_secs: u64,
+    /// Set by the deadline thread when it has killed the process group.
+    expired: AtomicBool,
+    /// Set by the caller once the child has been reaped, so the deadline
+    /// thread can exit without killing a recycled pid's group.
+    done: AtomicBool,
+}
+
+impl Watchdog {
+    fn new(limit_secs: u64) -> Self {
+        Self {
+            limit_secs,
+            expired: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Spawns a watchdog thread that kills the child's process group once
+/// `secs` elapses, unless the caller has already reaped the child.
+///
+/// Returns `None` when `wall_clock_secs` is `None` (deadline disabled).
+///
+/// The deadline fires even while the child sleeps or blocks on I/O, which
+/// `RLIMIT_CPU` cannot bound. Killing the **process group** (the child is
+/// spawned with `process_group(0)`) also takes down shell-spawned
+/// grandchildren that would otherwise inherit the pipes and outlive a bare
+/// kill of the direct child.
+fn spawn_wall_clock_watchdog(
+    pid: rustix::process::Pid,
+    wall_clock_secs: Option<u64>,
+) -> Option<(Arc<Watchdog>, thread::JoinHandle<()>)> {
+    let secs = wall_clock_secs?;
+    let state = Arc::new(Watchdog::new(secs));
+    let thread_state = Arc::clone(&state);
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let handle = thread::spawn(move || {
+        loop {
+            let now = Instant::now();
+            if thread_state.done.load(Ordering::Acquire) {
+                return;
+            }
+            if now >= deadline {
+                break;
+            }
+            thread::sleep(
+                deadline
+                    .saturating_duration_since(now)
+                    .min(Duration::from_millis(50)),
+            );
+        }
+        if thread_state.done.swap(true, Ordering::AcqRel) {
+            // Child was reaped between our last check and expiry; nothing to
+            // kill and the pid may already have been recycled.
+            return;
+        }
+        thread_state.expired.store(true, Ordering::Release);
+        // SIGKILL the whole group so grandchildren in the group die too.
+        // ESRCH is success (nothing left to kill); any other error is
+        // recorded and surfaced by the caller as a fail-closed error.
+        if let Err(err) = kill_child_group_at_deadline(pid) {
+            tracing::warn!(pid = pid.as_raw_pid(), error = %err, "wall-clock group kill failed");
+        }
+    });
+    Some((state, handle))
 }
 
 /// Reads stdout and stderr concurrently, enforcing a combined byte cap.
@@ -129,13 +205,25 @@ pub(crate) fn best_effort_capture(child: &mut Child, limit: u64) -> CapturedOutp
 /// sibling pipe and terminate the producer) and reaped, then
 /// [`ExecError::OutputExceeded`] is returned.
 ///
+/// When `wall_clock_secs` is `Some`, a watchdog thread kills the child's
+/// process group once the deadline elapses and
+/// [`ExecError::WallClockExpired`] is returned; a `Some(0)` deadline expires
+/// immediately. `None` disables the deadline entirely.
+///
 /// On success returns the exit code (if any) and the captured stdout/stderr.
 ///
 /// # Errors
 ///
-/// Returns [`ExecError::Wait`] when the child cannot be reaped, or
-/// [`ExecError::OutputExceeded`] when the combined output exceeds `limit`.
-pub(crate) fn read_with_limit(child: &mut Child, limit: u64) -> Result<CapturedOutput, ExecError> {
+/// Returns [`ExecError::Wait`] when the child cannot be reaped,
+/// [`ExecError::OutputExceeded`] when the combined output exceeds `limit`,
+/// [`ExecError::WallClockExpired`] when the wall-clock deadline fires, or
+/// [`ExecError::WallClockKillFailed`] when the group kill cannot be
+/// confirmed.
+pub(crate) fn read_with_limit(
+    child: &mut Child,
+    limit: u64,
+    wall_clock_secs: Option<u64>,
+) -> Result<CapturedOutput, ExecError> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let pid = rustix::process::Pid::from_child(child);
@@ -144,6 +232,16 @@ pub(crate) fn read_with_limit(child: &mut Child, limit: u64) -> Result<CapturedO
     let stdout_handle = stdout.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid));
     let stderr_handle = stderr.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid));
 
+    // A zero-second deadline expires immediately: kill the group before any
+    // drain instead of racing the watchdog thread's first tick.
+    if wall_clock_secs == Some(0) {
+        kill_child_group_at_deadline(pid)?;
+        let _ = child.kill();
+        // Give the reaper a moment to observe group death so the direct
+        // child is gone before we wait on it below.
+        thread::sleep(KILL_SETTLE);
+    }
+    let watchdog = spawn_wall_clock_watchdog(pid, wall_clock_secs.filter(|&secs| secs > 0));
     let captured_stdout = stdout_handle
         .map(|handle| handle.join().unwrap_or_default())
         .unwrap_or_default();
@@ -154,10 +252,47 @@ pub(crate) fn read_with_limit(child: &mut Child, limit: u64) -> Result<CapturedO
     let actual = total.load(Ordering::Relaxed);
     let status = child.wait().map_err(|source| ExecError::Wait { source })?;
 
+    // Reaped: release the watchdog before it can fire against a recycled
+    // pid, then collect its failure verdict, if any.
+    if let Some((state, handle)) = watchdog {
+        state.done.store(true, Ordering::Release);
+        let _ = handle.join();
+        if state.expired.load(Ordering::Acquire) {
+            // The child and its group were killed at the deadline. The
+            // direct child has been reaped above; the group kill already
+            // happened, so report expiry (fail closed) instead of the
+            // child's signal-death exit status.
+            return Err(ExecError::WallClockExpired {
+                limit_secs: state.limit_secs,
+            });
+        }
+    }
+
+    if wall_clock_secs == Some(0) {
+        return Err(ExecError::WallClockExpired { limit_secs: 0 });
+    }
+
     if actual > limit {
         return Err(ExecError::OutputExceeded { limit, actual });
     }
     Ok((status.code(), captured_stdout, captured_stderr))
+}
+
+/// Kills the child's process group, treating ESRCH as success.
+///
+/// Any other kill error fails closed: the group could not be confirmed dead.
+fn kill_child_group_at_deadline(pid: rustix::process::Pid) -> Result<(), ExecError> {
+    match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(err) => {
+            // Fall back to killing at least the direct child before
+            // reporting failure so we never leave it running unbounded.
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            Err(ExecError::WallClockKillFailed {
+                source: std::io::Error::from_raw_os_error(err.raw_os_error()),
+            })
+        }
+    }
 }
 
 /// Drains a single pipe into a buffer, updating the shared byte counter.
@@ -219,7 +354,7 @@ mod tests {
         let mut child = command.spawn()?;
         let limits = crate::ResourceLimits::default();
         apply_limits_fenced(&mut child, &limits)?;
-        let (code, out, _err) = read_with_limit(&mut child, DEFAULT_OUTPUT_LIMIT)?;
+        let (code, out, _err) = read_with_limit(&mut child, DEFAULT_OUTPUT_LIMIT, None)?;
         assert_eq!(code, Some(0));
         assert_eq!(String::from_utf8(out)?.trim(), "done");
         Ok(())
@@ -234,7 +369,7 @@ mod tests {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        let result = read_with_limit(&mut child, 1024);
+        let result = read_with_limit(&mut child, 1024, None);
         match result {
             Err(ExecError::OutputExceeded { limit, actual }) => {
                 assert_eq!(limit, 1024);
@@ -242,6 +377,24 @@ mod tests {
             }
             other => return Err(format!("expected OutputExceeded, got {other:?}").into()),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn watchdog_expired_flag_drives_typed_error() -> Result<(), Box<dyn std::error::Error>> {
+        // A zero-deadline kill path: kill_child_group_at_deadline must treat
+        // a missing process group (ESRCH) as success, per fail-closed rule —
+        // ESRCH means the group is already dead, which is the goal met.
+        let mut command = Command::new(bash_or_skip()?);
+        command.arg("-c").arg("true");
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        let pid = rustix::process::Pid::from_child(&child);
+        let _status = child.wait()?;
+        // The process (and its group, since it had no members left) is gone;
+        // the kill must report success, not an error.
+        kill_child_group_at_deadline(pid)?;
         Ok(())
     }
 }

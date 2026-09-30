@@ -78,6 +78,9 @@ pub(super) fn plugin_resource_limits() -> ResourceLimits {
         process_count: Some(PROCESS_LIMIT),
         fd_count: Some(FD_LIMIT),
         output_size_bytes: Some(OUTPUT_LIMIT_BYTES),
+        // Plugin wall-clock is bounded by wasmtime fuel/epoch interruption,
+        // not a parent-side process-group kill.
+        wall_clock_secs: None,
     }
 }
 

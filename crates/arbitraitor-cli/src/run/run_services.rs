@@ -11,7 +11,9 @@ use std::time::Duration;
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
 use arbitraitor_exec::script::{ExecutionResult, ScriptExecution};
-use arbitraitor_exec::{EnvAllowlist, ExecutionPolicy, SandboxConfig, TempDirectoryPolicy};
+use arbitraitor_exec::{
+    EnvAllowlist, ExecError, ExecutionPolicy, SandboxConfig, TempDirectoryPolicy,
+};
 #[cfg(target_os = "linux")]
 use arbitraitor_exec::{NativeExecution, NativeExecutionGate};
 use arbitraitor_fetch::{FetchPolicy, FetchRequest, FetchUrl, Fetcher, HttpFetcher, VecSink};
@@ -111,7 +113,7 @@ impl RunServices for DefaultRunServices {
                 execution
                     .execute(&artifact.bytes)
                     .map(execution_output)
-                    .map_err(|error| RunFailure::Execution(error.to_string()))
+                    .map_err(|error| map_exec_failure(&error))
             }
             ExecutionMode::Native => execute_native_artifact(artifact),
         }
@@ -132,6 +134,23 @@ impl RunServices for DefaultRunServices {
             .map_err(|error| RunFailure::Internal(error.to_string()))?;
         std::fs::write(&path, json).map_err(|error| RunFailure::Internal(error.to_string()))?;
         Ok(path)
+    }
+}
+
+/// Maps a script-execution failure to a [`RunFailure`], distinguishing
+/// wall-clock expiry from ordinary execution failure so harnesses can record
+/// "stopped at deadline" rather than a crash (issue #760).
+///
+/// Deadline expiry maps to `RunFailure::AnalysisIncomplete` (exit code 34,
+/// "incomplete due to resource limit") because the mediated run was aborted
+/// by the wall-clock resource fence rather than by the child's own behavior.
+/// All other errors map to the generic execution failure.
+fn map_exec_failure(error: &ExecError) -> RunFailure {
+    match error {
+        ExecError::WallClockExpired { .. } | ExecError::WallClockKillFailed { .. } => {
+            RunFailure::AnalysisIncomplete(error.to_string())
+        }
+        _ => RunFailure::Execution(error.to_string()),
     }
 }
 

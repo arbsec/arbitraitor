@@ -40,6 +40,7 @@
 // fragmentation inconsistent with the sibling `script.rs` pattern.
 
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -431,8 +432,9 @@ impl PowerShellExecution {
             }
         }
 
+        let wall_clock_secs = self.resource_limits.wall_clock_secs;
         let (exit_code, stdout, stderr) =
-            crate::spawn::read_with_limit(&mut child, self.output_limit())?;
+            crate::spawn::read_with_limit(&mut child, self.output_limit(), wall_clock_secs)?;
 
         Ok(ExecutionResult {
             exit_code,
@@ -456,6 +458,11 @@ impl PowerShellExecution {
         // the child before exec. The unsafe pre_exec boundary stays inside the
         // sandbox crate, preserving forbid(unsafe_code) here.
         arbitraitor_sandbox::configure_command(&mut command, self.sandbox_config);
+        // Put the child in its own process group so the wall-clock watchdog
+        // can kill the interpreter and every spawned descendant with a
+        // single group kill (spec §9 subprocess controls: process group +
+        // timeout and kill-tree behavior).
+        command.process_group(0);
         command
     }
 
@@ -592,6 +599,7 @@ mod tests {
             process_count: None,
             fd_count: None,
             output_size_bytes: None,
+            wall_clock_secs: None,
         }))
     }
 
@@ -713,6 +721,7 @@ mod tests {
             process_count: None,
             fd_count: None,
             output_size_bytes: Some(128),
+            wall_clock_secs: None,
         });
         // Generate far more than 128 bytes of stdout so the cap must trip.
         let result = capped.execute(b"1..10000 | ForEach-Object { 'x' * 128 }\r\n");

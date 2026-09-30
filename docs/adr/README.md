@@ -62,6 +62,7 @@ supersede it.
 | [0038](0038-pipeline-engine-crate-extraction.md) | Pipeline engine crate extraction and naming | Accepted | #747 |
 | [0039](0039-receipt-envelope-structure.md) | Receipt envelope structure (spec §31.1) | Accepted | #492 |
 | [0040](0040-wasmtime-security-floor.md) | Wasmtime security floor in Cargo.toml | Accepted | — |
+| [0041](0041-wall-clock-deadline-process-group-kill.md) | Wall-clock deadline and process-group kill for mediated execution | Accepted | #760 |
 
 ## Format
 

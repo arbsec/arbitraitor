@@ -13,6 +13,7 @@
 //! network denied by default.
 
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -230,6 +231,18 @@ impl ScriptExecution {
         }
     }
 
+    /// Returns the wall-clock deadline in seconds that will be enforced.
+    fn wall_clock_secs(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            self.resource_limits.wall_clock_secs
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     /// Returns the configured interpreter executable path.
     #[must_use]
     pub fn interpreter(&self) -> &Path {
@@ -312,7 +325,7 @@ impl ScriptExecution {
         }
 
         let (exit_code, stdout, stderr) =
-            crate::spawn::read_with_limit(&mut child, self.output_limit())?;
+            crate::spawn::read_with_limit(&mut child, self.output_limit(), self.wall_clock_secs())?;
 
         Ok(ExecutionResult {
             exit_code,
@@ -336,6 +349,11 @@ impl ScriptExecution {
         // the child before exec. The unsafe pre_exec boundary stays inside the
         // sandbox crate, preserving forbid(unsafe_code) here.
         arbitraitor_sandbox::configure_command(&mut command, self.sandbox_config);
+        // Put the child in its own process group so the wall-clock watchdog
+        // can kill the interpreter and every shell-spawned grandchild with a
+        // single group kill (spec §9 subprocess controls: process group +
+        // timeout and kill-tree behavior).
+        command.process_group(0);
         // Apply Landlock filesystem confinement: restrict the child to
         // read-execute on system paths and read-write-execute on its working
         // directory and temp home only. This prevents scripts from reading
@@ -550,6 +568,7 @@ mod tests {
     use std::process::Command as StdCommand;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     fn bash_or_skip() -> Result<ScriptExecution, ExecError> {
         // `/bin/bash` is the documented interpreter path for the mediated
@@ -566,8 +585,19 @@ mod tests {
                     process_count: None,
                     fd_count: None,
                     output_size_bytes: None,
+                    wall_clock_secs: None,
                 })
         })
+    }
+
+    /// Like [`bash_or_skip`] but with an explicit wall-clock deadline.
+    fn bash_with_deadline(secs: u64) -> Result<ScriptExecution, ExecError> {
+        let script = bash_or_skip()?;
+        let limits = crate::ResourceLimits {
+            wall_clock_secs: Some(secs),
+            ..crate::ResourceLimits::default()
+        };
+        Ok(script.with_resource_limits(limits))
     }
 
     fn network_isolated_bash_or_skip() -> Result<Option<ScriptExecution>, ExecError> {
@@ -1322,5 +1352,140 @@ mod tests {
             "signal death (no exit code) should return Err(ScriptIo), got {error:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn wall_clock_deadline_expires_with_typed_error() -> Result<(), Box<dyn std::error::Error>> {
+        // A child that consumes no CPU (so RLIMIT_CPU cannot stop it) must
+        // still be stopped by the wall-clock fence, with a typed error that
+        // distinguishes "stopped at deadline" from a crash.
+        let script = bash_with_deadline(1)?;
+        let started = std::time::Instant::now();
+        let error = match script.execute(b"sleep 30\n") {
+            Err(err) => err,
+            Ok(result) => {
+                return Err(format!("expected deadline expiry, got Ok: {result:?}").into());
+            }
+        };
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(error, ExecError::WallClockExpired { limit_secs: 1 }),
+            "expected WallClockExpired{{limit_secs: 1}}, got {error:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(500) && elapsed < Duration::from_secs(10),
+            "expiry must fire near the 1s deadline, not immediately nor after the full 30s sleep: {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wall_clock_deadline_zero_expires_immediately() -> Result<(), Box<dyn std::error::Error>> {
+        let script = bash_with_deadline(0)?;
+        let error = match script.execute(b"echo hi\n") {
+            Err(err) => err,
+            Ok(result) => {
+                return Err(format!("expected immediate expiry, got Ok: {result:?}").into());
+            }
+        };
+        assert!(
+            matches!(error, ExecError::WallClockExpired { limit_secs: 0 }),
+            "expected WallClockExpired{{limit_secs: 0}}, got {error:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wall_clock_none_runs_unbounded() -> Result<(), Box<dyn std::error::Error>> {
+        // Explicitly disabling the deadline must leave the ordinary path
+        // fully working — the caller opted out of the fence.
+        let script = bash_or_skip()?;
+        let result = script.execute(b"echo unbounded-ok\n")?;
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, b"unbounded-ok\n");
+        Ok(())
+    }
+
+    #[test]
+    fn normal_completion_unaffected_by_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        // A script that finishes well within the deadline must produce a
+        // normal result — the watchdog must not misfire.
+        let script = bash_with_deadline(300)?;
+        let result = script.execute(b"echo fine\n")?;
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, b"fine\n");
+        Ok(())
+    }
+
+    #[test]
+    fn deadline_kills_grandchildren_in_process_group() -> Result<(), Box<dyn std::error::Error>> {
+        // The deadline must take down shell-spawned grandchildren too: a
+        // bare kill of the interpreter would leave a backgrounded child
+        // holding the inherited pipe FDs. The child runs with
+        // process_group(0), so its pgid equals its own pid ($$). After
+        // expiry, no process may remain in that group.
+        let script = bash_with_deadline(1)?;
+        let error = match script.execute(b"echo $$\nexec sleep 30 &\nsleep 30\n") {
+            Err(err) => err,
+            Ok(result) => {
+                return Err(format!("expected deadline expiry, got Ok: {result:?}").into());
+            }
+        };
+        assert!(
+            matches!(error, ExecError::WallClockExpired { .. }),
+            "expected WallClockExpired, got {error:?}"
+        );
+        // The stdout buffer may not survive the error path, so re-derive
+        // the group from /proc instead: poll briefly for the kernel to
+        // finish reaping (SIGKILL is fast but not instantaneous for a
+        // grandchild the parent never waited on). We assert there is no
+        // surviving `sleep` process at all — flake risk only if an
+        // unrelated process on the machine runs `sleep`, and the window is
+        // a couple of hundred milliseconds.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if surviving_sleep_pids().is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let stray = surviving_sleep_pids();
+                assert!(
+                    stray.is_empty(),
+                    "grandchildren survived the wall-clock group kill: {stray:?}"
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    /// Finds pids running `sleep` (the grandchild marker used by
+    /// [`deadline_kills_grandchildren_in_process_group`]).
+    fn surviving_sleep_pids() -> Vec<u32> {
+        let mut pids = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return pids;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some(comm_start) = stat.find('(') else {
+                continue;
+            };
+            let Some(comm_end) = stat.rfind(')') else {
+                continue;
+            };
+            if &stat[comm_start + 1..comm_end] == "sleep" {
+                pids.push(pid);
+            }
+        }
+        pids
     }
 }

@@ -589,6 +589,7 @@ mod tests {
             process_count: None,
             fd_count: Some(32),
             output_size_bytes: None,
+            wall_clock_secs: None,
         };
         let result = NativeExecution::new()?
             .with_resource_limits(limits)
@@ -627,6 +628,7 @@ mod tests {
             process_count: None,
             fd_count: Some(64),
             output_size_bytes: None,
+            wall_clock_secs: None,
         };
         let result = NativeExecution::new()?
             .with_resource_limits(limits)
