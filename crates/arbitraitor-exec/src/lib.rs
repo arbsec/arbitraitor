@@ -221,6 +221,35 @@ pub enum ExecError {
         /// Actual combined bytes read before the child was killed.
         actual: u64,
     },
+    /// The child exceeded its wall-clock deadline.
+    ///
+    /// The watchdog fired at the deadline, the child's process group was
+    /// killed (the direct child and every descendant that remained in its
+    /// default group; a script that deliberately calls `setsid`/`setpgid`
+    /// creates a session the fence does not reach), and the direct child
+    /// has been reaped — so death is confirmed. Distinguishing expiry from
+    /// ordinary failure lets callers record "stopped at deadline" rather
+    /// than a crash — see spec §26.3 "complete process tree under …
+    /// resource control" and §9 subprocess controls (timeout and
+    /// kill-tree).
+    #[error("child exceeded wall-clock deadline of {limit_secs}s and was killed")]
+    WallClockExpired {
+        /// Configured wall-clock deadline in seconds.
+        limit_secs: u64,
+    },
+    /// Killing the child's process group at the wall-clock deadline failed
+    /// and the child could not be confirmed dead.
+    ///
+    /// Fail closed: death is not confirmed, so the execution is an error,
+    /// never a silent continuation. When the direct child is reaped (death
+    /// confirmed), expiry is reported as [`ExecError::WallClockExpired`]
+    /// instead.
+    #[error("failed to kill child process group at wall-clock deadline: {source}")]
+    WallClockKillFailed {
+        /// Source I/O error from the group kill.
+        #[source]
+        source: io::Error,
+    },
     /// The content-addressed store rejected the requested artifact.
     ///
     /// This typically means the digest is absent from the CAS or the stored
@@ -579,6 +608,16 @@ impl Default for FdPolicy {
     }
 }
 
+/// Default wall-clock deadline for mediated execution, in seconds.
+///
+/// Chosen to sit above every shorter stage timeout in the default
+/// configuration (`arbitraitor-core` `TimeoutConfig` caps at 120s for
+/// recursive payload graphs; `ExecutionConfig::timeout_secs` defaults to 60)
+/// so the wall-clock fence is a backstop, not the binding constraint in
+/// normal runs. `RLIMIT_CPU` cannot bound a child that sleeps or blocks on
+/// I/O, so this deadline is what actually stops a hung mediated child.
+pub const DEFAULT_WALL_CLOCK_SECS: u64 = 300;
+
 /// Conservative resource limits for execution contexts.
 ///
 /// These limits are declared by policy and recorded in the execution context.
@@ -598,6 +637,25 @@ pub struct ResourceLimits {
     pub fd_count: Option<u32>,
     /// Maximum combined stdout/stderr output size in bytes.
     pub output_size_bytes: Option<u64>,
+    /// Maximum wall-clock time in seconds for the whole execution.
+    ///
+    /// Unlike [`Self::cpu_time_secs`] (which does not bound a child that
+    /// sleeps or blocks on I/O), this deadline fires even when the child
+    /// consumes no CPU. On expiry the child's process group is killed —
+    /// the direct child and every descendant that remained in its default
+    /// group (a script that deliberately calls `setsid`/`setpgid` creates
+    /// a new session the fence does not reach; that is observable
+    /// malicious behavior, addressed by shell analysis rather than this
+    /// deadline) — and the execution fails with
+    /// [`ExecError::WallClockExpired`].
+    ///
+    /// The deadline is enforced on **every Unix platform** for the script,
+    /// PowerShell, and native paths. The other limits in this struct are
+    /// Linux-only (applied via `prlimit`/`setrlimit`).
+    /// `None` disables the deadline — use only for explicitly trusted,
+    /// caller-driven paths; mediated execution of untrusted scripts must
+    /// keep the default.
+    pub wall_clock_secs: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -608,6 +666,7 @@ impl Default for ResourceLimits {
             process_count: Some(64),
             fd_count: Some(64),
             output_size_bytes: Some(10 * 1024 * 1024), // 10 MB
+            wall_clock_secs: Some(DEFAULT_WALL_CLOCK_SECS),
         }
     }
 }

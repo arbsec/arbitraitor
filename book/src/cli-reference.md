@@ -363,6 +363,25 @@ stderr: "bash: !DOCTYPE: event not found")`), distinguishing "I fed bash
 junk" from "kernel denied the user namespace" from "Landlock blocked the
 interpreter path". See #612 for the bug report and Fix B details.
 
+### Execution time limit
+
+Mediated script execution is bounded by a wall-clock deadline in addition
+to the CPU-time limit (`RLIMIT_CPU` cannot stop a child that sleeps or
+blocks on I/O). The deadline defaults to 300 seconds
+(`DEFAULT_WALL_CLOCK_SECS`). The child runs in its own process group, so on
+expiry the interpreter and every descendant that remained in its default
+process group are killed, and the run fails with "child exceeded
+wall-clock deadline" (exit code 34, *analysis incomplete due to resource
+limit* — the run was aborted by a resource fence, not by the child's own
+behavior). Scope note: the fence covers the direct child and its
+default-group descendants; a script that deliberately calls
+`setsid(2)`/`setpgid(2)` creates a new session the fence does not reach —
+observable malicious behavior, addressed by shell analysis rather than the
+deadline (ADR-0041). The fence is enforced on every Unix platform; the
+CPU/memory/fd limits are Linux-only. Embedders can tighten, loosen, or
+disable the fence per execution via
+`arbitraitor_exec::ResourceLimits::wall_clock_secs` (ADR-0041).
+
 ## Wrappers command
 
 ```sh

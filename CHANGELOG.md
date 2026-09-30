@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `arbitraitor_exec::ResourceLimits::wall_clock_secs` and
+  `arbitraitor_exec::DEFAULT_WALL_CLOCK_SECS` (300 s, ADR-0041): a
+  default-on wall-clock deadline for mediated execution that fires even when
+  the child consumes no CPU (which `RLIMIT_CPU` cannot stop). On expiry the
+  child's process group is killed — the interpreter and every descendant
+  that remained in its default group die together (a script that calls
+  `setsid`/`setpgid` opts out, which is observable malicious behavior) —
+  and execution fails with the new typed error
+  `arbitraitor_exec::ExecError::WallClockExpired`, distinguishable from an
+  ordinary crash; a failed group kill fails closed with
+  `ExecError::WallClockKillFailed` when the child is not confirmed dead.
+  The fence is enforced on every Unix platform (script, PowerShell, and
+  native paths); the CPU/memory/process/fd limits remain Linux-only.
+  Setting `wall_clock_secs = None` disables the fence for explicitly
+  trusted, caller-driven paths. The CLI `run` pipeline maps deadline expiry
+  to exit code 34 (analysis incomplete due to resource limit) so harnesses
+  record "stopped at deadline" (#760).
+- `arbitraitor-exec` children are now spawned in their own process group
+  (script, PowerShell, and native paths), matching the plugin host's
+  existing containment and enabling the deadline's group-wide kill.
 - `arbitraitor-engine` crate (ADR-0038, accepted): the single consolidated
   pipeline engine owning fetch → store → analyze → provenance → receipt →
   verdict → release. Public surface: `Arbitraitor`, `ArbitraitorBuilder`,

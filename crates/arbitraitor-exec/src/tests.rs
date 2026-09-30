@@ -426,6 +426,9 @@ fn resource_limits_have_conservative_defaults() {
     assert_eq!(limits.process_count, Some(64));
     assert_eq!(limits.fd_count, Some(64));
     assert_eq!(limits.output_size_bytes, Some(10 * 1024 * 1024));
+    // The wall-clock fence is on by default (issue #760): a hung mediated
+    // child must die without caller intervention.
+    assert_eq!(limits.wall_clock_secs, Some(DEFAULT_WALL_CLOCK_SECS));
 }
 
 #[test]
