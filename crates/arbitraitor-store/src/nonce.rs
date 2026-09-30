@@ -28,15 +28,7 @@ impl SpentNonceStore {
     ///
     /// Returns [`StoreError`] when redb cannot open or initialise the table.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let db = if path.exists() {
-            redb::Database::open(path)
-        } else {
-            redb::Database::create(path)
-        }
-        .map_err(|source| StoreError::Index {
-            stage: "nonce-store-open",
-            message: source.to_string(),
-        })?;
+        let db = crate::metadata::open_with_retry(path, "nonce-store-open", Path::exists)?;
         let store = Self { db };
         store.ensure_table()?;
         debug!("opened durable spent-nonce store at {}", path.display());

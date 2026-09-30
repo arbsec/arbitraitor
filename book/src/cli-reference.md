@@ -122,6 +122,12 @@ versioning. Rendered health rows show distinct per-status markers
 (`✓` Pass, `⚠` Warn, `⌀` Skipped, `✗` Fail) so degraded posture is visually
 distinct from healthy posture.
 
+The `legacy_store` check warns when a pre-cache-root store
+(`~/.arbitraitor/cas`) still exists alongside the active
+`$XDG_CACHE_HOME/arbitraitor/cas` store. The check is diagnostic only —
+nothing is migrated, moved, or deleted; remove the legacy directory
+manually once its contents are no longer needed.
+
 The `Detectors` row distinguishes the always-running built-in MVP detector
 baseline (archive-hazards, artifact, python-js, shell, url-discovery) from
 external coverage layers (YARA rule packs, AV adapters, plugins). When

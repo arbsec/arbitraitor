@@ -208,6 +208,7 @@ pub struct HealthChecker {
     plugin_dirs: Vec<PathBuf>,
     receipt_signing_key: Option<PathBuf>,
     shim_dir: Option<PathBuf>,
+    legacy_store: Option<PathBuf>,
 }
 
 impl HealthChecker {
@@ -294,6 +295,17 @@ impl HealthChecker {
         self
     }
 
+    /// Overrides the probed legacy store location.
+    ///
+    /// Defaults to `~/.arbitraitor/cas` (resolved from `HOME` at check
+    /// time). Injection exists for hermetic tests; production callers
+    /// should not need it.
+    #[must_use]
+    pub fn with_legacy_store(mut self, path: PathBuf) -> Self {
+        self.legacy_store = Some(path);
+        self
+    }
+
     /// Runs all configured checks and aggregates the results.
     #[must_use]
     pub fn check(&self) -> HealthReport {
@@ -312,6 +324,7 @@ impl HealthChecker {
             self.check_plugin_protocol(),
             self.check_wrapper_coverage(),
             self.check_shim_path_order(),
+            self.check_legacy_store(),
             self.check_clock_skew(),
             self.check_proxy_settings(),
             self.check_receipt_signing_key(),
@@ -733,6 +746,66 @@ impl HealthChecker {
                 shim_dir.display()
             ),
         )
+    }
+
+    /// Warns when a legacy `~/.arbitraitor/cas` store still exists alongside
+    /// the active cache-root store.
+    ///
+    /// Arbitraitor moved the default CAS root to the user cache directory
+    /// (`$XDG_CACHE_HOME/arbitraitor/cas`, falling back to
+    /// `$HOME/.cache/arbitraitor/cas`); pre-migration installs still carry a
+    /// `~/.arbitraitor/cas` tree whose contents the active store never sees.
+    /// This check is diagnostic only: it never migrates, moves, or deletes
+    /// anything — the operator decides what to do with the old store.
+    #[must_use]
+    pub fn check_legacy_store(&self) -> HealthCheckResult {
+        let Some(active) = &self.store_path else {
+            return HealthCheckResult::skipped(
+                "legacy_store",
+                "no content-addressed store configured",
+            );
+        };
+        let legacy_root = self.legacy_store.clone().or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".arbitraitor").join("cas"))
+        });
+        let Some(legacy_root) = legacy_root else {
+            return HealthCheckResult::skipped(
+                "legacy_store",
+                "HOME is unset; legacy store location cannot be probed",
+            );
+        };
+        let legacy = legacy_root.join("meta.db");
+        if !legacy.is_file() {
+            return HealthCheckResult::new(
+                "legacy_store",
+                HealthStatus::Pass,
+                "no legacy ~/.arbitraitor/cas store present",
+            );
+        }
+        if &legacy_root == active {
+            return HealthCheckResult::new(
+                "legacy_store",
+                HealthStatus::Pass,
+                "active store is the legacy location",
+            );
+        }
+        HealthCheckResult::new(
+            "legacy_store",
+            HealthStatus::Warn,
+            format!(
+                "legacy store {} still exists alongside the active store {}; \
+                 it is not migrated or read; remove it manually once its contents \
+                 are no longer needed",
+                legacy_root.display(),
+                active.display(),
+            ),
+        )
+        .with_details(serde_json::json!({
+            "legacy_store": legacy_root.display().to_string(),
+            "active_store": active.display().to_string(),
+        }))
     }
 
     /// Checks the local clock is plausible without performing network I/O.

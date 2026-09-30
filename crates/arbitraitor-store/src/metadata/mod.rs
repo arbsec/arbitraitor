@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::retention::RetentionMode;
 use crate::{SHA256_HEX_LEN, StoreError, metadata_sidecar_path};
 
+pub(crate) mod open_lock;
+pub(crate) use open_lock::open_with_retry;
+
 const ARTIFACTS: TableDefinition<&str, &str> = TableDefinition::new("artifacts");
 
 /// Rebuildable metadata for one artifact.
@@ -65,15 +68,7 @@ impl MetadataIndex {
     ///
     /// Returns [`StoreError`] when redb cannot be opened or initialized.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let db = if path.exists() {
-            redb::Database::open(path)
-        } else {
-            redb::Database::create(path)
-        }
-        .map_err(|source| StoreError::Index {
-            stage: "open",
-            message: source.to_string(),
-        })?;
+        let db = open_with_retry(path, "open", Path::exists)?;
         let index = Self { db };
         index.ensure_table()?;
         Ok(index)
