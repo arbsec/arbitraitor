@@ -13,7 +13,7 @@
 //!   invocation against the same store completes (the retry budget bridges
 //!   the holder's open→use→close window).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -90,22 +90,29 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
     let cas = root.join("cas");
     let script = write_scan_script(&root, b"#!/bin/sh\necho cross-process\n");
 
-    // Process A (this test, acting as the other process): open the store
-    // through a spawned engine call and keep it open for a bounded window
-    // shorter than the store layer's retry budget (400 ms), then release.
-    // The spawn-with-open→sleep→drop in a child process is approximated
-    // here by a thread in a separate std::process to honor the
-    // "cross-process" claim: the child re-opens and immediately drops.
+    // Process A (this test, acting as the other process): spawn the holder
+    // probe as a real separate process that opens the store and keeps it
+    // open for a bounded window shorter than the store layer's retry budget
+    // (400 ms), then releases.
     let mut holder = std::process::Command::new(std::env::current_exe()?)
-        .arg("--holder-probe")
-        .arg(&cas)
+        .args([
+            "--exact",
+            "holder_probe_opens_store_holds_then_releases",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("ARBITRAITOR_HOLDER_CAS", &cas)
         .env("ARBITRAITOR_HOLDER_MS", "150")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
+    // Give the holder a moment to actually acquire the lock before the CLI
+    // starts, so the CLI genuinely contends with it.
+    std::thread::sleep(Duration::from_millis(50));
+
     let started = std::time::Instant::now();
-    let output = Command::cargo_bin("arbitraitor")?
+    Command::cargo_bin("arbitraitor")?
         .arg("inspect")
         .arg(format!("file://{}", script.display()))
         .arg("--cas-dir")
@@ -113,46 +120,44 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
         .env("HOME", &root)
         .assert()
         .success();
-    let _ = output;
     let elapsed = started.elapsed();
 
-    holder.wait()?;
+    let holder_status = holder.wait()?;
 
-    // The CLI ran while the holder process still had (or had just released)
-    // the store open — i.e. it did not fail at store open as in #762.
+    // The CLI actually contended: the holder was still inside its 150 ms
+    // hold window (50 ms settle + hold + open margin), so the CLI elapsed
+    // time must include at least part of the remaining hold. If the spawn
+    // or the contention were removed, the CLI would finish in its normal
+    // fast path and this lower bound would fail.
     assert!(
-        elapsed < Duration::from_secs(10),
-        "CLI must complete promptly, took {elapsed:?}"
+        elapsed >= Duration::from_millis(100),
+        "CLI must have contended with the 150 ms holder; finished in {elapsed:?}, \
+         which suggests the holder never held the store"
+    );
+    assert!(
+        holder_status.success(),
+        "holder probe must have opened and released the store cleanly"
     );
     Ok(())
 }
 
 /// Holder helper: opens the store, holds it for `ARBITRAITOR_HOLDER_MS`,
-/// then exits (releasing the lock). Spawned with `--holder-probe` by the
-/// cross-process test.
+/// then exits (releasing the lock). Spawned by
+/// `cli_fetch_completes_while_another_process_holds_store_briefly` with
+/// `--exact holder_probe_opens_store_holds_then_releases --ignored` and the
+/// CAS path in `ARBITRAITOR_HOLDER_CAS`.
 #[cfg(unix)]
 #[test]
+#[ignore = "spawned explicitly by cli_fetch_completes_while_another_process_holds_store_briefly"]
 fn holder_probe_opens_store_holds_then_releases() {
-    // This test is only executed when spawned explicitly by
-    // cli_fetch_completes_while_another_process_holds_store_briefly. When
-    // the normal harness runs it, it must be a no-op to avoid contending
-    // with other tests.
-    if !std::env::args().any(|arg| arg == "--holder-probe") {
-        return;
-    }
-    let args: Vec<String> = std::env::args().collect();
-    let Some(cas_index) = args.iter().position(|arg| arg == "--holder-probe") else {
-        return;
-    };
-    let Some(cas) = args.get(cas_index + 1) else {
-        return;
-    };
+    let cas = std::env::var("ARBITRAITOR_HOLDER_CAS")
+        .unwrap_or_else(|_| panic!("ARBITRAITOR_HOLDER_CAS must be set by the spawning test"));
     let hold_ms: u64 = std::env::var("ARBITRAITOR_HOLDER_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(150);
     let store =
-        arbitraitor_store::ContentStore::open(Path::new(cas)).expect("holder probe store open");
+        arbitraitor_store::ContentStore::open(Path::new(&cas)).expect("holder probe store open");
     std::thread::sleep(Duration::from_millis(hold_ms));
     drop(store);
 }

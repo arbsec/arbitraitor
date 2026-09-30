@@ -75,8 +75,9 @@ pub const DEFAULT_SCAN_MAX_BYTES: u64 = 256 * 1024 * 1024;
 ///
 /// Composes fetcher, content store, analysis coordinator, policy engine,
 /// provenance verification, and receipt builder into a single in-process
-/// interface. Instances are cheap to clone internally (the store and
-/// coordinator are behind `Arc`) and safe to share across tasks via `&self`.
+/// interface. Instances are cheap to clone internally (the per-operation
+/// store handle and the coordinator are behind `Arc`) and safe to share
+/// across tasks via `&self`.
 #[derive(Clone)]
 pub struct ArbitraitorApi {
     store: StoreHandle,
@@ -115,11 +116,18 @@ impl StoreHandle {
     ///
     /// The store (and with it the redb whole-file lock) is closed when this
     /// method returns — including on the error path — so no lock survives
-    /// an idle period between requests.
-    fn with_store<T>(
+    /// an idle period between requests. The closure keeps its native error
+    /// type (`E`); the caller converts store-level errors (`From<
+    /// StoreError>`) at the single site that knows the user-facing
+    /// semantics, so no foreign error is re-wrapped into a misleading
+    /// `StoreError::Index`.
+    fn with_store<T, E>(
         &self,
-        f: impl FnOnce(&arbitraitor_store::ContentStore) -> Result<T, arbitraitor_store::StoreError>,
-    ) -> Result<T, arbitraitor_store::StoreError> {
+        f: impl FnOnce(&arbitraitor_store::ContentStore) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<arbitraitor_store::StoreError>,
+    {
         let store = arbitraitor_store::ContentStore::open(&self.path)?;
         let result = f(&store);
         drop(store);
@@ -510,7 +518,7 @@ impl ArbitraitorApi {
             .map_or_else(|| url.to_owned(), ToString::to_string);
         let size = receipt.bytes_written;
         let digest = receipt.sha256.clone();
-        self.store.with_store(|store| {
+        self.store.with_store(|store| -> Result<(), EngineError> {
             store.store_with_metadata_and_limits(
                 bytes.clone(),
                 Some(redact_url(url)),
@@ -518,12 +526,7 @@ impl ArbitraitorApi {
                 arbitraitor_store::RetentionMode::Cache,
                 self.store_max_bytes,
             )?;
-            discover_and_store_children(store, &bytes, self.store_max_bytes)
-                .map_err(|error| arbitraitor_store::StoreError::Index {
-                    stage: "store-children",
-                    message: error.to_string(),
-                })
-                .map(|_| ())
+            discover_and_store_children(store, &bytes, self.store_max_bytes).map(|_| ())
         })?;
         Ok(FetchResult {
             sha256: digest.to_string(),
@@ -660,10 +663,7 @@ impl ArbitraitorApi {
                 dest,
                 &arbitraitor_exec::release::ReleasePolicy::default(),
             )
-            .map_err(|error| arbitraitor_store::StoreError::Index {
-                stage: "release",
-                message: error.to_string(),
-            })
+            .map_err(|error| EngineError::Release(error.to_string()))
         })?;
         let _completed = operation.release()?.complete()?;
         Ok(ReleaseResult {
@@ -851,14 +851,8 @@ impl ArbitraitorApi {
         let result = self.coordinator.analyze_with_retrieval(bytes, retrieval);
         operation = operation.transition_to(PipelineState::Analyzing)?;
 
-        self.store.with_store(|store| {
-            discover_and_store_children(store, bytes, self.store_max_bytes).map_err(|error| {
-                arbitraitor_store::StoreError::Index {
-                    stage: "store-children",
-                    message: error.to_string(),
-                }
-            })
-        })?;
+        self.store
+            .with_store(|store| discover_and_store_children(store, bytes, self.store_max_bytes))?;
         operation = operation.transition_to(PipelineState::Expanding)?;
 
         let (verdict, policy_trace) = self.resolve_verdict(&result);
