@@ -214,7 +214,9 @@ caps pending record files at
   Permission denied` and mediated script execution failed exactly where the
   isolation layer was strongest. The mediated ruleset now adds three
   per-file, write-only (`LANDLOCK_ACCESS_FS_WRITE_FILE`) rules for exactly
-  those three procfs files on wrapper runs. The grant is not leverageable:
+  those three procfs files, and only for wrapper runs — non-wrapped
+  mediated execution receives no `/proc` grants. The grant is not
+  leverageable:
   per-file `O_PATH` handles (no directory traversal), write-only (no
   read-back), kernel-validated content (an unprivileged writer can only map
   its own UID/GID to itself; elevating mappings and second writes fail with
@@ -229,7 +231,8 @@ caps pending record files at
   (`LandlockProbe::Supported(abi)` / `LandlockProbe::No`) at command
   configuration time, the `pre_exec` hook enforces exactly that verdict
   (`install_landlock_ruleset_plan` reports
-  `LandlockInstallOutcome::{Enforced, NoKernelSupport}`), and
+  `LandlockInstallOutcome::{Enforced, NoKernelSupport}` — observable
+  in-process and in tests; the forked-child hook itself discards it), and
   `compute_effective_controls` maps `Supported` → `Available` / `No` →
   `Unavailable`. The #755 fail-closed behavior is unchanged — a host without
   a Landlock ABI still reports `filesystem_isolation: Unavailable` — but

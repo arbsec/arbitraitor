@@ -318,6 +318,14 @@ impl LandlockInstallPlan {
         self.probe
     }
 
+    /// Returns the captured rules as raw path/access pairs.
+    ///
+    /// Empty on non-Linux platforms (no Landlock UAPI to capture against).
+    #[must_use]
+    pub fn captured(&self) -> &[(CString, u64)] {
+        &self.captured
+    }
+
     /// Maps the plan's probe verdict to the effective-controls state for
     /// filesystem isolation.
     ///
@@ -416,14 +424,26 @@ fn capture_rules(rules: &[PathRule]) -> Vec<(CString, u64)> {
         .collect()
 }
 
+/// Non-Linux platforms have no Landlock UAPI, so no rules are ever
+/// captured; the plan exists for type-consistent probe reporting and its
+/// `captured` field is never read (`configure_filesystem_isolation_with_plan`
+/// registers no hook without a Linux Landlock adapter).
+#[cfg(not(target_os = "linux"))]
+fn capture_rules(_rules: &[PathRule]) -> Vec<(CString, u64)> {
+    Vec::new()
+}
+
 #[cfg(target_os = "linux")]
 fn install_landlock_ruleset(rules: &[(CString, u64)]) -> io::Result<()> {
     install_landlock_ruleset_plan(rules, capture_landlock_probe()).map(|_| ())
 }
 
 /// Installs the ruleset for `rules` under `probe`'s verdict, reporting the
-/// recorded outcome on success. Failures propagate as errors so the spawning
-/// process fails closed instead of running an unconstrained child (#754).
+/// recorded outcome on success. The outcome is observable only in-process
+/// (tests, callers running the install directly); the `pre_exec` hook path
+/// discards it because the hook runs in the forked child. Hook failures
+/// still propagate as errors so the spawn fails closed instead of running
+/// an unconstrained child (#754).
 #[cfg(target_os = "linux")]
 fn install_landlock_ruleset_plan(
     rules: &[(CString, u64)],

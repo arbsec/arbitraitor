@@ -160,9 +160,11 @@ interpreter in `unshare --user --map-current-user`, which writes its own
 user-namespace identity mapping through `/proc/self/uid_map`,
 `/proc/self/setgroups`, and `/proc/self/gid_map` before exec. Under an
 active Landlock ruleset the mediated profile grants exactly those three
-files write-only access — per-file handles, kernel-validated content (an
-unprivileged writer can only map its own identity to itself), so the grant
-cannot be leveraged into a privilege-escalation primitive (#754).
+files write-only access, and only for wrapper runs (non-wrapped mediated
+execution receives no `/proc` grants) — per-file handles,
+kernel-validated content (an unprivileged writer can only map its own
+identity to itself), so the grant cannot be leveraged into a
+privilege-escalation primitive (#754).
 
 ## macOS containment
 

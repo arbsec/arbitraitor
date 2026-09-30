@@ -344,6 +344,7 @@ impl ScriptExecution {
             &self.interpreter,
             self.environment.working_dir(),
             self.environment.home_dir(),
+            self.network_isolated,
         );
         configure_filesystem_isolation(&mut command, &rules);
         command
@@ -418,17 +419,19 @@ fn resolve_stdin_write_failure(
 /// Builds the Landlock path rules for a mediated script execution.
 ///
 /// The interpreter, its runtime directories, and the temporary working/home
-/// directories are the only filesystem surface the mediated profile needs —
-/// except when the command is wrapped in the `unshare --map-current-user`
-/// network wrapper, which must write its own user-namespace identity mapping
-/// through `/proc/self` before executing the interpreter (#754). For wrapper
-/// runs exactly three per-file `WRITE_FILE` rules are added for
-/// `/proc/self/uid_map`, `/proc/self/setgroups`, and `/proc/self/gid_map`;
-/// see [`proc_map_write_rule`] for why that grant cannot be leveraged.
+/// directories are the only filesystem surface the mediated profile needs.
+/// When `network_isolated` selects the `unshare --map-current-user` network
+/// wrapper, that wrapper must additionally write its own user-namespace
+/// identity mapping through `/proc/self` before executing the interpreter
+/// (#754): exactly three per-file `WRITE_FILE` rules are added for
+/// `/proc/self/uid_map`, `/proc/self/setgroups`, and `/proc/self/gid_map`.
+/// Non-wrapped runs receive no `/proc` grants; see [`proc_map_write_rule`]
+/// for why the wrapper grant cannot be leveraged.
 fn landlock_rules_for_script_execution(
     interpreter: &Path,
     working_dir: &Path,
     home_dir: &Path,
+    network_isolated: bool,
 ) -> Vec<PathRule> {
     let mut rules = Vec::new();
 
@@ -450,21 +453,24 @@ fn landlock_rules_for_script_execution(
         rules.push(PathRule::read_execute(PathBuf::from(path)));
     }
 
-    rules.extend(unshare_wrapper_proc_rules());
+    if network_isolated {
+        rules.extend(unshare_wrapper_proc_rules());
+    }
 
     rules
 }
 
 /// Landlock rules for the `unshare --map-current-user` network wrapper's
-/// identity-mapping writes, or an empty vector when this execution is not
-/// wrapped (Linux only; always empty elsewhere).
+/// identity-mapping writes.
 ///
-/// The wrapper writes the user-namespace mapping through per-process procfs
-/// files before exec'ing the interpreter. Without these rules the wrapper
-/// dies with EACCES on every host where Landlock is active (#754), taking
-/// mediated script execution with it. The grant is per-file, write-only,
-/// and kernel-checked; see [`proc_map_write_rule`] for the
-/// non-leverageability argument.
+/// The caller gates these on `network_isolated` — the same condition that
+/// selects the wrapper in `build_program_command` — so non-wrapped runs
+/// receive no `/proc` grants. The wrapper writes the user-namespace mapping
+/// through per-process procfs files before exec'ing the interpreter. Without
+/// these rules the wrapper dies with EACCES on every host where Landlock is
+/// active (#754), taking mediated script execution with it. The grant is
+/// per-file, write-only, and kernel-checked; see [`proc_map_write_rule`] for
+/// the non-leverageability argument.
 #[cfg(target_os = "linux")]
 fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
     UNSHARE_ID_MAP_FILES
@@ -934,6 +940,7 @@ mod tests {
             Path::new("/bin/bash"),
             Path::new("/tmp/work"),
             Path::new("/tmp/home"),
+            false,
         );
         let paths: Vec<&Path> = rules.iter().map(|r| r.path.as_path()).collect();
         assert!(paths.iter().any(|p| p == &Path::new("/bin")));
@@ -941,6 +948,24 @@ mod tests {
         assert!(paths.iter().any(|p| p == &Path::new("/usr/local/bin")));
         assert!(paths.iter().any(|p| p == &Path::new("/lib")));
         assert!(paths.iter().any(|p| p == &Path::new("/tmp")));
+    }
+
+    /// #754 (adversarial review round 1, F1): non-wrapped mediated runs must
+    /// receive NO `/proc` grants — the wrapper's identity-mapping writes are
+    /// needed only when the `unshare --map-current-user` wrapper is actually
+    /// in use. Least privilege: the grant follows the wrapper.
+    #[test]
+    fn landlock_rules_omit_proc_grants_without_wrapper() {
+        let rules = landlock_rules_for_script_execution(
+            Path::new("/bin/bash"),
+            Path::new("/tmp/work"),
+            Path::new("/tmp/home"),
+            false,
+        );
+        assert!(
+            rules.iter().all(|rule| !rule.path.starts_with("/proc")),
+            "non-wrapped execution must not receive /proc grants: {rules:?}"
+        );
     }
 
     /// #754: the unshare identity wrapper's procfs mapping files must be
@@ -953,6 +978,7 @@ mod tests {
             Path::new("/bin/bash"),
             Path::new("/tmp/work"),
             Path::new("/tmp/home"),
+            true,
         );
         for path in UNSHARE_ID_MAP_FILES {
             let rule = rules
@@ -1054,19 +1080,14 @@ mod tests {
             &mut command,
             arbitraitor_sandbox::SandboxConfig::default(),
         );
-        // Pre-#754 rule set: no procfs map-file grants.
+        // Pre-#754 rule set: no procfs map-file grants (equivalent to the
+        // current builder for a non-wrapped run).
         let pre_fix_rules: Vec<PathRule> = landlock_rules_for_script_execution(
             Path::new("/bin/sh"),
             script.environment().working_dir(),
             script.environment().home_dir(),
-        )
-        .into_iter()
-        .filter(|rule| {
-            !UNSHARE_ID_MAP_FILES
-                .iter()
-                .any(|p| rule.path == PathBuf::from(p))
-        })
-        .collect();
+            false,
+        );
         arbitraitor_sandbox::configure_filesystem_isolation(&mut command, &pre_fix_rules);
         let output = command.output()?;
         assert!(
