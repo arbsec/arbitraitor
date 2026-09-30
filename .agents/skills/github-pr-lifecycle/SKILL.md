@@ -7,6 +7,11 @@ compatibility: Requires gh CLI v2.94.0+ for sub-issue/dependency linking, jq for
 
 # github-pr-lifecycle
 
+> **`gh` authentication note**: all `gh` invocations assume `GH_TOKEN` is set from the
+> minting tool (see project workflow policy) — agent sessions MUST prefix every call
+> with `GH_TOKEN="$(cargo run -q -p xtask -- mint-github-token)"`; bare `gh` defaults
+> to personal auth and is the labelled fallback only.
+
 Owns the **PR half** of spec-driven delivery: draft → CI → review → remediate → converge → merge → reconcile. The sibling skill `github-project-workflow` owns the issue half. This skill is **generic mechanism**; project-specific policy (required reviewer domains, review-loop limits, PR convergence rules, forbidden administrative shortcuts) lives in `.agents/project/arbitraitor-workflow.md` and the project config file.
 
 ## When to use
