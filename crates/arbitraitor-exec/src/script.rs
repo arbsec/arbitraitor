@@ -32,6 +32,21 @@ const UNSHARE_PATH: &str = "/usr/bin/unshare";
 #[cfg(target_os = "linux")]
 const UNSHARE_NETWORK_ARGS: [&str; 4] = ["--user", "--map-current-user", "--net", "--"];
 
+/// procfs files `unshare --map-current-user` writes to establish the
+/// identity mapping for the new user namespace (#754).
+///
+/// The wrapper opens all three in the order required by
+/// `user_namespaces(7)`: `setgroups` must be written `deny` before `gid_map`
+/// when the writer lacks `CAP_SETGID` in the parent namespace (the mediated
+/// profile is unprivileged, so this always applies), and `uid_map`/`gid_map`
+/// receive the single-line own-identity mapping.
+#[cfg(target_os = "linux")]
+const UNSHARE_ID_MAP_FILES: [&str; 3] = [
+    "/proc/self/uid_map",
+    "/proc/self/setgroups",
+    "/proc/self/gid_map",
+];
+
 /// Result of executing a script through the controlled interpreter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
@@ -400,6 +415,16 @@ fn resolve_stdin_write_failure(
     ))
 }
 
+/// Builds the Landlock path rules for a mediated script execution.
+///
+/// The interpreter, its runtime directories, and the temporary working/home
+/// directories are the only filesystem surface the mediated profile needs —
+/// except when the command is wrapped in the `unshare --map-current-user`
+/// network wrapper, which must write its own user-namespace identity mapping
+/// through `/proc/self` before executing the interpreter (#754). For wrapper
+/// runs exactly three per-file `WRITE_FILE` rules are added for
+/// `/proc/self/uid_map`, `/proc/self/setgroups`, and `/proc/self/gid_map`;
+/// see [`proc_map_write_rule`] for why that grant cannot be leveraged.
 fn landlock_rules_for_script_execution(
     interpreter: &Path,
     working_dir: &Path,
@@ -425,7 +450,65 @@ fn landlock_rules_for_script_execution(
         rules.push(PathRule::read_execute(PathBuf::from(path)));
     }
 
+    rules.extend(unshare_wrapper_proc_rules());
+
     rules
+}
+
+/// Landlock rules for the `unshare --map-current-user` network wrapper's
+/// identity-mapping writes, or an empty vector when this execution is not
+/// wrapped (Linux only; always empty elsewhere).
+///
+/// The wrapper writes the user-namespace mapping through per-process procfs
+/// files before exec'ing the interpreter. Without these rules the wrapper
+/// dies with EACCES on every host where Landlock is active (#754), taking
+/// mediated script execution with it. The grant is per-file, write-only,
+/// and kernel-checked; see [`proc_map_write_rule`] for the
+/// non-leverageability argument.
+#[cfg(target_os = "linux")]
+fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
+    UNSHARE_ID_MAP_FILES
+        .iter()
+        .map(|path| proc_map_write_rule(PathBuf::from(path)))
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
+    Vec::new()
+}
+
+/// A minimal Landlock `WRITE_FILE`-only rule for one of the wrapper's
+/// procfs identity-mapping files.
+///
+/// # Why this grant cannot be leveraged (issue #754 review argument)
+///
+/// - **Per-file, not per-directory.** The rule is an `O_PATH` handle on the
+///   exact file (`LANDLOCK_RULE_PATH_BENEATH` with a non-directory parent),
+///   so it grants nothing else under `/proc` and no directory traversal.
+/// - **Write-only.** Only `LANDLOCK_ACCESS_FS_WRITE_FILE` is granted — not
+///   read, not execute, not `REFER`/`TRUNCATE` — so the child cannot even
+///   read back mapping state through this rule.
+/// - **Kernel-checked content.** `uid_map`/`gid_map` accept exactly one
+///   write per namespace, and the kernel validates it against the writer's
+///   own credentials in the parent namespace: an unprivileged writer can
+///   only map its own UID/GID to itself (the identity mapping
+///   `--map-current-user` requests). Writing a mapping that elevates or
+///   changes identity fails with `EPERM`; a second write fails with `EPERM`
+///   (verified against kernel 7.2). The write is not a `setuid` primitive —
+///   credentials inside the new namespace are fixed by the mapping, and
+///   `no_new_privs` plus Landlock remain active across it.
+/// - **`setgroups` is single-value.** It accepts only `allow`/`deny` and is
+///   required by `user_namespaces(7)` before `gid_map` for unprivileged
+///   writers; `deny` (the wrapper's choice) is the more restrictive value.
+/// - **Self-scoped.** `/proc/self/*` resolves to the writing process's own
+///   namespace files; Landlock's `O_PATH` handle binds to the same procfs
+///   object (pidfs inode identity survives the `CLONE_NEWUSER` switch on
+///   the same process), so the rule cannot be re-aimed at another
+///   process's map files.
+#[cfg(target_os = "linux")]
+fn proc_map_write_rule(path: PathBuf) -> PathRule {
+    PathRule::new(path, arbitraitor_sandbox::access_fs::WRITE_FILE)
 }
 
 fn operation_plan(interpreter: &Path, args: &[String]) -> OperationPlan {
@@ -451,6 +534,8 @@ fn operation_plan(interpreter: &Path, args: &[String]) -> OperationPlan {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use std::fs;
     use std::io::Read;
@@ -856,6 +941,144 @@ mod tests {
         assert!(paths.iter().any(|p| p == &Path::new("/usr/local/bin")));
         assert!(paths.iter().any(|p| p == &Path::new("/lib")));
         assert!(paths.iter().any(|p| p == &Path::new("/tmp")));
+    }
+
+    /// #754: the unshare identity wrapper's procfs mapping files must be
+    /// granted write-only, per-file access so the wrapper can write its own
+    /// user-namespace mapping under an active Landlock ruleset.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_rules_grant_wrapper_uid_map_writes() {
+        let rules = landlock_rules_for_script_execution(
+            Path::new("/bin/bash"),
+            Path::new("/tmp/work"),
+            Path::new("/tmp/home"),
+        );
+        for path in UNSHARE_ID_MAP_FILES {
+            let rule = rules
+                .iter()
+                .find(|rule| rule.path == *path)
+                .unwrap_or_else(|| panic!("missing write rule for {path}"));
+            assert_eq!(
+                rule.access,
+                arbitraitor_sandbox::access_fs::WRITE_FILE,
+                "grant for {path} must be WRITE_FILE-only"
+            );
+        }
+    }
+
+    /// #754 non-leverageability: the wrapper's map-file grants must be
+    /// write-only — reading identity state or executing through the granted
+    /// paths must stay denied under the mediated ruleset.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_wrapper_map_grants_are_write_only() -> Result<(), Box<dyn std::error::Error>> {
+        if !landlock_enforced() {
+            return Ok(());
+        }
+        // Build the exact mediated command (wrapper included) and have it
+        // attempt to READ its own uid_map: the WRITE_FILE-only grant must
+        // keep that denied.
+        let script = network_isolated_bash_or_skip()?;
+        let Some(script) = script else {
+            return Ok(());
+        };
+        let result = script.execute(b"cat /proc/self/uid_map\n")?;
+        assert_ne!(
+            result.exit_code,
+            Some(0),
+            "reading /proc/self/uid_map must stay denied under the mediated ruleset; \
+             stdout={}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        Ok(())
+    }
+
+    /// #754 end-to-end regression: mediated network-isolated script
+    /// execution must actually run under an active Landlock LSM. Before the
+    /// fix the unshare wrapper died with `cannot open /proc/self/uid_map:
+    /// Permission denied` on every Landlock-active host; the earlier
+    /// `loopback_connection_fails_when_network_isolated` test passed
+    /// vacuously because the wrapper's death also prevented the connect.
+    /// This test asserts the wrapper's identity-mapping write succeeds and
+    /// the script runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn network_isolated_script_runs_under_landlock() -> Result<(), Box<dyn std::error::Error>> {
+        if !landlock_enforced() {
+            return Ok(());
+        }
+        let Some(script) = network_isolated_bash_or_skip()? else {
+            return Ok(());
+        };
+        let result = script.execute(b"echo ran-under-landlock\n")?;
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "mediated network-isolated execution failed under Landlock; stderr={}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("ran-under-landlock"),
+            "script output missing; stdout={}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        Ok(())
+    }
+
+    /// #754 contrast proof: with the wrapper grants removed, mediated
+    /// network-isolated execution must fail again on a Landlock-active
+    /// host. Guards against silently widening/granting rules that make the
+    /// fix pass for the wrong reason.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn network_isolated_script_fails_without_wrapper_proc_grants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if !landlock_enforced() {
+            return Ok(());
+        }
+        let Some(script) = network_isolated_bash_or_skip()? else {
+            return Ok(());
+        };
+        // Execute a command whose Landlock rules deliberately omit the
+        // wrapper's procfs mapping grants by re-running the rules builder's
+        // base set: simulate pre-#754 behavior through a raw Command so the
+        // assertion cannot pass through the fixed path.
+        let mut command = StdCommand::new(UNSHARE_PATH);
+        command.args(UNSHARE_NETWORK_ARGS);
+        command.arg("/bin/sh").arg("-c").arg("echo should-not-run");
+        command.env_clear();
+        command.envs(script.environment().environment_iter());
+        command.current_dir(script.environment().working_dir());
+        arbitraitor_sandbox::configure_command(
+            &mut command,
+            arbitraitor_sandbox::SandboxConfig::default(),
+        );
+        // Pre-#754 rule set: no procfs map-file grants.
+        let pre_fix_rules: Vec<PathRule> = landlock_rules_for_script_execution(
+            Path::new("/bin/sh"),
+            script.environment().working_dir(),
+            script.environment().home_dir(),
+        )
+        .into_iter()
+        .filter(|rule| {
+            !UNSHARE_ID_MAP_FILES
+                .iter()
+                .any(|p| rule.path == PathBuf::from(p))
+        })
+        .collect();
+        arbitraitor_sandbox::configure_filesystem_isolation(&mut command, &pre_fix_rules);
+        let output = command.output()?;
+        assert!(
+            !output.status.success(),
+            "unshare wrapper unexpectedly survived without its procfs map grants"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("uid_map"),
+            "expected the pre-fix uid_map denial diagnostic; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
     }
 
     /// Regression test for #620: when bash exits before consuming all

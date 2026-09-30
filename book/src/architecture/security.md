@@ -151,7 +151,18 @@ host's Landlock ABI probe succeeds. A kernel without a Landlock ABI
 (Linux < 5.13, or the Landlock LSM disabled) receives no ruleset from the
 execution gate, so the effective-controls matrix fails closed and reports
 `filesystem_isolation` as `unavailable` (#755) instead of promising
-containment the platform will not deliver.
+containment the platform will not deliver. The matrix is derived from the
+same captured probe verdict the `pre_exec` hook enforces, so reporting and
+enforcement cannot disagree (#754).
+
+Mediated script execution with network isolation (the default) wraps the
+interpreter in `unshare --user --map-current-user`, which writes its own
+user-namespace identity mapping through `/proc/self/uid_map`,
+`/proc/self/setgroups`, and `/proc/self/gid_map` before exec. Under an
+active Landlock ruleset the mediated profile grants exactly those three
+files write-only access — per-file handles, kernel-validated content (an
+unprivileged writer can only map its own identity to itself), so the grant
+cannot be leveraged into a privilege-escalation primitive (#754).
 
 ## macOS containment
 

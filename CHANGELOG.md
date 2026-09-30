@@ -202,6 +202,38 @@ caps pending record files at
   (Warn — previously the table claimed Pass, contradicting the shipped
   derivation; no Low-severity producer exists in the default detector set,
   so observed behavior is unchanged) and adds the Informational row.
+- **Mediated script execution works again on Landlock-active hosts: the
+  network wrapper's user-namespace identity writes are granted
+  (`arbitraitor-exec`)** (#754) — `ScriptExecution::bash` (and any mediated
+  script run with network isolation enabled, the default) wraps the
+  interpreter in `unshare --user --map-current-user --net`, which writes
+  `/proc/self/uid_map`, `/proc/self/setgroups`, and `/proc/self/gid_map`
+  before exec'ing the interpreter. `landlock_rules_for_script_execution`
+  granted no `/proc` access, so on every host where the Landlock LSM is
+  active the wrapper died with `unshare: cannot open /proc/self/uid_map:
+  Permission denied` and mediated script execution failed exactly where the
+  isolation layer was strongest. The mediated ruleset now adds three
+  per-file, write-only (`LANDLOCK_ACCESS_FS_WRITE_FILE`) rules for exactly
+  those three procfs files on wrapper runs. The grant is not leverageable:
+  per-file `O_PATH` handles (no directory traversal), write-only (no
+  read-back), kernel-validated content (an unprivileged writer can only map
+  its own UID/GID to itself; elevating mappings and second writes fail with
+  `EPERM`), and `/proc/self/*` resolves to the writing process's own
+  namespace files.
+- **The effective-controls matrix is derived from the same Landlock probe
+  the enforcement hook acts on (`arbitraitor-sandbox`)** (#754) —
+  `compute_effective_controls` probed the kernel ABI independently while
+  `configure_filesystem_isolation` made its own install/no-op decision, so
+  the reported matrix and actual enforcement could diverge. Both now share
+  one captured verdict: `capture_landlock_install_plan` records the probe
+  (`LandlockProbe::Supported(abi)` / `LandlockProbe::No`) at command
+  configuration time, the `pre_exec` hook enforces exactly that verdict
+  (`install_landlock_ruleset_plan` reports
+  `LandlockInstallOutcome::{Enforced, NoKernelSupport}`), and
+  `compute_effective_controls` maps `Supported` → `Available` / `No` →
+  `Unavailable`. The #755 fail-closed behavior is unchanged — a host without
+  a Landlock ABI still reports `filesystem_isolation: Unavailable` — but
+  the reporting and the hook can no longer disagree.
 - **curl/wget wrapper: scheme-less `host[:port]/path` arguments are
   normalized to `http://`, the wrapper's URL diagnostic states every
   accepted form, and `-f`/`-s` no longer silence the gate's own
