@@ -9,9 +9,12 @@
 //! - in-process: a long-lived [`ArbitraitorApi`] holds no redb lock between
 //!   operations, so a second process-equivalent open of the same store
 //!   succeeds while the API instance is alive;
-//! - cross-process: while one process holds the store open, a real CLI
-//!   invocation against the same store completes (the retry budget bridges
-//!   the holder's open→use→close window).
+//! - cross-process: a spawned holder process confirms it holds the metadata
+//!   lock, the real CLI binary is spawned against the same store while the
+//!   lock is held, and the holder releases on a signal file inside the
+//!   retry budget — the CLI's contended open recovers via retry and
+//!   succeeds (the exact #762 shape). Signal-file release (not a timer)
+//!   makes the hold deterministic under CI scheduler load.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -19,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_engine::{ArbitraitorApi, Config};
-use assert_cmd::Command;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -92,8 +94,13 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
 
     // Process A (this test, acting as the other process): spawn the holder
     // probe as a real separate process that opens the store and keeps it
-    // open for a bounded window shorter than the store layer's retry budget
-    // (400 ms), then releases.
+    // open until the test tells it to release. The release is a signal file
+    // (not a wall-clock sleep): a loaded CI runner can deschedule the holder
+    // past any fixed hold, which is exactly the flake the previous
+    // timer-based design hit. The test controls the hold precisely —
+    // release right after the CLI's contended open is underway, well inside
+    // the 400 ms retry budget.
+    let release_signal = root.join("release-holder");
     let mut holder = std::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
@@ -102,36 +109,79 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
             "--nocapture",
         ])
         .env("ARBITRAITOR_HOLDER_CAS", &cas)
-        .env("ARBITRAITOR_HOLDER_MS", "150")
+        .env("ARBITRAITOR_HOLDER_RELEASE", &release_signal)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    // Give the holder a moment to actually acquire the lock before the CLI
-    // starts, so the CLI genuinely contends with it.
-    std::thread::sleep(Duration::from_millis(50));
+    // Wait until the holder actually holds the metadata lock before the CLI
+    // starts (poll the flock, 5 ms steps): slow CI process spawns must not
+    // miss the hold window, or the CLI would sail through uncontended and
+    // the contention assertion below would flake. The poll's own successful
+    // try_locks drop their fd at each iteration end, so the poll never holds
+    // the lock itself.
+    let meta_db = cas.join("meta.db");
+    let mut lock_observed = false;
+    for _ in 0..600 {
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&meta_db);
+        // `try_lock` fails while the holder's flock is live — exactly the
+        // signal we poll for.
+        let held_by_other = match probe {
+            Ok(file) => file.try_lock().is_err(),
+            Err(_) => false,
+        };
+        if held_by_other {
+            lock_observed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        lock_observed,
+        "holder probe must acquire the metadata lock within 3 s; \
+         if this fails the spawn environment is too slow to test contention"
+    );
 
     let started = std::time::Instant::now();
-    Command::cargo_bin("arbitraitor")?
+    let cli_bin = env!("CARGO_BIN_EXE_arbitraitor");
+    let mut cli = std::process::Command::new(cli_bin)
         .arg("inspect")
         .arg(format!("file://{}", script.display()))
         .arg("--cas-dir")
         .arg(&cas)
         .env("HOME", &root)
-        .assert()
-        .success();
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // The CLI process is now running its contended open. Hold the lock a
+    // moment longer so the CLI's first open attempt definitely hits the
+    // flock, then release well inside the 400 ms retry budget: the CLI's
+    // open retries until the flock frees, then succeeds — the exact #762
+    // recovery path.
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::write(&release_signal, b"release")?;
+
+    let status = cli.wait()?;
     let elapsed = started.elapsed();
 
     let holder_status = holder.wait()?;
 
-    // The CLI actually contended: the holder was still inside its 150 ms
-    // hold window (50 ms settle + hold + open margin), so the CLI elapsed
-    // time must include at least part of the remaining hold. If the spawn
-    // or the contention were removed, the CLI would finish in its normal
-    // fast path and this lower bound would fail.
+    // The CLI actually contended: the lock was confirmed held before the
+    // CLI spawned, so its open necessarily blocked until the holder
+    // released. If the contention were removed (holder skipped, or the
+    // engine regressed to a process-lifetime eager open), either the
+    // lock-observation assert or the success assert here would catch it.
     assert!(
-        elapsed >= Duration::from_millis(100),
-        "CLI must have contended with the 150 ms holder; finished in {elapsed:?}, \
+        status.success(),
+        "CLI must succeed after the contended open recovers via retry"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(20),
+        "CLI must have blocked on the held lock; finished in {elapsed:?}, \
          which suggests the holder never held the store"
     );
     assert!(
@@ -141,23 +191,29 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
     Ok(())
 }
 
-/// Holder helper: opens the store, holds it for `ARBITRAITOR_HOLDER_MS`,
-/// then exits (releasing the lock). Spawned by
-/// `cli_fetch_completes_while_another_process_holds_store_briefly` with
-/// `--exact holder_probe_opens_store_holds_then_releases --ignored` and the
-/// CAS path in `ARBITRAITOR_HOLDER_CAS`.
+/// Holder helper: opens the store and holds it until the release signal file
+/// (`ARBITRAITOR_HOLDER_RELEASE`) appears, then exits (releasing the lock).
+/// Spawned by `cli_fetch_completes_while_another_process_holds_store_briefly`
+/// with `--exact holder_probe_opens_store_holds_then_releases --ignored` and
+/// the CAS path in `ARBITRAITOR_HOLDER_CAS`.
 #[cfg(unix)]
 #[test]
 #[ignore = "spawned explicitly by cli_fetch_completes_while_another_process_holds_store_briefly"]
 fn holder_probe_opens_store_holds_then_releases() {
     let cas = std::env::var("ARBITRAITOR_HOLDER_CAS")
         .unwrap_or_else(|_| panic!("ARBITRAITOR_HOLDER_CAS must be set by the spawning test"));
-    let hold_ms: u64 = std::env::var("ARBITRAITOR_HOLDER_MS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(150);
+    let release = std::env::var("ARBITRAITOR_HOLDER_RELEASE")
+        .unwrap_or_else(|_| panic!("ARBITRAITOR_HOLDER_RELEASE must be set by the spawning test"));
     let store =
         arbitraitor_store::ContentStore::open(Path::new(&cas)).expect("holder probe store open");
-    std::thread::sleep(Duration::from_millis(hold_ms));
+    // Hold until the test signals release (poll every 2 ms). A cap prevents
+    // a hung test from blocking the suite forever; 30 s is far beyond any
+    // realistic scheduler delay while staying bounded.
+    for _ in 0..15_000 {
+        if Path::new(&release).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
     drop(store);
 }
