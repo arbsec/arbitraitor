@@ -47,6 +47,8 @@ pub enum IngressDenyReason {
     MissingDeliveryKey,
     /// The envelope's event type was empty — routing needs it.
     MissingEventType,
+    /// The envelope's repository was empty — the dedup key needs it.
+    MissingRepository,
 }
 
 /// Audit record for one accepted delivery (embedder persists it in its
@@ -124,6 +126,11 @@ pub fn authenticate_envelope(
             reason: IngressDenyReason::MissingEventType,
         };
     }
+    if context.repository.trim().is_empty() {
+        return IngressDecision::Denied {
+            reason: IngressDenyReason::MissingRepository,
+        };
+    }
     IngressDecision::Accepted(IngressReceipt::from_context(context))
 }
 
@@ -199,6 +206,19 @@ mod tests {
             decision,
             IngressDecision::Denied {
                 reason: IngressDenyReason::MissingEventType
+            }
+        );
+    }
+
+    #[test]
+    fn empty_repository_denies_even_with_valid_credential() {
+        let mut envelope = context();
+        envelope.repository = "  ".to_owned();
+        let decision = authenticate_envelope(&secret("k"), &secret("k"), &envelope);
+        assert_eq!(
+            decision,
+            IngressDecision::Denied {
+                reason: IngressDenyReason::MissingRepository
             }
         );
     }
