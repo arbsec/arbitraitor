@@ -42,3 +42,4 @@ book/src/adr/
 .arbitraitor/cas/
 .arbitraitor/receipts/
 .arbitraitor/intel.json
+# ci probe: store_lock flake triage (see #788). Empty change; closes on merge attempt.
