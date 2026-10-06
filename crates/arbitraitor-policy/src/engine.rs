@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use arbitraitor_model::finding::{Finding, FindingCategory};
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
-use crate::context::EvalContext;
+use crate::context::{EvalContext, IngressContext};
 use crate::error::PolicyError;
 use crate::schema::{Condition, FieldMatch, MatchOp, Policy, PolicyAction, Rule, ScalarValue};
 use crate::trace::{PolicyTrace, RuleEvaluation};
@@ -811,6 +811,9 @@ fn resolve_field(field: &str, finding: Option<&Finding>, context: &EvalContext) 
     if let Some(rest) = field.strip_prefix("context.") {
         return resolve_context_field(rest, context);
     }
+    if let Some(rest) = field.strip_prefix("ingress.") {
+        return resolve_ingress_field(rest, context.ingress.as_ref());
+    }
     // Unknown prefix — treat as unavailable so the rule is skipped.
     FieldValue::Unavailable
 }
@@ -922,6 +925,53 @@ fn resolve_context_field(name: &str, context: &EvalContext) -> FieldValue {
             None => FieldValue::Unavailable,
         },
         _ => FieldValue::Unavailable,
+    }
+}
+
+/// Resolves an `ingress.*` subpath against the attached [`IngressContext`].
+///
+/// Unknown subfields resolve to [`FieldValue::Unavailable`] so forward-
+/// compatible rules are skipped rather than silently matching.
+fn resolve_ingress_field(name: &str, ingress: Option<&IngressContext>) -> FieldValue {
+    let Some(ingress) = ingress else {
+        return FieldValue::Unavailable;
+    };
+    match name {
+        "event_type" => FieldValue::Text {
+            canonical: normalize_str(&ingress.event_type),
+            rank: None,
+        },
+        "repository" => FieldValue::Text {
+            canonical: normalize_str(&ingress.repository),
+            rank: None,
+        },
+        "delivery_id" => FieldValue::Text {
+            canonical: normalize_str(&ingress.delivery_id),
+            rank: None,
+        },
+        "payload_size" => FieldValue::Int(u64_to_i64(ingress.payload_size)),
+        "head_sha" => optional_ingress_text(ingress.head_sha.as_deref()),
+        "run_id" => optional_ingress_text(ingress.run_id.as_deref()),
+        "node_identity" => optional_ingress_text(ingress.node_identity.as_deref()),
+        "attempt" => match ingress.attempt {
+            Some(attempt) => FieldValue::Text {
+                canonical: attempt.to_string(),
+                rank: None,
+            },
+            None => FieldValue::Unavailable,
+        },
+        _ => FieldValue::Unavailable,
+    }
+}
+
+/// Maps an optional ingress string to [`FieldValue::Text`].
+fn optional_ingress_text(value: Option<&str>) -> FieldValue {
+    match value {
+        Some(value) => FieldValue::Text {
+            canonical: normalize_str(value),
+            rank: None,
+        },
+        None => FieldValue::Unavailable,
     }
 }
 
@@ -1039,6 +1089,10 @@ fn scalar_int(scalar: &ScalarValue) -> Option<i64> {
 }
 
 fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
@@ -1219,8 +1273,13 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
     // Field paths within these namespaces are accepted by the parser but
     // only resolve to values when the caller's EvalContext carries the
     // corresponding data (tracked in #488).
-    const FORWARD_COMPATIBLE_PREFIXES: &[&str] =
-        &["caller_origin.", "execution.", "integrity.", "findings."];
+    const FORWARD_COMPATIBLE_PREFIXES: &[&str] = &[
+        "caller_origin.",
+        "execution.",
+        "integrity.",
+        "findings.",
+        "ingress.",
+    ];
 
     if let Some(rest) = field.strip_prefix("finding.") {
         if FINDING_FIELDS.contains(&rest) {
@@ -1246,7 +1305,7 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
     }
     Err(PolicyError::Invalid(format!(
         "field path must start with 'finding.', 'context.', 'caller_origin.', \
-         'execution.', 'integrity.', or 'findings.': '{field}'"
+         'execution.', 'integrity.', 'findings.', or 'ingress.': '{field}'"
     )))
 }
 

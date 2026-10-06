@@ -7,7 +7,8 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
 use crate::{
-    DetectorHealth, EvalContext, OperationMode, PolicyEngine, PolicyLayer, PolicyPrecedence,
+    DetectorHealth, EvalContext, IngressContext, OperationMode, PolicyEngine, PolicyLayer,
+    PolicyPrecedence,
 };
 use arbitraitor_model::origin::CallerOrigin;
 
@@ -118,6 +119,7 @@ fn full_eval_context() -> EvalContext {
         is_https: true,
         is_private_network: false,
         caller_origin: CallerOrigin::DaemonLocal,
+        ingress: None,
     }
 }
 
@@ -1178,6 +1180,145 @@ all = []
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ingress envelope context
+// ---------------------------------------------------------------------------
+
+fn make_ingress() -> IngressContext {
+    IngressContext {
+        event_type: "workflow_run".to_owned(),
+        repository: "arbsec/orchestraitor".to_owned(),
+        head_sha: Some("0123456789abcdef".to_owned()),
+        delivery_id: "delivery-42".to_owned(),
+        run_id: Some("run-99".to_owned()),
+        attempt: Some(2),
+        node_identity: Some("node-a".to_owned()),
+        payload_size: 2048,
+    }
+}
+
+const INGRESS_RULE_POLICY: &str = r#"
+version = 1
+
+[defaults]
+action = "pass"
+
+[[rules]]
+id = "block-untrusted-repo"
+action = "block"
+[rules.when]
+all = [
+  { field = "ingress.repository", equals = "arbsec/orchestraitor" },
+  { field = "ingress.attempt", equals = 2 },
+]
+"#;
+
+#[test]
+fn validates_forward_compatible_ingress_field_paths() {
+    // Any `ingress.*` subpath parses: the namespace is forward-compatible.
+    let engine =
+        PolicyEngine::load(INGRESS_RULE_POLICY).expect("ingress.* field paths must validate");
+    assert_eq!(engine.policy().rules[0].id, "block-untrusted-repo");
+
+    // Unknown future subfields also parse and resolve Unavailable.
+    let future = r"
+version = 1
+[[rules]]
+id = 'future'
+action = 'pass'
+[rules.when]
+all = [{ field = 'ingress.not_yet_a_field', equals = 'x' }]
+";
+    assert!(
+        PolicyEngine::load(future).is_ok(),
+        "unknown ingress.* subpaths must remain forward-compatible"
+    );
+
+    // Bare field names and made-up namespaces are still rejected.
+    let bare = r"
+version = 1
+[[rules]]
+id = 'bare'
+action = 'pass'
+[rules.when]
+all = [{ field = 'repository', equals = 'x' }]
+";
+    assert!(
+        PolicyEngine::load(bare).is_err(),
+        "bare field name without ingress. prefix must be rejected"
+    );
+    let junk = r"
+version = 1
+[[rules]]
+id = 'junk'
+action = 'pass'
+[rules.when]
+all = [{ field = 'ingresses.repository', equals = 'x' }]
+";
+    assert!(PolicyEngine::load(junk).is_err());
+}
+
+#[test]
+fn ingress_rule_is_skipped_without_ingress_context() {
+    let engine = PolicyEngine::load(INGRESS_RULE_POLICY).unwrap();
+    let (verdict, trace) = engine.evaluate_with_trace(&[], &interactive_https_ctx());
+    // Missing ingress context resolves Unavailable; the default fail-closed
+    // posture upgrades the skipped rule to Block.
+    assert_eq!(verdict, Verdict::Block);
+    let rule_eval = trace
+        .rules_evaluated
+        .iter()
+        .find(|r| r.rule_id == "block-untrusted-repo")
+        .unwrap();
+    assert!(!rule_eval.matched);
+    assert!(rule_eval.reason.contains("unavailable"));
+}
+
+#[test]
+fn ingress_rule_matches_with_populated_context() {
+    let engine = PolicyEngine::load(INGRESS_RULE_POLICY).unwrap();
+    let ctx = interactive_https_ctx().with_ingress(Some(make_ingress()));
+    assert_eq!(engine.evaluate(&[], &ctx), Verdict::Block);
+
+    let mut ingress = make_ingress();
+    ingress.repository = "other/repo".to_owned();
+    let ctx = interactive_https_ctx().with_ingress(Some(ingress));
+    assert_eq!(engine.evaluate(&[], &ctx), Verdict::Pass);
+}
+
+#[test]
+fn ingress_payload_size_supports_numeric_comparison() {
+    let policy = r#"
+version = 1
+
+[defaults]
+action = "pass"
+
+[[rules]]
+id = "block-oversized-envelope"
+action = "block"
+[rules.when]
+all = [{ field = "ingress.payload_size", greater_than = 1000 }]
+"#;
+    let engine = PolicyEngine::load(policy).unwrap();
+
+    let ctx = interactive_https_ctx().with_ingress(Some(make_ingress()));
+    assert_eq!(engine.evaluate(&[], &ctx), Verdict::Block);
+
+    let mut ingress = make_ingress();
+    ingress.payload_size = 512;
+    let ctx = interactive_https_ctx().with_ingress(Some(ingress));
+    assert_eq!(engine.evaluate(&[], &ctx), Verdict::Pass);
+}
+
+#[test]
+fn ingress_context_serde_round_trip() {
+    let ingress = make_ingress();
+    let json = serde_json::to_string(&ingress).unwrap();
+    let decoded: IngressContext = serde_json::from_str(&json).unwrap();
+    assert_eq!(ingress, decoded);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,5 +13,6 @@ pub mod origin;
 pub mod osv;
 pub mod taxonomy;
 pub mod transport;
+pub mod untrusted;
 pub mod verdict;
 pub mod vex;

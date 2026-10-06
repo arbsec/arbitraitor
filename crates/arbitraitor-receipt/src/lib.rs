@@ -7,8 +7,15 @@
 //! Starting with schema version 2, the receipt JSON uses a top-level envelope
 //! structure with grouped buckets: `request`, `artifact`, `retrieval`,
 //! `provenance`, `payload_graph`, `detectors`, `findings`, `policy`,
-//! `verdict`, `release`, and `timestamps`. Use [`Receipt::parse`] to read
-//! receipts that may use either v1 (flat) or v2 (envelope) schema.
+//! `verdict`, `release`, and `timestamps`.
+//!
+//! ## Schema v3 — optional ingress bucket
+//!
+//! Schema version 3 adds the optional `ingress` bucket, present only for
+//! receipts produced by the ingress-envelope authentication capability.
+//!
+//! Use [`Receipt::parse`] to read receipts that may use the v1 (flat),
+//! v2 (envelope without `ingress`), or v3 (envelope) schema.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -34,8 +41,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-/// Current receipt schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// Current receipt schema version. Schema version 3 adds the optional
+/// `ingress` bucket for ingress-envelope authentication receipts.
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+
+/// Legacy v2 receipt schema version (envelope structure, before the optional
+/// `ingress` bucket was added in v3).
+pub const V2_SCHEMA_VERSION: u32 = 2;
 
 /// Legacy v1 receipt schema version (flat structure, pre-envelope).
 pub const V1_SCHEMA_VERSION: u32 = 1;
@@ -45,13 +57,14 @@ pub const V1_SCHEMA_VERSION: u32 = 1;
 /// Schema v2 groups fields into top-level envelope buckets:
 /// `request`, `artifact`, `retrieval`, `provenance`, `payload_graph`,
 /// `detectors`, `findings`, `policy`, `verdict`, `release`, `timestamps`.
+/// Schema v3 adds the optional `ingress` bucket.
 ///
-/// Use [`Receipt::parse`] to deserialize JSON that may be either v1 (flat)
-/// or v2 (envelope) format.
+/// Use [`Receipt::parse`] to deserialize JSON that may use the v1 (flat),
+/// v2 (envelope without `ingress`), or v3 (envelope) format.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
-    /// Receipt schema version. Currently [`CURRENT_SCHEMA_VERSION`] (2).
+    /// Receipt schema version. Currently [`CURRENT_SCHEMA_VERSION`] (3).
     pub schema_version: u32,
     /// Request metadata: Arbitraitor version and configuration digest.
     pub request: RequestInfo,
@@ -76,6 +89,11 @@ pub struct Receipt {
     pub release: Option<ReleaseInfo>,
     /// Receipt creation and update timestamps.
     pub timestamps: ReceiptTimestamps,
+    /// Optional ingress-envelope authentication metadata (added in schema v3).
+    /// Present only for receipts produced by the ingress capability; `None`
+    /// for artifact-pipeline receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<IngressInfo>,
 }
 
 /// Request metadata bucket.
@@ -250,16 +268,19 @@ impl Receipt {
         })
     }
 
-    /// Parse a receipt from JSON, accepting either v1 (flat) or v2 (envelope)
-    /// schema. v1 receipts are automatically migrated to v2.
+    /// Parse a receipt from JSON, accepting the v1 (flat), v2 (envelope
+    /// without the `ingress` bucket), or v3 (current envelope) schema. v1
+    /// receipts are migrated via [`Self::from_v1`]; v2 receipts are migrated
+    /// by stamping the current schema version (`ingress` deserializes to
+    /// `None` via the field default).
     ///
     /// # Errors
     ///
-    /// Returns [`ReceiptError::Parse`] if the JSON cannot be parsed as either
-    /// v1 or v2 format.
+    /// Returns [`ReceiptError::Parse`] if the JSON cannot be parsed as any
+    /// supported receipt schema.
     pub fn parse(json: &str) -> Result<Self, ReceiptError> {
         match serde_json::from_str::<Self>(json) {
-            Ok(receipt) => Ok(receipt),
+            Ok(receipt) => Ok(receipt.migrated_from_v2()),
             Err(v2_error) => match serde_json::from_str::<migration::ReceiptV1>(json) {
                 Ok(v1) => Ok(Self::from_v1(v1)),
                 Err(v1_error) => Err(ReceiptError::Parse { v2_error, v1_error }),
@@ -267,7 +288,7 @@ impl Receipt {
         }
     }
 
-    /// Migrate a legacy v1 (flat) receipt to the current v2 envelope schema.
+    /// Migrate a legacy v1 (flat) receipt to the current envelope schema.
     #[must_use]
     pub fn from_v1(v1: migration::ReceiptV1) -> Self {
         let release = v1.release.map(|r| ReleaseInfo {
@@ -307,6 +328,7 @@ impl Receipt {
             verdict: v1.verdict,
             release,
             timestamps: v1.timestamps,
+            ingress: None,
         }
     }
 }
@@ -524,6 +546,58 @@ impl From<&Finding> for FindingSummary {
     }
 }
 
+/// Ingress-envelope authentication outcome recorded in a receipt (schema v3).
+///
+/// Present only for receipts produced by the ingress-envelope authentication
+/// capability. Records the non-secret credential label, the durable GitHub
+/// delivery key, and the accept/deny outcome. Never contains credential
+/// material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngressInfo {
+    /// Non-secret label identifying the relay credential that authenticated
+    /// the delivery. Chosen at configuration time; never derived from the
+    /// credential secret itself.
+    pub credential_id: String,
+    /// Full durable GitHub delivery key for the authenticated delivery.
+    /// Embedders deduplicate deliveries on these components.
+    pub delivery_key: DeliveryKeyReceipt,
+    /// Tailnet node identity observed for the transport peer, when the
+    /// transport supplied one. Defense-in-depth signal; self-reported
+    /// envelope metadata, not transport-authenticated by Arbitraitor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_identity: Option<String>,
+    /// Outcome of the ingress admission decision: `"accept"` or `"deny"`.
+    pub outcome: String,
+    /// Typed deny-reason serialization. Present when `outcome` is `"deny"`;
+    /// `None` for accepted deliveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_reason: Option<String>,
+}
+
+/// Durable GitHub delivery key components recorded in an ingress receipt.
+///
+/// Together these fields uniquely identify one GitHub event delivery
+/// (webhook or Actions workflow run attempt). Embedders deduplicate
+/// deliveries on these components; all fields are always serialized (with
+/// explicit nulls) so the serialized key shape is constant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryKeyReceipt {
+    /// GitHub delivery GUID (`X-GitHub-Delivery` header value).
+    pub delivery_id: String,
+    /// Workflow run identifier, when the delivery is Actions run-scoped.
+    pub run_id: Option<String>,
+    /// Workflow run attempt number, when the delivery is Actions run-scoped.
+    pub attempt: Option<u32>,
+    /// Repository the event targets, in `owner/name` form.
+    pub repository: String,
+    /// GitHub event type (`X-GitHub-Event` header value).
+    pub event_type: String,
+    /// Head commit SHA of the event, when the event is commit-scoped.
+    pub head_sha: Option<String>,
+}
+
 /// Policy verdict information included in receipts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -663,6 +737,7 @@ impl ReceiptBuilder {
                 verdict,
                 release: None,
                 timestamps,
+                ingress: None,
             },
             pending_approval: None,
             pending_effective_controls: None,
@@ -798,6 +873,14 @@ impl ReceiptBuilder {
         self
     }
 
+    /// Set the ingress-envelope authentication metadata (schema v3). When
+    /// unset, the built receipt has no `ingress` bucket.
+    #[must_use]
+    pub fn ingress(mut self, info: IngressInfo) -> Self {
+        self.receipt.ingress = Some(info);
+        self
+    }
+
     /// Add a receipt signature.
     #[must_use]
     pub fn signature(mut self, signature: Signature) -> Self {
@@ -836,10 +919,10 @@ pub enum ReceiptError {
     /// Receipt artifact digest was not valid SHA-256 hex.
     #[error("receipt artifact SHA-256 is invalid: {0}")]
     InvalidArtifactDigest(Sha256DigestParseError),
-    /// Receipt JSON could not be parsed as either v1 or v2 schema.
-    #[error("receipt parsing failed (v2: {v2_error}; v1: {v1_error})")]
+    /// Receipt JSON could not be parsed as any supported schema version.
+    #[error("receipt parsing failed (envelope: {v2_error}; v1: {v1_error})")]
     Parse {
-        /// Error when parsing as v2 envelope schema.
+        /// Error when parsing as the envelope schema (v2/v3).
         v2_error: serde_json::Error,
         /// Error when parsing as v1 flat schema.
         v1_error: serde_json::Error,
@@ -1348,7 +1431,7 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_rejects_extra_fields() {
-        let json = r#"{"schema_version":2,"request":{"arbitraitor_version":"0.1.0"},"artifact":{"sha256":"abababababababababababababababababababababababababababababababab","size":1},"retrieval":null,"provenance":{},"payload_graph":null,"detectors":[],"findings":[],"policy":{},"verdict":{"verdict":"pass","deciding_rule":null,"policy_trace":[]},"release":null,"timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},"extra":true}"#;
+        let json = r#"{"schema_version":3,"request":{"arbitraitor_version":"0.1.0"},"artifact":{"sha256":"abababababababababababababababababababababababababababababababab","size":1},"retrieval":null,"provenance":{},"payload_graph":null,"detectors":[],"findings":[],"policy":{},"verdict":{"verdict":"pass","deciding_rule":null,"policy_trace":[]},"release":null,"timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},"extra":true}"#;
         assert!(serde_json::from_str::<Receipt>(json).is_err());
     }
 
@@ -1752,7 +1835,7 @@ mod tests {
     fn envelope_has_correct_schema_version() {
         let receipt = sample_receipt();
         assert_eq!(receipt.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(receipt.schema_version, 2);
+        assert_eq!(receipt.schema_version, 3);
     }
 
     #[test]
@@ -2105,6 +2188,230 @@ mod tests {
             !canonical_str.contains("\"signature\""),
             "canonical bytes must not contain signature field"
         );
+        Ok(())
+    }
+    fn sample_ingress_info() -> IngressInfo {
+        IngressInfo {
+            credential_id: "ci-relay-prod".to_owned(),
+            delivery_key: DeliveryKeyReceipt {
+                delivery_id: "72d3162e-cc78-11e3-81ab-6c5b7e6a5f4d".to_owned(),
+                run_id: Some("8123456789".to_owned()),
+                attempt: Some(1),
+                repository: "arbsec/arbitraitor".to_owned(),
+                event_type: "workflow_run".to_owned(),
+                head_sha: Some("ab".repeat(20)),
+            },
+            node_identity: Some("ci-node-1.tailnet-ts.net".to_owned()),
+            outcome: "accept".to_owned(),
+            deny_reason: None,
+        }
+    }
+
+    #[test]
+    fn parse_accepts_v2_envelope_receipt_and_migrates_to_v3()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v2_json = r#"{
+            "schema_version": 2,
+            "request": {"arbitraitor_version": "0.1.0", "config_digest": "config:01"},
+            "artifact": {"sha256": "abababababababababababababababababababababababababababababababab", "size": 12, "artifact_type": "shell-script"},
+            "retrieval": null,
+            "provenance": {},
+            "payload_graph": null,
+            "detectors": [],
+            "findings": [],
+            "policy": {"policy_digest": "policy:01"},
+            "verdict": {"verdict": "pass", "deciding_rule": null, "policy_trace": []},
+            "release": null,
+            "timestamps": {"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"}
+        }"#;
+
+        let receipt = Receipt::parse(v2_json)?;
+        assert_eq!(receipt.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(receipt.ingress, None);
+        assert_eq!(receipt.request.arbitraitor_version, "0.1.0");
+        assert_eq!(receipt.artifact.size, 12);
+        assert_eq!(
+            receipt.artifact.artifact_type.as_deref(),
+            Some("shell-script")
+        );
+        assert_eq!(receipt.policy.policy_digest.as_deref(), Some("policy:01"));
+
+        let json = serde_json::to_value(&receipt)?;
+        assert_eq!(json["schema_version"], 3);
+        assert!(json.get("ingress").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn v3_receipt_with_ingress_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            "ab".repeat(32),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .ingress(sample_ingress_info())
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        assert!(
+            json.contains("\"ingress\""),
+            "ingress bucket must serialize"
+        );
+        assert!(json.contains("\"schema_version\":3"));
+
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded, receipt);
+        let parsed = Receipt::parse(&json)?;
+        assert_eq!(parsed, receipt);
+
+        let ingress = decoded.ingress.as_ref().ok_or("ingress must be present")?;
+        assert_eq!(ingress.credential_id, "ci-relay-prod");
+        assert_eq!(ingress.outcome, "accept");
+        assert_eq!(ingress.deny_reason, None);
+        assert_eq!(
+            ingress.delivery_key.delivery_id,
+            "72d3162e-cc78-11e3-81ab-6c5b7e6a5f4d"
+        );
+        assert_eq!(ingress.delivery_key.run_id.as_deref(), Some("8123456789"));
+        assert_eq!(ingress.delivery_key.attempt, Some(1));
+        assert_eq!(ingress.delivery_key.repository, "arbsec/arbitraitor");
+        assert_eq!(ingress.delivery_key.event_type, "workflow_run");
+        Ok(())
+    }
+
+    #[test]
+    fn deny_ingress_round_trips_with_reason() -> Result<(), Box<dyn std::error::Error>> {
+        let info = IngressInfo {
+            node_identity: None,
+            outcome: "deny".to_owned(),
+            deny_reason: Some("policy_denied".to_owned()),
+            ..sample_ingress_info()
+        };
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            "ab".repeat(32),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Block,
+                deciding_rule: Some("ingress.deny.unknown-repo".to_owned()),
+                policy_trace: vec!["ingress repository not allowlisted".to_owned()],
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .ingress(info)
+        .build();
+
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded, receipt);
+        let ingress = decoded.ingress.as_ref().ok_or("ingress must be present")?;
+        assert_eq!(ingress.outcome, "deny");
+        assert_eq!(ingress.deny_reason.as_deref(), Some("policy_denied"));
+        assert_eq!(ingress.node_identity, None);
+        Ok(())
+    }
+
+    #[test]
+    fn ingress_bucket_omitted_when_not_set() -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(&sample_receipt())?;
+        assert!(
+            !json.contains("ingress"),
+            "ingress must be omitted when None"
+        );
+        let decoded: Receipt = serde_json::from_str(&json)?;
+        assert_eq!(decoded.ingress, None);
+        Ok(())
+    }
+
+    #[test]
+    fn deny_unknown_fields_rejects_extra_field_in_ingress() {
+        let json = r#"{"schema_version":3,"request":{"arbitraitor_version":"0.1.0"},"artifact":{"sha256":"abababababababababababababababababababababababababababababababab","size":1},"retrieval":null,"provenance":{},"payload_graph":null,"detectors":[],"findings":[],"policy":{},"verdict":{"verdict":"pass","deciding_rule":null,"policy_trace":[]},"release":null,"timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},"ingress":{"credential_id":"ci-relay-prod","delivery_key":{"delivery_id":"72d3162e-cc78-11e3-81ab-6c5b7e6a5f4d","run_id":null,"attempt":null,"repository":"arbsec/arbitraitor","event_type":"workflow_run","head_sha":null},"outcome":"accept","bogus":true}}"#;
+        assert!(serde_json::from_str::<Receipt>(json).is_err());
+    }
+
+    #[test]
+    fn deny_unknown_fields_rejects_extra_field_in_delivery_key() {
+        let json = r#"{"schema_version":3,"request":{"arbitraitor_version":"0.1.0"},"artifact":{"sha256":"abababababababababababababababababababababababababababababababab","size":1},"retrieval":null,"provenance":{},"payload_graph":null,"detectors":[],"findings":[],"policy":{},"verdict":{"verdict":"pass","deciding_rule":null,"policy_trace":[]},"release":null,"timestamps":{"created":"2026-06-17T00:00:00Z","modified":"2026-06-17T00:00:00Z"},"ingress":{"credential_id":"ci-relay-prod","delivery_key":{"delivery_id":"72d3162e-cc78-11e3-81ab-6c5b7e6a5f4d","run_id":null,"attempt":null,"repository":"arbsec/arbitraitor","event_type":"workflow_run","head_sha":null,"attempt_count":2},"outcome":"accept"}}"#;
+        assert!(serde_json::from_str::<Receipt>(json).is_err());
+    }
+
+    #[test]
+    fn intoto_statement_includes_ingress_bucket() -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            "ab".repeat(32),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .ingress(sample_ingress_info())
+        .build();
+
+        let statement = receipt.to_intoto_statement()?;
+        let ingress = statement
+            .predicate
+            .get("ingress")
+            .ok_or("in-toto predicate must carry the ingress bucket")?;
+        assert_eq!(ingress["credential_id"], "ci-relay-prod");
+        assert_eq!(ingress["outcome"], "accept");
+        assert_eq!(
+            ingress["delivery_key"]["delivery_id"],
+            "72d3162e-cc78-11e3-81ab-6c5b7e6a5f4d"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn signs_and_verifies_v3_receipt_with_ingress() -> Result<(), Box<dyn std::error::Error>> {
+        let key = minisign::KeyPair::generate_unencrypted_keypair()?;
+        let receipt = ReceiptBuilder::new(
+            "0.1.0",
+            "ab".repeat(32),
+            12,
+            VerdictInfo {
+                verdict: Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: Vec::new(),
+            },
+            ReceiptTimestamps {
+                created: "2026-06-17T00:00:00Z".to_owned(),
+                modified: "2026-06-17T00:00:00Z".to_owned(),
+            },
+        )
+        .ingress(sample_ingress_info())
+        .build();
+        assert_eq!(receipt.schema_version, 3);
+
+        let signed = sign_receipt(&receipt, &key)?;
+        verify_receipt(&signed, &key.pk)?;
+
+        let mut tampered = signed.clone();
+        if let Some(ingress) = tampered.receipt.ingress.as_mut() {
+            ingress.outcome = "deny".to_owned();
+        }
+        assert!(matches!(
+            verify_receipt(&tampered, &key.pk),
+            Err(VerifyError::InvalidSignature { .. })
+        ));
         Ok(())
     }
 }

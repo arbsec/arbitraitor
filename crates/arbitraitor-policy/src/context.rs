@@ -2,6 +2,43 @@
 
 use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::origin::CallerOrigin;
+use serde::{Deserialize, Serialize};
+
+/// Ingress-envelope admission context attached to an evaluation.
+///
+/// Carries the fields of an external event envelope (e.g. a CI webhook
+/// delivery) that policy admission rules reason about via `ingress.*` field
+/// paths. Populated only when the operation arrived through an authenticated
+/// ingress channel; every optional field that is absent resolves to
+/// `FieldValue::Unavailable` at evaluation time, which triggers the
+/// configured fail-closed behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngressContext {
+    /// Event type of the ingress envelope (e.g. `"push"`, `"pull_request"`).
+    pub event_type: String,
+
+    /// Repository the event targets, in `owner/name` form.
+    pub repository: String,
+
+    /// Head commit SHA referenced by the event, when the event carries one.
+    pub head_sha: Option<String>,
+
+    /// Unique delivery identifier assigned by the ingress transport.
+    pub delivery_id: String,
+
+    /// Run identifier for workflow-run style events, when present.
+    pub run_id: Option<String>,
+
+    /// Attempt counter for re-executed runs, when present.
+    pub attempt: Option<u32>,
+
+    /// Identity of the node that accepted the envelope, when attested.
+    pub node_identity: Option<String>,
+
+    /// Size of the ingress payload in bytes.
+    pub payload_size: u64,
+}
 
 /// Operation mode requested for this policy evaluation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -71,6 +108,7 @@ impl DetectorHealth {
 /// - `recursive_graph_complete = false` — recursive dependency graph incomplete.
 /// - `execution_network = false` — no execution-time network grant.
 /// - `caller_origin = Unknown` — lowest trust class.
+/// - `ingress = None` — no ingress envelope; `ingress.*` fields unavailable.
 ///
 /// Callers **must** populate the fields accurately before evaluating.
 #[derive(Debug, Clone, Default)]
@@ -134,6 +172,12 @@ pub struct EvalContext {
     /// Origin class of the operation request. Defaults to
     /// [`CallerOrigin::Unknown`] — the lowest trust class.
     pub caller_origin: CallerOrigin,
+
+    /// Ingress-envelope admission context for externally delivered events.
+    /// `None` means no authenticated ingress envelope is attached and every
+    /// `ingress.*` field resolves to `FieldValue::Unavailable`, triggering
+    /// the configured fail-closed behaviour.
+    pub ingress: Option<IngressContext>,
 }
 
 impl EvalContext {
@@ -179,6 +223,13 @@ impl EvalContext {
     #[must_use]
     pub fn with_caller_origin(mut self, origin: CallerOrigin) -> Self {
         self.caller_origin = origin;
+        self
+    }
+
+    /// Sets the ingress-envelope admission context.
+    #[must_use]
+    pub fn with_ingress(mut self, context: Option<IngressContext>) -> Self {
+        self.ingress = context;
         self
     }
 }

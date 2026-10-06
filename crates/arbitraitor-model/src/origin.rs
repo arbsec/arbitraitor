@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 /// The origin class of an operation request.
 ///
 /// Spoofing rules: all non-`HumanTty` classes are spoofable by a malicious
-/// local process unless the transport authenticates them. Policy must not
+/// local process unless the transport authenticates them. `HumanTty` and
+/// `HumanIpc` are authenticated by the OS; `CiRelay` authenticates only the
+/// relay channel itself, at request time, while its envelope metadata fields
+/// remain self-reported per the §23.1.1 spoofing rules. Policy must not
 /// treat any self-reported field as authoritative unless the corresponding
 /// transport-level authentication is verified for the request.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -25,6 +28,13 @@ pub enum CallerOrigin {
     /// Request from a pre-configured CI identity (run ID, repository,
     /// environment). Medium trust — binding established at install time.
     Ci,
+    /// Request from a remote event-relay channel authenticated at request
+    /// time by a per-deployment relay credential that Arbitraitor verifies
+    /// in constant time during ingress-envelope evaluation. Medium trust —
+    /// the binding is established at deployment setup. Envelope metadata
+    /// fields (repository, event type, run id, head SHA) remain
+    /// self-reported per the §23.1.1 spoofing rules.
+    CiRelay,
     /// Request from an MCP server (transport-bound). Medium trust when local;
     /// low when remote until remote transport binding is implemented.
     McpServer,
@@ -50,6 +60,7 @@ impl CallerOrigin {
             Self::HumanTty => "human_tty",
             Self::HumanIpc => "human_ipc",
             Self::Ci => "ci",
+            Self::CiRelay => "ci_relay",
             Self::McpServer => "mcp_server",
             Self::AgentSession => "agent_session",
             Self::DaemonLocal => "daemon_local",
@@ -68,5 +79,34 @@ impl CallerOrigin {
     #[must_use]
     pub fn is_self_reported(&self) -> bool {
         !matches!(self, Self::HumanTty | Self::HumanIpc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ci_relay_serde_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let serialized = serde_json::to_string(&CallerOrigin::CiRelay)?;
+        assert_eq!(serialized, "\"ci_relay\"");
+        assert_eq!(
+            serde_json::from_str::<CallerOrigin>(&serialized)?,
+            CallerOrigin::CiRelay
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ci_relay_as_str_label() {
+        assert_eq!(CallerOrigin::CiRelay.as_str(), "ci_relay");
+    }
+
+    #[test]
+    fn ci_relay_envelope_metadata_is_self_reported() {
+        // The relay channel is authenticated by the per-deployment
+        // credential, but the envelope metadata fields it carries are
+        // asserted by the sender per the §23.1.1 spoofing rules.
+        assert!(CallerOrigin::CiRelay.is_self_reported());
     }
 }

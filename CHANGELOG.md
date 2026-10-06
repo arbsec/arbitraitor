@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ingress-envelope authentication capability (issue #752, requested by
+  orchestraitor §9.47): constant-time relay-credential validation
+  (`verify_relay_credential`) and the per-envelope accept/deny decision
+  (`authenticate_envelope`) in `arbitraitor-policy`, returning typed
+  decisions with log-safe deny codes and an `IngressReceipt` for the
+  embedder's audit store. Tailnet node identity is defense-in-depth input
+  recorded on the receipt — never a sole authentication factor. Envelope
+  payload content remains untrusted data for `sanitize_for_agent`.
 - `arbitraitor-engine` crate (ADR-0038, accepted): the single consolidated
   pipeline engine owning fetch → store → analyze → provenance → receipt →
   verdict → release. Public surface: `Arbitraitor`, `ArbitraitorBuilder`,
