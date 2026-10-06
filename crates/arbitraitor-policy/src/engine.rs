@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use arbitraitor_model::finding::{Finding, FindingCategory};
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
-use crate::context::EvalContext;
+use crate::context::{EvalContext, IngressContext};
 use crate::error::PolicyError;
 use crate::schema::{Condition, FieldMatch, MatchOp, Policy, PolicyAction, Rule, ScalarValue};
 use crate::trace::{PolicyTrace, RuleEvaluation};
@@ -811,8 +811,59 @@ fn resolve_field(field: &str, finding: Option<&Finding>, context: &EvalContext) 
     if let Some(rest) = field.strip_prefix("context.") {
         return resolve_context_field(rest, context);
     }
+    if let Some(rest) = field.strip_prefix("ingress.") {
+        return resolve_ingress_field(rest, context.ingress.as_ref());
+    }
     // Unknown prefix — treat as unavailable so the rule is skipped.
     FieldValue::Unavailable
+}
+
+/// Resolves an `ingress.*` subpath against the attached [`IngressContext`].
+///
+/// Unknown subfields resolve to [`FieldValue::Unavailable`] so forward-
+/// compatible rules are skipped rather than silently matching.
+fn resolve_ingress_field(name: &str, ingress: Option<&IngressContext>) -> FieldValue {
+    let Some(ingress) = ingress else {
+        return FieldValue::Unavailable;
+    };
+    match name {
+        "event_type" => FieldValue::Text {
+            canonical: normalize_str(&ingress.event_type),
+            rank: None,
+        },
+        "repository" => FieldValue::Text {
+            canonical: normalize_str(&ingress.repository),
+            rank: None,
+        },
+        "delivery_id" => FieldValue::Text {
+            canonical: normalize_str(&ingress.delivery_id),
+            rank: None,
+        },
+        "payload_size" => FieldValue::Int(u64_to_i64(ingress.payload_size)),
+        "attempt" => ingress
+            .attempt
+            .map_or(FieldValue::Unavailable, |a| FieldValue::Int(i64::from(a))),
+        "head_sha" => optional_ingress_text(ingress.head_sha.as_deref()),
+        "run_id" => optional_ingress_text(ingress.run_id.as_deref()),
+        "node_identity" => optional_ingress_text(ingress.node_identity.as_deref()),
+        _ => FieldValue::Unavailable,
+    }
+}
+
+/// Maps an optional ingress string to [`FieldValue::Text`].
+fn optional_ingress_text(value: Option<&str>) -> FieldValue {
+    match value {
+        Some(value) => FieldValue::Text {
+            canonical: normalize_str(value),
+            rank: None,
+        },
+        None => FieldValue::Unavailable,
+    }
+}
+
+/// Fits a `u64` payload size into the evaluation integer domain.
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn resolve_finding_field(name: &str, finding: Option<&Finding>) -> FieldValue {
@@ -1215,6 +1266,17 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         "source_url",
         "artifact_type",
     ];
+    /// `ingress.*` subfields resolvable in rule conditions (§9.47).
+    const INGRESS_FIELDS: &[&str] = &[
+        "event_type",
+        "repository",
+        "delivery_id",
+        "payload_size",
+        "attempt",
+        "head_sha",
+        "run_id",
+        "node_identity",
+    ];
     // Forward-compatible namespaces accepted by policy.
     // Field paths within these namespaces are accepted by the parser but
     // only resolve to values when the caller's EvalContext carries the
@@ -1236,6 +1298,14 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         }
         return Err(PolicyError::Invalid(format!(
             "unknown context field: '{field}'"
+        )));
+    }
+    if let Some(rest) = field.strip_prefix("ingress.") {
+        if INGRESS_FIELDS.contains(&rest) {
+            return Ok(());
+        }
+        return Err(PolicyError::Invalid(format!(
+            "unknown ingress field: '{field}'"
         )));
     }
     if FORWARD_COMPATIBLE_PREFIXES

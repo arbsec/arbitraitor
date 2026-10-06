@@ -29,7 +29,9 @@ use sha2::{Digest, Sha256};
 mod explain;
 mod headless;
 
-pub use explain::sanitize_for_agent;
+pub use arbitraitor_model::untrusted::sanitize_for_agent;
+#[cfg(test)]
+use arbitraitor_model::untrusted::{UNTRUSTED_END, UNTRUSTED_START};
 use explain::{
     error_response, explain_verdict, json_response, sanitize_json, sanitize_option, sanitized_agent,
 };
@@ -46,9 +48,6 @@ use uuid::Uuid;
 /// HMAC-SHA256 type alias used for approval token signatures.
 type HmacSha256 = Hmac<Sha256>;
 
-pub(crate) const UNTRUSTED_START: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_START>>";
-pub(crate) const UNTRUSTED_END: &str = "<<ARBITRAITOR_UNTRUSTED_DATA_END>>";
-pub(crate) const MAX_UNTRUSTED_CHARS: usize = 4096;
 /// Length of the canonical plan digest prefix a human must retype when
 /// approving a plan-bound execution token, per ADR-0013.
 const PLAN_DIGEST_PREFIX_LEN: usize = 12;

@@ -7,7 +7,8 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
 use crate::{
-    DetectorHealth, EvalContext, OperationMode, PolicyEngine, PolicyLayer, PolicyPrecedence,
+    DetectorHealth, EvalContext, IngressContext, OperationMode, PolicyEngine, PolicyLayer,
+    PolicyPrecedence,
 };
 use arbitraitor_model::origin::CallerOrigin;
 
@@ -97,6 +98,7 @@ fn interactive_https_ctx() -> EvalContext {
 
 fn full_eval_context() -> EvalContext {
     EvalContext {
+        ingress: None,
         operation_mode: OperationMode::Contained,
         artifact_digest: Some(Sha256Digest::new([1; 32])),
         artifact_type: Some("python-package".to_owned()),
@@ -505,6 +507,7 @@ all = [{ field = "context.operation_mode", equals = "mediated" }]
 "#;
     let engine = PolicyEngine::load(policy).unwrap();
     let ctx = EvalContext {
+        ingress: None,
         operation_mode: OperationMode::Mediated,
         ..EvalContext::new(true)
     };
@@ -1302,4 +1305,92 @@ fn loads_spec_section_23_1_1_example_policy_with_not_in_and_nested_fields() {
         .expect("example policy must parse without errors");
     let digest = engine.digest();
     assert!(!digest.is_empty(), "policy digest must be computed");
+}
+
+#[test]
+fn ingress_attempt_resolves_as_integer() {
+    // Regression: `attempt` as FieldValue::Text made `greater_than` rules
+    // silently never match (failed open). It must be Int.
+    let engine = PolicyEngine::load(
+        r#"
+version = 1
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+[[rules]]
+id = "retry-cap"
+action = "block"
+[rules.when]
+field = "ingress.attempt"
+greater_than = 3
+"#,
+    )
+    .unwrap();
+    let context = EvalContext::new(true)
+        .with_https(true)
+        .with_ingress(Some(IngressContext {
+            event_type: "workflow_run".to_owned(),
+            repository: "arbsec/arbitraitor".to_owned(),
+            head_sha: None,
+            delivery_id: "d1".to_owned(),
+            run_id: None,
+            attempt: Some(4),
+            node_identity: None,
+            payload_size: 128,
+        }));
+    assert_eq!(engine.evaluate(&[], &context), Verdict::Block);
+}
+
+#[test]
+fn ingress_absent_resolves_unavailable_fail_closed() {
+    let engine = PolicyEngine::load(
+        r#"
+version = 1
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+[[rules]]
+id = "retry-cap"
+action = "block"
+[rules.when]
+field = "ingress.attempt"
+greater_than = 3
+"#,
+    )
+    .unwrap();
+    let context = EvalContext::new(true).with_https(true);
+    // No ingress at all: the rule cannot match; fail-closed default applies.
+    assert_eq!(engine.evaluate(&[], &context), Verdict::Block);
+}
+
+#[test]
+fn ingress_payload_size_resolves_as_integer() {
+    let engine = PolicyEngine::load(
+        r#"
+version = 1
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+[[rules]]
+id = "big-payload"
+action = "block"
+[rules.when]
+field = "ingress.payload_size"
+greater_than = 100
+"#,
+    )
+    .unwrap();
+    let context = EvalContext::new(true)
+        .with_https(true)
+        .with_ingress(Some(IngressContext {
+            event_type: "push".to_owned(),
+            repository: "arbsec/arbitraitor".to_owned(),
+            head_sha: None,
+            delivery_id: "d2".to_owned(),
+            run_id: None,
+            attempt: None,
+            node_identity: None,
+            payload_size: 999,
+        }));
+    assert_eq!(engine.evaluate(&[], &context), Verdict::Block);
 }
