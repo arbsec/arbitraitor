@@ -388,7 +388,7 @@ fn query_receipt_returns_known_receipt() {
     assert_eq!(json["release_performed"], false);
     assert_eq!(json["found"], true);
     assert_eq!(json["sha256"], digest.to_string());
-    assert_eq!(json["receipt"]["schema_version"], 2);
+    assert_eq!(json["receipt"]["schema_version"], 3);
     assert!(
         json["receipt"]["artifact"]["sha256"]
             .as_str()

@@ -79,6 +79,9 @@ impl DetectorHealth {
     reason = "EvalContext mirrors policy input booleans for direct context.* field resolution"
 )]
 pub struct EvalContext {
+    /// Ingress-envelope metadata, when the operation originates from an
+    /// authenticated external event (§9.47). `None` for local operations.
+    pub ingress: Option<IngressContext>,
     /// Operation mode being evaluated.
     pub operation_mode: OperationMode,
 
@@ -136,6 +139,41 @@ pub struct EvalContext {
     pub caller_origin: CallerOrigin,
 }
 
+/// Ingress-envelope admission context attached to an evaluation.
+///
+/// Carries the fields of an external event envelope (e.g. a CI webhook
+/// delivery) that policy admission rules reason about via `ingress.*` field
+/// paths. Populated only when the operation arrived through an authenticated
+/// ingress channel; every optional field that is absent resolves to
+/// `FieldValue::Unavailable` at evaluation time, which triggers the
+/// configured fail-closed behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressContext {
+    /// Event type of the ingress envelope (e.g. `"push"`, `"pull_request"`).
+    pub event_type: String,
+
+    /// Repository the event targets, in `owner/name` form.
+    pub repository: String,
+
+    /// Head commit SHA referenced by the event, when the event carries one.
+    pub head_sha: Option<String>,
+
+    /// Unique delivery identifier assigned by the ingress transport.
+    pub delivery_id: String,
+
+    /// Run identifier for workflow-run style events, when present.
+    pub run_id: Option<String>,
+
+    /// Attempt counter for re-executed runs, when present.
+    pub attempt: Option<u32>,
+
+    /// Identity of the node that accepted the envelope, when attested.
+    pub node_identity: Option<String>,
+
+    /// Size of the ingress payload in bytes.
+    pub payload_size: u64,
+}
+
 impl EvalContext {
     /// Creates a context with `is_interactive` set and all other fields at
     /// their fail-closed defaults.
@@ -179,6 +217,12 @@ impl EvalContext {
     #[must_use]
     pub fn with_caller_origin(mut self, origin: CallerOrigin) -> Self {
         self.caller_origin = origin;
+        self
+    }
+    /// Attaches ingress-envelope metadata (§9.47).
+    #[must_use]
+    pub fn with_ingress(mut self, context: Option<IngressContext>) -> Self {
+        self.ingress = context;
         self
     }
 }

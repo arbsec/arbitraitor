@@ -48,13 +48,18 @@
 mod context;
 mod engine;
 mod error;
+mod ingress;
 mod schema;
 mod trace;
 mod vex;
 
-pub use context::{DetectorHealth, EvalContext, OperationMode};
+pub use context::{DetectorHealth, EvalContext, IngressContext, OperationMode};
 pub use engine::{LayeredPolicy, PolicyEngine, PolicyLayer, PolicyPrecedence};
 pub use error::PolicyError;
+pub use ingress::{
+    IngressDecision, IngressDenyReason, IngressReceipt, authenticate_envelope,
+    verify_relay_credential,
+};
 pub use schema::{
     Condition, DefaultsConfig, FieldMatch, LimitsConfig, MatchOp, NetworkConfig, Policy,
     PolicyAction, RedirectsConfig, Rule, ScalarValue,
