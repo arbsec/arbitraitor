@@ -63,6 +63,31 @@ gh pr list --repo arbsec/arbitraitor --state open --draft=false \
 - When blocked by another issue or PR: link the blocker, set the `blockedBy` edge, and
   label cross-repo blockers `blocked:orchestraitor`.
 
+## Loop-driven scheduling
+
+`arbsec/orchestraitor`'s `orc loop` consumes this repository's ready queue from the same
+shared board ("Arbsec Development", project `1`). The loop's ready-queue selection
+criteria are:
+
+- leaf `Task`/`Bug` issues: use the native issue type when set, or the `task`/`bug`
+  label when `issueType` is null (labels never override an authoritative non-leaf
+  native type; see `ready-queue.jq`),
+- board `Status` = `Ready`,
+- no unresolved `blockedBy` edges,
+- the issue's source repository is `arbsec/arbitraitor` (per `repos` in the local
+  project config).
+
+Before implementation, `orc loop` must apply the auto-continuation queue's
+conflicting-in-flight-PR gate (see "Check for conflicting in-flight work" in
+[Scheduling: the auto-continuation queue](#scheduling-the-auto-continuation-queue)): do not implement an issue while an in-flight PR touches the
+same spec section, crate, or invariant. The ready-queue selection above does not
+substitute for this check.
+
+Priority order is unchanged: P0/P1 `Priority` first, then lowest-numbered issue.
+`Target` is **not** gated for this repo — Arbitraitor is post-MVP, and the loop's
+optional-target-gate support keeps `require_target = false` for the arbitraitor local
+config, so board items without a `Target` value remain schedulable.
+
 ## Parallel delivery lanes
 
 Independent leaf work runs in parallel lanes instead of serializing behind the
