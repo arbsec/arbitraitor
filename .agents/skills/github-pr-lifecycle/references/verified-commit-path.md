@@ -52,10 +52,10 @@ Behavior (mirrors `orc github push-branch` in orchestraitor):
 ### Deltas from the orchestraitor implementation
 
 This is a scoped port of `orc github push-branch`; the following are NOT
-ported: `--re-land` (deliberate re-landing of an already-landed tree), stdin
-`-` support for `--body-file`, and the typed detached-HEAD error of the
-original (here, a detached HEAD with no `--branch` fails on the generic
-branch resolution instead). Consequence: a branch that was rebased onto
+ported: `--re-land` (deliberate re-landing of an already-landed tree) and
+stdin `-` support for `--body-file`; the typed detached-HEAD error of the
+original IS ported (a detached HEAD with no `--branch` bails before any API
+call). Consequence: a branch that was rebased onto
 another commit but whose TREE equals the remote head exits with "nothing to
 land" - the change set is tree-based, so there is nothing to re-create. If
 that state genuinely needs re-landing, re-create the branch tip with a

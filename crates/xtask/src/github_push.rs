@@ -843,34 +843,65 @@ fn tree_modes(
 
 // --- Secret-file plumbing (mirrors github_mint) -------------------------------
 
-/// A 0600 file inside a 0700 private temp dir; removed on drop. Secrets
-/// (the Authorization header, the GraphQL payload) reach curl via
-/// `@file` arguments — never argv, env, or inside the repo.
+/// A 0600 file inside a 0700 private temp dir; the file itself is removed on
+/// drop (the session dir is reused across calls in this process and ages out
+/// via OS tmpfiles policy). Secrets (the Authorization header, the GraphQL
+/// payload) reach curl via `@file` arguments — never argv, env, or inside
+/// the repo.
 struct SecretFile {
-    /// Holds the temp dir alive until the file is consumed by curl; never
-    /// read directly (the guard's Drop removes the directory).
-    _dir: TempDirGuard,
     path: std::path::PathBuf,
 }
 
-struct TempDirGuard {
-    path: std::path::PathBuf,
-    /// Session-scoped guard: removing the dir would break subsequent
-    /// SecretFile calls in the same process, so Drop only deletes this
-    /// instance's file's parent at process exit (the LAST guard dropped).
-    session: bool,
-}
-
-impl Drop for TempDirGuard {
+impl Drop for SecretFile {
     fn drop(&mut self) {
-        if !self.session {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-        // Session dirs: removed on process exit by the OS from /tmp per
-        // tmpfiles policy; contents are 0600 inside a 0700 dir, so residue
-        // is unreadable to other local users. mint's PID-named sweep does
-        // not apply here (multiple files per dir).
+        // The secret file is per-call; delete it eagerly so residue is
+        // bounded to the empty session dir (0700) even on early returns.
+        let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Resolves the session temp dir: a PID-unique 0700 dir created once per
+/// process. If creation fails, falls back to a fresh per-call dir (same
+/// posture, just not shared) — never a panic, never a default-ACL path.
+#[cfg(unix)]
+fn session_temp_dir() -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    static SESSION_DIR: std::sync::LazyLock<Option<std::path::PathBuf>> =
+        std::sync::LazyLock::new(|| {
+            let candidate = std::env::temp_dir().join(format!(
+                "xtask-push-branch-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&candidate)
+                .ok()
+                .map(|_| candidate)
+        });
+    if let Some(p) = SESSION_DIR.as_ref() {
+        return Ok(p.clone());
+    }
+    // Fallback: unique per-call dir with the same 0700 posture (the session
+    // dir could not be created — never a panic, never a default-ACL path).
+    let fallback = std::env::temp_dir().join(format!(
+        "xtask-push-branch-fallback-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&fallback)
+        .map_err(|e| format!("tempdir: {e}"))?;
+    Ok(fallback)
 }
 
 impl SecretFile {
@@ -880,7 +911,8 @@ impl SecretFile {
     /// Non-unix platforms fail closed: they cannot enforce POSIX modes, and
     /// secret material must never land under default ACLs (github_mint
     /// posture). One session dir (created lazily, reused for every call in
-    /// this process) limits crash residue to a single directory per run.
+    /// this process) limits crash residue to a single directory per run;
+    /// each file is removed on drop.
     fn temp(contents: &[u8]) -> Result<Self, String> {
         #[cfg(not(unix))]
         {
@@ -894,32 +926,7 @@ impl SecretFile {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            static SESSION_DIR: std::sync::OnceLock<std::path::PathBuf> =
-                std::sync::OnceLock::new();
-            let base = SESSION_DIR.get_or_init(|| {
-                let p = std::env::temp_dir().join(format!(
-                    "xtask-push-branch-{}-{}",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_default()
-                ));
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-                    std::fs::DirBuilder::new()
-                        .mode(0o700)
-                        .recursive(true)
-                        .create(&p)
-                        .map_err(|e| format!("tempdir: {e}"))
-                        .expect("session tempdir creation");
-                }
-                p
-            });
-            // Session dir is removed at process end via atexit-style guard:
-            // leak-safe across SIGKILL is impossible for temp secrets; the
-            // 0600 mode + PID-unique name keeps residue unusable to other
-            // local users, and the next run's PID differs.
+            let base = session_temp_dir()?;
             let file = base.join(format!(
                 "secret-{}",
                 std::time::SystemTime::now()
@@ -932,13 +939,7 @@ impl SecretFile {
                 .map_err(|e| format!("tempfile permissions: {e}"))?;
             // Write-then-chmod on a 0700 dir is safe (no TOCTOU exposure:
             // the parent denies traversal to other users).
-            Ok(Self {
-                _dir: TempDirGuard {
-                    path: base.clone(),
-                    session: true,
-                },
-                path: file,
-            })
+            Ok(Self { path: file })
         }
     }
 }
@@ -963,8 +964,8 @@ fn remote_head_tree(
         return Ok(tree);
     }
     Err(format!(
-        "cannot read the remote head {head_oid} tree locally — pass --base <ref> or fetch the \
-         repository first"
+        "cannot read the remote head {head_oid} tree locally — run `git fetch \
+         https://github.com/{owner}/{repo}.git` first"
     ))
 }
 
