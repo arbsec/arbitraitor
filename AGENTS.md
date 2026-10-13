@@ -32,8 +32,14 @@ When rules conflict or trade-offs must be made, resolve in this order:
   operations (issues, PRs, comments, reviews) MUST authenticate as the
   `arbsec-agent` GitHub App service identity — mint an installation token
   via `cargo run -p xtask -- mint-github-token` and use
-  `GH_TOKEN=<token> gh ...`; git commits from agent worktrees carry
-  author=`arbsec-agent[bot]`
+  `GH_TOKEN=<token> gh ...`; branch commits MUST land via
+  `cargo run -p xtask -- push-branch --message "..."` (the App-signed
+  landing path — GitHub itself signs the commit as committer
+  `web-flow`, `verified: true`; plain `git push` on a PR branch is
+  forbidden because the credential helper can silently authenticate as
+  the operator's personal account and misattribute ref updates, and a
+  locally-created bot-identity commit can never verify). Local commits
+  from agent worktrees carry author=`arbsec-agent[bot]`
   (`--author='arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>'`)
   plus the DCO `Signed-off-by:` trailer, while the **committer stays the
   ambient local git identity of the operator** (whose registered SSH

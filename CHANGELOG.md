@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- App-signed branch landing (`xtask push-branch`): agent branch pushes land
+  via GraphQL `createCommitOnBranch` behind tree-equality and verification
+  gates with an exact-head CAS ref swing — the landed commit is signed by
+  GitHub itself (`web-flow` committer, `verified: true`), eliminating the
+  misattribution class where a plain `git push` authenticated through the
+  ambient credential helper as the operator's personal account (observed on
+  PR #801). `commit-identity` check script added to the pr-lifecycle skill;
+  `git push` on PR branches is now forbidden by the workflow policy.
 - Mediated HTTP egress (#799, spec §11.6 / ADR-0041):
   `ArbitraitorApi::http_egress` executes grant-authorized GETs through the
   hardened transport path (per-hop resolution + connected-peer

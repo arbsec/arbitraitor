@@ -661,15 +661,18 @@ fn diff_tree_changes(
 
 /// Builds the `fileChanges` payload from the diff records. Blob contents
 /// come from the branch's committed objects (`git cat-file blob`), never
-/// the working directory. `FileAddition.mode` is not settable via
-/// `createCommitOnBranch` — files land 100644; arbitraitor ships no
-/// executable tracked files (verify before adding one).
+/// the working directory. GitHub's `createCommitOnBranch` `FileAddition`
+/// has NO mode field — added files always land `100644`, so an executable
+/// file being ADDED (not already 100755 in the base tree) cannot survive
+/// the landing; that case fails closed with a typed error (the
+/// tree-equality gate would refuse it anyway — this surfaces the cause).
 fn build_file_changes(
     cwd: &std::path::Path,
     changes: &[(String, String)],
     base_tree: &str,
     local_tree: &str,
 ) -> Result<Value, String> {
+    let base_modes = tree_modes(cwd, base_tree)?;
     let mut additions = Vec::new();
     let mut deletions = Vec::new();
     for (status, path) in changes {
@@ -686,6 +689,24 @@ fn build_file_changes(
                         "git cat-file blob {local_tree}:{path} failed: {}",
                         String::from_utf8_lossy(&contents.stderr).trim()
                     ));
+                }
+                if status == "A" {
+                    let local_mode = git(cwd, &["ls-tree", local_tree, "--", path])?
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("100644")
+                        .to_string();
+                    if local_mode == "100755"
+                        && base_modes.get(path.as_str()) != Some(&"100755".to_string())
+                    {
+                        return Err(format!(
+                            "`{path}` is executable (100755) locally but is being ADDED — GitHub's \
+                             createCommitOnBranch FileAddition always lands 100644, so the remote \
+                             tree would differ from the local tree (the tree gate refuses the \
+                             landing). Commit the file as 100644 locally, or land the file with \
+                             mode 100644 and chmod locally afterwards."
+                        ));
+                    }
                 }
                 additions.push(serde_json::json!({
                     "path": path,
@@ -707,6 +728,42 @@ fn build_file_changes(
         return Err("change set produced no fileChanges".to_string());
     }
     Ok(Value::Object(payload))
+}
+
+/// Reads a tree's entry modes (`git ls-tree -r -z <tree>`): path -> mode.
+fn tree_modes(
+    cwd: &std::path::Path,
+    tree: &str,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(["ls-tree", "-r", "-z", tree])
+        .output()
+        .map_err(|e| format!("git ls-tree: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let mut modes = std::collections::HashMap::new();
+    for record in out.stdout.split(|b| *b == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(tab) = record.iter().position(|b| *b == b'\t') else {
+            continue;
+        };
+        let meta = String::from_utf8_lossy(&record[..tab]).to_string();
+        let path = String::from_utf8_lossy(&record[tab + 1..]).to_string();
+        let mode = meta
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        modes.insert(path, mode);
+    }
+    Ok(modes)
 }
 
 // --- Secret-file plumbing (mirrors github_mint) -------------------------------

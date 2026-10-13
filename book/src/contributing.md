@@ -99,6 +99,25 @@ docs(spec): define encoded HTTP artifact identity
 security(plugin): reject undeclared WASI imports
 ```
 
+### Agent branch landing (service identity)
+
+Agent-driven branches land through the GitHub App service identity, never a
+personal account:
+
+```sh
+cargo run -p xtask -- push-branch --message "feat(scope): conventional subject"
+```
+
+This creates the remote commit through the GitHub API (GraphQL
+`createCommitOnBranch`) behind tree-equality and verification gates with an
+exact-head compare-and-swap ref swing, so GitHub itself signs the commit
+(committer `web-flow`, `verified: true`) — satisfying the `required_signatures`
+branch ruleset without local signing. Plain `git push` on a PR branch is
+forbidden: the ambient credential helper can silently authenticate as the
+operator's personal account and misattribute ref updates, and a
+locally-created bot-identity commit can never verify. See the pr-lifecycle
+skill's `references/verified-commit-path.md` for the full contract.
+
 ### PR requirements
 
 Every PR must include:

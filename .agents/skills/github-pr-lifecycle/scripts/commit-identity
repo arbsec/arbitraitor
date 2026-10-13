@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# commit-identity: verify the ambient git commit identity in a worktree or
+# clone before any local `git commit` destined for a PR branch.
+#
+# Arbitraitor's commit shape (arbitraitor-workflow.md "GitHub service identity",
+# verified live on PRs #776/#780/#801): commits are **authored** as the
+# `arbsec-agent[bot]` service principal with a DCO `Signed-off-by:` trailer,
+# while the **committer** stays the operator's ambient local identity — the
+# bot owns no signing key, and the org ruleset (`required_signatures`) verifies
+# SSH signatures against keys registered to the *committer's* identity.
+# (The landing path itself is `xtask push-branch`, which creates the remote
+# commit via the App API — committer `GitHub <noreply@github.com>`, signed by
+# GitHub. This check governs LOCAL commits, e.g. multi-commit chains that will
+# be landed tree-identically or audit-logged branch history.)
+#
+# Incident background: a fresh clone/worktree inherits the global gitconfig
+# (user.name=mekwall / user.email=marcus.ekwall@gmail.com). A local commit made
+# there as the OPERATOR is correct-by-design here (committer=operator is the
+# verified shape), but a commit authored as the human (no `--author=` override)
+# produces PR history attributed to the personal account — a policy violation.
+#
+# Subcommands:
+#   check [path]   Verify that the AUTHOR identity a local commit would get
+#                  (GIT_AUTHOR_* env, else user.name/user.email) matches the
+#                  declared bot author shape. Commits without the bot author
+#                  and DCO sign-off fail with exit 3 and a remediation hint.
+#   env            Print the author override for `eval` (read-only; no secrets).
+#
+# Usage (agents): before ANY local `git commit` destined for a PR branch:
+#   bash .agents/skills/github-pr-lifecycle/scripts/commit-identity check
+#   git commit --author="$ARBITRAITOR_BOT_AUTHOR" -s -m "..."
+#
+# Exit codes: 0 ok | 2 config/state error | 3 policy violation
+set -euo pipefail
+
+# Declared service principal (AGENTS.md / arbitraitor-workflow.md; matches
+# xtask/src/github_mint.rs APP constants — do not hardcode divergent values).
+BOT_NAME="arbsec-agent[bot]"
+BOT_EMAIL="334074867+arbsec-agent[bot]@users.noreply.github.com"
+BOT_AUTHOR="$BOT_NAME <$BOT_EMAIL>"
+
+SUBCOMMAND="${1:-}"
+case "$SUBCOMMAND" in
+  env)
+    printf 'export ARBITRAITOR_BOT_AUTHOR=%q\n' "$BOT_AUTHOR"
+    exit 0
+    ;;
+  check)
+    TARGET_PATH="${2:-$PWD}"
+    if [ ! -d "$TARGET_PATH" ]; then
+      echo "error: path does not exist or is not a directory: $TARGET_PATH" >&2
+      exit 2
+    fi
+    TOP="$(git -C "$TARGET_PATH" rev-parse --show-toplevel 2>/dev/null)" || {
+      echo "error: not a git repository (or worktree): $TARGET_PATH" >&2
+      exit 2
+    }
+    # A plain `git commit` takes the author from GIT_AUTHOR_* env first, then
+    # user.name/user.email config. Evaluate exactly what the commit would use.
+    AMBIENT_NAME="${GIT_AUTHOR_NAME:-$(git -C "$TOP" config user.name 2>/dev/null || true)}"
+    AMBIENT_EMAIL="${GIT_AUTHOR_EMAIL:-$(git -C "$TOP" config user.email 2>/dev/null || true)}"
+    DCO_OK=false
+    if [ -n "${GIT_AUTHOR_NAME:-}" ] || git -C "$TOP" config user.name >/dev/null 2>&1; then
+      # The commit command must carry `-s`; detect the DCO trailer posture by
+      # checking whether the caller set the ARBITRAITOR_DCO_OK marker (set by
+      # wrappers that always pass -s) OR whether the last commit in this repo
+      # carries the trailer (the ambient convention).
+      if [ "${ARBITRAITOR_DCO_OK:-}" = "1" ] \
+        || git -C "$TOP" log -1 --format='%(trailers:key=Signed-off-by,valueonly)' 2>/dev/null | grep -q .; then
+        DCO_OK=true
+      fi
+    fi
+
+    MATCH=true
+    REASON=""
+    if [ -z "$AMBIENT_NAME" ] || [ -z "$AMBIENT_EMAIL" ]; then
+      MATCH=false
+      REASON="no user.name/user.email configured (and no GIT_AUTHOR_* env)"
+    elif [ "$AMBIENT_NAME" != "$BOT_NAME" ] || [ "$AMBIENT_EMAIL" != "$BOT_EMAIL" ]; then
+      # The operator identity is EXPECTED as the committer; it is a violation
+      # only as the AUTHOR (no --author= override was passed).
+      MATCH=false
+      REASON="commits must be authored as $BOT_AUTHOR (pass --author=...); the ambient identity is reserved for the committer"
+    elif [ "$DCO_OK" != "true" ]; then
+      MATCH=false
+      REASON="the DCO Signed-off-by trailer (-s) is missing from the commit convention"
+    fi
+
+    echo "path:     $TOP"
+    echo "author:   ${AMBIENT_NAME:-<unset>} <${AMBIENT_EMAIL:-<unset>}>"
+    if [ "$MATCH" = true ]; then
+      echo "result:   OK (author is the service principal; committer stays ambient)"
+    else
+      echo "result:   POLICY VIOLATION — $REASON"
+      echo "" >&2
+      echo "remediation: author PR-branch commits as the service principal with DCO:" >&2
+      echo "  git commit --author='$BOT_AUTHOR' -s -m \"...\"" >&2
+      echo "or: eval \"\$(bash $0 env)\" && git commit --author=\"\$ARBITRAITOR_BOT_AUTHOR\" -s -m \"...\"" >&2
+      echo "NOTE: the committer must stay the operator identity (never -c user.name=<bot>)." >&2
+      echo "Land the branch with: cargo run -p xtask -- push-branch --message ... (App-signed)." >&2
+      exit 3
+    fi
+    exit 0
+    ;;
+  *)
+    echo "error: subcommand required (check [path] | env)" >&2
+    exit 2
+    ;;
+esac

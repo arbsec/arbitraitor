@@ -145,6 +145,19 @@ overridable via `$ARB_SERVICE_IDENTITIES`).
 - Verification limits: installation tokens are **not** user tokens — REST `GET /user`
   returns 403 ("not accessible by integration") even though attribution works; check
   identity via GraphQL `viewer.login` (returns `arbsec-agent[bot]`).
+- **Branch landing path (verified commits).** Agent branch pushes MUST land via
+  `cargo run -p xtask -- push-branch --message "..."` — the App-API landing
+  subcommand (GraphQL `createCommitOnBranch` + exact-head CAS ref swing; see the
+  pr-lifecycle skill's `references/verified-commit-path.md`). The landed commit is
+  signed by GitHub itself (`web-flow` committer, `verification: valid`) and the
+  push credential is the installation token in the Authorization header only.
+  Plain `git push` on a PR branch is FORBIDDEN: (a) the ambient credential helper
+  can silently authenticate as the operator's personal account — GitHub then
+  attributes the ref update to `mekwall` (incident 2026-10-13, PR #801 timeline:
+  "mekwall force-pushed" for an agent push); (b) a locally-created bot-identity
+  commit can never verify, and `required_signatures` blocks it at merge.
+  Run `bash .agents/skills/github-pr-lifecycle/scripts/commit-identity check`
+  before any local `git commit` destined for a PR branch.
 - Git identity for commits from agent worktrees: **author** = `arbsec-agent[bot]`
   (set via `--author='arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>'`
   — bot user id `334074867`, verified against real bot commits; the App id is not part
