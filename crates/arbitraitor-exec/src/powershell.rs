@@ -475,8 +475,10 @@ impl PowerShellExecution {
             crate::spawn::best_effort_capture(child, output_limit);
         if child_exit_code.is_none() {
             // Killed by a signal or could not be reaped — if the watchdog
-            // fired while the write was blocked, report expiry.
-            if let Err(err) = crate::spawn::finish_wall_clock(watchdog) {
+            // fired while the write was blocked, report expiry (or a
+            // fail-closed WallClockKillFailed when the group kill errored
+            // and death is unconfirmed).
+            if let Err(err) = crate::spawn::finish_wall_clock(watchdog, false) {
                 return PowerShellError::Execution {
                     message: err.to_string(),
                 };
@@ -484,7 +486,7 @@ impl PowerShellExecution {
         } else {
             // Child exited on its own terms; a late watchdog expiry must
             // not override the child's own result.
-            crate::spawn::finish_wall_clock(watchdog).ok();
+            crate::spawn::finish_wall_clock(watchdog, true).ok();
         }
         PowerShellError::script_io(stage, source, child_exit_code, child_stderr)
     }

@@ -240,33 +240,45 @@ pub(crate) fn arm_wall_clock(
     }
 }
 
-/// Resolves an armed watchdog after the direct child has been reaped.
+/// Resolves an armed watchdog after the wall-clock window ended.
 ///
-/// The child's reap is the confirmation of death: if the watchdog fired, the
-/// group kill succeeded (or the group was already gone) and the typed
-/// [`ExecError::WallClockExpired`] is returned. A recorded kill error here
-/// would mean the child died of something else before the kill — the child
-/// is dead either way, so expiry remains the accurate report and the error
-/// is only logged.
-pub(crate) fn finish_wall_clock(mut guard: WallClockGuard) -> Result<(), ExecError> {
+/// `death_confirmed` reports whether the caller reaped the direct child
+/// before calling. Reap is the confirmation of death: with it, a watchdog
+/// firing means the group kill succeeded (or the group was already gone) and
+/// the typed [`ExecError::WallClockExpired`] is returned — a recorded kill
+/// error would mean the child died of something else before the kill, so the
+/// error is only logged. Without it (`death_confirmed == false`, e.g. the
+/// best-effort capture after a blocked stdin write could not reap), an
+/// expiry paired with a recorded kill error fails closed as
+/// [`ExecError::WallClockKillFailed`]: the child may still be alive, so
+/// reporting "was killed" would be a false claim.
+pub(crate) fn finish_wall_clock(
+    guard: WallClockGuard,
+    death_confirmed: bool,
+) -> Result<(), ExecError> {
+    let mut guard = guard;
     let Some(state) = guard.state.take() else {
         return Ok(());
     };
     state.done.store(true, Ordering::Release);
     let _ = guard.handle.take().map(thread::JoinHandle::join);
     if state.expired.load(Ordering::Acquire) {
-        // The watchdog fired at the deadline. The direct child has been
-        // reaped by the caller before this call, so it is confirmed dead;
-        // report expiry (fail closed) instead of the child's signal-death
-        // exit status. A kill error recorded by the watchdog is surfaced
-        // only when death is NOT confirmed (see [`WallClockKillFailed`]).
-        if let Some(err) = state
+        // The watchdog fired at the deadline. Fail closed when the kill
+        // errored AND death is unconfirmed: the child may still be running,
+        // so expiry ("was killed") would misreport. When the caller reaped
+        // the child first, death is confirmed and expiry is the accurate
+        // report even if the kill errored (the child died of something else
+        // before or despite the kill).
+        let kill_failed = state
             .kill_failed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
+            .take();
+        if let (Some(err), true) = (&kill_failed, death_confirmed) {
             tracing::warn!(error = %err, "wall-clock group kill errored, but child reaped");
+        }
+        if let (Some(err), false) = (kill_failed, death_confirmed) {
+            return Err(ExecError::WallClockKillFailed { source: err });
         }
         return Err(ExecError::WallClockExpired {
             limit_secs: state.limit_secs,
@@ -355,8 +367,9 @@ pub(crate) fn read_with_limit(
     // Reaped: resolve the watchdog before interpreting the result. Expiry
     // (with its typed error) takes precedence over the child's exit status
     // and over an output-cap breach — the fence fired, so the run is
-    // "stopped at deadline" regardless of what the child printed.
-    finish_wall_clock(watchdog)?;
+    // "stopped at deadline" regardless of what the child printed. The
+    // successful reap confirms death.
+    finish_wall_clock(watchdog, true)?;
 
     if actual > limit {
         return Err(ExecError::OutputExceeded { limit, actual });
@@ -422,6 +435,13 @@ fn drain_stream<R: Read + std::os::unix::io::AsFd + Send + 'static>(
             Ok(())
         };
         if let Err(error) = setup {
+            // Best-effort: fcntl failures are not expected on the freshly
+            // created pipes this crate spawns, but if one occurs, fall back
+            // to blocking reads. The flag is then only observed between
+            // reads that return data, so the partial-output bound holds only
+            // when no out-of-group descendant survives holding the pipe —
+            // the overall run is still bounded by the deadline thread's
+            // group kill.
             tracing::warn!(error = %error, "could not set pipe non-blocking for deadline-aware drain");
         }
         let mut buffer = Vec::new();
@@ -592,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_expired_flag_drives_typed_error() -> Result<(), Box<dyn std::error::Error>> {
+    fn kill_child_group_treats_esrch_as_success() -> Result<(), Box<dyn std::error::Error>> {
         // A zero-deadline kill path: kill_child_group_at_deadline must treat
         // a missing process group (ESRCH) as success, per fail-closed rule —
         // ESRCH means the group is already dead, which is the goal met.
@@ -626,6 +646,64 @@ mod tests {
         // Dropping disarms: the deadline thread observes `done` on its next
         // poll (~50 ms) and exits without killing anything.
         assert!(state.done.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unconfirmed_death_with_kill_error_fails_closed() {
+        // finish_wall_clock must return WallClockKillFailed when the
+        // watchdog fired, the group kill errored (non-ESRCH), and the
+        // caller could NOT reap the child (death unconfirmed): reporting
+        // "was killed" (WallClockExpired) would be a false claim.
+        let guard = arm_wall_clock(
+            rustix::process::Pid::from_raw(1).expect("pid 1 is valid"),
+            Some(3600),
+        );
+        let state = Arc::clone(guard.state.as_ref().expect("armed state"));
+        // Simulate the deadline thread: expiry fired but the kill failed.
+        state.expired.store(true, Ordering::Release);
+        *state
+            .kill_failed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(std::io::Error::from_raw_os_error(libc::EPERM));
+        let result = finish_wall_clock(guard, false);
+        match result {
+            Err(ExecError::WallClockKillFailed { source }) => {
+                assert_eq!(
+                    source.raw_os_error(),
+                    Some(libc::EPERM),
+                    "the kill error must be surfaced: {source}"
+                );
+            }
+            other => {
+                panic!("expected WallClockKillFailed, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_death_reports_expiry_despite_kill_error() {
+        // With death confirmed (child reaped), a recorded kill error is only
+        // logged: the child is dead either way, so expiry is the accurate
+        // report.
+        let guard = arm_wall_clock(
+            rustix::process::Pid::from_raw(1).expect("pid 1 is valid"),
+            Some(3600),
+        );
+        let state = Arc::clone(guard.state.as_ref().expect("armed state"));
+        state.expired.store(true, Ordering::Release);
+        *state
+            .kill_failed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(std::io::Error::from_raw_os_error(libc::EPERM));
+        let result = finish_wall_clock(guard, true);
+        match result {
+            Err(ExecError::WallClockExpired { limit_secs: 3600 }) => {}
+            other => {
+                panic!("expected WallClockExpired{{limit_secs: 3600}}, got {other:?}");
+            }
+        }
     }
 
     #[test]

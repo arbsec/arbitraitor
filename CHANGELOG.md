@@ -44,7 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Setting `wall_clock_secs = None` disables the fence for explicitly
   trusted, caller-driven paths. The CLI `run` pipeline maps deadline expiry
   to exit code 34 (analysis incomplete due to resource limit) so harnesses
-  record "stopped at deadline" (#760).
+  record "stopped at deadline" (#760). Native-path output is now capped at
+  `ResourceLimits::output_size_bytes` (default 10 MiB), failing with
+  `ExecError::OutputExceeded`, matching the script/PowerShell paths.
 - `arbitraitor-exec` children are now spawned in their own process group
   (script, PowerShell, and native paths), matching the plugin host's
   existing containment and enabling the deadline's group-wide kill.

@@ -231,7 +231,8 @@ pub enum ExecError {
     /// ordinary failure lets callers record "stopped at deadline" rather
     /// than a crash — see spec §26.3 "complete process tree under …
     /// resource control" and §9 subprocess controls (timeout and
-    /// kill-tree).
+    /// kill-tree). The child's exit status is replaced by this typed error
+    /// and partially captured stdout/stderr is discarded (fail-closed).
     #[error("child exceeded wall-clock deadline of {limit_secs}s and was killed")]
     WallClockExpired {
         /// Configured wall-clock deadline in seconds.

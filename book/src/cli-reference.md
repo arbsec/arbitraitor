@@ -365,7 +365,8 @@ interpreter path". See #612 for the bug report and Fix B details.
 
 ### Execution time limit
 
-Mediated script execution is bounded by a wall-clock deadline in addition
+Mediated script, PowerShell, and native execution are bounded by a
+wall-clock deadline in addition
 to the CPU-time limit (`RLIMIT_CPU` cannot stop a child that sleeps or
 blocks on I/O). The deadline defaults to 300 seconds
 (`DEFAULT_WALL_CLOCK_SECS`). The child runs in its own process group, so on
@@ -377,7 +378,9 @@ behavior). Scope note: the fence covers the direct child and its
 default-group descendants; a script that deliberately calls
 `setsid(2)`/`setpgid(2)` creates a new session the fence does not reach —
 observable malicious behavior, addressed by shell analysis rather than the
-deadline (ADR-0042). The fence is enforced on every Unix platform; the
+deadline (ADR-0042). On expiry the child's exit status is replaced by the
+typed deadline error and partially captured stdout/stderr is discarded
+(fail-closed). The fence is enforced on every Unix platform; the
 CPU/memory/fd limits are Linux-only. Embedders can tighten, loosen, or
 disable the fence per execution via
 `arbitraitor_exec::ResourceLimits::wall_clock_secs` (ADR-0042).

@@ -440,12 +440,13 @@ fn resolve_stdin_write_failure(
     if child_exit_code.is_none() {
         // The child was killed by a signal or could not be reaped. If the
         // wall-clock watchdog fired while the write was blocked, report
-        // expiry rather than a misleading ScriptIo.
-        crate::spawn::finish_wall_clock(watchdog)?;
+        // expiry (or a fail-closed WallClockKillFailed when the group kill
+        // errored and death is unconfirmed).
+        crate::spawn::finish_wall_clock(watchdog, false)?;
     } else {
         // The child exited on its own terms (reaped); resolve the watchdog
         // without letting a late expiry override the child's own result.
-        crate::spawn::finish_wall_clock(watchdog).ok();
+        crate::spawn::finish_wall_clock(watchdog, true).ok();
     }
     if source.kind() == std::io::ErrorKind::BrokenPipe && child_exit_code.is_some() {
         return Ok(ExecutionResult {
