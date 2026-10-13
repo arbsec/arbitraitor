@@ -89,6 +89,23 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capability_token: Option<String>,
     },
+    /// Mediated HTTP egress GET (spec §11.6, ADR-0041).
+    ///
+    /// Grant-scoped by the daemon's compiled policy; the bounded response
+    /// body is returned in the response payload. `caller_origin` is
+    /// overridden to `DaemonLocal` after peer authentication per §23.1.1.
+    HttpEgress {
+        /// Absolute https URL to GET.
+        url: String,
+        /// Caller-origin class asserted by the client. Overridden by the
+        /// daemon to [`CallerOrigin::DaemonLocal`] after peer authentication.
+        #[serde(default)]
+        caller_origin: CallerOrigin,
+        /// Optional opaque capability token. The daemon records but does not
+        /// interpret the value; structured enforcement lives in core.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_token: Option<String>,
+    },
     /// Report component health (store, detectors, version).
     Health {
         /// Caller-origin class asserted by the client. Overridden by the
@@ -134,6 +151,7 @@ impl DaemonRequest {
             Self::Inspect { caller_origin, .. }
             | Self::Scan { caller_origin, .. }
             | Self::QueryReceipt { caller_origin, .. }
+            | Self::HttpEgress { caller_origin, .. }
             | Self::Health { caller_origin, .. }
             | Self::Shutdown { caller_origin, .. }
             | Self::Status { caller_origin, .. } => caller_origin.clone(),
@@ -151,6 +169,9 @@ impl DaemonRequest {
                 capability_token, ..
             }
             | Self::QueryReceipt {
+                capability_token, ..
+            }
+            | Self::HttpEgress {
                 capability_token, ..
             }
             | Self::Health {
@@ -186,6 +207,22 @@ pub struct DaemonResponse {
     /// Daemon-process snapshot for `Status` requests; absent for all others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_info: Option<DaemonInfo>,
+    /// Bounded egress response body for `HttpEgress` requests; absent for
+    /// all others (spec §11.6). Never an artifact identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_body: Option<Vec<u8>>,
+    /// Grant the egress request executed under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_grant_id: Option<String>,
+    /// HTTP status of the egress response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_status: Option<u16>,
+    /// Response media type of the egress response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_content_type: Option<String>,
+    /// Whether the body was delivered (false = withheld).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_body_returned: Option<bool>,
 }
 
 /// Single record describing one operation seen by the daemon.
@@ -653,6 +690,15 @@ fn stamp_caller_origin(request: DaemonRequest) -> DaemonRequest {
             caller_origin: CallerOrigin::DaemonLocal,
             capability_token,
         },
+        DaemonRequest::HttpEgress {
+            url,
+            caller_origin: _,
+            capability_token,
+        } => DaemonRequest::HttpEgress {
+            url,
+            caller_origin: CallerOrigin::DaemonLocal,
+            capability_token,
+        },
         DaemonRequest::Health {
             caller_origin: _,
             capability_token,
@@ -735,6 +781,11 @@ async fn dispatch_request(request: DaemonRequest, state: &DaemonState) -> Daemon
             caller_origin: _,
             capability_token: _,
         } => query_receipt(&sha256, state),
+        DaemonRequest::HttpEgress {
+            url,
+            caller_origin: _,
+            capability_token: _,
+        } => http_egress(&url, state).await,
         DaemonRequest::Health {
             caller_origin: _,
             capability_token: _,
@@ -753,6 +804,11 @@ async fn dispatch_request(request: DaemonRequest, state: &DaemonState) -> Daemon
                 error: None,
                 health_report: None,
                 daemon_info: None,
+                egress_body: None,
+                egress_grant_id: None,
+                egress_status: None,
+                egress_content_type: None,
+                egress_body_returned: None,
             }
         }
         DaemonRequest::Status {
@@ -768,6 +824,7 @@ fn operation_label(request: &DaemonRequest) -> &'static str {
         DaemonRequest::Inspect { .. } => "inspect",
         DaemonRequest::Scan { .. } => "scan",
         DaemonRequest::QueryReceipt { .. } => "query_receipt",
+        DaemonRequest::HttpEgress { .. } => "http_egress",
         DaemonRequest::Health { .. } => "health",
         DaemonRequest::Shutdown { .. } => "shutdown",
         DaemonRequest::Status { .. } => "status",
@@ -842,6 +899,37 @@ async fn inspect_url(
     }
 }
 
+/// Delegates an `HttpEgress` request to the pipeline engine (spec §11.6).
+///
+/// The engine authorizes the request against the compiled policy's egress
+/// grants, executes the GET, persists the egress receipt, and returns the
+/// bounded body. The body rides in `egress_body` on the response;
+/// `sha256` stays `None` because egress bytes never become artifacts.
+async fn http_egress(url: &str, state: &DaemonState) -> DaemonResponse {
+    if !url.starts_with("https://") {
+        return error_response(format!(
+            "invalid URL: http_egress requires https (spec §11.6 transport floor): {url}"
+        ));
+    }
+    match state.api.http_egress(url, "daemon_local").await {
+        Ok(result) => DaemonResponse {
+            success: true,
+            verdict: None,
+            findings_count: 0,
+            sha256: None,
+            error: None,
+            health_report: None,
+            daemon_info: None,
+            egress_body: Some(result.body),
+            egress_grant_id: Some(result.grant_id),
+            egress_status: Some(result.status),
+            egress_content_type: Some(result.content_type),
+            egress_body_returned: Some(result.body_returned),
+        },
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
 /// Delegates a `Scan` request to the pipeline engine.
 ///
 /// The engine bounds the read (the previous implementation read the file
@@ -874,6 +962,11 @@ fn query_receipt(sha256: &str, state: &DaemonState) -> DaemonResponse {
             error: None,
             health_report: None,
             daemon_info: None,
+            egress_body: None,
+            egress_grant_id: None,
+            egress_status: None,
+            egress_content_type: None,
+            egress_body_returned: None,
         },
         Ok(None) => error_response(format!("no inspection receipt for {sha256}")),
         Err(error) => error_response(error.to_string()),
@@ -889,6 +982,11 @@ fn inspection_response(result: &arbitraitor_engine::InspectionResult) -> DaemonR
         error: None,
         health_report: None,
         daemon_info: None,
+        egress_body: None,
+        egress_grant_id: None,
+        egress_status: None,
+        egress_content_type: None,
+        egress_body_returned: None,
     }
 }
 
@@ -909,6 +1007,11 @@ fn error_response(message: impl Into<String>) -> DaemonResponse {
         error: Some(message.into()),
         health_report: None,
         daemon_info: None,
+        egress_body: None,
+        egress_grant_id: None,
+        egress_status: None,
+        egress_content_type: None,
+        egress_body_returned: None,
     }
 }
 
@@ -924,6 +1027,11 @@ fn health_response(state: &DaemonState) -> DaemonResponse {
         error: None,
         health_report: Some(report),
         daemon_info: None,
+        egress_body: None,
+        egress_grant_id: None,
+        egress_status: None,
+        egress_content_type: None,
+        egress_body_returned: None,
     }
 }
 
@@ -948,6 +1056,11 @@ async fn status_response(state: &DaemonState) -> DaemonResponse {
             last_operation,
             recent_operations,
         }),
+        egress_body: None,
+        egress_grant_id: None,
+        egress_status: None,
+        egress_content_type: None,
+        egress_body_returned: None,
     }
 }
 

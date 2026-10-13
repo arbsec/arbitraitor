@@ -7,6 +7,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod egress;
+pub mod egress_exec;
+pub use egress::{
+    EGRESS_DEFAULT_RESPONSE_BYTES, EgressBodyTreatment, EgressError, EgressGrant,
+    EgressQueryPolicy, EgressResponse,
+};
+pub use egress_exec::{EgressExecutor, EgressTimeouts};
+
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -57,6 +65,12 @@ impl FetchUrl {
             .map_err(|source| FetchError::InvalidUrl {
                 message: source.to_string(),
             })
+    }
+
+    /// Wraps an already-parsed URL (egress executor path).
+    #[must_use]
+    pub fn from_parsed(url: url::Url) -> Self {
+        Self(url)
     }
 
     /// Returns the normalized URL.

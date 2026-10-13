@@ -56,8 +56,9 @@ pub use context::{DetectorHealth, EvalContext, OperationMode};
 pub use engine::{LayeredPolicy, PolicyEngine, PolicyLayer, PolicyPrecedence};
 pub use error::PolicyError;
 pub use schema::{
-    Condition, DefaultsConfig, FieldMatch, LimitsConfig, MatchOp, NetworkConfig, Policy,
-    PolicyAction, RedirectsConfig, Rule, ScalarValue,
+    Condition, DefaultsConfig, EgressBodyTreatment, EgressConfig, EgressGrant, EgressQueryPolicy,
+    FieldMatch, LimitsConfig, MatchOp, NetworkConfig, Policy, PolicyAction, RedirectsConfig, Rule,
+    ScalarValue,
 };
 pub use trace::{PolicyTrace, RuleEvaluation};
 pub use vex::{VexDenyReason, VexDowngradeResult, VexPolicy, validate_vex_downgrade};

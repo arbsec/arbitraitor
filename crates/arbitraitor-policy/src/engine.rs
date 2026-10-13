@@ -305,7 +305,11 @@ fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
             policy.version
         )));
     }
-    validate_rules(&policy.rules)
+    validate_rules(&policy.rules)?;
+    for grant in &policy.network.egress.grants {
+        grant.validate().map_err(PolicyError::Invalid)?;
+    }
+    Ok(())
 }
 
 fn ensure_tightening(
@@ -316,6 +320,11 @@ fn ensure_tightening(
     let mut violations = Vec::new();
     check_defaults(&inherited.defaults, &candidate.defaults, &mut violations);
     check_network(&inherited.network, &candidate.network, &mut violations);
+    check_egress(
+        &inherited.network.egress,
+        &candidate.network.egress,
+        &mut violations,
+    );
     check_limits(&inherited.limits, &candidate.limits, &mut violations);
     check_integrity(&inherited.integrity, &candidate.integrity, &mut violations);
     check_provenance(
@@ -334,6 +343,147 @@ fn ensure_tightening(
             detail: violations.join("; "),
         })
     }
+}
+
+/// Monotonicity for the egress section (ADR-0017): a lower-precedence
+/// layer may tighten but never widen egress. Hosts may only shrink to a
+/// subset, response bounds may only shrink, content-type allowlists may
+/// only narrow, query policy may only move toward more restrictive, and
+/// body treatment may only escalate toward inspection.
+fn check_egress(
+    inherited: &crate::schema::EgressConfig,
+    candidate: &crate::schema::EgressConfig,
+    violations: &mut Vec<String>,
+) {
+    use crate::schema::EgressQueryPolicy;
+
+    for grant in &candidate.grants {
+        let Some(base) = inherited.grants.iter().find(|g| g.id == grant.id) else {
+            // New grant ids may only appear at the organization layer; a
+            // lower layer cannot mint egress authority the org didn't grant.
+            violations.push(format!(
+                "network.egress.grants: grant {} is not present in inherited policy and cannot be minted by a tightening layer",
+                grant.id
+            ));
+            continue;
+        };
+        for host in &grant.hosts {
+            if !base.hosts.iter().any(|h| h == host) {
+                violations.push(format!(
+                    "network.egress.grants[{}]: host {host} was not allowlisted by inherited policy",
+                    grant.id
+                ));
+            }
+        }
+        if grant.path_prefix != base.path_prefix
+            && !grant.path_prefix.starts_with(&base.path_prefix)
+        {
+            violations.push(format!(
+                "network.egress.grants[{}]: path prefix {:?} is not a narrowing of inherited {:?}",
+                grant.id, grant.path_prefix, base.path_prefix
+            ));
+        }
+        let rank = |q: EgressQueryPolicy| match q {
+            EgressQueryPolicy::Forbidden => 0,
+            EgressQueryPolicy::Pinned => 1,
+            EgressQueryPolicy::Bounded => 2,
+            EgressQueryPolicy::Allowed => 3,
+        };
+        if rank(grant.query_policy) > rank(base.query_policy) {
+            violations.push(format!(
+                "network.egress.grants[{}]: query policy cannot widen from {:?} to {:?}",
+                grant.id, base.query_policy, grant.query_policy
+            ));
+        }
+        if grant.body_treatment != base.body_treatment
+            && body_treatment_rank(grant.body_treatment) < body_treatment_rank(base.body_treatment)
+        {
+            violations.push(format!(
+                "network.egress.grants[{}]: body treatment cannot relax from {:?} to {:?}",
+                grant.id, base.body_treatment, grant.body_treatment
+            ));
+        }
+        let max_bytes = |g: &crate::schema::EgressGrant| {
+            g.max_response_bytes
+                .unwrap_or(inherited_default_response_bytes())
+        };
+        if max_bytes(grant) > max_bytes(base) {
+            violations.push(format!(
+                "network.egress.grants[{}]: response size bound cannot grow",
+                grant.id
+            ));
+        }
+        for ct in &grant.allowed_content_types {
+            let covers = |narrow: &str, wide: &str| {
+                narrow == wide
+                    || (narrow.ends_with("/*") && wide.starts_with(narrow.trim_end_matches('*')))
+            };
+            if !base.allowed_content_types.is_empty()
+                && !base.allowed_content_types.iter().any(|b| covers(ct, b))
+            {
+                violations.push(format!(
+                    "network.egress.grants[{}]: content type {ct} was not permitted by inherited policy",
+                    grant.id
+                ));
+            }
+        }
+    }
+    for param in &candidate.credential_query_params {
+        if !inherited
+            .credential_query_params
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(param))
+            && !BUILTIN_CREDENTIAL_QUERY_PARAMS
+                .iter()
+                .any(|p| param.eq_ignore_ascii_case(p))
+        {
+            violations.push(format!(
+                "network.egress.credential_query_params: {param} was not declared by inherited policy"
+            ));
+        }
+    }
+}
+
+/// Inspection ordering for `EgressBodyTreatment`: `unscanned` (0) is the
+/// weaker guarantee, `inspect_first` (1) the stronger. A tightening layer
+/// may move to a higher rank; a lower rank than inherited is a relaxation
+/// and is rejected.
+fn body_treatment_rank(t: crate::schema::EgressBodyTreatment) -> u8 {
+    match t {
+        crate::schema::EgressBodyTreatment::Unscanned => 0,
+        crate::schema::EgressBodyTreatment::InspectFirst => 1,
+    }
+}
+
+/// Built-in query-parameter names treated as credentials in egress
+/// receipts regardless of policy configuration.
+const BUILTIN_CREDENTIAL_QUERY_PARAMS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_token",
+    "token",
+    "auth",
+    "key",
+    "secret",
+    "password",
+    "passwd",
+    "sig",
+    "signature",
+    "credential",
+    "credentials",
+    "session",
+    "sid",
+    "sessionid",
+];
+
+/// Default response-size fallback when a grant sets no explicit bound:
+/// 1 MiB, deliberately far below the CAS default so egress never becomes a
+/// bulk-transfer path.
+const EGRESS_DEFAULT_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+fn inherited_default_response_bytes() -> u64 {
+    EGRESS_DEFAULT_RESPONSE_BYTES
 }
 
 fn action_rank(action: PolicyAction) -> u8 {
