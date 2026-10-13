@@ -122,10 +122,12 @@ monotonicity applies to every property).
   `allowed`), and requires egress receipts to preserve the full URL with
   credential-only redaction — overriding §11.5's "secrets removed" for this
   operation class — so an auditor sees the channel rather than a sanitized
-  URL. Name denylists cannot enumerate every credential parameter, so a
-  value under an unlisted name must never reach a receipt either:
-  implementations (#799) apply value-shape safeguards in addition to the
-  denylist, and policy authors MUST NOT grant `allowed` query policy on
+  URL. Name denylists cannot enumerate every credential parameter, so an
+  unlisted query value that matches the credential value-shape rules in
+  §11.6 (high-entropy opaque tokens, JWT-shaped or UUID-shaped values in
+  credential-position parameters) must never reach a receipt either:
+  implementations (#799) apply these value-shape safeguards in addition to
+  the denylist, and policy authors MUST NOT grant `allowed` query policy on
   hosts known to accept credentials in query parameters — use
   `pinned`/`bounded` so the grant shape itself bounds what can leak.
   Residual risk: a `bounded` or `allowed` grant still permits
