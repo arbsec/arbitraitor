@@ -66,7 +66,7 @@ pub fn run() -> ExitCode {
 /// from the environment or the keyring, no token is minted and no
 /// personal-account fallback is attempted here (the labelled fallback is
 /// the caller's explicit decision, per AGENTS.md).
-fn mint() -> Result<String, String> {
+pub(crate) fn mint() -> Result<String, String> {
     let pem = load_pem()?;
     let installation_id = installation_id()?;
     let dir = TempDir::create()?;
