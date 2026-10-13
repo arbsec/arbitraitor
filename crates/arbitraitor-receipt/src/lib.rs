@@ -2323,6 +2323,41 @@ mod tests {
     }
 
     #[test]
+    fn v2_document_carrying_ingress_bucket_is_normalized() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // A crafted v2 document must not be trusted with an ingress bucket:
+        // the v2->v3 migration clears `ingress` unconditionally.
+        let v2_json = format!(
+            r#"{{
+            "schema_version": 2,
+            "request": {{"arbitraitor_version": "0.1.0", "config_digest": "config:01"}},
+            "artifact": {{"sha256": "{}", "size": 12, "artifact_type": "shell-script"}},
+            "retrieval": null,
+            "provenance": {{}},
+            "payload_graph": null,
+            "detectors": [],
+            "findings": [],
+            "policy": {{"policy_digest": "policy:01"}},
+            "verdict": {{"verdict": "pass", "deciding_rule": null, "policy_trace": []}},
+            "release": null,
+            "timestamps": {{"created": "2026-06-17T00:00:00Z", "modified": "2026-06-17T00:00:00Z"}},
+            "ingress": {{"credential_id": "ci-relay-prod", "delivery_key": {{"delivery_id": "72d3162e-cc78-11e3-81ab-6c5b7e6a5f4d", "run_id": "8123456789", "attempt": 1, "repository": "arbsec/arbitraitor", "event_type": "workflow_run", "head_sha": "{}"}}, "node_identity": "ci-node-1.tailnet-ts.net", "outcome": "accept", "deny_reason": null}}
+        }}"#,
+            "ab".repeat(32),
+            "ab".repeat(20),
+        );
+
+        let receipt = Receipt::parse(&v2_json)?;
+        assert_eq!(receipt.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(receipt.ingress, None);
+
+        let json = serde_json::to_value(&receipt)?;
+        assert_eq!(json["schema_version"], 3);
+        assert!(json.get("ingress").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn v3_receipt_with_ingress_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let receipt = ReceiptBuilder::new(
             "0.1.0",

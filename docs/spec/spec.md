@@ -2850,6 +2850,14 @@ A receipt should include:
 - execution exit status;
 - local timestamp and monotonic timing where useful.
 
+Receipt schema v3 additionally carries an optional `ingress` bucket
+(`IngressInfo`) recording how a relay delivery authenticated: the
+credential id, the durable GitHub delivery key, the transport node
+identity when present, and the accept/deny outcome with a typed deny
+reason. v2 documents are migrated in place on parse; a v2 document
+claiming an `ingress` bucket is normalized (bucket cleared), not
+trusted.
+
 ### 31.3 Receipt signing
 
 Optional receipt signing:
@@ -4769,6 +4777,13 @@ ADR-0038 (accepted) resolved this section's open items:
    the MCP tool handlers consume `InspectionResult` from the engine
    (ADR-0038 decision 6 wraps the receipt in `InspectionResultReceipt` so
    internal schema changes do not break consumers).
+
+The `arbitraitor-policy` crate additionally exposes the ingress-envelope
+authentication surface used by the relay ingress path
+(`authenticate_envelope` returning a typed `IngressDecision`, plus
+`ingress.*` policy fields); it is a library entry point for embedders
+that accept webhook or workflow-run deliveries, not a new process
+boundary.
 
 Alternatives already rejected in pre-design:
 
