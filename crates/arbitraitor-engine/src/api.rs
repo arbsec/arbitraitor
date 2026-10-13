@@ -1303,17 +1303,22 @@ fn fetch_grant_view(grant: &arbitraitor_policy::EgressGrant) -> arbitraitor_fetc
 }
 
 /// Stable receipt key for an egress request: SHA-256 over
-/// `egress/<grant>/<url>/<unix-millis nonce>`. Never collides with an
-/// artifact receipt (those are keyed by the artifact digest).
+/// `egress/<grant>/<url>/<nanosecond timestamp>/<per-process call counter>`.
+/// Never collides with an artifact receipt (those are keyed by the artifact
+/// digest).
+/// Per-process monotonic call counter for egress receipt keys and temp
+/// receipt names — disambiguates same-process calls within one timestamp
+/// tick and concurrent temp-file writers.
+static EGRESS_CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn egress_receipt_key(grant_id: &str, url: &str) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
     // Per-process monotonic counter + nanosecond timestamp: two calls in
     // the same millisecond (the gen-4 LOW-1 collision) can no longer share
     // a key — the counter alone disambiguates same-process calls, and the
     // nanos cover cross-process restarts within a millisecond.
-    static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let call = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let call = EGRESS_CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -1634,10 +1639,14 @@ impl ArbitraitorApi {
                 // Write-to-temp + atomic rename (gen-4 LOW-2): a crash can
                 // no longer leave an untagged receipt at the artifact key.
                 // The temp file lives beside the destination (same
-                // filesystem, atomic rename guarantee) with a unique name.
-                let temp_path = self
-                    .receipts_dir
-                    .join(format!(".egress-body-tmp-{digest}-{}", std::process::id()));
+                // filesystem, atomic rename guarantee) with a name unique
+                // per call (pid + counter): two concurrent inspect calls
+                // with identical bodies must never share a temp path.
+                let temp_path = self.receipts_dir.join(format!(
+                    ".egress-body-tmp-{digest}-{}-{}",
+                    std::process::id(),
+                    EGRESS_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
                 std::fs::write(&temp_path, json)
                     .map_err(|error| EngineError::Receipt(error.to_string()))?;
                 std::fs::rename(&temp_path, &egress_key_path)
