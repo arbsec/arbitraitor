@@ -738,7 +738,12 @@ this capability; ADR-0041 records the decision.
   §11.5's blanket "secrets removed" rule for this operation class so the
   audit trail preserves the channel without recording raw credential
   values. §11.3 remains binding: no raw credential value reaches a receipt
-  on any carrier.
+  on any carrier. Because name denylists cannot enumerate every credential
+  parameter, a value under an unlisted name must never reach a receipt
+  either: implementations (#799) apply value-shape safeguards in addition
+  to the denylist, and policy authors MUST NOT grant `allowed` query
+  policy on hosts known to accept credentials in query parameters — use
+  `pinned`/`bounded` so the grant shape itself bounds what can leak.
 - **Grant-scoped.** Every request executes under an egress grant: an explicit
   policy object scoping the operation to allowlisted host(s), the `GET`
   method, a path prefix, response size, and response content types. A request
