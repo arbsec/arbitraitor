@@ -186,5 +186,26 @@ fn egress_transport_floor_is_immutable() {
     assert!(!policy.allow_loopback_addresses);
     assert!(!policy.forward_authorization_cross_origin);
     assert_eq!(policy.tls_verifier, TlsVerifier::PlatformVerifier);
-    assert!(!policy.http_error_status_is_failure);
+    // §11.6: non-2xx responses are typed failures, never delivered bodies
+    // (an error page must not reach the caller dressed as a clean result).
+    assert!(policy.http_error_status_is_failure);
+}
+
+#[tokio::test]
+async fn path_prefix_boundary_is_enforced() {
+    // M1: a grant for /v1 must not cover /v11/x or /v1admin — prefix match
+    // happens at a '/' boundary only.
+    let mut grant = grant(&["127.0.0.1"]);
+    grant.path_prefix = "/v1".to_owned();
+    grant.query_policy = EgressQueryPolicy::Allowed;
+    let executor = EgressExecutor::new();
+    for path in ["/v11/anything", "/v1admin/secrets"] {
+        let result = executor
+            .execute(&grant, &format!("http://127.0.0.1:1{path}"), &TIMEOUTS)
+            .await;
+        assert!(
+            matches!(result, Err(EgressError::OutsideGrant { .. })),
+            "path {path} must be outside the /v1 grant, got {result:?}"
+        );
+    }
 }

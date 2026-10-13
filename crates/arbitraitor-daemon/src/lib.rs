@@ -911,7 +911,11 @@ async fn http_egress(url: &str, state: &DaemonState) -> DaemonResponse {
             "invalid URL: http_egress requires https (spec §11.6 transport floor): {url}"
         ));
     }
-    match state.api.http_egress(url, "daemon_local").await {
+    match state
+        .api
+        .http_egress(url, &arbitraitor_model::origin::CallerOrigin::DaemonLocal)
+        .await
+    {
         Ok(result) => DaemonResponse {
             success: true,
             verdict: None,

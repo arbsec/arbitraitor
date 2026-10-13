@@ -276,22 +276,37 @@ pub struct EgressConfig {
     /// built-in denylist; names are matched case-insensitively.
     #[serde(default)]
     pub credential_query_params: Vec<String>,
+    /// §23.1.1 caller-origin classes denied for egress (e.g.
+    /// `["agent_session"]`). The daemon/MCP derives the class at request
+    /// time (peer-credential-derived, never wire-trusted); a request whose
+    /// class is listed here is denied before any grant evaluation.
+    /// Fail-closed default is unnecessary (no class names means nothing is
+    /// pre-denied; grants still gate), but listing low-trust classes here
+    /// implements the spec's "Policy MAY deny egress for `agent_session`".
+    #[serde(default)]
+    pub deny_origins: Vec<String>,
 }
 
 impl EgressConfig {
     /// Returns the grant matching `host` and `path`, if any.
     ///
     /// A request matches at most one grant: the first grant whose host list
-    /// contains the host and whose path prefix covers the path. Overlapping
+    /// contains the host and whose path prefix covers the path at a `/`
+    /// boundary (`/v1` matches `/v1/x` but not `/v11/x`). Overlapping
     /// grants resolve to the earliest declaration — policy authors keep
     /// grants disjoint.
     #[must_use]
     pub fn matching_grant(&self, host: &str, path: &str) -> Option<&EgressGrant> {
         let host = host.to_lowercase();
-        self.grants.iter().find(|g| {
-            g.hosts.iter().any(|h| h == &host)
-                && (g.path_prefix.is_empty() || path.starts_with(&g.path_prefix))
-        })
+        let in_scope = |prefix: &str| {
+            prefix.is_empty()
+                || path == prefix
+                || (path.starts_with(prefix)
+                    && (prefix.ends_with('/') || path[prefix.len()..].starts_with('/')))
+        };
+        self.grants
+            .iter()
+            .find(|g| g.hosts.iter().any(|h| h == &host) && in_scope(&g.path_prefix))
     }
 }
 

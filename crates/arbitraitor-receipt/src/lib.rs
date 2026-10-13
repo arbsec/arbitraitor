@@ -144,6 +144,14 @@ pub struct PolicyInfo {
     /// Digest of the effective policy snapshot, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_digest: Option<String>,
+    /// Operation class of the receipt (spec §11.6): `artifact` (default,
+    /// omitted for existing receipts) or `egress` (mediated GET-only web
+    /// request — the artifact fields carry a request-identity key, not a
+    /// CAS digest, and the verdict field carries no artifact verdict).
+    /// Consumers MUST branch on this before treating `artifact.sha256` as
+    /// a CAS identity or `verdict` as a release gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_class: Option<String>,
     /// Metadata from allow rules that authorized release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_rule_metadata: Vec<AllowRuleMetadata>,
@@ -306,6 +314,7 @@ impl Receipt {
             findings: v1.findings,
             policy: PolicyInfo {
                 policy_digest: v1.policy_digest,
+                operation_class: None,
                 allow_rule_metadata: v1.allow_rule_metadata,
                 audit_trail: v1.audit_trail,
             },

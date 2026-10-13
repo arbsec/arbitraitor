@@ -83,6 +83,23 @@ impl EgressExecutor {
             });
         }
 
+        // §11.6: every hop must stay inside the grant. The fetcher's
+        // redirect policy already denies cross-origin hops
+        // (allow_cross_origin_redirect = false) and HTTPS downgrades, but a
+        // same-origin hop can still leave the grant's path prefix
+        // (/v1/x → /admin). Re-authorize the final URL against the grant's
+        // host + path scope before any delivery; the query policy is NOT
+        // re-checked here because the final URL's query is the response of
+        // the redirect, not caller-controlled data — the caller-controlled
+        // query was authorized pre-transport.
+        if let Some(final_url) = receipt.metadata.final_url.as_ref()
+            && !grant.covers(final_url.as_url())
+        {
+            return Err(EgressError::OutsideGrant {
+                grant_id: grant.id.clone(),
+            });
+        }
+
         let body = sink.into_bytes();
         let delivered =
             u64::try_from(body.len()).is_ok_and(|n| n <= grant.effective_max_response_bytes());
@@ -135,7 +152,12 @@ impl EgressExecutor {
             behind_proxy: false,
             require_digest: false,
             first_byte_timeout: None,
-            http_error_status_is_failure: false,
+            // §11.6 deterministic-failure semantics: an error-status
+            // response is a transport-boundary outcome, not a body to
+            // deliver — a 500 error page is not the content the grant
+            // authorized, and delivering it as a success would let a
+            // hostile origin dress arbitrary bytes as a clean result.
+            http_error_status_is_failure: true,
         }
     }
 

@@ -660,20 +660,23 @@ impl ArbitraitorApi {
     /// request, keyed by a digest of the request identity (grant id + URL +
     /// nonce), never colliding with artifact receipts.
     ///
-    /// `caller_origin` must be the peer-credential-derived §23.1.1 class;
-    /// the caller (daemon/MCP) derives it, the engine never trusts a
-    /// wire-supplied value for enforcement.
+    /// `caller_origin` must be the peer-credential-derived §23.1.1 class
+    /// (typed — never a wire-supplied freeform string); the daemon/MCP
+    /// derives it from transport authentication. Policy denies listed
+    /// origin classes (`network.egress.deny_origins`) before grant
+    /// evaluation.
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::EgressDenied`] when no grant authorizes the
-    /// request, [`EngineError::EgressPolicy`] when the policy carries no
-    /// compiled egress section, and [`EngineError::Fetch`] for transport
-    /// boundaries after authorization.
+    /// Returns [`EngineError::EgressDenied`] when the origin class is
+    /// denied by policy or no grant authorizes the request,
+    /// [`EngineError::EgressPolicy`] when the policy carries no compiled
+    /// egress section, and [`EngineError::Fetch`] for transport boundaries
+    /// after authorization.
     pub async fn http_egress(
         &self,
         url: &str,
-        caller_origin: &str,
+        caller_origin: &arbitraitor_model::origin::CallerOrigin,
     ) -> Result<EgressResult, EngineError> {
         // Parse and authorize against the compiled policy's egress grants.
         let policy = self.policy.as_ref().ok_or_else(|| {
@@ -682,6 +685,19 @@ impl ArbitraitorApi {
             )
         })?;
         let egress_config = &policy.policy().network.egress;
+        // §11.6 caller-origin binding: deny listed low-trust origin classes
+        // before grant evaluation. The class arrives as the peer-derived
+        // §23.1.1 label from the daemon/MCP layer, never wire-trusted.
+        if egress_config
+            .deny_origins
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(caller_origin.as_str()))
+        {
+            return Err(EngineError::EgressDenied(format!(
+                "caller origin '{}' is denied for egress by policy",
+                caller_origin.as_str()
+            )));
+        }
         let parsed_url = url::Url::parse(url)
             .map_err(|_| EngineError::EgressDenied("unparseable URL".to_owned()))?;
         let host = parsed_url
@@ -721,40 +737,15 @@ impl ArbitraitorApi {
         // a passing verdict releases it. This is the sole path where egress
         // produces a verdict about the body (spec §11.6 non-goals
         // exception).
-        let body_outcome;
-        let delivered_bytes;
-        let final_body;
-        match fetch_grant.body_treatment {
-            arbitraitor_fetch::EgressBodyTreatment::InspectFirst => {
-                let (inspection, _op) =
-                    self.inspect_egress_body(&response.body, &response.content_type, url)?;
-                if inspection.verdict == Verdict::Pass || inspection.verdict == Verdict::Warn {
-                    body_outcome = "returned_inspected";
-                    delivered_bytes = u64::try_from(response.body.len()).ok();
-                    final_body = Some(response.body.clone());
-                } else {
-                    body_outcome = "withheld";
-                    delivered_bytes = None;
-                    final_body = None;
-                }
-            }
-            arbitraitor_fetch::EgressBodyTreatment::Unscanned => {
-                body_outcome = "returned_unscanned";
-                delivered_bytes = if response.delivered {
-                    u64::try_from(response.body.len()).ok()
-                } else {
-                    None
-                };
-                final_body = response.delivered.then(|| response.body.clone());
-            }
-        }
+        let (body_outcome, delivered_bytes, final_body) =
+            self.resolve_egress_body_outcome(&fetch_grant, &response, url)?;
 
         // Persist the egress receipt: keyed by grant+url+nonce digest so it
         // never collides with an artifact receipt.
         let receipt_key = egress_receipt_key(&response.grant_id, url);
         let egress_info = arbitraitor_receipt::EgressInfo {
             grant_id: response.grant_id.clone(),
-            caller_origin: caller_origin.to_owned(),
+            caller_origin: caller_origin.as_str().to_owned(),
             requested_url: redact_egress_url(url, egress_config),
             final_url: Some(redact_egress_url(&response.final_url, egress_config)),
             redirect_chain: response
@@ -1309,12 +1300,37 @@ fn egress_receipt_key(grant_id: &str, url: &str) -> String {
     hex
 }
 
-/// §11.6 receipt URL redaction: credential-class only. Userinfo password
-/// is always redacted; credential-bearing query parameters (policy
-/// denylist + built-ins) are replaced by their class; all other query and
-/// path content is preserved verbatim. §11.5's blanket query removal does
-/// NOT apply to egress receipts.
-fn redact_egress_url(value: &str, egress: &arbitraitor_policy::EgressConfig) -> String {
+/// §11.6 receipt URL redaction: credential-class only. Implements the
+/// full §11.6 rule set:
+///
+/// - userinfo password → class marker (username may be functional);
+/// - credential-bearing query parameters (policy denylist + built-ins)
+///   are replaced by their class;
+/// - **credential value-shape rules**: a query value matching neither the
+///   name denylist nor a non-credential shape is redacted when it is
+///   (a) a high-entropy opaque token (≥24 chars from `[A-Za-z0-9_-]` with
+///   at least one digit, one letter, and mixed case), (b) JWT-shaped
+///   (three dot-separated base64url segments), or (c) UUID-shaped in a
+///   credential-position parameter (name contains `id`/`token`/`key` or
+///   is denylisted);
+/// - **unmatched-query fallback (fail-closed)**: a query value matching
+///   neither the denylist nor the value shapes and not establishable as
+///   non-credential (pure digits, ≤8 chars, or a well-known non-secret
+///   parameter name) is redacted to `[REDACTED-UNESTABLISHABLE]`;
+/// - **path-segment secret-pattern denylist**: any path segment that is
+///   ≥32 chars of hex/base64url or a JWT segment is replaced by
+///   `[REDACTED-PATH-SEGMENT]`.
+///
+/// All other query and path content is preserved verbatim (§11.5's
+/// blanket "secrets removed" rule is narrowed for this operation class).
+/// The fail-the-request clause for unredactable values cannot fire here:
+/// URL components are strings and therefore always redactable — the
+/// fail-closed path is exercised by callers handling non-string values,
+/// which must fail the request rather than record the value.
+///
+/// Applies to the requested URL, final URL, and redirect chain (the
+/// receipt builder calls this per URL).
+pub(crate) fn redact_egress_url(value: &str, egress: &arbitraitor_policy::EgressConfig) -> String {
     let Ok(mut parsed) = url::Url::parse(value) else {
         return arbitraitor_receipt::redact_url(value);
     };
@@ -1322,28 +1338,128 @@ fn redact_egress_url(value: &str, egress: &arbitraitor_policy::EgressConfig) -> 
     if parsed.password().is_some() {
         let _ = parsed.set_password(Some("[REDACTED-PASSWORD]"));
     }
+    // Path-segment secret-pattern denylist (§11.6).
+    let segments: Vec<String> = parsed
+        .path_segments()
+        .map(|segs| segs.map(redact_path_segment).collect())
+        .unwrap_or_default();
+    if !segments.is_empty() {
+        parsed.set_path(&format!("/{}", segments.join("/")));
+    }
     if let Some(query) = parsed.query() {
-        let deny: Vec<String> = BUILTIN_CREDENTIAL_QUERY_PARAMS
-            .iter()
-            .map(ToString::to_string)
-            .chain(egress.credential_query_params.iter().cloned())
-            .collect();
+        let deny = |name: &str| {
+            BUILTIN_CREDENTIAL_QUERY_PARAMS
+                .iter()
+                .copied()
+                .chain(egress.credential_query_params.iter().map(String::as_str))
+                .any(|d| d.eq_ignore_ascii_case(name))
+        };
         let redacted: Vec<String> = query
             .split('&')
             .map(|pair| {
                 let (name, sep_value) = pair.split_once('=').map_or((pair, ""), |(n, v)| (n, v));
-                if deny.iter().any(|d| d.eq_ignore_ascii_case(name)) {
-                    format!("{name}=[REDACTED-CREDENTIAL]")
-                } else if sep_value.is_empty() {
-                    name.to_owned()
-                } else {
-                    pair.to_owned()
+                if sep_value.is_empty() {
+                    return name.to_owned();
                 }
+                if deny(name) {
+                    return format!("{name}=[REDACTED-CREDENTIAL]");
+                }
+                if is_high_entropy_token(sep_value)
+                    || is_jwt_shaped(sep_value)
+                    || (is_uuid_shaped(sep_value) && is_credential_position(name, &deny))
+                {
+                    return format!("{name}=[REDACTED-CREDENTIAL]");
+                }
+                if !is_established_non_credential(name, sep_value) {
+                    return format!("{name}=[REDACTED-UNESTABLISHABLE]");
+                }
+                pair.to_owned()
             })
             .collect();
         parsed.set_query(Some(&redacted.join("&")));
     }
     parsed.to_string()
+}
+
+/// High-entropy opaque token: ≥24 chars from `[A-Za-z0-9_-]` with at
+/// least one digit, one letter, and mixed upper/lower case.
+fn is_high_entropy_token(value: &str) -> bool {
+    if value.len() < 24
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return false;
+    }
+    let has_digit = value.bytes().any(|b| b.is_ascii_digit());
+    let has_lower = value.bytes().any(|b| b.is_ascii_lowercase());
+    let has_upper = value.bytes().any(|b| b.is_ascii_uppercase());
+    has_digit && has_lower && has_upper
+}
+
+/// JWT shape: exactly three dot-separated base64url segments, each at
+/// least 8 chars of `[A-Za-z0-9_-]`.
+fn is_jwt_shaped(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    segments.len() == 3
+        && segments.iter().all(|s| {
+            s.len() >= 8
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+}
+
+/// UUID shape: 8-4-4-4-12 hex digits.
+fn is_uuid_shaped(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    let widths = [8, 4, 4, 4, 12];
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip(widths)
+            .all(|(g, w)| g.len() == w && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A parameter is in a credential position when its name contains
+/// `id`, `token`, or `key`, or it is on the denylist.
+fn is_credential_position(name: &str, deny: &impl Fn(&str) -> bool) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("id") || lower.contains("token") || lower.contains("key") || deny(name)
+}
+
+/// Well-known non-secret parameter names (lowercase compare).
+const NON_CREDENTIAL_QUERY_PARAMS: &[&str] = &[
+    "q", "query", "search", "page", "limit", "offset", "sort", "order", "lang", "locale", "format",
+    "version", "v", "callback", "fields", "include", "type", "kind", "category", "tag", "tags",
+    "filter", "from", "to", "since", "until", "count", "size", "cursor",
+];
+
+/// Establishes a query value as non-credential: pure digits, short
+/// (≤8 chars), or a well-known non-secret parameter name. Values that
+/// match neither this, the denylist, nor the value shapes are
+/// unestablishable and fail closed (redacted).
+fn is_established_non_credential(name: &str, value: &str) -> bool {
+    if value.bytes().all(|b| b.is_ascii_digit()) || value.len() <= 8 {
+        return true;
+    }
+    NON_CREDENTIAL_QUERY_PARAMS
+        .iter()
+        .any(|p| *p == name.to_ascii_lowercase())
+}
+
+/// Path-segment secret-pattern denylist: a segment of ≥32 hex/base64url
+/// characters, or a JWT segment (three dot-separated base64url parts),
+/// is replaced by its class.
+fn redact_path_segment(segment: &str) -> String {
+    if is_jwt_shaped(segment)
+        || (segment.len() >= 32
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
+        return "[REDACTED-PATH-SEGMENT]".to_owned();
+    }
+    segment.to_owned()
 }
 
 /// Built-in credential query-parameter names (mirrors the policy crate's
@@ -1378,7 +1494,50 @@ fn query_policy_name(policy: arbitraitor_policy::EgressQueryPolicy) -> &'static 
     }
 }
 
+/// Resolved §11.6 body outcome: outcome label, delivered byte count, and
+/// the body actually returned to the caller (`None` = withheld).
+type EgressBodyOutcome = (&'static str, Option<u64>, Option<Vec<u8>>);
+
 impl ArbitraitorApi {
+    /// Resolves the §11.6 body outcome for an egress response.
+    ///
+    /// `inspect_first` grants gate delivery on the inspection verdict: a
+    /// non-releasable verdict (`Incomplete`/`Block`/`Error`) withholds the
+    /// body entirely; `Pass` delivers unmodified; `Warn` delivers with the
+    /// verdict recorded on the inspection receipt (ADR-0013 semantics:
+    /// warn is release-permitted-with-warning). `unscanned` grants deliver
+    /// exactly what the transport bounded.
+    fn resolve_egress_body_outcome(
+        &self,
+        fetch_grant: &arbitraitor_fetch::EgressGrant,
+        response: &arbitraitor_fetch::EgressResponse,
+        url: &str,
+    ) -> Result<EgressBodyOutcome, EngineError> {
+        match fetch_grant.body_treatment {
+            arbitraitor_fetch::EgressBodyTreatment::InspectFirst => {
+                let (inspection, _op) =
+                    self.inspect_egress_body(&response.body, &response.content_type, url)?;
+                if matches!(inspection.verdict, Verdict::Pass | Verdict::Warn) {
+                    Ok((
+                        "returned_inspected",
+                        u64::try_from(response.body.len()).ok(),
+                        Some(response.body.clone()),
+                    ))
+                } else {
+                    Ok(("withheld", None, None))
+                }
+            }
+            arbitraitor_fetch::EgressBodyTreatment::Unscanned => Ok((
+                "returned_unscanned",
+                response
+                    .delivered
+                    .then(|| u64::try_from(response.body.len()).ok())
+                    .flatten(),
+                response.delivered.then(|| response.body.clone()),
+            )),
+        }
+    }
+
     /// §11.6 `inspect_first` body path: run the egress body through the
     /// inspection pipeline in-memory (no CAS write) and return the
     /// inspection result whose verdict gates delivery.
@@ -1432,7 +1591,12 @@ impl ArbitraitorApi {
             payload_graph: None,
             detectors: Vec::new(),
             findings: Vec::new(),
-            policy: arbitraitor_receipt::PolicyInfo::default(),
+            policy: arbitraitor_receipt::PolicyInfo {
+                policy_digest: None,
+                operation_class: Some("egress".to_owned()),
+                allow_rule_metadata: Vec::new(),
+                audit_trail: Vec::new(),
+            },
             verdict: arbitraitor_receipt::VerdictInfo {
                 verdict: arbitraitor_model::verdict::Verdict::Pass,
                 deciding_rule: None,

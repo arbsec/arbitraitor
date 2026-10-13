@@ -428,3 +428,308 @@ fn receipt_retrieval_info_records_response_status_code() {
         "no status must serialize as null (absent), never a fabricated code: {json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §11.6 egress receipt URL redaction
+// ---------------------------------------------------------------------------
+
+fn egress_config_with(params: &[&str]) -> arbitraitor_policy::EgressConfig {
+    arbitraitor_policy::EgressConfig {
+        credential_query_params: params.iter().map(ToString::to_string).collect(),
+        ..arbitraitor_policy::EgressConfig::default()
+    }
+}
+
+#[test]
+fn redact_egress_url_denylist_param_is_class_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?token=abcdef0123456789abcdef01",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?token=[REDACTED-CREDENTIAL]",
+        "denylisted parameter value must be replaced by its class: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_high_entropy_value_under_unlisted_name_is_redacted() {
+    // 32 chars, alphanumeric mixed case with digits, not on any denylist.
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?state=aB3xY7kQ9mN2pR5tW8zC1vB4nM6jH0fD",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?state=[REDACTED-CREDENTIAL]",
+        "high-entropy opaque token must be redacted regardless of name: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_jwt_under_unlisted_name_is_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?auth=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?auth=[REDACTED-CREDENTIAL]",
+        "JWT-shaped value must be redacted regardless of name: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_uuid_in_credential_position_is_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?request_id=550e8400-e29b-41d4-a716-446655440000",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?request_id=[REDACTED-CREDENTIAL]",
+        "UUID-shaped value in a credential-position parameter must be redacted: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_short_common_param_preserved() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?q=hello&page=2",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?q=hello&page=2",
+        "established non-credential values must be preserved verbatim: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_unestablishable_value_fails_closed() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?opaque=this-is-a-long-ambiguous-value!",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?opaque=[REDACTED-UNESTABLISHABLE]",
+        "unestablishable value must be redacted to its class (fail-closed): {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_path_segment_32_hex_is_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/download/deadbeefdeadbeefdeadbeefdeadbeef/file.tar.gz",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/download/[REDACTED-PATH-SEGMENT]/file.tar.gz",
+        "32-hex path segment must be redacted: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_normal_path_is_preserved() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/search?query=rust+crates",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/search?query=rust+crates",
+        "ordinary path and established query must be preserved: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_userinfo_password_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://user:sup3rs3cret@api.example.com/v1/data",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://user:%5BREDACTED-PASSWORD%5D@api.example.com/v1/data",
+        "userinfo password must be redacted: {redacted}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §11.6 egress: deny-origins enforcement, receipt redaction, body outcomes
+// ---------------------------------------------------------------------------
+
+fn egress_policy_toml(deny_origins: &[&str]) -> String {
+    let deny = deny_origins
+        .iter()
+        .map(|o| format!("\"{o}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r"
+version = 1
+
+[network.egress]
+deny_origins = [{deny}]
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+path_prefix = '/v1/search'
+query_policy = 'forbidden'
+"
+    )
+}
+
+#[tokio::test]
+async fn egress_denies_policy_listed_origin_before_grants() {
+    use arbitraitor_model::origin::CallerOrigin;
+
+    let api = crate::ArbitraitorApi::new(crate::api::Config {
+        policy_toml: egress_policy_toml(&["agent_session"]),
+        ..crate::api::Config::default()
+    })
+    .expect("engine with egress policy");
+    // The origin is denied before grant evaluation — the URL never parses
+    // into a transport attempt, and no receipt is written for it.
+    let error = api
+        .http_egress(
+            "https://api.example.internal/v1/search/x",
+            &CallerOrigin::AgentSession,
+        )
+        .await
+        .expect_err("denied origin must fail closed");
+    assert!(
+        error.to_string().contains("denied for egress"),
+        "expected origin denial, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn egress_allows_unlisted_origin_to_reach_grant_evaluation() {
+    use arbitraitor_model::origin::CallerOrigin;
+
+    let api = crate::ArbitraitorApi::new(crate::api::Config {
+        policy_toml: egress_policy_toml(&["agent_session"]),
+        ..crate::api::Config::default()
+    })
+    .expect("engine with egress policy");
+    // DaemonLocal is not on the deny list: the request reaches grant
+    // evaluation. https://127.0.0.1 is not allowlisted (grant hosts are
+    // api.example.internal) → OutsideGrant-class denial, NOT origin denial.
+    let error = api
+        .http_egress("https://127.0.0.1/v1/search/x", &CallerOrigin::DaemonLocal)
+        .await
+        .expect_err("non-allowlisted host must be denied at grant scope");
+    assert!(
+        error.to_string().contains("no egress grant"),
+        "expected grant-scope denial, got: {error}"
+    );
+}
+
+#[test]
+fn egress_receipt_redaction_preserves_common_params_and_redacts_secrets() {
+    use crate::api::redact_egress_url;
+    use arbitraitor_policy::EgressConfig;
+
+    let egress = EgressConfig::default();
+    // Denylisted name → value replaced by class.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/x?api_key=SK1234567890abcdef",
+            &egress
+        ),
+        "https://api.example.internal/v1/x?api_key=[REDACTED-CREDENTIAL]"
+    );
+    // Unlisted name but high-entropy value (24+ mixed alnum) → redacted.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/x?state=Abcdef1234567890ABCDEF1234",
+            &egress
+        ),
+        "https://api.example.internal/v1/x?state=[REDACTED-CREDENTIAL]"
+    );
+    // JWT-shaped value → redacted.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/x?sid=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            &egress
+        ),
+        "https://api.example.internal/v1/x?sid=[REDACTED-CREDENTIAL]"
+    );
+    // Common non-secret param with a short value → preserved verbatim.
+    assert_eq!(
+        redact_egress_url("https://api.example.internal/v1/x?q=hello&page=2", &egress),
+        "https://api.example.internal/v1/x?q=hello&page=2"
+    );
+    // 32-hex path segment → redacted segment.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/deadbeefdeadbeefdeadbeefdeadbeef/report",
+            &egress
+        ),
+        "https://api.example.internal/v1/[REDACTED-PATH-SEGMENT]/report"
+    );
+    // Userinfo password → class marker.
+    assert_eq!(
+        redact_egress_url("https://user:hunter2@api.example.internal/v1/x", &egress),
+        "https://user:%5BREDACTED-PASSWORD%5D@api.example.internal/v1/x"
+    );
+}
+
+#[test]
+fn egress_receipt_carries_operation_class_egress() {
+    use arbitraitor_receipt::CURRENT_SCHEMA_VERSION;
+    use arbitraitor_receipt::{
+        ArtifactInfo, EgressInfo, PolicyInfo, ProvenanceInfo, Receipt, ReceiptTimestamps,
+        RequestInfo, VerdictInfo,
+    };
+
+    // The discriminator must be present on egress receipts so
+    // query_receipts()/audit consumers never mistake the request-identity
+    // key for a CAS digest (L1).
+    let receipt = Receipt {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        request: RequestInfo {
+            arbitraitor_version: "test".to_owned(),
+            config_digest: None,
+        },
+        artifact: ArtifactInfo {
+            sha256: "egress-key".to_owned(),
+            size: 0,
+            artifact_type: Some("egress".to_owned()),
+        },
+        retrieval: None,
+        egress: Some(EgressInfo {
+            grant_id: "g".to_owned(),
+            caller_origin: "daemon_local".to_owned(),
+            requested_url: "https://h/x".to_owned(),
+            final_url: None,
+            redirect_chain: Vec::new(),
+            status: Some(200),
+            content_type: None,
+            query_policy: "forbidden".to_owned(),
+            body_outcome: "returned_unscanned".to_owned(),
+            delivered_bytes: Some(0),
+        }),
+        provenance: ProvenanceInfo::default(),
+        payload_graph: None,
+        detectors: Vec::new(),
+        findings: Vec::new(),
+        policy: PolicyInfo {
+            policy_digest: None,
+            operation_class: Some("egress".to_owned()),
+            allow_rule_metadata: Vec::new(),
+            audit_trail: Vec::new(),
+        },
+        verdict: VerdictInfo {
+            verdict: arbitraitor_model::verdict::Verdict::Pass,
+            deciding_rule: None,
+            policy_trace: vec!["egress operation: no artifact verdict (spec §11.6)".to_owned()],
+        },
+        release: None,
+        timestamps: ReceiptTimestamps {
+            created: "unix:0.0Z".to_owned(),
+            modified: "unix:0.0Z".to_owned(),
+        },
+    };
+    assert_eq!(
+        receipt.policy.operation_class.as_deref(),
+        Some("egress"),
+        "egress receipts must carry the operation_class discriminator"
+    );
+}

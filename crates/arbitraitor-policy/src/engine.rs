@@ -395,6 +395,25 @@ fn check_egress(
                 grant.id, base.query_policy, grant.query_policy
             ));
         }
+        // §11.6: when both layers bound the query, the inherited bounds are
+        // the ceiling — a tightening layer may shrink them but never grow
+        // them.
+        if grant.query_policy == EgressQueryPolicy::Bounded
+            && base.query_policy == EgressQueryPolicy::Bounded
+        {
+            if grant.max_query_bytes.unwrap_or(0) > base.max_query_bytes.unwrap_or(0) {
+                violations.push(format!(
+                    "network.egress.grants[{}]: bounded query bounds cannot grow (max_query_bytes {:?} > inherited {:?})",
+                    grant.id, grant.max_query_bytes, base.max_query_bytes
+                ));
+            }
+            if grant.max_query_params.unwrap_or(0) > base.max_query_params.unwrap_or(0) {
+                violations.push(format!(
+                    "network.egress.grants[{}]: bounded query bounds cannot grow (max_query_params {:?} > inherited {:?})",
+                    grant.id, grant.max_query_params, base.max_query_params
+                ));
+            }
+        }
         if grant.body_treatment != base.body_treatment
             && body_treatment_rank(grant.body_treatment) < body_treatment_rank(base.body_treatment)
         {
@@ -428,17 +447,18 @@ fn check_egress(
             }
         }
     }
-    for param in &candidate.credential_query_params {
-        if !inherited
+    // Adding a credential-parameter name strictly strengthens redaction
+    // (more values replaced by their class), so a tightening layer may add
+    // names freely — it may never REMOVE an inherited name. The built-in
+    // names are always in force and cannot be weakened either way.
+    for param in &inherited.credential_query_params {
+        if !candidate
             .credential_query_params
             .iter()
             .any(|p| p.eq_ignore_ascii_case(param))
-            && !BUILTIN_CREDENTIAL_QUERY_PARAMS
-                .iter()
-                .any(|p| param.eq_ignore_ascii_case(p))
         {
             violations.push(format!(
-                "network.egress.credential_query_params: {param} was not declared by inherited policy"
+                "network.egress.credential_query_params: {param} cannot be removed by a tightening layer"
             ));
         }
     }
@@ -454,28 +474,6 @@ fn body_treatment_rank(t: crate::schema::EgressBodyTreatment) -> u8 {
         crate::schema::EgressBodyTreatment::InspectFirst => 1,
     }
 }
-
-/// Built-in query-parameter names treated as credentials in egress
-/// receipts regardless of policy configuration.
-const BUILTIN_CREDENTIAL_QUERY_PARAMS: &[&str] = &[
-    "api_key",
-    "apikey",
-    "api-key",
-    "access_token",
-    "token",
-    "auth",
-    "key",
-    "secret",
-    "password",
-    "passwd",
-    "sig",
-    "signature",
-    "credential",
-    "credentials",
-    "session",
-    "sid",
-    "sessionid",
-];
 
 /// Default response-size fallback when a grant sets no explicit bound:
 /// 1 MiB, deliberately far below the CAS default so egress never becomes a

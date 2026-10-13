@@ -1568,3 +1568,86 @@ fn project_layer_may_tighten_egress_query_policy() {
     assert_eq!(grant.query_policy, crate::EgressQueryPolicy::Bounded);
     assert_eq!(grant.max_query_bytes, Some(16));
 }
+
+#[test]
+fn project_layer_cannot_grow_bounded_query_bounds() {
+    // §11.6: when both layers are `bounded`, the inherited bounds are the
+    // ceiling — a lower layer may shrink them but never raise them.
+    let organization = org_egress_policy(
+        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 2\n",
+    );
+    let project = org_egress_policy(
+        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 10000\nmax_query_params = 2\n",
+    );
+    let result = crate::PolicyEngine::merge_layers(
+        [
+            crate::PolicyLayer {
+                precedence: crate::PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            crate::PolicyLayer {
+                precedence: crate::PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+    assert!(
+        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("bounded query bounds cannot grow") && detail.contains("max_query_bytes")),
+        "raising max_query_bytes under bounded must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn project_layer_cannot_grow_bounded_query_param_count() {
+    let organization = org_egress_policy(
+        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 2\n",
+    );
+    let project = org_egress_policy(
+        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 50\n",
+    );
+    let result = crate::PolicyEngine::merge_layers(
+        [
+            crate::PolicyLayer {
+                precedence: crate::PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            crate::PolicyLayer {
+                precedence: crate::PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+    assert!(
+        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("bounded query bounds cannot grow") && detail.contains("max_query_params")),
+        "raising max_query_params under bounded must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn egress_matching_grant_respects_path_boundary() {
+    let policy = r"
+version = 1
+
+[[network.egress.grants]]
+id = 'v1'
+hosts = ['api.example.com']
+path_prefix = '/v1'
+query_policy = 'forbidden'
+";
+    let engine = crate::PolicyEngine::load(policy).unwrap();
+    let egress = &engine.policy().network.egress;
+    assert!(
+        egress
+            .matching_grant("api.example.com", "/v1/search")
+            .is_some()
+    );
+    assert!(egress.matching_grant("api.example.com", "/v1").is_some());
+    assert!(egress.matching_grant("api.example.com", "/v11/x").is_none());
+    assert!(
+        egress
+            .matching_grant("api.example.com", "/v1admin")
+            .is_none()
+    );
+}

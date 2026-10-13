@@ -85,6 +85,9 @@ impl EgressGrant {
     }
 
     /// Returns true when `url` is inside this grant's host and path scope.
+    ///
+    /// The path prefix must match at a `/` boundary: a grant for `/v1`
+    /// covers `/v1/x` and `/v1` but not `/v11/x` or `/v1admin`.
     #[must_use]
     pub fn covers(&self, url: &Url) -> bool {
         let Some(host) = url.host_str() else {
@@ -93,8 +96,18 @@ impl EgressGrant {
         if !self.hosts.iter().any(|h| h.as_str() == host.to_lowercase()) {
             return false;
         }
-        let path = url.path();
-        self.path_prefix.is_empty() || path.starts_with(&self.path_prefix)
+        Self::path_in_scope(url.path(), &self.path_prefix)
+    }
+
+    /// Path-prefix match at a `/` boundary (or exact equality).
+    fn path_in_scope(path: &str, prefix: &str) -> bool {
+        if prefix.is_empty() {
+            return true;
+        }
+        if path == prefix {
+            return true;
+        }
+        path.starts_with(prefix) && (prefix.ends_with('/') || path[prefix.len()..].starts_with('/'))
     }
 
     /// Validates the request URL against this grant.
