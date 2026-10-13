@@ -101,6 +101,7 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
     // release right after the CLI's contended open is underway, well inside
     // the 400 ms retry budget.
     let release_signal = root.join("release-holder");
+    let held_signal = root.join("holder-holding");
     let mut holder = std::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
@@ -110,16 +111,35 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
         ])
         .env("ARBITRAITOR_HOLDER_CAS", &cas)
         .env("ARBITRAITOR_HOLDER_RELEASE", &release_signal)
+        .env("ARBITRAITOR_HOLDER_HELD", &held_signal)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    // Wait until the holder actually holds the metadata lock before the CLI
-    // starts (poll the flock, 5 ms steps): slow CI process spawns must not
-    // miss the hold window, or the CLI would sail through uncontended and
-    // the contention assertion below would flake. The poll's own successful
-    // try_locks drop their fd at each iteration end, so the poll never holds
-    // the lock itself.
+    // Wait until the holder process has *actually acquired the flock*,
+    // signalled by the holder writing `ARBITRAITOR_HOLDER_HELD` after its
+    // open returns. A flock probe alone (below) races on loaded CI runners:
+    // the test process can observe a stale/probe-side lock state while the
+    // holder's own open has not yet landed, then the CLI spawns and its
+    // open either sails through or races the holder's open for the same
+    // retry budget — the 2026-10-13 CI flake (issue #803). The signal file
+    // makes the hold window exact, mirroring how release is signalled.
+    let held_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !held_signal.exists() {
+        assert!(
+            holder.try_wait()?.is_none_or(|s| s.success()),
+            "holder probe exited before acquiring the store lock"
+        );
+        assert!(
+            held_deadline > std::time::Instant::now(),
+            "holder probe must signal lock acquisition within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // Belt-and-suspenders: also confirm the flock from this process' view.
+    // The poll's own successful try_locks drop their fd at each iteration
+    // end, so the poll never holds the lock itself.
     let meta_db = cas.join("meta.db");
     let mut lock_observed = false;
     for _ in 0..600 {
@@ -131,7 +151,7 @@ fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult
         // signal we poll for.
         let held_by_other = match probe {
             Ok(file) => file.try_lock().is_err(),
-            Err(_) => false,
+            Err(_) => true,
         };
         if held_by_other {
             lock_observed = true;
@@ -204,8 +224,15 @@ fn holder_probe_opens_store_holds_then_releases() {
         .unwrap_or_else(|_| panic!("ARBITRAITOR_HOLDER_CAS must be set by the spawning test"));
     let release = std::env::var("ARBITRAITOR_HOLDER_RELEASE")
         .unwrap_or_else(|_| panic!("ARBITRAITOR_HOLDER_RELEASE must be set by the spawning test"));
+    let held = std::env::var("ARBITRAITOR_HOLDER_HELD")
+        .unwrap_or_else(|_| panic!("ARBITRAITOR_HOLDER_HELD must be set by the spawning test"));
     let store =
         arbitraitor_store::ContentStore::open(Path::new(&cas)).expect("holder probe store open");
+    // Signal the spawning test that the flock is now actually held (issue
+    // #803): the test must not spawn the contended CLI until this lands,
+    // or the CLI's open races the holder's open inside the same retry
+    // budget. Write-after-acquire ordering is the point of the signal.
+    std::fs::write(&held, b"holding").expect("write holder-held signal");
     // Hold until the test signals release (poll every 2 ms). A cap prevents
     // a hung test from blocking the suite forever; 30 s is far beyond any
     // realistic scheduler delay while staying bounded.
