@@ -85,6 +85,15 @@ pub enum EngineError {
     /// A retrieval or transport failure occurred.
     #[error("fetch failed: {0}")]
     Fetch(String),
+    /// An egress request was denied by policy before any transport
+    /// activity (no matching grant, query-policy violation, userinfo
+    /// credentials, or address-policy denial).
+    #[error("egress denied: {0}")]
+    EgressDenied(String),
+    /// Egress was requested but the engine has no compiled policy able to
+    /// authorize it (egress requires compiled policy; fail-closed).
+    #[error("egress policy unavailable: {0}")]
+    EgressPolicy(String),
     /// A classified transport failure with a machine-readable kind.
     ///
     /// Produced when a fetch aborts with a [`FetchError`] that maps to a

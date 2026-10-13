@@ -24,6 +24,7 @@ use arbitraitor_policy::RuleEvaluation;
 use arbitraitor_policy::{EvalContext, PolicyEngine, PolicyTrace};
 use arbitraitor_receipt::Receipt;
 use sha2::{Digest as _, Sha256};
+use std::fmt::Write as _;
 
 use crate::pipeline::{
     ReceiptInput, analysis_retrieval_info, build_receipt, default_cas_dir, default_receipts_dir,
@@ -269,6 +270,30 @@ pub struct FetchResult {
     pub content_type: Option<String>,
 }
 
+/// Outcome of [`ArbitraitorApi::http_egress`] (spec §11.6).
+///
+/// The bounded body is returned to the calling tool; it is not an artifact
+/// and carries no artifact identity. `body_returned == false` means the
+/// body was withheld (an `inspect_first` grant with a non-passing verdict,
+/// or a bound hit after connect).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EgressResult {
+    /// Grant the request executed under.
+    pub grant_id: String,
+    /// HTTP response status.
+    pub status: u16,
+    /// Response media type as received.
+    pub content_type: String,
+    /// Bounded response body (empty when `body_returned` is false).
+    pub body: Vec<u8>,
+    /// Whether the body was delivered to the caller.
+    pub body_returned: bool,
+    /// Body treatment in force: `unscanned` or `inspect_first`.
+    pub body_treatment: String,
+    /// Final URL after redirects (unredacted; the receipt is redacted).
+    pub final_url: String,
+}
+
 /// Outcome of [`ArbitraitorApi::release`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseResult {
@@ -479,6 +504,7 @@ impl ArbitraitorApi {
             source,
             Some(&fetch_receipt),
             fetch_receipt.metadata.content_type.clone(),
+            true,
         )?;
         Ok(inspection)
     }
@@ -569,6 +595,7 @@ impl ArbitraitorApi {
             &requested,
             None,
             entry.as_ref().and_then(|m| m.content_type.clone()),
+            true,
         )?;
         Ok(inspection)
     }
@@ -607,6 +634,7 @@ impl ArbitraitorApi {
             &path.to_string_lossy(),
             None,
             None,
+            true,
         )?;
         Ok(inspection)
     }
@@ -625,6 +653,130 @@ impl ArbitraitorApi {
         self.store
             .with_store(|store| read_stored_bytes(store, &digest))
             .map_err(not_found_if_missing(sha256))
+    }
+
+    /// Executes a mediated HTTP egress request (spec §11.6, ADR-0041).
+    ///
+    /// The request is authorized against the policy's egress grants before
+    /// any transport activity; the bounded body is returned to the caller
+    /// without entering the CAS. One egress receipt is persisted per
+    /// request, keyed by a digest of the request identity (grant id + URL +
+    /// nonce), never colliding with artifact receipts.
+    ///
+    /// `caller_origin` must be the peer-credential-derived §23.1.1 class
+    /// (typed — never a wire-supplied freeform string); the daemon/MCP
+    /// derives it from transport authentication. Policy denies listed
+    /// origin classes (`network.egress.deny_origins`) before grant
+    /// evaluation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::EgressDenied`] when the origin class is
+    /// denied by policy or no grant authorizes the request,
+    /// [`EngineError::EgressPolicy`] when the policy carries no compiled
+    /// egress section, and [`EngineError::Fetch`] for transport boundaries
+    /// after authorization.
+    pub async fn http_egress(
+        &self,
+        url: &str,
+        caller_origin: &arbitraitor_model::origin::CallerOrigin,
+    ) -> Result<EgressResult, EngineError> {
+        // Parse and authorize against the compiled policy's egress grants.
+        let policy = self.policy.as_ref().ok_or_else(|| {
+            EngineError::EgressPolicy(
+                "no policy loaded; egress requires compiled policy".to_owned(),
+            )
+        })?;
+        let egress_config = &policy.policy().network.egress;
+        // §11.6 caller-origin binding: deny listed low-trust origin classes
+        // before grant evaluation. The class arrives as the peer-derived
+        // §23.1.1 label from the daemon/MCP layer, never wire-trusted.
+        if egress_config
+            .deny_origins
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(caller_origin.as_str()))
+        {
+            return Err(EngineError::EgressDenied(format!(
+                "caller origin '{}' is denied for egress by policy",
+                caller_origin.as_str()
+            )));
+        }
+        let parsed_url = url::Url::parse(url)
+            .map_err(|_| EngineError::EgressDenied("unparseable URL".to_owned()))?;
+        let host = parsed_url
+            .host_str()
+            .ok_or_else(|| EngineError::EgressDenied("URL has no host".to_owned()))?
+            .to_lowercase();
+        let path = parsed_url.path();
+        let grant = egress_config.matching_grant(&host, path).ok_or_else(|| {
+            EngineError::EgressDenied("no egress grant matches host/path".to_owned())
+        })?;
+
+        // Map the policy grant onto the fetch-layer grant view.
+        let fetch_grant = fetch_grant_view(grant);
+
+        let timeouts = arbitraitor_fetch::EgressTimeouts {
+            connect: self.fetch_policy.connect_timeout,
+            read: self.fetch_policy.read_timeout,
+            total: self.fetch_policy.total_timeout,
+        };
+        let executor = arbitraitor_fetch::EgressExecutor::new();
+        let response = executor
+            .execute(&fetch_grant, url, &timeouts)
+            .await
+            .map_err(|e| match e {
+                arbitraitor_fetch::EgressError::OutsideGrant { .. }
+                | arbitraitor_fetch::EgressError::QueryPolicy { .. }
+                | arbitraitor_fetch::EgressError::UserinfoCredentials
+                | arbitraitor_fetch::EgressError::NoGrant => {
+                    EngineError::EgressDenied(e.to_string())
+                }
+                other => EngineError::Fetch(other.to_string()),
+            })?;
+
+        // §11.6 inspect_first: the body flows through the inspection
+        // pipeline before delivery. The body is scanned in-memory through
+        // the same analyze tail as `scan_path` (bounded by the grant); only
+        // a passing verdict releases it. This is the sole path where egress
+        // produces a verdict about the body (spec §11.6 non-goals
+        // exception).
+        let (body_outcome, delivered_bytes, final_body) =
+            self.resolve_egress_body_outcome(&fetch_grant, &response, url)?;
+
+        // Persist the egress receipt: keyed by grant+url+nonce digest so it
+        // never collides with an artifact receipt.
+        let receipt_key = egress_receipt_key(&response.grant_id, url);
+        let egress_info = arbitraitor_receipt::EgressInfo {
+            grant_id: response.grant_id.clone(),
+            caller_origin: caller_origin.as_str().to_owned(),
+            requested_url: redact_egress_url(url, egress_config),
+            final_url: Some(redact_egress_url(&response.final_url, egress_config)),
+            redirect_chain: response
+                .redirect_chain
+                .iter()
+                .map(|u| redact_egress_url(u, egress_config))
+                .collect(),
+            status: Some(response.status),
+            content_type: Some(response.content_type.clone()),
+            query_policy: query_policy_name(grant.query_policy).to_owned(),
+            body_outcome: body_outcome.to_owned(),
+            delivered_bytes,
+        };
+        self.persist_egress_receipt(&receipt_key, egress_info)?;
+
+        let body_returned = final_body.is_some();
+        Ok(EgressResult {
+            grant_id: response.grant_id,
+            status: response.status,
+            content_type: response.content_type,
+            body: final_body.unwrap_or_default(),
+            body_returned,
+            body_treatment: match fetch_grant.body_treatment {
+                arbitraitor_fetch::EgressBodyTreatment::Unscanned => "unscanned".to_owned(),
+                arbitraitor_fetch::EgressBodyTreatment::InspectFirst => "inspect_first".to_owned(),
+            },
+            final_url: response.final_url,
+        })
     }
 
     /// Releases a stored artifact to `dest` through the ADR-0015 safe-release
@@ -825,6 +977,7 @@ impl ArbitraitorApi {
     /// Returns the inspection result plus the terminal operation (in
     /// `AwaitingApproval`) so callers and tests can observe the state
     /// machine's position.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn analyze_and_finalize(
         &self,
         operation: PipelineOperation,
@@ -833,6 +986,7 @@ impl ArbitraitorApi {
         requested_source: &str,
         fetch_receipt: Option<&arbitraitor_fetch::FetchReceipt>,
         content_type: Option<String>,
+        store_children: bool,
     ) -> Result<(InspectionResult, PipelineOperation), EngineError> {
         let mut operation = operation;
         let classification = classify(bytes);
@@ -851,8 +1005,15 @@ impl ArbitraitorApi {
         let result = self.coordinator.analyze_with_retrieval(bytes, retrieval);
         operation = operation.transition_to(PipelineState::Analyzing)?;
 
-        self.store
-            .with_store(|store| discover_and_store_children(store, bytes, self.store_max_bytes))?;
+        // §11.6 inspect_first: child discovery is suppressed for egress
+        // bodies (ADR-0041 "without CAS population" — extracted children
+        // must not persist in the queryable store; the body itself is never
+        // CAS-stored). Artifact-path callers keep the expansion stage.
+        if store_children {
+            self.store.with_store(|store| {
+                discover_and_store_children(store, bytes, self.store_max_bytes)
+            })?;
+        }
         operation = operation.transition_to(PipelineState::Expanding)?;
 
         let (verdict, policy_trace) = self.resolve_verdict(&result);
@@ -974,6 +1135,13 @@ impl ArbitraitorApi {
         let data = std::fs::read(&path)?;
         let receipt: Receipt = serde_json::from_slice(&data)
             .map_err(|error| EngineError::Receipt(format!("{}: {error}", path.display())))?;
+        // Gen-3 M1 (defense in depth): an egress-class receipt must never
+        // authorize release even if one ever lands in the artifact
+        // namespace. The namespace move in inspect_egress_body keeps them
+        // out; this guard holds the invariant independently.
+        if receipt.policy.operation_class.as_deref() == Some("egress") {
+            return Err(EngineError::NoReceipt(sha256.to_owned()));
+        }
         Ok(receipt.verdict.verdict)
     }
 }
@@ -1095,5 +1263,431 @@ fn not_found_if_missing(
     move |error| match error {
         arbitraitor_store::StoreError::NotFound { .. } => EngineError::NotFound(sha256.to_owned()),
         other => EngineError::Store(other.to_string()),
+    }
+}
+
+/// Maps a policy egress grant onto the fetch-layer grant view.
+fn fetch_grant_view(grant: &arbitraitor_policy::EgressGrant) -> arbitraitor_fetch::EgressGrant {
+    arbitraitor_fetch::EgressGrant {
+        id: grant.id.clone(),
+        hosts: grant.hosts.clone(),
+        path_prefix: grant.path_prefix.clone(),
+        query_policy: match grant.query_policy {
+            arbitraitor_policy::EgressQueryPolicy::Forbidden => {
+                arbitraitor_fetch::EgressQueryPolicy::Forbidden
+            }
+            arbitraitor_policy::EgressQueryPolicy::Pinned => {
+                arbitraitor_fetch::EgressQueryPolicy::Pinned
+            }
+            arbitraitor_policy::EgressQueryPolicy::Bounded => {
+                arbitraitor_fetch::EgressQueryPolicy::Bounded
+            }
+            arbitraitor_policy::EgressQueryPolicy::Allowed => {
+                arbitraitor_fetch::EgressQueryPolicy::Allowed
+            }
+        },
+        pinned_query: grant.pinned_query.clone(),
+        max_query_bytes: grant.max_query_bytes,
+        max_query_params: grant.max_query_params,
+        max_response_bytes: grant.max_response_bytes,
+        allowed_content_types: grant.allowed_content_types.clone(),
+        body_treatment: match grant.body_treatment {
+            arbitraitor_policy::EgressBodyTreatment::Unscanned => {
+                arbitraitor_fetch::EgressBodyTreatment::Unscanned
+            }
+            arbitraitor_policy::EgressBodyTreatment::InspectFirst => {
+                arbitraitor_fetch::EgressBodyTreatment::InspectFirst
+            }
+        },
+    }
+}
+
+/// Stable receipt key for an egress request: SHA-256 over
+/// `egress/<grant>/<url>/<unix-millis nonce>`. Never collides with an
+/// artifact receipt (those are keyed by the artifact digest).
+fn egress_receipt_key(grant_id: &str, url: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let digest = Sha256::digest(format!("egress/{grant_id}/{url}/{nonce}").as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// §11.6 receipt URL redaction: credential-class only. Implements the
+/// full §11.6 rule set:
+///
+/// - userinfo password → class marker (username may be functional);
+/// - credential-bearing query parameters (policy denylist + built-ins)
+///   are replaced by their class;
+/// - **credential value-shape rules**: a query value matching neither the
+///   name denylist nor a non-credential shape is redacted when it is
+///   (a) a high-entropy opaque token (≥24 chars from `[A-Za-z0-9_-]` with
+///   at least one digit, one letter, and mixed case), (b) JWT-shaped
+///   (three dot-separated base64url segments), or (c) UUID-shaped in a
+///   credential-position parameter (name contains `id`/`token`/`key` or
+///   is denylisted);
+/// - **unmatched-query fallback (fail-closed)**: a query value matching
+///   neither the denylist nor the value shapes and not establishable as
+///   non-credential (pure digits, ≤8 chars, or a well-known non-secret
+///   parameter name) is redacted to `[REDACTED-UNESTABLISHABLE]`;
+/// - **path-segment secret-pattern denylist**: any path segment that is
+///   ≥32 chars of hex/base64url or a JWT segment is replaced by
+///   `[REDACTED-PATH-SEGMENT]`.
+///
+/// All other query and path content is preserved verbatim (§11.5's
+/// blanket "secrets removed" rule is narrowed for this operation class).
+/// The fail-the-request clause for unredactable values cannot fire here:
+/// URL components are strings and therefore always redactable — the
+/// fail-closed path is exercised by callers handling non-string values,
+/// which must fail the request rather than record the value.
+///
+/// Applies to the requested URL, final URL, and redirect chain (the
+/// receipt builder calls this per URL).
+pub(crate) fn redact_egress_url(value: &str, egress: &arbitraitor_policy::EgressConfig) -> String {
+    let Ok(mut parsed) = url::Url::parse(value) else {
+        return arbitraitor_receipt::redact_url(value);
+    };
+    // Userinfo password → class marker (username may be functional).
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some("[REDACTED-PASSWORD]"));
+    }
+    // Path-segment secret-pattern denylist (§11.6).
+    let segments: Vec<String> = parsed
+        .path_segments()
+        .map(|segs| segs.map(redact_path_segment).collect())
+        .unwrap_or_default();
+    if !segments.is_empty() {
+        parsed.set_path(&format!("/{}", segments.join("/")));
+    }
+    if let Some(query) = parsed.query() {
+        let deny = |name: &str| {
+            BUILTIN_CREDENTIAL_QUERY_PARAMS
+                .iter()
+                .copied()
+                .chain(egress.credential_query_params.iter().map(String::as_str))
+                .any(|d| d.eq_ignore_ascii_case(name))
+        };
+        let redacted: Vec<String> = query
+            .split('&')
+            .map(|pair| {
+                let (name, sep_value) = pair.split_once('=').map_or((pair, ""), |(n, v)| (n, v));
+                if sep_value.is_empty() {
+                    return name.to_owned();
+                }
+                if deny(name) {
+                    return format!("{name}=[REDACTED-CREDENTIAL]");
+                }
+                if is_high_entropy_token(sep_value)
+                    || is_jwt_shaped(sep_value)
+                    || (is_uuid_shaped(sep_value) && is_credential_position(name, &deny))
+                {
+                    return format!("{name}=[REDACTED-CREDENTIAL]");
+                }
+                if !is_established_non_credential(name, sep_value) {
+                    return format!("{name}=[REDACTED-UNESTABLISHABLE]");
+                }
+                pair.to_owned()
+            })
+            .collect();
+        parsed.set_query(Some(&redacted.join("&")));
+    }
+    parsed.to_string()
+}
+
+/// High-entropy opaque token: ≥24 chars from `[A-Za-z0-9_-]` with at
+/// least one digit, one letter, and mixed upper/lower case.
+fn is_high_entropy_token(value: &str) -> bool {
+    if value.len() < 24
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return false;
+    }
+    let has_digit = value.bytes().any(|b| b.is_ascii_digit());
+    let has_lower = value.bytes().any(|b| b.is_ascii_lowercase());
+    let has_upper = value.bytes().any(|b| b.is_ascii_uppercase());
+    has_digit && has_lower && has_upper
+}
+
+/// JWT shape: exactly three dot-separated base64url segments, each at
+/// least 8 chars of `[A-Za-z0-9_-]`.
+fn is_jwt_shaped(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    segments.len() == 3
+        && segments.iter().all(|s| {
+            s.len() >= 8
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+}
+
+/// UUID shape: 8-4-4-4-12 hex digits.
+fn is_uuid_shaped(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    let widths = [8, 4, 4, 4, 12];
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip(widths)
+            .all(|(g, w)| g.len() == w && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A parameter is in a credential position when its name contains
+/// `id`, `token`, or `key`, or it is on the denylist.
+fn is_credential_position(name: &str, deny: &impl Fn(&str) -> bool) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("id") || lower.contains("token") || lower.contains("key") || deny(name)
+}
+
+/// Well-known non-secret parameter names (lowercase compare).
+const NON_CREDENTIAL_QUERY_PARAMS: &[&str] = &[
+    "q", "query", "search", "page", "limit", "offset", "sort", "order", "lang", "locale", "format",
+    "version", "v", "callback", "fields", "include", "type", "kind", "category", "tag", "tags",
+    "filter", "from", "to", "since", "until", "count", "size", "cursor",
+];
+
+/// Establishes a query value as non-credential: pure digits, short
+/// (≤8 chars), or a well-known non-secret parameter name. Values that
+/// match neither this, the denylist, nor the value shapes are
+/// unestablishable and fail closed (redacted).
+fn is_established_non_credential(name: &str, value: &str) -> bool {
+    if value.bytes().all(|b| b.is_ascii_digit()) || value.len() <= 8 {
+        return true;
+    }
+    NON_CREDENTIAL_QUERY_PARAMS
+        .iter()
+        .any(|p| *p == name.to_ascii_lowercase())
+}
+
+/// Path-segment secret-pattern denylist: a segment of ≥32 hex/base64url
+/// characters, or a JWT segment (three dot-separated base64url parts),
+/// is replaced by its class.
+fn redact_path_segment(segment: &str) -> String {
+    if is_jwt_shaped(segment)
+        || (segment.len() >= 32
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
+        return "[REDACTED-PATH-SEGMENT]".to_owned();
+    }
+    segment.to_owned()
+}
+
+/// Built-in credential query-parameter names (mirrors the policy crate's
+/// egress denylist; the policy value extends this set).
+const BUILTIN_CREDENTIAL_QUERY_PARAMS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_token",
+    "token",
+    "auth",
+    "key",
+    "secret",
+    "password",
+    "passwd",
+    "sig",
+    "signature",
+    "credential",
+    "credentials",
+    "session",
+    "sid",
+    "sessionid",
+];
+
+/// Human-readable name of a query policy for the receipt.
+fn query_policy_name(policy: arbitraitor_policy::EgressQueryPolicy) -> &'static str {
+    match policy {
+        arbitraitor_policy::EgressQueryPolicy::Forbidden => "forbidden",
+        arbitraitor_policy::EgressQueryPolicy::Pinned => "pinned",
+        arbitraitor_policy::EgressQueryPolicy::Bounded => "bounded",
+        arbitraitor_policy::EgressQueryPolicy::Allowed => "allowed",
+    }
+}
+
+/// Resolved §11.6 body outcome: outcome label, delivered byte count, and
+/// the body actually returned to the caller (`None` = withheld).
+type EgressBodyOutcome = (&'static str, Option<u64>, Option<Vec<u8>>);
+
+impl ArbitraitorApi {
+    /// Resolves the §11.6 body outcome for an egress response.
+    ///
+    /// `inspect_first` grants gate delivery on the inspection verdict: a
+    /// non-releasable verdict (`Incomplete`/`Block`/`Error`) withholds the
+    /// body entirely; `Pass` delivers unmodified; `Warn` delivers with the
+    /// verdict recorded on the inspection receipt (ADR-0013 semantics:
+    /// warn is release-permitted-with-warning). `unscanned` grants deliver
+    /// exactly what the transport bounded.
+    fn resolve_egress_body_outcome(
+        &self,
+        fetch_grant: &arbitraitor_fetch::EgressGrant,
+        response: &arbitraitor_fetch::EgressResponse,
+        url: &str,
+    ) -> Result<EgressBodyOutcome, EngineError> {
+        match fetch_grant.body_treatment {
+            arbitraitor_fetch::EgressBodyTreatment::InspectFirst => {
+                let (inspection, _op) =
+                    self.inspect_egress_body(&response.body, &response.content_type, url)?;
+                if matches!(inspection.verdict, Verdict::Pass | Verdict::Warn) {
+                    Ok((
+                        "returned_inspected",
+                        u64::try_from(response.body.len()).ok(),
+                        Some(response.body.clone()),
+                    ))
+                } else {
+                    Ok(("withheld", None, None))
+                }
+            }
+            arbitraitor_fetch::EgressBodyTreatment::Unscanned => {
+                if response.delivered {
+                    Ok((
+                        "returned_unscanned",
+                        u64::try_from(response.body.len()).ok(),
+                        Some(response.body.clone()),
+                    ))
+                } else {
+                    // Unreachable while the transport fails closed on size
+                    // (http_error_status_is_failure), but the label must
+                    // not claim "returned" for a withheld body.
+                    Ok(("withheld", None, None))
+                }
+            }
+        }
+    }
+
+    /// Test-only passthrough to the real §11.6 body-outcome gate.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn resolve_egress_body_outcome_for_test(
+        &self,
+        fetch_grant: &arbitraitor_fetch::EgressGrant,
+        response: &arbitraitor_fetch::EgressResponse,
+        url: &str,
+    ) -> Result<EgressBodyOutcome, EngineError> {
+        self.resolve_egress_body_outcome(fetch_grant, response, url)
+    }
+
+    /// §11.6 `inspect_first` body path: run the egress body through the
+    /// inspection pipeline in-memory (no CAS write) and return the
+    /// inspection result whose verdict gates delivery.
+    fn inspect_egress_body(
+        &self,
+        body: &[u8],
+        content_type: &str,
+        source_url: &str,
+    ) -> Result<(InspectionResult, PipelineOperation), EngineError> {
+        let digest = Sha256Digest::new(Sha256::digest(body).into());
+        let mut operation = PipelineOperation::new(OperationId::new(), ArtifactId(digest.clone()));
+        operation = operation
+            .transition_to(PipelineState::Retrieving)?
+            .transition_to(PipelineState::Stored)?;
+        let content_type = if content_type.is_empty() {
+            None
+        } else {
+            Some(content_type.to_owned())
+        };
+        let (inspection, operation) = self.analyze_and_finalize(
+            operation,
+            body,
+            &digest,
+            source_url,
+            Some(&synthetic_fetch_receipt(&digest, body.len() as u64)),
+            content_type,
+            false,
+        )?;
+        // The inspection receipt was persisted at the artifact-key path
+        // ({sha256}.json) by analyze_and_finalize — the same namespace
+        // lookup_verdict_for_release reads. Move it into the egress
+        // namespace so it can never clobber an artifact receipt at the
+        // same digest (gen-3 M1: an artifact re-served through an
+        // inspect_first grant would otherwise replace the artifact's
+        // verdict/findings/audit trail), and tag it operation_class =
+        // 'egress' so audit consumers see the dual-receipt shape.
+        let artifact_key_path = self
+            .receipts_dir
+            .join(format!("{}.json", inspection.sha256));
+        let egress_key_path = self.receipts_dir.join(format!("egress-body-{digest}.json"));
+        let mut tagged = None;
+        if let Ok(data) = std::fs::read(&artifact_key_path)
+            && let Ok(mut receipt) = serde_json::from_slice::<arbitraitor_receipt::Receipt>(&data)
+        {
+            receipt.policy.operation_class = Some("egress".to_owned());
+            tagged = serde_json::to_vec_pretty(&receipt).ok();
+        }
+        match tagged {
+            Some(json) => {
+                std::fs::write(&egress_key_path, json)
+                    .map_err(|error| EngineError::Receipt(error.to_string()))?;
+                // The artifact-namespace copy must not survive: leaving it
+                // would reintroduce the clobber on the next lookup.
+                std::fs::remove_file(&artifact_key_path)
+                    .map_err(|error| EngineError::Receipt(error.to_string()))?;
+            }
+            // Tagging failed (read/parse/serialize): fail loudly rather
+            // than leave an untagged artifact-namespace receipt (gen-3 L3
+            // — silent swallow was the original defect).
+            None => {
+                return Err(EngineError::Receipt(
+                    "egress inspection receipt could not be read for egress tagging".to_owned(),
+                ));
+            }
+        }
+        Ok((inspection, operation))
+    }
+
+    /// Persists an egress receipt under its request-identity key.
+    fn persist_egress_receipt(
+        &self,
+        receipt_key: &str,
+        egress: arbitraitor_receipt::EgressInfo,
+    ) -> Result<PathBuf, EngineError> {
+        let now = crate::pipeline::receipt_timestamp();
+        let receipt = arbitraitor_receipt::Receipt {
+            schema_version: arbitraitor_receipt::CURRENT_SCHEMA_VERSION,
+            request: arbitraitor_receipt::RequestInfo {
+                arbitraitor_version: env!("CARGO_PKG_VERSION").to_owned(),
+                config_digest: None,
+            },
+            artifact: arbitraitor_receipt::ArtifactInfo {
+                sha256: receipt_key.to_owned(),
+                size: egress.delivered_bytes.unwrap_or(0),
+                artifact_type: Some("egress".to_owned()),
+            },
+            retrieval: None,
+            egress: Some(egress),
+            provenance: arbitraitor_receipt::ProvenanceInfo::default(),
+            payload_graph: None,
+            detectors: Vec::new(),
+            findings: Vec::new(),
+            policy: arbitraitor_receipt::PolicyInfo {
+                policy_digest: None,
+                operation_class: Some("egress".to_owned()),
+                allow_rule_metadata: Vec::new(),
+                audit_trail: Vec::new(),
+            },
+            verdict: arbitraitor_receipt::VerdictInfo {
+                verdict: arbitraitor_model::verdict::Verdict::Pass,
+                deciding_rule: None,
+                policy_trace: vec!["egress operation: no artifact verdict (spec §11.6)".to_owned()],
+            },
+            release: None,
+            timestamps: arbitraitor_receipt::ReceiptTimestamps {
+                created: now.clone(),
+                modified: now,
+            },
+        };
+        let path = self.receipts_dir.join(format!("{receipt_key}.json"));
+        let json = serde_json::to_vec_pretty(&receipt)
+            .map_err(|error| EngineError::Receipt(error.to_string()))?;
+        std::fs::write(&path, json)?;
+        Ok(path)
     }
 }

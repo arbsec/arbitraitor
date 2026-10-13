@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mediated HTTP egress (#799, spec §11.6 / ADR-0041):
+  `ArbitraitorApi::http_egress` executes grant-authorized GETs through the
+  hardened transport path (per-hop resolution + connected-peer
+  verification, HTTPS-only floor, redirect policy, size bounds) and
+  returns the bounded response body to the caller. Policy gains the
+  `[network.egress]` section — grants with mandatory query policy
+  (`forbidden`/`pinned`/`bounded`/`allowed`), `body_treatment`
+  (`unscanned`/`inspect_first`), response bounds, a
+  `credential_query_params` receipt-redaction denylist, and a
+  `deny_origins` §23.1.1 origin-deny knob — under ADR-0017 monotonic
+  tightening (lower layers cannot mint grants, widen hosts or query policy,
+  grow/strip bounded-query bounds, un-deny origins, or relax body
+  treatment; bounded grants must declare bounds at load). Receipts gain the `EgressInfo`
+  bucket (grant id, §23.1.1 caller origin, credential-class-redacted
+  URLs, query policy, body outcome). MCP gains the `http_egress` tool
+  (Inspect class; default server now registers eight tools) and the
+  daemon gains the `HttpEgress` request. The bounded body is never an
+  artifact and never releasable/executable by Arbitraitor; GET-only by
+  construction (spec §39.7 upload line unchanged).
 - `arbitraitor-engine` crate (ADR-0038, accepted): the single consolidated
   pipeline engine owning fetch → store → analyze → provenance → receipt →
   verdict → release. Public surface: `Arbitraitor`, `ArbitraitorBuilder`,

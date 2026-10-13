@@ -211,6 +211,7 @@ fn analyze_and_finalize_drives_operation_to_awaiting_approval() {
             path.to_str().unwrap_or(""),
             None,
             None,
+            true,
         )
         .expect("analysis tail must succeed");
 
@@ -427,4 +428,507 @@ fn receipt_retrieval_info_records_response_status_code() {
         Some(&serde_json::Value::Null),
         "no status must serialize as null (absent), never a fabricated code: {json}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §11.6 egress receipt URL redaction
+// ---------------------------------------------------------------------------
+
+fn egress_config_with(params: &[&str]) -> arbitraitor_policy::EgressConfig {
+    arbitraitor_policy::EgressConfig {
+        credential_query_params: params.iter().map(ToString::to_string).collect(),
+        ..arbitraitor_policy::EgressConfig::default()
+    }
+}
+
+#[test]
+fn redact_egress_url_denylist_param_is_class_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?token=abcdef0123456789abcdef01",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?token=[REDACTED-CREDENTIAL]",
+        "denylisted parameter value must be replaced by its class: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_high_entropy_value_under_unlisted_name_is_redacted() {
+    // 32 chars, alphanumeric mixed case with digits, not on any denylist.
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?state=aB3xY7kQ9mN2pR5tW8zC1vB4nM6jH0fD",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?state=[REDACTED-CREDENTIAL]",
+        "high-entropy opaque token must be redacted regardless of name: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_jwt_under_unlisted_name_is_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?auth=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?auth=[REDACTED-CREDENTIAL]",
+        "JWT-shaped value must be redacted regardless of name: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_uuid_in_credential_position_is_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?request_id=550e8400-e29b-41d4-a716-446655440000",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?request_id=[REDACTED-CREDENTIAL]",
+        "UUID-shaped value in a credential-position parameter must be redacted: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_short_common_param_preserved() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?q=hello&page=2",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?q=hello&page=2",
+        "established non-credential values must be preserved verbatim: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_unestablishable_value_fails_closed() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/data?opaque=this-is-a-long-ambiguous-value!",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/data?opaque=[REDACTED-UNESTABLISHABLE]",
+        "unestablishable value must be redacted to its class (fail-closed): {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_path_segment_32_hex_is_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/download/deadbeefdeadbeefdeadbeefdeadbeef/file.tar.gz",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/download/[REDACTED-PATH-SEGMENT]/file.tar.gz",
+        "32-hex path segment must be redacted: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_normal_path_is_preserved() {
+    let redacted = crate::api::redact_egress_url(
+        "https://api.example.com/v1/search?query=rust+crates",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://api.example.com/v1/search?query=rust+crates",
+        "ordinary path and established query must be preserved: {redacted}"
+    );
+}
+
+#[test]
+fn redact_egress_url_userinfo_password_redacted() {
+    let redacted = crate::api::redact_egress_url(
+        "https://user:sup3rs3cret@api.example.com/v1/data",
+        &egress_config_with(&[]),
+    );
+    assert_eq!(
+        redacted, "https://user:%5BREDACTED-PASSWORD%5D@api.example.com/v1/data",
+        "userinfo password must be redacted: {redacted}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §11.6 egress: deny-origins enforcement, receipt redaction, body outcomes
+// ---------------------------------------------------------------------------
+
+fn egress_policy_toml(deny_origins: &[&str]) -> String {
+    let deny = deny_origins
+        .iter()
+        .map(|o| format!("\"{o}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r"
+version = 1
+
+[network.egress]
+deny_origins = [{deny}]
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+path_prefix = '/v1/search'
+query_policy = 'forbidden'
+"
+    )
+}
+
+#[tokio::test]
+async fn egress_denies_policy_listed_origin_before_grants() {
+    use arbitraitor_model::origin::CallerOrigin;
+
+    let api = crate::ArbitraitorApi::new(crate::api::Config {
+        policy_toml: egress_policy_toml(&["agent_session"]),
+        ..crate::api::Config::default()
+    })
+    .expect("engine with egress policy");
+    // The origin is denied before grant evaluation — the URL never parses
+    // into a transport attempt, and no receipt is written for it.
+    let error = api
+        .http_egress(
+            "https://api.example.internal/v1/search/x",
+            &CallerOrigin::AgentSession,
+        )
+        .await
+        .expect_err("denied origin must fail closed");
+    assert!(
+        error.to_string().contains("denied for egress"),
+        "expected origin denial, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn egress_allows_unlisted_origin_to_reach_grant_evaluation() {
+    use arbitraitor_model::origin::CallerOrigin;
+
+    let api = crate::ArbitraitorApi::new(crate::api::Config {
+        policy_toml: egress_policy_toml(&["agent_session"]),
+        ..crate::api::Config::default()
+    })
+    .expect("engine with egress policy");
+    // DaemonLocal is not on the deny list: the request reaches grant
+    // evaluation. https://127.0.0.1 is not allowlisted (grant hosts are
+    // api.example.internal) → OutsideGrant-class denial, NOT origin denial.
+    let error = api
+        .http_egress("https://127.0.0.1/v1/search/x", &CallerOrigin::DaemonLocal)
+        .await
+        .expect_err("non-allowlisted host must be denied at grant scope");
+    assert!(
+        error.to_string().contains("no egress grant"),
+        "expected grant-scope denial, got: {error}"
+    );
+}
+
+#[test]
+fn egress_receipt_redaction_preserves_common_params_and_redacts_secrets() {
+    use crate::api::redact_egress_url;
+    use arbitraitor_policy::EgressConfig;
+
+    let egress = EgressConfig::default();
+    // Denylisted name → value replaced by class.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/x?api_key=SK1234567890abcdef",
+            &egress
+        ),
+        "https://api.example.internal/v1/x?api_key=[REDACTED-CREDENTIAL]"
+    );
+    // Unlisted name but high-entropy value (24+ mixed alnum) → redacted.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/x?state=Abcdef1234567890ABCDEF1234",
+            &egress
+        ),
+        "https://api.example.internal/v1/x?state=[REDACTED-CREDENTIAL]"
+    );
+    // JWT-shaped value → redacted.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/x?sid=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            &egress
+        ),
+        "https://api.example.internal/v1/x?sid=[REDACTED-CREDENTIAL]"
+    );
+    // Common non-secret param with a short value → preserved verbatim.
+    assert_eq!(
+        redact_egress_url("https://api.example.internal/v1/x?q=hello&page=2", &egress),
+        "https://api.example.internal/v1/x?q=hello&page=2"
+    );
+    // 32-hex path segment → redacted segment.
+    assert_eq!(
+        redact_egress_url(
+            "https://api.example.internal/v1/deadbeefdeadbeefdeadbeefdeadbeef/report",
+            &egress
+        ),
+        "https://api.example.internal/v1/[REDACTED-PATH-SEGMENT]/report"
+    );
+    // Userinfo password → class marker.
+    assert_eq!(
+        redact_egress_url("https://user:hunter2@api.example.internal/v1/x", &egress),
+        "https://user:%5BREDACTED-PASSWORD%5D@api.example.internal/v1/x"
+    );
+}
+
+#[test]
+fn egress_receipt_carries_operation_class_egress() {
+    use arbitraitor_receipt::CURRENT_SCHEMA_VERSION;
+    use arbitraitor_receipt::{
+        ArtifactInfo, EgressInfo, PolicyInfo, ProvenanceInfo, Receipt, ReceiptTimestamps,
+        RequestInfo, VerdictInfo,
+    };
+
+    // The discriminator must be present on egress receipts so
+    // query_receipts()/audit consumers never mistake the request-identity
+    // key for a CAS digest (L1).
+    let receipt = Receipt {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        request: RequestInfo {
+            arbitraitor_version: "test".to_owned(),
+            config_digest: None,
+        },
+        artifact: ArtifactInfo {
+            sha256: "egress-key".to_owned(),
+            size: 0,
+            artifact_type: Some("egress".to_owned()),
+        },
+        retrieval: None,
+        egress: Some(EgressInfo {
+            grant_id: "g".to_owned(),
+            caller_origin: "daemon_local".to_owned(),
+            requested_url: "https://h/x".to_owned(),
+            final_url: None,
+            redirect_chain: Vec::new(),
+            status: Some(200),
+            content_type: None,
+            query_policy: "forbidden".to_owned(),
+            body_outcome: "returned_unscanned".to_owned(),
+            delivered_bytes: Some(0),
+        }),
+        provenance: ProvenanceInfo::default(),
+        payload_graph: None,
+        detectors: Vec::new(),
+        findings: Vec::new(),
+        policy: PolicyInfo {
+            policy_digest: None,
+            operation_class: Some("egress".to_owned()),
+            allow_rule_metadata: Vec::new(),
+            audit_trail: Vec::new(),
+        },
+        verdict: VerdictInfo {
+            verdict: arbitraitor_model::verdict::Verdict::Pass,
+            deciding_rule: None,
+            policy_trace: vec!["egress operation: no artifact verdict (spec §11.6)".to_owned()],
+        },
+        release: None,
+        timestamps: ReceiptTimestamps {
+            created: "unix:0.0Z".to_owned(),
+            modified: "unix:0.0Z".to_owned(),
+        },
+    };
+    assert_eq!(
+        receipt.policy.operation_class.as_deref(),
+        Some("egress"),
+        "egress receipts must carry the operation_class discriminator"
+    );
+}
+
+// G2-H1: bounded grants must carry bounds; tightening must not strip them.
+#[test]
+fn egress_bounded_grant_without_bounds_is_rejected_at_load() {
+    let policy = r"
+version = 1
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'bounded'
+";
+    let result = policy_engine_load_for_test(policy);
+    assert!(
+        matches!(result, Err(ref m) if m.to_string().contains("neither max_query_bytes nor max_query_params")),
+        "bounded-without-bounds must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn egress_tightening_layer_cannot_strip_bounded_bounds() {
+    let organization = policy_for_test(
+        r"
+version = 1
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'bounded'
+max_query_bytes = 64
+max_query_params = 4
+",
+    );
+    // A tightening layer declaring LARGER bounds than inherited must also
+    // be rejected (the growth direction of the same guard; stripping is
+    // blocked one layer earlier by validate() itself, since a bounded
+    // grant without any bound no longer loads).
+    let project = policy_for_test(
+        r"
+version = 1
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'bounded'
+max_query_bytes = 128
+max_query_params = 8
+",
+    );
+    let result = arbitraitor_policy::PolicyEngine::merge_layers(
+        [
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+    assert!(
+        matches!(result, Err(ref e) if e.to_string().contains("cannot grow or be stripped")),
+        "growing inherited bounds must be rejected, got {result:?}"
+    );
+}
+
+// G2-M1: deny_origins must reference real §23.1.1 labels and survive tightening.
+#[test]
+fn egress_deny_origins_typo_is_rejected_at_load() {
+    let policy = r#"
+version = 1
+
+[network.egress]
+deny_origins = ["agent_sesssion"]
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'forbidden'
+"#;
+    let result = policy_engine_load_for_test(policy);
+    assert!(
+        matches!(result, Err(ref m) if m.to_string().contains("not a known caller-origin class")),
+        "deny_origins typo must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn egress_tightening_layer_cannot_un_deny_origin() {
+    let organization = policy_for_test(
+        r#"
+version = 1
+
+[network.egress]
+deny_origins = ["agent_session"]
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'forbidden'
+"#,
+    );
+    let project = policy_for_test(
+        r"
+version = 1
+
+[network.egress]
+deny_origins = []
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'forbidden'
+",
+    );
+    let result = arbitraitor_policy::PolicyEngine::merge_layers(
+        [
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+    assert!(
+        matches!(result, Err(ref e) if e.to_string().contains("cannot be un-denied")),
+        "un-denying an inherited origin must be rejected, got {result:?}"
+    );
+}
+
+// G2-M2 + gen-3 L2: inspect_first must withhold the body on a
+// non-releasable verdict. Calls the REAL gate (resolve_egress_body_outcome)
+// with a synthetic response and an inspect_first grant; FAIL_CLOSED policy
+// yields a fail-closed (non-releasable) verdict for unmatched content, so
+// the withheld branch is exercised end-to-end through the production gate.
+#[test]
+fn egress_inspect_first_withholds_non_releasable_verdict() {
+    use arbitraitor_fetch::{EgressBodyTreatment, EgressGrant, EgressQueryPolicy, EgressResponse};
+
+    let api = crate::ArbitraitorApi::new(crate::api::Config {
+        policy_toml: crate::FAIL_CLOSED_POLICY_TOML.to_owned(),
+        ..crate::api::Config::default()
+    })
+    .expect("fail-closed engine");
+    let grant = EgressGrant {
+        id: "g".to_owned(),
+        hosts: vec!["h".to_owned()],
+        path_prefix: String::new(),
+        query_policy: EgressQueryPolicy::Forbidden,
+        pinned_query: None,
+        max_query_bytes: None,
+        max_query_params: None,
+        max_response_bytes: None,
+        allowed_content_types: Vec::new(),
+        body_treatment: EgressBodyTreatment::InspectFirst,
+    };
+    let response = EgressResponse {
+        grant_id: "g".to_owned(),
+        requested_url: "https://h/x".to_owned(),
+        final_url: "https://h/x".to_owned(),
+        redirect_chain: Vec::new(),
+        status: 200,
+        content_type: "application/octet-stream".to_owned(),
+        body: b"payload".to_vec(),
+        body_treatment: EgressBodyTreatment::InspectFirst,
+        delivered: true,
+    };
+    let (outcome, _delivered, body) = api
+        .resolve_egress_body_outcome_for_test(&grant, &response, "https://h/x")
+        .expect("outcome resolution must succeed");
+    // Forbidden-effect assertion: under FAIL_CLOSED policy the verdict for
+    // an unmatched payload is not releasable, so the body must be withheld.
+    assert_eq!(outcome, "withheld", "non-releasable body must be withheld");
+    assert!(
+        body.is_none(),
+        "withheld body must be None, never delivered"
+    );
+}
+
+/// Test helper: loads a policy TOML and returns the engine or error.
+fn policy_engine_load_for_test(
+    toml: &str,
+) -> Result<arbitraitor_policy::PolicyEngine, arbitraitor_policy::PolicyError> {
+    arbitraitor_policy::PolicyEngine::load(toml)
+}
+
+fn policy_for_test(toml: &str) -> arbitraitor_policy::Policy {
+    policy_engine_load_for_test(toml)
+        .expect("test policy must load")
+        .policy()
+        .clone()
 }

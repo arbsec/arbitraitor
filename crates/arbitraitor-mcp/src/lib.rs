@@ -26,6 +26,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+mod egress_tool;
 mod explain;
 mod headless;
 
@@ -2054,8 +2055,12 @@ fn build_default_server(api: ArbitraitorApi) -> McpServer {
     server.register(Box::new(ScanArtifactTool::new(api.clone())));
     server.register(Box::new(QueryReceiptTool::new(receipts)));
     server.register(Box::new(ExplainVerdictTool));
-    // ADR-0038 decision 3: the default server registers all seven tool
-    // handlers. `request_approval` cannot use `StdinApprovalPrompt` here:
+    // Spec §11.6 / #799: mediated egress tool (grant-scoped GET). Returns
+    // the bounded response body; the body is untrusted data per §33.5 and
+    // is never stored or released.
+    server.register(Box::new(egress_tool::HttpEgressTool::new(api.clone())));
+    // ADR-0038 decision 3 + spec §11.6 (#799): the default server registers
+    // all eight tool handlers. `request_approval` cannot use `StdinApprovalPrompt` here:
     // stdin is the JSON-RPC channel of the stdio transport, so reading a
     // human confirmation from it would block the protocol loop and consume
     // the client's next request line. `TransportUnavailablePrompt` fails
