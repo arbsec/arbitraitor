@@ -12,6 +12,7 @@
 //! temporary HOME and working directories, privilege-elevation rejection, and
 //! network denied by default.
 
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -278,13 +279,6 @@ impl ScriptExecution {
         let mut child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
-        // Record the child's process group for SIGINT/SIGTERM forwarding:
-        // the child sits outside the terminal's foreground group
-        // (process_group(0)), so without forwarding a parent killed by the
-        // terminal signal leaves this group running with no watchdog left
-        // to reap it. The forwarder killpg-SIGKILLs the recorded group
-        // before the parent's default termination.
-        arbitraitor_sandbox::record_forwarded_process_group(child.id());
 
         // Arm the wall-clock watchdog immediately after spawn so the
         // deadline covers the whole child lifetime — including this
@@ -292,7 +286,7 @@ impl ScriptExecution {
         // stdin, where a child that never reads would otherwise hang the
         // parent before the watchdog in read_with_limit ever starts.
         #[cfg(target_os = "linux")]
-        let mut watchdog = {
+        let watchdog = {
             // SIGSTOP the child, apply prlimit while frozen, then SIGCONT.
             // If the limits cannot be applied the child is killed and
             // reaped (see apply_limits_fenced) so it can never run
@@ -304,48 +298,42 @@ impl ScriptExecution {
             )
         };
         #[cfg(not(target_os = "linux"))]
-        let mut watchdog = crate::spawn::arm_wall_clock(
+        let watchdog = crate::spawn::arm_wall_clock(
             rustix::process::Pid::from_child(&child),
             self.wall_clock_secs(),
         );
 
-        // Write the script bytes deadline-aware: a blocking `write_all`
-        // would not observe the watchdog, so a child that never reads stdin
-        // — or a surviving `setsid` descendant holding the pipe's read end
-        // open past the group kill — could block the parent here
-        // indefinitely after the deadline. The helper flips stdin
-        // non-blocking, polls the watchdog's expiry flag between writes,
-        // and on expiry resolves the fence (dropping our write end) so
-        // `WallClockExpired` is produced instead of a hang.
-        if let Some(stdin) = child.stdin.take() {
-            match crate::spawn::write_stdin_with_deadline(stdin, script_bytes, &mut watchdog) {
-                Ok(()) => {}
-                Err(crate::spawn::StdinWriteError::Deadline) => {
-                    // The fence fired during the write: stdin is dropped
-                    // here, and read_with_limit reaps the child and
-                    // resolves the (already-taken) guard through
-                    // finish_wall_clock, which surfaces the typed
-                    // WallClockExpired error below.
-                    return crate::spawn::read_with_limit(
-                        &mut child,
-                        self.output_limit(),
-                        watchdog,
-                    )
-                    .map(|(exit_code, stdout, stderr)| ExecutionResult {
-                        exit_code,
-                        stdout,
-                        stderr,
-                    });
-                }
-                Err(crate::spawn::StdinWriteError::Io(source)) => {
-                    return resolve_stdin_write_failure(
-                        source,
-                        "write-script-stdin",
-                        &mut child,
-                        self.output_limit(),
-                        watchdog,
-                    );
-                }
+        // Drop our write end of the stdin pipe as soon as the script bytes are
+        // written so the interpreter observes EOF and completes any pending
+        // read-driven control flow before we wait for it. The child has been
+        // resumed by this point so it can drain the pipe without deadlock.
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(source) = stdin.write_all(script_bytes) {
+                // Drop stdin before capturing output. If the child is still
+                // alive (write_all failed due to EPIPE on one write, not
+                // because the child exited), the child may be blocked on
+                // stdin read. Without dropping stdin, the drain threads in
+                // best_effort_capture → read_with_limit would block forever
+                // waiting for stdout/stderr EOF while the child waits for
+                // stdin EOF that never arrives = deadlock.
+                drop(stdin);
+                return resolve_stdin_write_failure(
+                    source,
+                    "write-script-stdin",
+                    &mut child,
+                    self.output_limit(),
+                    watchdog,
+                );
+            }
+            if let Err(source) = stdin.flush() {
+                drop(stdin);
+                return resolve_stdin_write_failure(
+                    source,
+                    "flush-script-stdin",
+                    &mut child,
+                    self.output_limit(),
+                    watchdog,
+                );
             }
         }
 
@@ -1477,55 +1465,6 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(10),
             "deadline must fire near the 1s mark even while the stdin write is blocked: {elapsed:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn deadline_bounds_stdin_write_when_setsid_descendant_holds_stdin()
-    -> Result<(), Box<dyn std::error::Error>> {
-        // Regression test for the CodeRabbit finding: the parent's stdin
-        // write must observe the wall-clock deadline. A descendant that
-        // escapes the process group (setsid) inherits the pipe READ-end, so
-        // the group kill cannot close it and a blocking write of >64 KiB
-        // would hang the parent indefinitely past the deadline — the
-        // deadline-aware write must instead observe the shared expiry flag,
-        // drop stdin, and resolve through finish_wall_clock.
-        if !Path::new("/usr/bin/setsid").exists() && !Path::new("/bin/setsid").exists() {
-            // setsid is unavailable (e.g. macOS runners); the inherited-fd
-            // mechanism this test exercises needs a new session, so skip.
-            return Ok(());
-        }
-        let setsid = if Path::new("/usr/bin/setsid").exists() {
-            "/usr/bin/setsid"
-        } else {
-            "/bin/setsid"
-        };
-        let script = bash_with_deadline(2)?;
-        // A grandchild in a new session keeps the stdin read-end open
-        // forever (no redirect — mirrors a hostile daemon), while the
-        // foreground interpreter exits without reading stdin. The trailing
-        // padding pushes the input past the 64 KiB pipe buffer so the
-        // write genuinely blocks.
-        let script_text = format!("{setsid} sleep 30 <&0 &\nexec sleep 0.1\n");
-        let mut script_bytes = script_text.into_bytes();
-        script_bytes.resize(script_bytes.len() + 256 * 1024, b'#');
-        script_bytes.push(b'\n');
-        let started = std::time::Instant::now();
-        let error = match script.execute(&script_bytes) {
-            Err(err) => err,
-            Ok(result) => {
-                return Err(format!("expected deadline expiry, got Ok: {result:?}").into());
-            }
-        };
-        let elapsed = started.elapsed();
-        assert!(
-            matches!(error, ExecError::WallClockExpired { limit_secs: 2 }),
-            "expected WallClockExpired{{limit_secs: 2}}, got {error:?}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(15),
-            "deadline must bound the parent even when a setsid descendant holds stdin open: {elapsed:?}"
         );
         Ok(())
     }

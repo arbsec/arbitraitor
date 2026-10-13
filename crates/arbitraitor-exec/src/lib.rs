@@ -28,10 +28,6 @@ use thiserror::Error;
 use tracing::debug;
 
 pub use arbitraitor_sandbox::SandboxConfig;
-#[cfg(target_os = "linux")]
-pub use arbitraitor_sandbox::{
-    install_child_group_signal_forwarder, record_forwarded_process_group,
-};
 
 #[cfg(target_os = "linux")]
 pub mod native;
@@ -655,12 +651,7 @@ pub struct ResourceLimits {
     /// [`ExecError::WallClockExpired`].
     ///
     /// The deadline is enforced on **every Unix platform** for the script,
-    /// PowerShell, and native paths. Script and native callers observe
-    /// expiry as [`ExecError::WallClockExpired`] (or the fail-closed
-    /// [`ExecError::WallClockKillFailed`]); PowerShell callers observe the
-    /// mirrored typed variants [`crate::PowerShellError::WallClockExpired`]
-    /// and [`crate::PowerShellError::WallClockKillFailed`] on
-    /// [`crate::PowerShellError`]. The other limits in this struct are
+    /// PowerShell, and native paths. The other limits in this struct are
     /// Linux-only (applied via `prlimit`/`setrlimit`).
     /// `None` disables the deadline — use only for explicitly trusted,
     /// caller-driven paths; mediated execution of untrusted scripts must

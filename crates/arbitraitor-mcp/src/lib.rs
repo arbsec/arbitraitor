@@ -2195,16 +2195,6 @@ fn handle_request(server: &McpServer, request: &Value, agent: &AgentIdentity) ->
 /// Returns [`StdioError`] on I/O or JSON serialization failure.
 pub fn run_stdio_server() -> Result<(), StdioError> {
     arbitraitor_core::privilege::refuse_root();
-    // Forward SIGINT/SIGTERM to the mediated child's process group before
-    // the default termination (mirrors the CLI entry point): the script
-    // executor runs children in their own process group, so the terminal
-    // signal would otherwise leave the child group running with no
-    // watchdog left to reap it. Best-effort: a failed install proceeds
-    // without forwarding (deadline enforcement is unaffected).
-    #[cfg(target_os = "linux")]
-    if let Err(error) = arbitraitor_exec::install_child_group_signal_forwarder() {
-        tracing::warn!(%error, "could not install SIGINT/SIGTERM child-group forwarding");
-    }
     // Belt-and-braces with the handler-level URL guards on
     // `InspectUrlTool::inspect` and `FetchArtifactTool::fetch`: clamp the
     // engine's fetch policy to http/https so even a future handler that

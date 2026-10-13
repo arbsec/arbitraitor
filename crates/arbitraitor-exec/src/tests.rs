@@ -823,35 +823,3 @@ fn from_exec_error_preserves_script_io_fields() -> Result<(), Box<dyn std::error
     );
     Ok(())
 }
-
-/// Regression test for the typed-expiry contract on the PowerShell path:
-/// `From<ExecError>` must map the wall-clock variants to the mirrored typed
-/// `PowerShellError` variants (not the stringly `Execution` catch-all), so a
-/// PowerShell caller can match "stopped at deadline" the same way script and
-/// native callers can (ADR-0042).
-#[test]
-fn from_exec_error_maps_wall_clock_variants_to_typed_variants()
--> Result<(), Box<dyn std::error::Error>> {
-    use crate::PowerShellError;
-
-    let expired: PowerShellError = ExecError::WallClockExpired { limit_secs: 7 }.into();
-    assert!(
-        matches!(expired, PowerShellError::WallClockExpired { limit_secs: 7 }),
-        "expected PowerShellError::WallClockExpired{{limit_secs: 7}}, got {expired:?}"
-    );
-
-    let kill_failed: PowerShellError = ExecError::WallClockKillFailed {
-        source: std::io::Error::other("group kill denied"),
-    }
-    .into();
-    let PowerShellError::WallClockKillFailed { reason } = kill_failed else {
-        return Err(
-            format!("expected PowerShellError::WallClockKillFailed, got {kill_failed:?}").into(),
-        );
-    };
-    assert!(
-        reason.contains("group kill denied"),
-        "kill-failure reason should preserve the source error; got {reason:?}"
-    );
-    Ok(())
-}

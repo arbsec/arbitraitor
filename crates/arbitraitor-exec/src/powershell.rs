@@ -39,6 +39,7 @@
 // solely to serve PowerShellExecution. Splitting would create artificial
 // fragmentation inconsistent with the sibling `script.rs` pattern.
 
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -101,8 +102,8 @@ impl PowerShellPolicy {
 /// privilege-elevation rejection, output overflow, resource-limit application,
 /// child reap failures, ...). The structured detail for those lives on
 /// [`ExecError`]; PowerShell call sites only need to distinguish "the binary
-/// was missing", "spawn or stdin piping failed", "stopped at the wall-clock
-/// deadline", and "something else went wrong".
+/// was missing", "spawn or stdin piping failed", and "something else went
+/// wrong".
 #[derive(Debug, Error)]
 pub enum PowerShellError {
     /// Neither `pwsh` nor `powershell` was discovered on `PATH`.
@@ -114,28 +115,6 @@ pub enum PowerShellError {
     Execution {
         /// Human-readable description of the underlying failure.
         message: String,
-    },
-    /// The wall-clock deadline expired before the child completed.
-    ///
-    /// Mirrors [`ExecError::WallClockExpired`]: the process group was killed
-    /// at the deadline and the run is "stopped at deadline", not a crash.
-    /// Typed so PowerShell callers can distinguish expiry from ordinary
-    /// execution failure the same way script/native callers can (ADR-0042).
-    #[error("wall-clock deadline of {limit_secs}s expired")]
-    WallClockExpired {
-        /// Configured deadline in seconds that fired.
-        limit_secs: u64,
-    },
-    /// The wall-clock deadline fired but the process-group kill errored and
-    /// the child's death could not be confirmed.
-    ///
-    /// Mirrors [`ExecError::WallClockKillFailed`] (fail closed): the child
-    /// may still be alive, so reporting "was killed at deadline" would be a
-    /// false claim.
-    #[error("wall-clock deadline fired but the process-group kill failed: {reason}")]
-    WallClockKillFailed {
-        /// Human-readable description of the kill failure.
-        reason: String,
     },
     /// The interpreter process could not be spawned.
     #[error("spawn failed: {source}")]
@@ -199,10 +178,6 @@ impl From<ExecError> for PowerShellError {
     fn from(error: ExecError) -> Self {
         match error {
             ExecError::Spawn { source } => Self::Spawn { source },
-            ExecError::WallClockExpired { limit_secs } => Self::WallClockExpired { limit_secs },
-            ExecError::WallClockKillFailed { source } => Self::WallClockKillFailed {
-                reason: source.to_string(),
-            },
             ExecError::ScriptIo {
                 stage,
                 source,
@@ -409,10 +384,8 @@ impl PowerShellExecution {
     ///
     /// Returns [`PowerShellError::Spawn`] when the interpreter cannot be
     /// spawned, [`PowerShellError::ScriptIo`] when piping the script bytes
-    /// fails, [`PowerShellError::WallClockExpired`] (or the fail-closed
-    /// [`PowerShellError::WallClockKillFailed`]) when the wall-clock deadline
-    /// fires, or [`PowerShellError::Execution`] when resource-limit
-    /// application or output collection fails (including output-cap overflow).
+    /// fails, or [`PowerShellError::Execution`] when resource-limit application
+    /// or output collection fails (including output-cap overflow).
     pub fn execute(&self, script_bytes: &[u8]) -> Result<ExecutionResult, PowerShellError> {
         let mut command = self.build_command();
         debug!(
@@ -424,12 +397,6 @@ impl PowerShellExecution {
         let mut child = command
             .spawn()
             .map_err(|source| PowerShellError::Spawn { source })?;
-        // Record the child's process group for SIGINT/SIGTERM forwarding
-        // (mirrors the script/native paths): the child sits outside the
-        // terminal's foreground group (process_group(0)), so without
-        // forwarding a parent killed by the terminal signal leaves this
-        // group running with no watchdog left to reap it.
-        arbitraitor_sandbox::record_forwarded_process_group(child.id());
 
         // Arm the wall-clock watchdog immediately after spawn so the
         // deadline covers the whole child lifetime — including this
@@ -437,7 +404,7 @@ impl PowerShellExecution {
         // stdin, where a child that never reads would otherwise hang the
         // parent before the watchdog in read_with_limit ever starts.
         #[cfg(target_os = "linux")]
-        let mut watchdog = {
+        let watchdog = {
             // SIGSTOP the child, apply prlimit while frozen, then SIGCONT.
             // If the limits cannot be applied the child is killed and
             // reaped (see apply_limits_fenced) so it can never run
@@ -449,48 +416,35 @@ impl PowerShellExecution {
             )
         };
         #[cfg(not(target_os = "linux"))]
-        let mut watchdog = crate::spawn::arm_wall_clock(
+        let watchdog = crate::spawn::arm_wall_clock(
             rustix::process::Pid::from_child(&child),
             self.resource_limits.wall_clock_secs,
         );
 
-        // Write the script bytes deadline-aware (same shared helper as the
-        // script path): a blocking `write_all` would not observe the
-        // watchdog, so a child that never reads stdin — or a surviving
-        // `setsid` descendant holding the pipe's read end open past the
-        // group kill — could block the parent here indefinitely after the
-        // deadline. On expiry the helper resolves the fence and the typed
-        // `WallClockExpired` variant is surfaced below.
-        if let Some(stdin) = child.stdin.take() {
-            match crate::spawn::write_stdin_with_deadline(stdin, script_bytes, &mut watchdog) {
-                Ok(()) => {}
-                Err(crate::spawn::StdinWriteError::Deadline) => {
-                    // The fence fired during the write: stdin is dropped
-                    // here, and read_with_limit reaps the child and
-                    // resolves the (already-taken) guard through
-                    // finish_wall_clock, which surfaces the typed expiry
-                    // variant as this function's Err.
-                    return crate::spawn::read_with_limit(
-                        &mut child,
-                        self.output_limit(),
-                        watchdog,
-                    )
-                    .map(|(exit_code, stdout, stderr)| ExecutionResult {
-                        exit_code,
-                        stdout,
-                        stderr,
-                    })
-                    .map_err(PowerShellError::from);
-                }
-                Err(crate::spawn::StdinWriteError::Io(source)) => {
-                    return Err(Self::resolve_ps_stdin_write_failure(
-                        "write-script-stdin",
-                        source,
-                        &mut child,
-                        self.output_limit(),
-                        watchdog,
-                    ));
-                }
+        // Drop our write end of the stdin pipe as soon as the script bytes are
+        // written so the interpreter observes EOF and completes any pending
+        // read-driven control flow before we wait for it. The child has been
+        // resumed by this point so it can drain the pipe without deadlock.
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(source) = stdin.write_all(script_bytes) {
+                drop(stdin);
+                return Err(Self::resolve_ps_stdin_write_failure(
+                    "write-script-stdin",
+                    source,
+                    &mut child,
+                    self.output_limit(),
+                    watchdog,
+                ));
+            }
+            if let Err(source) = stdin.flush() {
+                drop(stdin);
+                return Err(Self::resolve_ps_stdin_write_failure(
+                    "flush-script-stdin",
+                    source,
+                    &mut child,
+                    self.output_limit(),
+                    watchdog,
+                ));
             }
         }
 
@@ -523,10 +477,11 @@ impl PowerShellExecution {
             // Killed by a signal or could not be reaped — if the watchdog
             // fired while the write was blocked, report expiry (or a
             // fail-closed WallClockKillFailed when the group kill errored
-            // and death is unconfirmed) through the typed variants so
-            // callers can match "stopped at deadline" (ADR-0042).
+            // and death is unconfirmed).
             if let Err(err) = crate::spawn::finish_wall_clock(watchdog, false) {
-                return PowerShellError::from(err);
+                return PowerShellError::Execution {
+                    message: err.to_string(),
+                };
             }
         } else {
             // Child exited on its own terms; a late watchdog expiry must
@@ -681,7 +636,6 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command as StdCommand;
-    use std::time::Duration;
 
     /// Returns a [`PowerShellExecution`] with resource limits relaxed so the
     /// .NET runtime can start, or `None` when PowerShell is not installed.
@@ -900,45 +854,5 @@ mod tests {
             }
         }
         Ok(count)
-    }
-
-    /// Regression test for the typed-expiry contract on the PowerShell
-    /// path: a deadline that fires while the interpreter never reads stdin
-    /// must surface the typed `WallClockExpired` variant in bounded time —
-    /// not a hang in the parent's stdin write (ADR-0042). Requires a real
-    /// interpreter; skipped when none is installed.
-    #[test]
-    #[ignore = "requires pwsh and sandbox support unavailable in CI containers"]
-    fn wall_clock_deadline_expires_with_typed_error() -> Result<(), Box<dyn std::error::Error>> {
-        let Some(exec) = pwsh_or_skip() else {
-            return Ok(());
-        };
-        let exec = exec.with_resource_limits(ResourceLimits {
-            wall_clock_secs: Some(1),
-            ..ResourceLimits::default()
-        });
-        // A script that never consumes stdin after startup: the >64 KiB
-        // input blocks the parent's write until the fence fires.
-        let mut script_bytes: Vec<u8> = Vec::with_capacity(256 * 1024);
-        script_bytes.extend_from_slice(b"Start-Sleep -Seconds 30 # ");
-        script_bytes.resize(256 * 1024, b'x');
-        script_bytes.extend_from_slice(b"\r\n");
-        let started = std::time::Instant::now();
-        let error = match exec.execute(&script_bytes) {
-            Err(err) => err,
-            Ok(result) => {
-                return Err(format!("expected deadline expiry, got Ok: {result:?}").into());
-            }
-        };
-        assert!(
-            matches!(error, PowerShellError::WallClockExpired { limit_secs: 1 }),
-            "expected WallClockExpired{{limit_secs: 1}}, got {error:?}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "expiry must bound the parent even while the stdin write is blocked: {:?}",
-            started.elapsed()
-        );
-        Ok(())
     }
 }
