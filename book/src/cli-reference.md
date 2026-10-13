@@ -122,6 +122,12 @@ versioning. Rendered health rows show distinct per-status markers
 (`✓` Pass, `⚠` Warn, `⌀` Skipped, `✗` Fail) so degraded posture is visually
 distinct from healthy posture.
 
+The `legacy_store` check warns when a pre-cache-root store
+(`~/.arbitraitor/cas`) still exists alongside the active
+`$XDG_CACHE_HOME/arbitraitor/cas` store. The check is diagnostic only —
+nothing is migrated, moved, or deleted; remove the legacy directory
+manually once its contents are no longer needed.
+
 The `Detectors` row distinguishes the always-running built-in MVP detector
 baseline (archive-hazards, artifact, python-js, shell, url-discovery) from
 external coverage layers (YARA rule packs, AV adapters, plugins). When
@@ -371,10 +377,10 @@ behavior). Scope note: the fence covers the direct child and its
 default-group descendants; a script that deliberately calls
 `setsid(2)`/`setpgid(2)` creates a new session the fence does not reach —
 observable malicious behavior, addressed by shell analysis rather than the
-deadline (ADR-0041). The fence is enforced on every Unix platform; the
+deadline (ADR-0042). The fence is enforced on every Unix platform; the
 CPU/memory/fd limits are Linux-only. Embedders can tighten, loosen, or
 disable the fence per execution via
-`arbitraitor_exec::ResourceLimits::wall_clock_secs` (ADR-0041).
+`arbitraitor_exec::ResourceLimits::wall_clock_secs` (ADR-0042).
 
 ## Wrappers command
 

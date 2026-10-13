@@ -508,3 +508,41 @@ fn scan_path_rejects_symlinks_and_enforces_size_bound() -> Result<(), Box<dyn st
     assert_eq!(ok.verdict, arbitraitor_model::verdict::Verdict::Pass);
     Ok(())
 }
+
+#[tokio::test]
+async fn release_failure_renders_release_error_not_store_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    // M1 regression (#783 review): the per-operation store handle must not
+    // re-wrap foreign errors into StoreError::Index. A release that fails
+    // inside the store-opener scope — here a destination that already
+    // exists — must surface release-error semantics ("release failed"),
+    // never "metadata index failure".
+    let root = unique_dir("release-error-semantics");
+    let config = pass_policy_config("release-error-semantics");
+    let api = ArbitraitorApi::new(config)?;
+    let payload = b"release-error-semantics-payload";
+    let url = mock_http_server(payload, "text/plain").await;
+
+    let inspected = api.inspect(&url).await?;
+
+    let dest = root.join("existing-dest");
+    std::fs::write(&dest, b"occupied")?;
+
+    let result = api.release(&inspected.sha256, &dest);
+
+    let error = result.expect_err("release to an existing destination must fail");
+    let rendered = error.to_string();
+    assert!(
+        matches!(error, EngineError::Release(_)),
+        "release failure must be EngineError::Release, got {error:?}"
+    );
+    assert!(
+        rendered.contains("release failed"),
+        "error must use release-error semantics, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("metadata index failure"),
+        "error must not masquerade as a metadata index failure: {rendered}"
+    );
+    Ok(())
+}

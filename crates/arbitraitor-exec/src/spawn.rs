@@ -148,6 +148,20 @@ pub(crate) struct WallClockGuard {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+impl Drop for WallClockGuard {
+    fn drop(&mut self) {
+        // Every exit path must stop the watchdog: a caller that drops the
+        // guard without reaching [`finish_wall_clock`] (e.g. an early
+        // `?` on a wait error) must not leave the deadline thread running
+        // until expiry and killing a possibly recycled pid's group. The
+        // handle is dropped without joining: the thread observes `done`
+        // within one poll interval (~50 ms) and exits on its own.
+        if let Some(state) = self.state.take() {
+            state.done.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// Arms the wall-clock watchdog for a freshly spawned child.
 ///
 /// Returns a disabled guard when `wall_clock_secs` is `None` (deadline
@@ -165,7 +179,15 @@ pub(crate) fn arm_wall_clock(
     };
     let state = Arc::new(Watchdog::new(secs));
     let thread_state = Arc::clone(&state);
-    let deadline = Instant::now() + Duration::from_secs(secs);
+    // `Duration::from_secs` + `Instant` addition panics on overflow; a
+    // caller can pass `Some(u64::MAX)` through the public API, so treat an
+    // unrepresentable deadline as no deadline instead of panicking.
+    let Some(deadline) = Instant::now().checked_add(Duration::from_secs(secs)) else {
+        return WallClockGuard {
+            state: None,
+            handle: None,
+        };
+    };
     let handle = thread::spawn(move || {
         loop {
             let now = Instant::now();
@@ -213,12 +235,12 @@ pub(crate) fn arm_wall_clock(
 /// would mean the child died of something else before the kill — the child
 /// is dead either way, so expiry remains the accurate report and the error
 /// is only logged.
-pub(crate) fn finish_wall_clock(guard: WallClockGuard) -> Result<(), ExecError> {
-    let Some(state) = guard.state else {
+pub(crate) fn finish_wall_clock(mut guard: WallClockGuard) -> Result<(), ExecError> {
+    let Some(state) = guard.state.take() else {
         return Ok(());
     };
     state.done.store(true, Ordering::Release);
-    let _ = guard.handle.map(thread::JoinHandle::join);
+    let _ = guard.handle.take().map(thread::JoinHandle::join);
     if state.expired.load(Ordering::Acquire) {
         // The watchdog fired at the deadline. The direct child has been
         // reaped by the caller before this call, so it is confirmed dead;
@@ -362,6 +384,8 @@ fn drain_stream<R: Read + Send + 'static>(
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use std::path::Path;
     use std::process::{Command, Stdio};
@@ -428,5 +452,37 @@ mod tests {
         // the kill must report success, not an error.
         kill_child_group_at_deadline(pid)?;
         Ok(())
+    }
+
+    #[test]
+    fn dropping_guard_disarms_watchdog() {
+        // Regression test for the CodeRabbit finding: a caller that drops
+        // the guard without calling finish_wall_clock (an early `?` on a
+        // wait error) must disarm the watchdog, or the deadline thread
+        // would keep running until expiry and kill a possibly recycled
+        // pid's group.
+        let guard = arm_wall_clock(
+            rustix::process::Pid::from_raw(1).expect("pid 1 is valid"),
+            Some(1),
+        );
+        let state = Arc::clone(guard.state.as_ref().expect("armed state"));
+        assert!(!state.done.load(Ordering::Acquire));
+        drop(guard);
+        // Dropping disarms: the deadline thread observes `done` on its next
+        // poll (~50 ms) and exits without killing anything.
+        assert!(state.done.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unrepresentable_deadline_disables_watchdog() {
+        // `Instant::now() + Duration::from_secs(u64::MAX)` would panic; the
+        // overflow must be treated as "no deadline" (a disabled guard)
+        // instead.
+        let guard = arm_wall_clock(
+            rustix::process::Pid::from_raw(1).expect("pid 1 is valid"),
+            Some(u64::MAX),
+        );
+        assert!(guard.state.is_none());
+        assert!(guard.handle.is_none());
     }
 }

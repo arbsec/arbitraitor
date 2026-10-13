@@ -61,6 +61,14 @@ A `StoreIndex` trait is kept so SQLite remains an option if ad-hoc querying
 and operational tooling become important. SQLite is **not** introduced solely
 for key-value lookups.
 
+**Open scope (#762):** redb holds a whole-file lock for as long as a
+`Database` handle exists. The metadata database is therefore opened **per
+operation** — open → use → close inside every engine request — never held
+across idle periods of a long-lived surface (MCP stdio server, daemon).
+Contended opens (two processes fetching at once) retry with a short backoff
+and then fail closed with a diagnostic naming the situation; they never
+spin or block release semantics beyond that bounded window.
+
 ## Consequences
 
 - Database corruption is a denial of service, not an execution bypass.

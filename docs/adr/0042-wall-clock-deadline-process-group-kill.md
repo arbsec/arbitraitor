@@ -1,4 +1,4 @@
-# ADR 0041: Wall-clock deadline and process-group kill for mediated execution
+# ADR 0042: Wall-clock deadline and process-group kill for mediated execution
 
 **Status:** Accepted
 **Date:** 2026-09-30

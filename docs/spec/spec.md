@@ -56,6 +56,13 @@
 > - Spec files moved from `.spec/` (gitignored, private) to `docs/spec/` (committed, public). All ADR cross-references updated from stale `.spec/arbitraitor-*.md` paths to canonical `docs/spec/*.md` paths.
 > - Cross-references in §33 (MCP capabilities), §31 (receipt audit), and ADR-0027 (CLI pipeline boundary) are aligned with §40 below.
 >
+> **Changelog vs v0.7 (2026-10-13):**
+>
+> - §11.6: added mediated HTTP egress (v0.7) — a GET-only, grant-scoped, return-to-caller operation class executed daemon-side under §11.2/§11.4 transport rules, ADR-0018 connected-peer verification, and §31.2/§11.5 receipts (ADR-0041, issue #797). POST/bodies remain out of model per §39.7 and §9 invariants 9/24; two candidate future policy-class designs are recorded in ADR-0041.
+> - §33.1: added `http_egress` to the MCP capability list, referencing §11.6.
+> - §40.3: added `HttpEgressTool` note (specified, landing with #799).
+> - docs/spec/tech-stack.md §4.7: added the egress client requirements mirroring §11.6 behind the `Fetcher` trait boundary.
+>
 > Arbitraitor is a policy-enforced download, inspection, provenance verification, and execution gate for content retrieved from untrusted or semi-trusted sources. It buffers the complete payload, analyzes the exact bytes that may later be consumed, recursively inspects referenced payloads where possible, and only releases or executes content when configured policy permits it.
 
 The name combines the ideas of arbitration, arbitrary-code execution, and a gatekeeper that can refuse to cooperate with a risky execution chain. The CLI command is `arbitraitor`; a shorter optional alias such as `arb` may be provided where it does not conflict with an existing local command.
@@ -677,7 +684,9 @@ Findings should be produced for:
 
 The receipt must include:
 
-- requested URL with secrets removed;
+- requested URL with secrets removed (§11.6 narrows this for mediated
+  egress receipts: credential-class redaction only, all other query and
+  path content preserved);
 - normalized URL;
 - redirect chain;
 - timestamps;
@@ -689,6 +698,122 @@ The receipt must include:
 - TLS version and peer certificate fingerprint where obtainable;
 - resolved and connected IP addresses where obtainable;
 - retriever version.
+
+### 11.6 Mediated HTTP egress (v0.7)
+
+The retrieval subsystem acquires artifacts into the quarantine store. A second,
+sharply bounded operation class — **mediated egress** — performs daemon-side
+HTTP GET requests on behalf of a calling tool and returns a bounded response
+body to that tool. This is the only operation in Arbitraitor where fetched
+bytes return to a caller without becoming an artifact; every requirement in
+this section is therefore binding, not optional.
+
+**Motivation.** Agent harnesses (§33, §40.3) need general web retrieval for
+built-in tools such as web search and page fetch. Unmediated direct-socket
+paths would bypass Arbitraitor's network model (§11.2, ADR-0018); a harness
+that fails closed instead lacks a capability it can request. #797 requested
+this capability; ADR-0041 records the decision.
+
+**Binding requirements:**
+
+- **GET only.** The operation class accepts exactly one method, `GET`. No
+  request body, no `POST`/`PUT`/`PATCH`/`DELETE`, no upgrade or bidirectional
+  streaming. Requests carrying a body fail closed with a typed unsupported
+  result, never an HTTP attempt. Content upload remains out of model per §5
+  (non-goals) and §9 invariants 9 and 24; a body-bearing capability would
+  require an explicit future policy-class design ruling (ADR-0041 records
+  the two candidate designs) — it is not enabled by this section.
+- **URL-borne data is outbound data.** The caller controls the path suffix
+  and query string under a granted prefix; a permit-all query policy would
+  make every egress grant an outbound data channel. Grants therefore MUST
+  state their query policy explicitly — `forbidden`, `pinned` (exact
+  required query), `bounded` (maximum query-string bytes and parameter
+  count), or `allowed` — and a grant without one is invalid at policy load.
+  Egress receipts record the full requested URL, final URL, and redirect
+  chain. Redaction is by **credential class only** (§11.3, ADR-0033):
+  userinfo passwords, credential-bearing query parameters (matched by a
+  configurable parameter-name denylist), and path segments matching a
+  configurable secret-pattern denylist are replaced by their class, while
+  all other query and path content is preserved verbatim — narrowing
+  §11.5's blanket "secrets removed" rule for this operation class so the
+  audit trail preserves the channel without recording raw credential
+  values. §11.3 remains binding: no raw credential value reaches a receipt
+  on any carrier. Name denylists cannot enumerate every credential
+  parameter, so an **unlisted query value that matches the credential
+  value-shape rules** — high-entropy opaque tokens (≥24 mixed-case
+  alphanumeric/URL-safe characters), JWT-shaped values (three dot-separated
+  base64url segments), or UUID-shaped values in a credential-position
+  parameter — must never reach a receipt either. For values matching
+  neither the denylist nor the value shapes and not otherwise establishable
+  as non-credential, the fallback is fail-closed: before a receipt is
+  recorded, the unestablishable value is redacted to its class (an
+  unredactable value fails the request rather than reaching the receipt).
+  This fallback applies to requested URLs, final URLs, and redirect chains.
+  Implementations (#799) apply these safeguards in addition to the
+  denylist, and policy authors MUST NOT grant `allowed` query policy on
+  hosts known to accept credentials in query parameters — use
+  `pinned`/`bounded` so the grant shape itself bounds what can leak.
+- **Grant-scoped.** Every request executes under an egress grant: an explicit
+  policy object scoping the operation to allowlisted host(s), the `GET`
+  method, a path prefix, response size, and response content types. A request
+  outside its grant fails closed. Grants live in policy layers and are
+  subject to the same monotonic tightening as the rest of the network
+  configuration (ADR-0017); untrusted project configuration can never mint
+  or widen one (§9 invariant 24). §39.15 anticipated
+  "request[ing] a network operation through the core" as a capability; this
+  section is its first concrete grant object, with the TOML schema designed
+  in the implementation issue (#799).
+- **Caller-origin binding.** The daemon derives the caller-origin class per
+  §23.1.1 at request time (peer-credential-derived, never self-reported) and
+  records it on the grant evaluation and the receipt. Policy MAY deny egress
+  for `agent_session` or other low-trust origins. Egress never executes from
+  self-reported origin classes without transport authentication.
+- **Transport.** HTTPS-only by default with certificate rejection, redirect
+  limits, credential stripping on cross-origin redirects, and connect/read/
+  total timeouts per §11.2 and §11.4. The ADR-0033 cross-protocol credential
+  secrecy rules apply unchanged.
+- **Connected-peer verification.** DNS rebinding, private/loopback/link-local/
+  metadata-service destination blocking, and IPv4/IPv6 policy controls follow
+  §11.2 and ADR-0018: policy is bound to the address actually connected, not
+  the address first resolved.
+- **Response bounds.** Maximum response size, content-type allowlist, and
+  total-time deadline are grant properties, enforced before body delivery.
+  Responses exceeding bounds are truncated-fail: the request fails closed,
+  the receipt records the bound violation, and no partial body is returned.
+- **Return path.** The bounded response body is returned to the calling tool.
+  The body is **not** an artifact: it is not stored in the CAS, not scanned by
+  the detector pipeline, and MUST NOT be executed or released by Arbitraitor.
+  The body is untrusted data per §33.5: callers MUST treat it as data, never
+  as instructions. Because the body bypasses the detector pipeline by design,
+  caller-side execution of egress content is a laundering path (§8.2
+  confused-deputy threats); grants therefore carry a machine-readable
+  `body_treatment` property — `unscanned` (default) or `inspect_first`
+  (the body is submitted through the inspection pipeline before delivery,
+  and only a passing verdict releases it to the caller) — and deployments
+  serving `agent_session` or other low-trust origins SHOULD set
+  `inspect_first` for executable content types. A tool that wants egress
+  content treated as an artifact may always submit it through
+  `inspect_url`/`scan_artifact` (§33.1) like any other untrusted content.
+- **Receipts.** One receipt per request per §31.2/§11.5 in the ADR-0023/
+  ADR-0039 envelope. §31.2 fields apply where meaningful for egress;
+  artifact-centric fields (artifact hash/size, release identity, execution
+  exit status) are replaced by the egress fields below. The receipt
+  additionally records: the egress grant identity, the caller-origin class,
+  the final URL after redirects, the response content-type and size, the
+  grant's query policy, and whether the body was returned unscanned,
+  returned after inspection, or withheld. Receipts record credential
+  classes, never credential values (ADR-0033, §11.3).
+- **Deterministic failure.** A denied, out-of-grant, or bounded-exceeded
+  request is an explicit structured result, not a silent empty success
+  (§39.24: a failure must not be interpreted as a clean result).
+
+**Non-goals.** Mediated egress does not replace the retriever (§11.2): it
+does not populate the CAS, and by default (`body_treatment = unscanned`) it
+produces no verdict about the response body. `inspect_first` grants are the
+sole exception: the body flows through the inspection pipeline before
+delivery, without changing its non-artifact status. Egress does not exempt
+any caller from artifact-gating rules when it re-submits content. It is not
+a general-purpose proxy and performs no caching.
 
 ---
 
@@ -2873,7 +2998,9 @@ An MCP or tool gateway should expose:
 - `explain_verdict`;
 - `request_approval`;
 - `run_approved_artifact`;
-- `query_receipt`.
+- `query_receipt`;
+- `http_egress` (v0.7, §11.6) — mediated GET-only egress under a policy
+  egress grant; returns the bounded response body, never releases content.
 
 ### 33.2 Capability separation
 
@@ -4515,6 +4642,13 @@ default server.
 Agent harnesses and AI-integration consumers consume Arbitraitor only through
 the MCP gateway today, transporting over stdio (local) or HTTP/SSE (remote,
 deferred, see §33.6 and §40.8).
+
+**Mediated egress (v0.7):** `HttpEgressTool` (§33.1, §11.6) is specified as a
+thin consumer of the engine's egress operation in `arbitraitor-mcp`; it lands
+with the egress implementation (#799) and is not registered in
+`build_default_server()` until its grant plumbing ships. The tool returns
+the bounded response body to the caller and can never release or execute
+content.
 
 ### 40.4 CLI integration
 

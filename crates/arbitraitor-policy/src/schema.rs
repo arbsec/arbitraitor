@@ -122,6 +122,14 @@ pub struct NetworkConfig {
     /// Redirect policy.
     #[serde(default)]
     pub redirects: RedirectsConfig,
+
+    /// Mediated HTTP egress grants (spec §11.6, ADR-0041).
+    ///
+    /// Absent means egress is denied entirely: there is no grant, so every
+    /// egress request fails closed. Egress is GET-only by construction; the
+    /// schema cannot express a body-bearing method.
+    #[serde(default)]
+    pub egress: EgressConfig,
 }
 
 impl Default for NetworkConfig {
@@ -130,7 +138,187 @@ impl Default for NetworkConfig {
             require_https: true,
             block_private_networks: true,
             redirects: RedirectsConfig::default(),
+            egress: EgressConfig::default(),
         }
+    }
+}
+
+/// Query-string policy for an egress grant (spec §11.6 "URL-borne data is
+/// outbound data").
+///
+/// A grant MUST declare one of these values; policy loading rejects an
+/// egress grant with no query policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum EgressQueryPolicy {
+    /// No query string permitted on any egress request under this grant.
+    #[default]
+    Forbidden,
+    /// The request query must exactly equal the grant's `pinned_query`.
+    Pinned,
+    /// Query permitted up to `max_query_bytes` total and `max_query_params`
+    /// parameters.
+    Bounded,
+    /// Any query permitted (still subject to credential-class redaction in
+    /// receipts).
+    Allowed,
+}
+
+/// What happens to the response body before it reaches the calling tool
+/// (spec §11.6 "Return path").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum EgressBodyTreatment {
+    /// Deliver the bounded body to the caller without inspection.
+    #[default]
+    Unscanned,
+    /// Submit the body through the inspection pipeline before delivery;
+    /// only a passing verdict releases it to the caller.
+    InspectFirst,
+}
+
+/// One mediated HTTP egress grant (spec §11.6, ADR-0041).
+///
+/// Grants scope a daemon-side GET to allowlisted hosts. Everything is
+/// fail-closed: a request outside any grant dimension is denied with a
+/// typed egress outcome, never attempted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressGrant {
+    /// Stable grant identifier recorded in egress receipts.
+    pub id: String,
+    /// Allowlisted hosts (exact host names, lowercase; no wildcards — a
+    /// wildcard would silently widen to subdomain takeover victims).
+    pub hosts: Vec<String>,
+    /// Path prefix the request URL must be under (e.g. `/v1/search`).
+    #[serde(default)]
+    pub path_prefix: String,
+    /// Query policy. Mandatory: policy loading rejects a grant without an
+    /// explicit value.
+    pub query_policy: EgressQueryPolicy,
+    /// Exact query required when `query_policy` is `pinned`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_query: Option<String>,
+    /// Maximum query-string bytes when `query_policy` is `bounded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_query_bytes: Option<usize>,
+    /// Maximum query parameter count when `query_policy` is `bounded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_query_params: Option<usize>,
+    /// Maximum response body bytes. `None` falls back to the policy-level
+    /// egress default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<u64>,
+    /// Response content types permitted (prefix match on the media type,
+    /// e.g. `application/json`). Empty means any content type.
+    #[serde(default)]
+    pub allowed_content_types: Vec<String>,
+    /// Response body treatment before delivery to the caller.
+    #[serde(default)]
+    pub body_treatment: EgressBodyTreatment,
+}
+
+impl EgressGrant {
+    /// Validates grant-internal invariants at policy load.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the grant is malformed: empty id/hosts, an
+    /// unpinned `pinned` query policy, or `allowed_content_types` entries
+    /// that are not media-type prefixes.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("egress grant id must not be empty".to_owned());
+        }
+        if self.hosts.is_empty() {
+            return Err(format!(
+                "egress grant {} must list at least one host",
+                self.id
+            ));
+        }
+        for host in &self.hosts {
+            if host.trim().is_empty() || host != host.trim() || host.as_str() != host.to_lowercase()
+            {
+                return Err(format!(
+                    "egress grant {} host {host:?} must be a non-empty lowercase exact host",
+                    self.id
+                ));
+            }
+        }
+        if self.path_prefix.contains('?') || self.path_prefix.contains('#') {
+            return Err(format!(
+                "egress grant {} path_prefix must not contain query or fragment",
+                self.id
+            ));
+        }
+        if self.query_policy == EgressQueryPolicy::Pinned && self.pinned_query.is_none() {
+            return Err(format!(
+                "egress grant {} pins a query but sets no pinned_query",
+                self.id
+            ));
+        }
+        if self.query_policy == EgressQueryPolicy::Bounded
+            && self.max_query_bytes.is_none()
+            && self.max_query_params.is_none()
+        {
+            // §11.6: a bounded grant without bounds is semantically
+            // `allowed` — reject at load rather than defaulting to
+            // unlimited.
+            return Err(format!(
+                "egress grant {} is bounded but sets neither max_query_bytes nor max_query_params",
+                self.id
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Egress policy section (spec §11.6).
+///
+/// The default denies egress: an empty `EgressConfig` has no grants, and
+/// egress without a matching grant fails closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConfig {
+    /// Grant list. Empty = egress denied entirely.
+    #[serde(default)]
+    pub grants: Vec<EgressGrant>,
+    /// Query-parameter names treated as credentials in egress receipts
+    /// (replaced by their class, never recorded as values). Extends the
+    /// built-in denylist; names are matched case-insensitively.
+    #[serde(default)]
+    pub credential_query_params: Vec<String>,
+    /// §23.1.1 caller-origin classes denied for egress (e.g.
+    /// `["agent_session"]`). The daemon/MCP derives the class at request
+    /// time (peer-credential-derived, never wire-trusted); a request whose
+    /// class is listed here is denied before any grant evaluation.
+    /// Fail-closed default is unnecessary (no class names means nothing is
+    /// pre-denied; grants still gate), but listing low-trust classes here
+    /// implements the spec's "Policy MAY deny egress for `agent_session`".
+    #[serde(default)]
+    pub deny_origins: Vec<String>,
+}
+
+impl EgressConfig {
+    /// Returns the grant matching `host` and `path`, if any.
+    ///
+    /// A request matches at most one grant: the first grant whose host list
+    /// contains the host and whose path prefix covers the path at a `/`
+    /// boundary (`/v1` matches `/v1/x` but not `/v11/x`). Overlapping
+    /// grants resolve to the earliest declaration — policy authors keep
+    /// grants disjoint.
+    #[must_use]
+    pub fn matching_grant(&self, host: &str, path: &str) -> Option<&EgressGrant> {
+        let host = host.to_lowercase();
+        let in_scope = |prefix: &str| {
+            prefix.is_empty()
+                || path == prefix
+                || (path.starts_with(prefix)
+                    && (prefix.ends_with('/') || path[prefix.len()..].starts_with('/')))
+        };
+        self.grants
+            .iter()
+            .find(|g| g.hosts.iter().any(|h| h == &host) && in_scope(&g.path_prefix))
     }
 }
 

@@ -2440,15 +2440,16 @@ fn headless_prune_removes_unverifiable_records_and_orphaned_markers()
     assert!(store.get(&digest_live)?.is_some());
     Ok(())
 }
-/// ADR-0038 decision 3: the default server registers all seven tool
-/// handlers, including `request_approval` and `run_approved_artifact` which
-/// were previously implemented but unregistered.
+/// ADR-0038 decision 3 + spec §11.6 (#799): the default server registers
+/// all eight tool handlers, including `request_approval`,
+/// `run_approved_artifact` (previously unregistered), and `http_egress`
+/// (mediated GET-only egress, Inspect class).
 #[test]
-fn default_server_registers_all_seven_tools() {
+fn default_server_registers_all_eight_tools() {
     let server = build_default_server(test_engine_api());
 
     let capabilities = server.list_capabilities();
-    assert_eq!(capabilities.len(), 7, "all seven tools must be registered");
+    assert_eq!(capabilities.len(), 8, "all eight tools must be registered");
     assert_eq!(
         capabilities,
         vec![
@@ -2457,6 +2458,7 @@ fn default_server_registers_all_seven_tools() {
             ("scan_artifact".to_owned(), McpCapability::Inspect),
             ("query_receipt".to_owned(), McpCapability::Inspect),
             ("explain_verdict".to_owned(), McpCapability::Inspect),
+            ("http_egress".to_owned(), McpCapability::Inspect),
             ("request_approval".to_owned(), McpCapability::Approve),
             ("run_approved_artifact".to_owned(), McpCapability::Execute),
         ]

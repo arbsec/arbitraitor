@@ -43,6 +43,19 @@ pub enum CallerOrigin {
 }
 
 impl CallerOrigin {
+    /// All receipt/diagnostic labels, in enum order. Used by policy
+    /// load-time validation so a `deny_origins` typo fails closed instead
+    /// of silently denying nothing.
+    pub const KNOWN_LABELS: &'static [&'static str] = &[
+        "human_tty",
+        "human_ipc",
+        "ci",
+        "mcp_server",
+        "agent_session",
+        "daemon_local",
+        "unknown",
+    ];
+
     /// Returns the string label used in receipts and diagnostics.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
@@ -68,5 +81,34 @@ impl CallerOrigin {
     #[must_use]
     pub fn is_self_reported(&self) -> bool {
         !matches!(self, Self::HumanTty | Self::HumanIpc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CallerOrigin;
+
+    #[test]
+    fn known_labels_covers_every_variant() {
+        // L1: a new variant added to either as_str() or KNOWN_LABELS but
+        // not both must fail here — the two lists must stay in sync or
+        // policy validation silently stops matching a class.
+        let all: Vec<CallerOrigin> = vec![
+            CallerOrigin::HumanTty,
+            CallerOrigin::HumanIpc,
+            CallerOrigin::Ci,
+            CallerOrigin::McpServer,
+            CallerOrigin::AgentSession,
+            CallerOrigin::DaemonLocal,
+            CallerOrigin::Unknown,
+        ];
+        assert_eq!(all.len(), CallerOrigin::KNOWN_LABELS.len());
+        for origin in all {
+            assert!(
+                CallerOrigin::KNOWN_LABELS.contains(&origin.as_str()),
+                "label {:?} missing from KNOWN_LABELS",
+                origin.as_str()
+            );
+        }
     }
 }

@@ -26,7 +26,7 @@ arbitraitor/                           # Workspace root (Cargo.toml)
 │   ├── arbitraitor-exec/              # Mediated execution (script + native + PowerShell)
 │   ├── arbitraitor-sandbox/            # Process hardening (prctl, close_range, setrlimit)
 │   ├── arbitraitor-engine/             # Pipeline engine (fetch → store → analyze → provenance → receipt → verdict → release)
-│   ├── arbitraitor-mcp/               # MCP server (inspect, scan, explain, approve, execute)
+│   ├── arbitraitor-mcp/               # MCP server (inspect, scan, explain, egress, approve, execute)
 │   ├── arbitraitor-plugin-api/         # Plugin trait hierarchy
 │   ├── arbitraitor-plugin-host/        # Plugin runtime (subprocess + Wasmtime)
 │   ├── arbitraitor-wrapper/            # curl/wget wrapper translators + per-shell init
@@ -62,9 +62,9 @@ State machine and orchestration. Loads config, coordinates pipeline.
 
 ### `arbitraitor-fetch`
 
-HTTP retrieval with security controls.
+HTTP retrieval with security controls, plus mediated HTTP egress (spec §11.6: grant-scoped, GET-only, bounded return-to-caller body).
 
-**Owns:** Transport policy, redirect following, TLS verification, SSRF protection, transport metadata recording
+**Owns:** Transport policy, redirect following, TLS verification, SSRF protection, transport metadata recording, egress grant enforcement at the transport layer
 **Must not:** Policy evaluation, release decisions
 
 ### `arbitraitor-store`

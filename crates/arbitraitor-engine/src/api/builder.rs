@@ -2,14 +2,12 @@
 
 use std::path::PathBuf;
 
-use arbitraitor_fetch::HttpFetcher;
-use arbitraitor_policy::PolicyEngine;
-use arbitraitor_store::ContentStore;
-
-use super::ArbitraitorApi;
+use super::{ArbitraitorApi, StoreHandle};
 use crate::pipeline::analysis_coordinator;
 use crate::signatures::SignatureInputs;
 use crate::{Config, EngineError};
+use arbitraitor_fetch::HttpFetcher;
+use arbitraitor_policy::PolicyEngine;
 
 /// Entry point for constructing a pipeline engine API.
 #[derive(Clone, Copy, Debug, Default)]
@@ -83,7 +81,12 @@ impl ArbitraitorBuilder {
             policy_toml,
             emit_partial_receipt_on_cancel,
         } = self.config;
-        let store = ContentStore::open(&store_path)?;
+        // The store opens per operation (`StoreHandle::with_store`):
+        // long-lived surfaces (MCP stdio server, daemon) construct the API
+        // once at startup, and an eagerly-opened redb metadata index would
+        // hold the whole-file lock for the process lifetime, failing every
+        // concurrent CLI fetch at open (#762).
+        let store = StoreHandle::new(store_path);
         let policy = if let Some(policy) = self.policy {
             Some(policy)
         } else if policy_toml.trim().is_empty() {

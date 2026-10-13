@@ -9,8 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mediated HTTP egress (#799, spec §11.6 / ADR-0041):
+  `ArbitraitorApi::http_egress` executes grant-authorized GETs through the
+  hardened transport path (per-hop resolution + connected-peer
+  verification, HTTPS-only floor, redirect policy, size bounds) and
+  returns the bounded response body to the caller. Policy gains the
+  `[network.egress]` section — grants with mandatory query policy
+  (`forbidden`/`pinned`/`bounded`/`allowed`), `body_treatment`
+  (`unscanned`/`inspect_first`), response bounds, a
+  `credential_query_params` receipt-redaction denylist, and a
+  `deny_origins` §23.1.1 origin-deny knob — under ADR-0017 monotonic
+  tightening (lower layers cannot mint grants, widen hosts or query policy,
+  grow/strip bounded-query bounds, un-deny origins, or relax body
+  treatment; bounded grants must declare bounds at load). Receipts gain the `EgressInfo`
+  bucket (grant id, §23.1.1 caller origin, credential-class-redacted
+  URLs, query policy, body outcome). MCP gains the `http_egress` tool
+  (Inspect class; default server now registers eight tools) and the
+  daemon gains the `HttpEgress` request. The bounded body is never an
+  artifact and never releasable/executable by Arbitraitor; GET-only by
+  construction (spec §39.7 upload line unchanged).
 - `arbitraitor_exec::ResourceLimits::wall_clock_secs` and
-  `arbitraitor_exec::DEFAULT_WALL_CLOCK_SECS` (300 s, ADR-0041): a
+  `arbitraitor_exec::DEFAULT_WALL_CLOCK_SECS` (300 s, ADR-0042): a
   default-on wall-clock deadline for mediated execution that fires even when
   the child consumes no CPU (which `RLIMIT_CPU` cannot stop). On expiry the
   child's process group is killed — the interpreter and every descendant
@@ -125,6 +144,15 @@ caps pending record files at
   `user.name`/`user.email` stay the operator's — never `-c` them to the
   bot); setting the committer to the bot fails as `UNKNOWN_KEY` (no
   bot-owned signing key).
+- Spec §11.6 (new, v0.7): **mediated HTTP egress** — a GET-only,
+  grant-scoped, return-to-caller operation class for agent web tools,
+  executed daemon-side under the §11.2/§11.4 transport rules, ADR-0018
+  connected-peer verification, and §31.2/§11.5 receipts (ADR-0041, #797).
+  POST/bodies remain out of model (§39.7, §9 invariants 9/24); body-bearing
+  methods are explicitly deferred with two candidate policy-class designs
+  recorded in ADR-0041. Adds `http_egress` to the §33.1 MCP capability list
+  and a `HttpEgressTool` note to §40.3; tech-stack §4.7 specifies the
+  egress client. Documentation-only; the operation lands with #799.
 
 ### Changed
 
@@ -257,6 +285,34 @@ caps pending record files at
   `Unavailable`. The #755 fail-closed behavior is unchanged — a host without
   a Landlock ABI still reports `filesystem_isolation: Unavailable` — but
   the reporting and the hook can no longer disagree.
+- **Long-lived MCP server and daemon no longer hold an exclusive lock on the
+  CAS metadata store** (#762) — three coordinated fixes for the
+  "metadata index failure during open: Database already open. Cannot acquire
+  lock." failure that made every fetch through the curl/wget wrapper and the
+  CLI fail while `arbitraitor mcp` (or the daemon) was running:
+  - The engine now opens the content store **per operation** instead of
+    once at API construction: `ArbitraitorApi` opens the store inside each
+    inspect/fetch/scan/release/list call and closes it when the call ends,
+    so long-lived surfaces (the MCP stdio server, the Unix-socket daemon)
+    hold the redb whole-file lock only for the duration of a request and
+    never while idle. An MCP server and concurrent CLI fetches now
+    coexist; the daemon and MCP server no longer exclude each other.
+    Startup no longer fails when the store is briefly locked by another
+    process — the failure, if any, moves to the request that actually
+    needs the store.
+  - A contended metadata-database open (two Arbitraitor processes opening
+    the same store within milliseconds, e.g. two concurrent fetches) now
+    retries with a short backoff for a bounded window instead of failing
+    on the first attempt. If another process still holds the store after
+    the retry budget, the operation fails closed with a diagnostic that
+    names the situation and how to find the holder
+    (`pgrep -af arbitraitor`) instead of the raw redb lock message. The
+    same treatment applies to the durable spent-nonce store.
+  - `arbitraitor doctor` gains a `legacy_store` check that warns when the
+    pre-cache-root store location `~/.arbitraitor/cas` still exists
+    alongside the active `$XDG_CACHE_HOME/arbitraitor/cas` store. The
+    check is diagnostic only: it never migrates, moves, or deletes the
+    legacy store.
 - **curl/wget wrapper: scheme-less `host[:port]/path` arguments are
   normalized to `http://`, the wrapper's URL diagnostic states every
   accepted form, and `-f`/`-s` no longer silence the gate's own

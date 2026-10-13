@@ -59,6 +59,10 @@ pub struct Receipt {
     pub artifact: ArtifactInfo,
     /// Optional redacted retrieval metadata.
     pub retrieval: Option<RetrievalInfo>,
+    /// Mediated HTTP egress operation metadata (spec §11.6). `None` for
+    /// artifact-pipeline receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<EgressInfo>,
     /// Provenance: verifier identity, detector binary provenance, and signatures.
     pub provenance: ProvenanceInfo,
     /// Payload graph recording artifacts and their relationships.
@@ -140,6 +144,14 @@ pub struct PolicyInfo {
     /// Digest of the effective policy snapshot, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_digest: Option<String>,
+    /// Operation class of the receipt (spec §11.6): `artifact` (default,
+    /// omitted for existing receipts) or `egress` (mediated GET-only web
+    /// request — the artifact fields carry a request-identity key, not a
+    /// CAS digest, and the verdict field carries no artifact verdict).
+    /// Consumers MUST branch on this before treating `artifact.sha256` as
+    /// a CAS identity or `verdict` as a release gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_class: Option<String>,
     /// Metadata from allow rules that authorized release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_rule_metadata: Vec<AllowRuleMetadata>,
@@ -290,6 +302,7 @@ impl Receipt {
                 artifact_type: v1.artifact_type,
             },
             retrieval: v1.retrieval,
+            egress: None,
             provenance: ProvenanceInfo {
                 verifier_identity: v1.verifier_identity,
                 detector_provenance: v1.detector_provenance,
@@ -301,6 +314,7 @@ impl Receipt {
             findings: v1.findings,
             policy: PolicyInfo {
                 policy_digest: v1.policy_digest,
+                operation_class: None,
                 allow_rule_metadata: v1.allow_rule_metadata,
                 audit_trail: v1.audit_trail,
             },
@@ -604,6 +618,39 @@ pub struct ReceiptTimestamps {
     pub modified: String,
 }
 
+/// Mediated HTTP egress receipt metadata (spec §11.6, ADR-0041).
+///
+/// All URL fields preserve query and path content verbatim except
+/// credential-class redaction (userinfo password, credential-bearing query
+/// parameters on the denylist, path segments matching secret patterns):
+/// §11.6 requires the audit trail to preserve the channel, while §11.3/ADR-0033
+/// forbid raw credential values on any carrier.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressInfo {
+    /// Stable identifier of the grant the request executed under.
+    pub grant_id: String,
+    /// §23.1.1 caller-origin class derived at request time.
+    pub caller_origin: String,
+    /// Requested URL after credential-class redaction.
+    pub requested_url: String,
+    /// Final URL after redirects, credential-class redacted.
+    pub final_url: Option<String>,
+    /// Redirect chain, each credential-class redacted.
+    pub redirect_chain: Vec<String>,
+    /// HTTP response status.
+    pub status: Option<u16>,
+    /// Response media type as received.
+    pub content_type: Option<String>,
+    /// Grant query policy in force (`forbidden`/`pinned`/`bounded`/`allowed`).
+    pub query_policy: String,
+    /// Response body outcome: `returned_unscanned`, `returned_inspected`,
+    /// or `withheld`.
+    pub body_outcome: String,
+    /// Body bytes actually delivered to the caller.
+    pub delivered_bytes: Option<u64>,
+}
+
 /// Minisign signature metadata embedded in a signed receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -655,6 +702,7 @@ impl ReceiptBuilder {
                     artifact_type: None,
                 },
                 retrieval: None,
+                egress: None,
                 provenance: ProvenanceInfo::default(),
                 payload_graph: None,
                 detectors: Vec::new(),
