@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ingress-envelope authentication (PR #807, receipt schema v3): relay
+  deliveries authenticate through a shared credential before any payload
+  processing. Receipts gain the `ingress` bucket (`IngressInfo`:
+  credential id, durable GitHub delivery key, transport node identity,
+  accept/deny outcome, typed deny reason); the receipt schema version
+  bumps to 3 and v2 documents are migrated in place on parse
+  (`migrated_from_v2` clears any `ingress` bucket a crafted v2 document
+  carries, so it is normalized, not trusted). The policy crate gains the
+  public `authenticate_envelope` function and typed `IngressDecision`
+  (fail-closed credential, delivery-key, and repository checks), and
+  policies may condition on `ingress.*` fields. `xtask` gains the
+  `check-wasmtime-lock` subcommand, a guard enforcing the
+  RUSTSEC-2026-0327 lockfile-waiver posture: it fails when the
+  `deny.toml` waiver is dropped while the security workflow still passes
+  `--ignore RUSTSEC-2026-0327` to cargo audit, and it rejects any
+  affected `wasmtime` copy not covered by the waiver (the waived
+  `45.0.3` copy must be reached only through the exact waiver parent
+  set).
 - Mediated HTTP egress (#799, spec §11.6 / ADR-0041):
   `ArbitraitorApi::http_egress` executes grant-authorized GETs through the
   hardened transport path (per-hop resolution + connected-peer

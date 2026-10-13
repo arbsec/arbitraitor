@@ -1709,6 +1709,7 @@ impl ArbitraitorApi {
                 created: now.clone(),
                 modified: now,
             },
+            ingress: None,
         };
         let path = self.receipts_dir.join(format!("{receipt_key}.json"));
         let json = serde_json::to_vec_pretty(&receipt)

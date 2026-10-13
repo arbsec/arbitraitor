@@ -727,6 +727,7 @@ fn egress_receipt_carries_operation_class_egress() {
             created: "unix:0.0Z".to_owned(),
             modified: "unix:0.0Z".to_owned(),
         },
+        ingress: None,
     };
     assert_eq!(
         receipt.policy.operation_class.as_deref(),
