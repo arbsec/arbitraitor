@@ -8,6 +8,7 @@
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::os::fd::AsFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -156,18 +157,39 @@ impl NativeExecution {
         );
         configure_filesystem_isolation(&mut command, &fs_rules);
 
+        // Put the child in its own process group so the wall-clock watchdog
+        // can kill the binary and any children it spawns with a single
+        // group kill (mirrors the script/PowerShell paths; spec §9).
+        command.process_group(0);
+
         debug!(binary = %binary_path.display(), "spawning native binary");
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
-        // Limits were applied in pre_exec before execve — no race window.
-        let output = child
-            .wait_with_output()
-            .map_err(|source| ExecError::Wait { source })?;
+        // Arm the wall-clock watchdog so the deadline covers the whole
+        // child lifetime (the same fence the script/PowerShell paths
+        // enforce; RLIMIT_CPU cannot bound a child that sleeps or blocks
+        // on I/O).
+        let watchdog = crate::spawn::arm_wall_clock(
+            rustix::process::Pid::from_child(&child),
+            self.resource_limits.wall_clock_secs,
+        );
+        // Collect output through the same deadline-aware, output-capped
+        // collector the script path uses: `wait_with_output` would wait for
+        // EOF on the inherited pipes, so a setsid descendant holding a
+        // write-end could keep this parent blocked past the deadline and
+        // `WallClockExpired` could never be produced. The output cap is
+        // still enforced by the collector.
+        let output_limit = self
+            .resource_limits
+            .output_size_bytes
+            .unwrap_or(crate::spawn::DEFAULT_OUTPUT_LIMIT);
+        let (exit_code, stdout, stderr) =
+            crate::spawn::read_with_limit(&mut child, output_limit, watchdog)?;
         Ok(crate::ExecutionResult {
-            exit_code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            exit_code,
+            stdout,
+            stderr,
         })
     }
 
@@ -474,6 +496,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use arbitraitor_artifact::executable::{Architecture, Bitness, ExecutableFormat, Linking};
 
@@ -589,6 +612,7 @@ mod tests {
             process_count: None,
             fd_count: Some(32),
             output_size_bytes: None,
+            wall_clock_secs: None,
         };
         let result = NativeExecution::new()?
             .with_resource_limits(limits)
@@ -627,6 +651,7 @@ mod tests {
             process_count: None,
             fd_count: Some(64),
             output_size_bytes: None,
+            wall_clock_secs: None,
         };
         let result = NativeExecution::new()?
             .with_resource_limits(limits)
@@ -709,6 +734,78 @@ mod tests {
             &crate::ExecutionPolicy::default(),
         );
         assert!(matches!(result, Err(ExecError::NativeExecutionNotApproved)));
+    }
+
+    /// Resolves when the `setsid` helper binary is installed, else `Err`
+    /// (callers skip the test).
+    fn setsid_or_skip() -> Result<&'static str, &'static str> {
+        if Path::new("/usr/bin/setsid").exists() {
+            Ok("/usr/bin/setsid")
+        } else if Path::new("/bin/setsid").exists() {
+            Ok("/bin/setsid")
+        } else {
+            Err("setsid not installed")
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_deadline_bounds_setsid_descendant_holding_stdout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Regression test for the CodeRabbit finding: `wait_with_output`
+        // waits for pipe EOF, so a setsid descendant inheriting the pipe
+        // write-ends would keep `execute` blocked past the deadline and
+        // `WallClockExpired` could never be produced. The shared
+        // deadline-aware collector must bound the parent.
+        let root = temp_root("setsid-deadline")?;
+        if !xattrs_supported(&root)? {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+        let setsid = setsid_or_skip();
+        let Some(binary) = copy_executable("/bin/bash", &root, "native-bash")? else {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        };
+        let Ok(setsid) = setsid
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "setsid not installed"))
+        else {
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        };
+        let limits = ResourceLimits {
+            wall_clock_secs: Some(1),
+            ..ResourceLimits::default()
+        };
+        let started = std::time::Instant::now();
+        let result = NativeExecution::new()?
+            .with_resource_limits(limits)
+            .with_args(vec![
+                "-c".to_owned(),
+                format!(
+                    // A grandchild in a new session (the group kill cannot
+                    // reach it) that inherits and holds the pipe write-ends
+                    // forever — no redirect — so only the deadline-aware
+                    // drain can bound the parent.
+                    "{setsid} sleep 30 &\necho started\nexec sleep 30\n"
+                ),
+            ])
+            .execute(&binary);
+        let elapsed = started.elapsed();
+        fs::remove_dir_all(root)?;
+        match result {
+            Err(ExecError::WallClockExpired { limit_secs: 1 }) => {}
+            other => {
+                return Err(
+                    format!("expected WallClockExpired{{limit_secs: 1}}, got {other:?}").into(),
+                );
+            }
+        }
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "native deadline must bound the parent even with an out-of-group pipe holder: {elapsed:?}"
+        );
+        Ok(())
     }
 
     #[test]
