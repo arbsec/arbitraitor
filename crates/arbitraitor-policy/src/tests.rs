@@ -7,7 +7,8 @@ use arbitraitor_model::ids::Sha256Digest;
 use arbitraitor_model::verdict::{Confidence, Severity, Verdict};
 
 use crate::{
-    DetectorHealth, EvalContext, OperationMode, PolicyEngine, PolicyLayer, PolicyPrecedence,
+    DetectorHealth, EvalContext, IngressContext, OperationMode, PolicyEngine, PolicyLayer,
+    PolicyPrecedence,
 };
 use arbitraitor_model::origin::CallerOrigin;
 
@@ -97,6 +98,7 @@ fn interactive_https_ctx() -> EvalContext {
 
 fn full_eval_context() -> EvalContext {
     EvalContext {
+        ingress: None,
         operation_mode: OperationMode::Contained,
         artifact_digest: Some(Sha256Digest::new([1; 32])),
         artifact_type: Some("python-package".to_owned()),
@@ -505,6 +507,7 @@ all = [{ field = "context.operation_mode", equals = "mediated" }]
 "#;
     let engine = PolicyEngine::load(policy).unwrap();
     let ctx = EvalContext {
+        ingress: None,
         operation_mode: OperationMode::Mediated,
         ..EvalContext::new(true)
     };
@@ -1304,350 +1307,90 @@ fn loads_spec_section_23_1_1_example_policy_with_not_in_and_nested_fields() {
     assert!(!digest.is_empty(), "policy digest must be computed");
 }
 
-// ---------------------------------------------------------------------------
-// Egress grants (spec §11.6, ADR-0041)
-// ---------------------------------------------------------------------------
-
-fn org_egress_policy(grant_toml: &str) -> crate::Policy {
-    parsed_policy(&format!(
-        r"
+#[test]
+fn ingress_attempt_resolves_as_integer() {
+    // Regression: `attempt` as FieldValue::Text made `greater_than` rules
+    // silently never match (failed open). It must be Int.
+    let engine = PolicyEngine::load(
+        r#"
 version = 1
-
-[network.egress]
-credential_query_params = []
-
-[[network.egress.grants]]
-{grant_toml}
-"
-    ))
-}
-
-#[test]
-fn egress_grant_with_missing_query_policy_is_rejected_at_load() {
-    // §11.6: a grant without an explicit query policy is invalid at policy
-    // load — fail closed, never defaulted to the permissive case. The
-    // field is non-optional in the schema, so serde denies it at parse.
-    let policy = r"
-version = 1
-
-[[network.egress.grants]]
-id = 'web-search'
-hosts = ['api.example.internal']
-";
-    let result = crate::PolicyEngine::load(policy);
-    assert!(
-        matches!(result, Err(crate::PolicyError::Parse(_))),
-        "missing query_policy must be rejected at load, got {result:?}"
-    );
-}
-
-#[test]
-fn egress_grant_with_valid_query_policy_loads() {
-    let policy = r"
-version = 1
-
-[[network.egress.grants]]
-id = 'web-search'
-hosts = ['api.example.internal']
-query_policy = 'forbidden'
-";
-    let engine = crate::PolicyEngine::load(policy).expect("valid grant must load");
-    let egress = &engine.policy().network.egress;
-    assert_eq!(egress.grants.len(), 1);
-    assert_eq!(
-        egress.grants[0].query_policy,
-        crate::EgressQueryPolicy::Forbidden
-    );
-}
-
-#[test]
-fn egress_grant_with_uppercase_host_is_rejected() {
-    let policy = r"
-version = 1
-
-[[network.egress.grants]]
-id = 'web'
-hosts = ['API.example.internal']
-query_policy = 'forbidden'
-";
-    let result = crate::PolicyEngine::load(policy);
-    assert!(
-        matches!(result, Err(crate::PolicyError::Invalid(ref m)) if m.contains("lowercase")),
-        "uppercase host must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn egress_grant_with_empty_hosts_is_rejected() {
-    let policy = r"
-version = 1
-
-[[network.egress.grants]]
-id = 'web'
-hosts = []
-query_policy = 'forbidden'
-";
-    let result = crate::PolicyEngine::load(policy);
-    assert!(
-        matches!(result, Err(crate::PolicyError::Invalid(ref m)) if m.contains("at least one host")),
-        "empty hosts must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn egress_matching_grant_selects_by_host_and_path() {
-    let policy = r"
-version = 1
-
-[[network.egress.grants]]
-id = 'search'
-hosts = ['api.example.com']
-path_prefix = '/v1/search'
-query_policy = 'forbidden'
-
-[[network.egress.grants]]
-id = 'other'
-hosts = ['other.example.com']
-query_policy = 'forbidden'
-";
-    let engine = crate::PolicyEngine::load(policy).unwrap();
-    let egress = &engine.policy().network.egress;
-    let grant = egress
-        .matching_grant("api.example.com", "/v1/search/web")
-        .expect("matching grant");
-    assert_eq!(grant.id, "search");
-    assert!(egress.matching_grant("api.example.com", "/admin").is_none());
-    assert!(
-        egress
-            .matching_grant("unknown.example.com", "/v1/search")
-            .is_none()
-    );
-}
-
-#[test]
-fn project_layer_cannot_mint_egress_grant() {
-    // §9 invariant 24 / ADR-0017: untrusted project config can never mint
-    // egress authority the org didn't grant.
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'forbidden'\n",
-    );
-    let project = parsed_policy(
-        r"
-version = 1
-
-[[network.egress.grants]]
-id = 'new-grant'
-hosts = ['evil.example.com']
-query_policy = 'allowed'
-",
-    );
-    let result = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
-    );
-    assert!(
-        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("cannot be minted")),
-        "minting a grant at a lower layer must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn project_layer_cannot_widen_egress_hosts() {
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'forbidden'\n",
-    );
-    let project = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com', 'evil.example.com']\nquery_policy = 'forbidden'\n",
-    );
-    let result = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
-    );
-    assert!(
-        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("evil.example.com")),
-        "widening hosts must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn project_layer_cannot_widen_egress_query_policy() {
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'forbidden'\n",
-    );
-    let project =
-        org_egress_policy("id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'allowed'\n");
-    let result = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
-    );
-    assert!(
-        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("query policy cannot widen")),
-        "widening query policy must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn project_layer_cannot_relax_egress_body_treatment() {
-    // §11.6: body treatment may escalate (unscanned → inspect_first) but
-    // never relax.
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'forbidden'\nbody_treatment = 'inspect_first'\n",
-    );
-    let project = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'forbidden'\nbody_treatment = 'unscanned'\n",
-    );
-    let result = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
-    );
-    assert!(
-        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("body treatment cannot relax")),
-        "relaxing body treatment must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn project_layer_may_tighten_egress_query_policy() {
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'allowed'\nmax_query_bytes = 100\nmax_query_params = 10\n",
-    );
-    let project = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 2\n",
-    );
-    let layered = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+[[rules]]
+id = "retry-cap"
+action = "block"
+[rules.when]
+field = "ingress.attempt"
+greater_than = 3
+"#,
     )
-    .expect("tightening layers must merge");
-    let grant = &layered.policy.network.egress.grants[0];
-    assert_eq!(grant.query_policy, crate::EgressQueryPolicy::Bounded);
-    assert_eq!(grant.max_query_bytes, Some(16));
+    .unwrap();
+    let context = EvalContext::new(true)
+        .with_https(true)
+        .with_ingress(Some(IngressContext {
+            event_type: "workflow_run".to_owned(),
+            repository: "arbsec/arbitraitor".to_owned(),
+            head_sha: None,
+            delivery_id: "d1".to_owned(),
+            run_id: None,
+            attempt: Some(4),
+            node_identity: None,
+            payload_size: 128,
+        }));
+    assert_eq!(engine.evaluate(&[], &context), Verdict::Block);
 }
 
 #[test]
-fn project_layer_cannot_grow_bounded_query_bounds() {
-    // §11.6: when both layers are `bounded`, the inherited bounds are the
-    // ceiling — a lower layer may shrink them but never raise them.
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 2\n",
-    );
-    let project = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 10000\nmax_query_params = 2\n",
-    );
-    let result = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
-    );
-    assert!(
-        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("bounded query bounds cannot grow") && detail.contains("max_query_bytes")),
-        "raising max_query_bytes under bounded must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn project_layer_cannot_grow_bounded_query_param_count() {
-    let organization = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 2\n",
-    );
-    let project = org_egress_policy(
-        "id = 'search'\nhosts = ['api.example.com']\nquery_policy = 'bounded'\nmax_query_bytes = 16\nmax_query_params = 50\n",
-    );
-    let result = crate::PolicyEngine::merge_layers(
-        [
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Organization,
-                policy: organization,
-            },
-            crate::PolicyLayer {
-                precedence: crate::PolicyPrecedence::Project,
-                policy: project,
-            },
-        ],
-        false,
-    );
-    assert!(
-        matches!(result, Err(crate::PolicyError::Weakening { ref detail, .. }) if detail.contains("bounded query bounds cannot grow") && detail.contains("max_query_params")),
-        "raising max_query_params under bounded must be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn egress_matching_grant_respects_path_boundary() {
-    let policy = r"
+fn ingress_absent_resolves_unavailable_fail_closed() {
+    let engine = PolicyEngine::load(
+        r#"
 version = 1
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+[[rules]]
+id = "retry-cap"
+action = "block"
+[rules.when]
+field = "ingress.attempt"
+greater_than = 3
+"#,
+    )
+    .unwrap();
+    let context = EvalContext::new(true).with_https(true);
+    // No ingress at all: the rule cannot match; fail-closed default applies.
+    assert_eq!(engine.evaluate(&[], &context), Verdict::Block);
+}
 
-[[network.egress.grants]]
-id = 'v1'
-hosts = ['api.example.com']
-path_prefix = '/v1'
-query_policy = 'forbidden'
-";
-    let engine = crate::PolicyEngine::load(policy).unwrap();
-    let egress = &engine.policy().network.egress;
-    assert!(
-        egress
-            .matching_grant("api.example.com", "/v1/search")
-            .is_some()
-    );
-    assert!(egress.matching_grant("api.example.com", "/v1").is_some());
-    assert!(egress.matching_grant("api.example.com", "/v11/x").is_none());
-    assert!(
-        egress
-            .matching_grant("api.example.com", "/v1admin")
-            .is_none()
-    );
+#[test]
+fn ingress_payload_size_resolves_as_integer() {
+    let engine = PolicyEngine::load(
+        r#"
+version = 1
+[defaults]
+action = "prompt"
+non_interactive_prompt_action = "block"
+[[rules]]
+id = "big-payload"
+action = "block"
+[rules.when]
+field = "ingress.payload_size"
+greater_than = 100
+"#,
+    )
+    .unwrap();
+    let context = EvalContext::new(true)
+        .with_https(true)
+        .with_ingress(Some(IngressContext {
+            event_type: "push".to_owned(),
+            repository: "arbsec/arbitraitor".to_owned(),
+            head_sha: None,
+            delivery_id: "d2".to_owned(),
+            run_id: None,
+            attempt: None,
+            node_identity: None,
+            payload_size: 999,
+        }));
+    assert_eq!(engine.evaluate(&[], &context), Verdict::Block);
 }

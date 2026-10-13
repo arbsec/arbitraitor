@@ -707,6 +707,7 @@ fn egress_receipt_carries_operation_class_egress() {
             body_outcome: "returned_unscanned".to_owned(),
             delivered_bytes: Some(0),
         }),
+        ingress: None,
         provenance: ProvenanceInfo::default(),
         payload_graph: None,
         detectors: Vec::new(),

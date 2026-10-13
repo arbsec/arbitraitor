@@ -1689,6 +1689,7 @@ impl ArbitraitorApi {
             },
             retrieval: None,
             egress: Some(egress),
+            ingress: None,
             provenance: arbitraitor_receipt::ProvenanceInfo::default(),
             payload_graph: None,
             detectors: Vec::new(),

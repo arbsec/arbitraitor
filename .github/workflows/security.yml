@@ -46,7 +46,18 @@ jobs:
           tool: cargo-audit
       - name: Run cargo-audit
         # Ignore list must mirror deny.toml [advisories].ignore. 0141 is the
+<<<<<<< ours
         # unmaintained-bincode advisory (transitive via yara-x); 0222/0269/0316/
         # 0325/0326/0327 apply to the yara-x-pinned wasmtime 45.0.3 copy (see
         # deny.toml comments for the upstream tracking rationale).
+||||||| base
+        # unmaintained-bincode advisory (transitive via yara-x); 0222/0269/0316
+        # apply to the yara-x-pinned wasmtime 45.0.3 copy (see deny.toml
+        # comments for the upstream tracking rationale).
+        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0222 --ignore RUSTSEC-2026-0269 --ignore RUSTSEC-2026-0316
+=======
+        # unmaintained-bincode advisory (transitive via yara-x); 0222/0269/0316
+        # apply to the yara-x-pinned wasmtime 45.0.3 copy (see deny.toml
+        # comments for the upstream tracking rationale).
+>>>>>>> theirs
         run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0222 --ignore RUSTSEC-2026-0269 --ignore RUSTSEC-2026-0316 --ignore RUSTSEC-2026-0327
