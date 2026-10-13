@@ -20,20 +20,24 @@
 # produces PR history attributed to the personal account — a policy violation.
 #
 # Subcommands:
-#   check [path]   Verify that the AUTHOR identity a local commit would get
-#                  (GIT_AUTHOR_* env, else user.name/user.email) matches the
-#                  declared bot author shape, and that the COMMITTER identity
-#                  is NOT the bot (the committer must stay the operator —
-#                  `git -c user.name=<bot> commit` is forbidden). Commits
-#                  without the bot author fail with exit 3 and a remediation
-#                  hint. The DCO trailer is reported as a CONVENTION HINT,
-#                  not a verification: in a repo with no commits yet the
-#                  check is skipped (the caller is expected to pass `-s`), not
-#                  failed.
+#   check [path] [--author "Name <email>"]
+#                  Verify the AUTHOR identity a local commit would get:
+#                  with --author, validate the explicitly planned author (the
+#                  `git commit --author=...` value) against the bot author;
+#                  without it, validate the ambient identity (GIT_AUTHOR_* env,
+#                  else user.name/user.email). Also verify the COMMITTER
+#                  identity is NOT the bot (the committer must stay the
+#                  operator — `git -c user.name=<bot> commit` is forbidden).
+#                  Commits without the bot author fail with exit 3 and a
+#                  remediation hint. The DCO trailer is reported as a
+#                  CONVENTION HINT, not a verification: in a repo with no
+#                  commits yet the check is skipped (the caller is expected to
+#                  pass `-s`), not failed.
 #   env            Print the author override for `eval` (read-only; no secrets).
 #
 # Usage (agents): before ANY local `git commit` destined for a PR branch:
 #   bash .agents/skills/github-pr-lifecycle/scripts/commit-identity check
+#   bash .agents/skills/github-pr-lifecycle/scripts/commit-identity check . --author "Name <email>"
 #   git commit --author="$ARBITRAITOR_BOT_AUTHOR" -s -m "..."
 #
 # Exit codes: 0 ok | 2 config/state error | 3 policy violation
@@ -52,7 +56,35 @@ case "$SUBCOMMAND" in
     exit 0
     ;;
   check)
-    TARGET_PATH="${2:-$PWD}"
+    shift
+    TARGET_PATH=""
+    PLANNED_AUTHOR=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --author)
+          if [ $# -lt 2 ]; then
+            echo "error: --author requires a value (\"Name <email>\")" >&2
+            exit 2
+          fi
+          PLANNED_AUTHOR="$2"
+          shift 2
+          ;;
+        --author=*)
+          PLANNED_AUTHOR="${1#--author=}"
+          shift
+          ;;
+        *)
+          if [ -z "$TARGET_PATH" ]; then
+            TARGET_PATH="$1"
+          else
+            echo "error: unexpected argument: $1" >&2
+            exit 2
+          fi
+          shift
+          ;;
+      esac
+    done
+    TARGET_PATH="${TARGET_PATH:-$PWD}"
     if [ ! -d "$TARGET_PATH" ]; then
       echo "error: path does not exist or is not a directory: $TARGET_PATH" >&2
       exit 2
@@ -91,23 +123,38 @@ case "$SUBCOMMAND" in
 
     MATCH=true
     REASON=""
-    if [ -z "$AMBIENT_NAME" ] || [ -z "$AMBIENT_EMAIL" ]; then
+    # A caller may plan `git commit --author="..."`: when --author is passed
+    # here, validate THAT author (the identity the commit will actually get),
+    # not the ambient config. The committer-must-not-be-bot check is kept
+    # regardless — the committer always stays the operator identity.
+    if [ -n "$PLANNED_AUTHOR" ]; then
+      if [ "$PLANNED_AUTHOR" != "$BOT_AUTHOR" ]; then
+        MATCH=false
+        REASON="planned --author '$PLANNED_AUTHOR' is not the service principal $BOT_AUTHOR"
+      fi
+      AUTHOR_LABEL="planned: $PLANNED_AUTHOR"
+    elif [ -z "$AMBIENT_NAME" ] || [ -z "$AMBIENT_EMAIL" ]; then
       MATCH=false
       REASON="no user.name/user.email configured (and no GIT_AUTHOR_* env)"
-    elif [ "$COMMITTER_NAME" = "$BOT_NAME" ] || [ "$COMMITTER_EMAIL" = "$BOT_EMAIL" ]; then
-      # The committer must NEVER be the bot: that identity has no registered
-      # signing key, so the commit can never verify (required_signatures).
-      MATCH=false
-      REASON="the COMMITTER must stay the operator identity — never commit with -c user.name=$BOT_NAME (the bot owns no signing key; the commit could never verify)"
+      AUTHOR_LABEL="ambient: ${AMBIENT_NAME:-<unset>} <${AMBIENT_EMAIL:-<unset>}>"
     elif [ "$AMBIENT_NAME" != "$BOT_NAME" ] || [ "$AMBIENT_EMAIL" != "$BOT_EMAIL" ]; then
       # The operator identity is EXPECTED as the committer; it is a violation
       # only as the AUTHOR (no --author= override was passed).
       MATCH=false
       REASON="commits must be authored as $BOT_AUTHOR (pass --author=...); the ambient identity is reserved for the committer"
+      AUTHOR_LABEL="ambient: $AMBIENT_NAME <$AMBIENT_EMAIL>"
+    else
+      AUTHOR_LABEL="ambient: $AMBIENT_NAME <$AMBIENT_EMAIL>"
+    fi
+    if [ "$COMMITTER_NAME" = "$BOT_NAME" ] || [ "$COMMITTER_EMAIL" = "$BOT_EMAIL" ]; then
+      # The committer must NEVER be the bot: that identity has no registered
+      # signing key, so the commit can never verify (required_signatures).
+      MATCH=false
+      REASON="the COMMITTER must stay the operator identity — never commit with -c user.name=$BOT_NAME (the bot owns no signing key; the commit could never verify)"
     fi
 
     echo "path:      $TOP"
-    echo "author:    ${AMBIENT_NAME:-<unset>} <${AMBIENT_EMAIL:-<unset>}>"
+    echo "author:    $AUTHOR_LABEL"
     echo "committer: ${COMMITTER_NAME:-<unset>} <${COMMITTER_EMAIL:-<unset>}>"
     echo "dco-hint:  $DCO_HINT (convention hint, not a verification; the commit command must carry -s)"
     if [ "$MATCH" = true ]; then
@@ -118,6 +165,7 @@ case "$SUBCOMMAND" in
       echo "remediation: author PR-branch commits as the service principal with DCO:" >&2
       echo "  git commit --author='$BOT_AUTHOR' -s -m \"...\"" >&2
       echo "or: eval \"\$(bash $0 env)\" && git commit --author=\"\$ARBITRAITOR_BOT_AUTHOR\" -s -m \"...\"" >&2
+      echo "verify the planned command first: bash $0 check . --author \"\$ARBITRAITOR_BOT_AUTHOR\"" >&2
       echo "NOTE: the committer must stay the operator identity (never -c user.name=<bot>)." >&2
       echo "Land the branch with: cargo run -p xtask -- push-branch --message ... (App-signed)." >&2
       exit 3
@@ -125,7 +173,7 @@ case "$SUBCOMMAND" in
     exit 0
     ;;
   *)
-    echo "error: subcommand required (check [path] | env)" >&2
+    echo "error: subcommand required (check [path] [--author \"Name <email>\"] | env)" >&2
     exit 2
     ;;
 esac

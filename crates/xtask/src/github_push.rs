@@ -35,6 +35,7 @@
 //! The token stays in memory for the session; it is never echoed, logged,
 //! persisted, or passed through the arbitraitor curl shim.
 
+use std::io::Write as _;
 use std::process::{Command, ExitCode};
 
 use serde_json::Value;
@@ -198,6 +199,25 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             head_oid.clone(),
             &remote_branch,
         )?;
+        // Non-fatal warning: the remote branch may legitimately lag the
+        // default branch (an earlier landing landed tree-identically while
+        // default advanced). But if its head does not contain the current
+        // default-branch head, the landed diff could revert newer default
+        // commits — surface it and let the operator verify the diff.
+        let base_ref = match &opts.base {
+            Some(b) => b.clone(),
+            None => graphql.default_branch(&owner, &repo)?,
+        };
+        if let Some(base_oid) = graphql.branch_head(&owner, &repo, &base_ref)?
+            && fetch_authenticated(&token, &cwd, &owner, &repo, &base_oid)
+            && ensure_contains(&cwd, &base_oid, &head_oid).is_err()
+        {
+            eprintln!(
+                "warning: remote branch {remote_branch} head {head_oid} does not contain \
+                 {base_ref} head {base_oid}; verify the landing diff does not revert newer \
+                 {base_ref} commits"
+            );
+        }
         (tree, None, Some(head_oid))
     } else {
         // New remote branch: diff base is --base, else the default branch,
@@ -212,6 +232,17 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                 format!("base ref {base_ref} does not exist on {owner}/{repo} — pass --base <ref>")
             })?;
         let tree = remote_head_tree(&token, &cwd, &owner, &repo, base_head.clone(), &base_ref)?;
+        // Fail closed on a stale cut point: the local branch must contain
+        // the current base head, or the landed commit (parented on base_head
+        // with the local tree) would silently revert newer {base_ref}
+        // commits on squash-merge. remote_head_tree already fetched
+        // base_head, so the object is present locally.
+        if let Err(e) = ensure_contains(&cwd, &base_head, &local_branch) {
+            return Err(format!(
+                "local branch `{local_branch}` {e} (base {base_ref} head {base_head}); \
+                 landing would revert newer {base_ref} commits — rebase onto {base_ref} first"
+            ));
+        }
         (tree, Some(base_head), None)
     };
 
@@ -295,11 +326,16 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         cleanup_temp_ref(&graphql, &temp_ref_id, &temp_branch);
         return Err(e);
     }
-    let new_head = commit
+    let Some(new_head) = commit
         .get("oid")
         .and_then(Value::as_str)
-        .ok_or("landing commit response missing commit.oid")?
-        .to_string();
+        .map(str::to_string)
+    else {
+        // Every other failure path cleans up the temp ref; a malformed
+        // response must not leak push-branch/tmp-* either.
+        cleanup_temp_ref(&graphql, &temp_ref_id, &temp_branch);
+        return Err("landing commit response missing commit.oid".to_string());
+    };
 
     // 5. CAS-swing the real ref; then verify the move outcome.
     let swing = match &observed_head {
@@ -621,6 +657,18 @@ fn git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Fail-closed ancestry check: `descendant` must contain `ancestor`
+/// (`git merge-base --is-ancestor ancestor descendant`). Used to stop a
+/// landing whose base is older than the default branch (squash-merge would
+/// silently revert newer default-branch commits). The error is a plain
+/// clause; callers add their own context.
+fn ensure_contains(cwd: &std::path::Path, ancestor: &str, descendant: &str) -> Result<(), String> {
+    if git(cwd, &["merge-base", "--is-ancestor", ancestor, descendant]).is_err() {
+        return Err(format!("does not contain {ancestor}"));
+    }
+    Ok(())
+}
+
 fn origin_owner_repo(cwd: &std::path::Path) -> Result<(Option<String>, Option<String>), String> {
     let url = match git(cwd, &["remote", "get-url", "origin"]) {
         Ok(u) => u,
@@ -925,16 +973,31 @@ impl SecretFile {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
             let base = session_temp_dir()?;
-            let file = base.join(format!(
-                "secret-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or_default()
-            ));
-            std::fs::write(&file, contents).map_err(|e| format!("tempfile write: {e}"))?;
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let file = base.join(format!("secret-{seq}-{nanos}"));
+            // create_new makes the collision impossible rather than merely
+            // improbable: two calls can no longer target the same path (the
+            // old name was only the timestamp — on coarse clocks, e.g.
+            // macOS microsecond resolution, the second write overwrote the
+            // first and corrupted the GraphQL payload). 0600 at creation
+            // avoids any chmod-after-create window; set_permissions below
+            // is belt-and-braces.
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&file)
+                .map_err(|e| format!("tempfile create: {e}"))?;
+            f.write_all(contents)
+                .map_err(|e| format!("tempfile write: {e}"))?;
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| format!("tempfile permissions: {e}"))?;
             // Write-then-chmod on a 0700 dir is safe (no TOCTOU exposure:
@@ -1076,5 +1139,75 @@ mod tests {
             (None, None)
         );
         assert_eq!(parse_github_slug("https://example.com/x/y"), (None, None));
+    }
+
+    #[test]
+    fn ensure_contains_ancestry() {
+        let dir =
+            std::env::temp_dir().join(format!("xtask-ensure-contains-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("spawn git")
+        };
+        assert!(run(&["init", "-q", "-b", "main"]).status.success());
+        assert!(
+            run(&["config", "user.email", "t@example.com"])
+                .status
+                .success()
+        );
+        assert!(run(&["config", "user.name", "t"]).status.success());
+        assert!(std::fs::write(dir.join("a.txt"), "a").is_ok());
+        assert!(run(&["add", "a.txt"]).status.success());
+        assert!(run(&["commit", "-q", "-m", "A"]).status.success());
+        let a = String::from_utf8_lossy(&run(&["rev-parse", "main"]).stdout)
+            .trim()
+            .to_string();
+        assert!(run(&["checkout", "-q", "-b", "side"]).status.success());
+        assert!(std::fs::write(dir.join("b.txt"), "b").is_ok());
+        assert!(run(&["add", "b.txt"]).status.success());
+        assert!(run(&["commit", "-q", "-m", "B"]).status.success());
+        // A (on main) is contained in the side branch: ok.
+        assert_eq!(ensure_contains(&dir, &a, "side"), Ok(()));
+        // B (side only) is NOT contained in main: error.
+        assert!(ensure_contains(&dir, "side", "main").is_err());
+        // Trivial self-containment: ok.
+        assert_eq!(ensure_contains(&dir, "main", "main"), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_temp_paths_are_unique() {
+        let mut paths = Vec::new();
+        for i in 0..5u64 {
+            let payload = format!("payload-{i}").into_bytes();
+            let sf = SecretFile::temp(&payload).expect("create temp secret file");
+            assert!(
+                !paths.contains(&sf.path),
+                "temp path reused within the same tick: {:?}",
+                sf.path
+            );
+            let read = std::fs::read(&sf.path).expect("read back temp secret file");
+            assert_eq!(read, payload, "temp file contents corrupted");
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&sf.path)
+                .expect("stat temp secret file")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "temp file mode must stay 0600");
+            paths.push(sf.path.clone());
+        }
+        // All five paths distinct (paths.contains asserted per iteration).
+        let unique = paths.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 5);
     }
 }

@@ -83,7 +83,12 @@ checks that a local `git commit` would be **authored** as
 `arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>`
 (`--author=`) and that the **committer** stays the operator identity (never
 the bot); it also prints a DCO convention hint - the commit command must
-carry `-s` - which is informational, not a verification. Local chains are
+carry `-s` - which is informational, not a verification. To validate the
+exact command you are about to run, pass the planned author explicitly:
+`commit-identity check . --author "$ARBITRAITOR_BOT_AUTHOR"` (without
+`--author`, the check reads the ambient GIT_AUTHOR_* env / user.name /
+user.email config, which fails by design when the commit will carry an
+explicit `--author=` override). Local chains are
 landed
 tree-identically by `push-branch`; the local commit metadata stays for audit.
 
