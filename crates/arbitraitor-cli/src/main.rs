@@ -459,6 +459,17 @@ async fn main() {
 async fn run_main() -> Result<()> {
     let cli = parse_cli_from_invocation();
 
+    // Forward SIGINT/SIGTERM to the mediated child's process group before
+    // the default termination: mediated children run in their own process
+    // group (process_group(0)), so the terminal signal would otherwise
+    // kill only this parent and leave the child group running with no
+    // watchdog left to reap it. Best-effort: a failed install proceeds
+    // without forwarding (deadline enforcement is unaffected).
+    #[cfg(target_os = "linux")]
+    if let Err(error) = arbitraitor_exec::install_child_group_signal_forwarder() {
+        tracing::warn!(%error, "could not install SIGINT/SIGTERM child-group forwarding");
+    }
+
     let is_diagnostic = matches!(
         cli.command,
         Command::Doctor(_) | Command::Version | Command::Status(_)

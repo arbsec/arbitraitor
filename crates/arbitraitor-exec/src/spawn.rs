@@ -16,7 +16,7 @@
 //!    write-buffer deadlock) and kills the child as soon as the combined output
 //!    exceeds a cap.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -297,6 +297,111 @@ pub(crate) fn finish_wall_clock(
         tracing::warn!(error = %err, "wall-clock group kill errored after normal completion");
     }
     Ok(())
+}
+
+/// Writes script bytes to a child's stdin under the wall-clock deadline.
+///
+/// A plain blocking `write_all` does not observe the watchdog: if the child
+/// exits without reading stdin (or a surviving `setsid` descendant keeps the
+/// pipe's read end open), the 64 KiB pipe buffer fills and the parent blocks
+/// in the kernel past the deadline — `WallClockExpired` would never be
+/// produced. This helper flips the stdin fd to non-blocking and writes in a
+/// loop that polls the watchdog's shared expiry flag (raised by the deadline
+/// thread after the process-group kill), so the write is bounded by the same
+/// deadline that bounds output collection.
+///
+/// On success the bytes are fully written and flushed (best-effort flush:
+/// a flush failure is reported like a write failure). On watchdog expiry the
+/// remaining bytes are lost, the caller's stdin handle should be dropped, and
+/// the error is the resolved wall-clock error from [`finish_wall_clock`]
+/// ([`ExecError::WallClockExpired`], or the fail-closed
+/// [`ExecError::WallClockKillFailed`] when the group kill errored and death
+/// is unconfirmed) — the caller must not treat this as script I/O failure.
+/// Any other I/O error is returned as-is and resolved by the caller through
+/// its existing stdin-write-failure path.
+///
+/// # Errors
+///
+/// Returns the resolved wall-clock error on expiry, or the underlying
+/// [`std::io::Error`] for genuine write/flush failures.
+pub(crate) fn write_stdin_with_deadline<W: Write + std::os::unix::io::AsFd>(
+    mut stdin: W,
+    bytes: &[u8],
+    watchdog: &mut WallClockGuard,
+) -> Result<(), StdinWriteError> {
+    // Non-blocking is best-effort: on failure fall back to blocking writes.
+    // The flag is then only observed between chunk writes that made
+    // progress, but the deadline thread's group kill still bounds the run
+    // (a blocked write then unblocks with EPIPE or an I/O error once the
+    // read end closes).
+    let deadline_aware = watchdog.state.is_some();
+    if deadline_aware && let Err(error) = set_nonblocking(&stdin) {
+        tracing::warn!(error = %error, "could not set stdin non-blocking for deadline-aware write");
+    }
+    let expired = watchdog
+        .state
+        .as_ref()
+        .map(|state| Arc::clone(&state.drain_expired));
+
+    let mut written = 0_usize;
+    while written < bytes.len() {
+        if expired
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            // The deadline thread has killed the process group. Resolve the
+            // watchdog now: the remaining bytes are lost, and the caller
+            // reports expiry instead of a misleading ScriptIo.
+            return Err(StdinWriteError::Deadline);
+        }
+        match stdin.write(&bytes[written..]) {
+            Ok(0) => {
+                // A non-blocking write returning 0 means the pipe is full
+                // and would block; sleep one poll interval so the expiry
+                // flag is re-checked promptly.
+                thread::sleep(Duration::from_millis(DRAIN_POLL_INTERVAL_MS));
+            }
+            Ok(n) => written += n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(DRAIN_POLL_INTERVAL_MS));
+            }
+            Err(error) => return Err(StdinWriteError::Io(error)),
+        }
+    }
+    // The script bytes are in the kernel pipe buffer; the flush merely
+    // preserves the historical "flush after write" step and must not be
+    // allowed to outlive the deadline either.
+    if expired
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        return Err(StdinWriteError::Deadline);
+    }
+    match stdin.flush() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            // The bytes are already in the kernel pipe buffer; a WouldBlock
+            // flush cannot be waited out without re-entering a loop the
+            // deadline no longer bounds, and there is nothing left to push.
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(()),
+        Err(error) => Err(StdinWriteError::Io(error)),
+    }
+}
+
+/// Failure of a deadline-aware stdin write ([`write_stdin_with_deadline`]).
+pub(crate) enum StdinWriteError {
+    /// The wall-clock deadline fired during the write. The watchdog has
+    /// been resolved; the caller reaps the child through
+    /// [`read_with_limit`], whose own [`finish_wall_clock`] call surfaces
+    /// the typed expiry (`WallClockExpired`, or the fail-closed
+    /// `WallClockKillFailed`).
+    Deadline,
+    /// A genuine write or flush I/O failure; resolved by the caller through
+    /// its existing stdin-write-failure path.
+    Io(std::io::Error),
 }
 
 /// Reads stdout and stderr concurrently, enforcing a combined byte cap and

@@ -173,7 +173,14 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         None => String::new(),
     };
 
-    // 1. The intended tree: the branch's committed tree object.
+    // 1. The intended tree: the branch's committed tree object. The commit
+    // OID is resolved at the same moment so the ancestry guard below
+    // validates exactly the commit that supplied `local_tree` — if another
+    // process moves `local_branch` between here and the guard, validating
+    // the branch tip could check a different commit than the tree being
+    // landed (a new-branch landing would then parent the old tree on the
+    // current base and silently revert newer base commits).
+    let local_commit = git(&cwd, &["rev-parse", &local_branch])?;
     let local_tree = git(&cwd, &["rev-parse", &format!("{local_branch}^{{tree}}")])?;
 
     // 2. Mint the installation token (in-memory only).
@@ -232,15 +239,19 @@ fn run_inner(args: &[String]) -> Result<(), String> {
                 format!("base ref {base_ref} does not exist on {owner}/{repo} — pass --base <ref>")
             })?;
         let tree = remote_head_tree(&token, &cwd, &owner, &repo, base_head.clone(), &base_ref)?;
-        // Fail closed on a stale cut point: the local branch must contain
-        // the current base head, or the landed commit (parented on base_head
-        // with the local tree) would silently revert newer {base_ref}
-        // commits on squash-merge. remote_head_tree already fetched
-        // base_head, so the object is present locally.
-        if let Err(e) = ensure_contains(&cwd, &base_head, &local_branch) {
+        // Fail closed on a stale cut point: the local commit that supplied
+        // the landed tree must contain the current base head, or the landed
+        // commit (parented on base_head with the local tree) would silently
+        // revert newer {base_ref} commits on squash-merge. The commit OID is
+        // pinned next to the tree capture so a branch that moves mid-flight
+        // is validated at the exact revision being landed.
+        // remote_head_tree already fetched base_head, so the object is
+        // present locally.
+        if let Err(e) = ensure_contains(&cwd, &base_head, &local_commit) {
             return Err(format!(
-                "local branch `{local_branch}` {e} (base {base_ref} head {base_head}); \
-                 landing would revert newer {base_ref} commits — rebase onto {base_ref} first"
+                "local branch `{local_branch}` ({local_commit}) {e} (base {base_ref} head \
+                 {base_head}); landing would revert newer {base_ref} commits — rebase onto \
+                 {base_ref} first"
             ));
         }
         (tree, Some(base_head), None)

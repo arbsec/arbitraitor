@@ -36,10 +36,17 @@ so the harness can record "stopped at deadline" (spec §9.24-style
    paths only. A `Some(0)` deadline expires immediately (useful for tests
    and fail-closed probes).
 2. **Watchdog thread.** The watchdog is armed immediately after spawn (it
-   covers the parent's blocking `write_all` of the script bytes to the
-   child's stdin, not only output collection), polls the deadline
-   (50 ms granularity), and is released the moment the direct child is
-   reaped, so it never fires against a recycled pid.
+   covers the parent's write of the script bytes to the child's stdin, not
+   only output collection), polls the deadline (50 ms granularity), and is
+   released the moment the direct child is reaped, so it never fires against
+   a recycled pid. Both parent-side I/O phases are deadline-aware: the
+   stdin write (`spawn::write_stdin_with_deadline`, shared by the script and
+   PowerShell paths) flips the stdin fd to non-blocking and polls the
+   watchdog's expiry flag between writes, and the output-drain threads poll
+   the same flag (they never block on a read for more than one poll
+   interval). A surviving `setsid` descendant that keeps the stdin read-end
+   (or the output write-ends) open past the group kill therefore cannot
+   block the parent past the deadline in either phase.
 3. **Process-group kill.** The child is spawned with
    `process_group(0)` (mirroring the plugin host's `configure_process_group`),
    so on expiry the watchdog `SIGKILL`s the child's **process group** —
@@ -57,13 +64,14 @@ so the harness can record "stopped at deadline" (spec §9.24-style
    is a resource backstop, not containment — filesystem, network, and
    process containment are Landlock/unshare/seccomp's job
    (ADR-0008/0020/0021), and a detached survivor does not hang the parent
-   either: the output-drain threads are deadline-aware (they poll a shared
-   expiry flag the deadline thread raises after the group kill, exiting
-   with their partial bytes instead of waiting for a pipe EOF that a
-   `setsid` survivor holding the inherited write-ends could defer
-   indefinitely), so the parent reaps the child and reports
-   `WallClockExpired` at the deadline even when an out-of-group descendant
-   survives.
+   either: both the stdin write and the output-drain threads are
+   deadline-aware (both poll a shared expiry flag the deadline thread
+   raises after the group kill, the write abandoning the remaining stdin
+   bytes and the drains exiting with their partial bytes instead of
+   waiting for a pipe EOF that a `setsid` survivor holding the inherited
+   read- or write-ends could defer indefinitely), so the parent reaps the
+   child and reports `WallClockExpired` at the deadline even when an
+   out-of-group descendant survives.
    `ESRCH`
    from the group kill is treated as success (the goal — a dead group — is
    met); any other kill error is surfaced as

@@ -166,6 +166,13 @@ impl NativeExecution {
         let mut child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
+        // Record the child's process group for SIGINT/SIGTERM forwarding:
+        // the child sits outside the terminal's foreground group
+        // (process_group(0)), so without forwarding a parent killed by the
+        // terminal signal leaves this group running with no watchdog left
+        // to reap it. The forwarder killpg-SIGKILLs the recorded group
+        // before the parent's default termination.
+        arbitraitor_sandbox::record_forwarded_process_group(child.id());
         // Arm the wall-clock watchdog so the deadline covers the whole
         // child lifetime (the same fence the script/PowerShell paths
         // enforce; RLIMIT_CPU cannot bound a child that sleeps or blocks
