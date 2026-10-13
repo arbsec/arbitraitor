@@ -10,10 +10,10 @@ use serde_json::{Value, json};
 
 use crate::explain::{error_response, json_response};
 use crate::{
-    AgentIdentity, MAX_UNTRUSTED_CHARS, McpCapability, McpTool, McpToolHandler, McpToolResponse,
-    sanitize_for_agent,
+    AgentIdentity, McpCapability, McpTool, McpToolHandler, McpToolResponse, sanitize_for_agent,
 };
 use arbitraitor_engine::ArbitraitorApi;
+use arbitraitor_model::untrusted::MAX_UNTRUSTED_CHARS;
 
 /// Tool handler for `http_egress`.
 pub struct HttpEgressTool {

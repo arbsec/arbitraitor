@@ -31,6 +31,8 @@ jobs:
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
         with:
           tool: cargo-deny
+      - name: Guard RUSTSEC-2026-0327 wasmtime waiver
+        run: cargo run -q -p xtask -- check-wasmtime-lock
       - name: Run cargo-deny
         run: cargo deny check
 
@@ -44,6 +46,8 @@ jobs:
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
         with:
           tool: cargo-audit
+      - name: Guard RUSTSEC-2026-0327 wasmtime waiver
+        run: cargo run -q -p xtask -- check-wasmtime-lock
       - name: Run cargo-audit
         # Ignore list must mirror deny.toml [advisories].ignore. 0141 is the
         # unmaintained-bincode advisory (transitive via yara-x); 0222/0269/0316/

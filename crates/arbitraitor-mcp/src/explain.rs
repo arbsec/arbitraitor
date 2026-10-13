@@ -2,29 +2,10 @@
 
 use serde_json::{Value, json};
 
-use crate::{
-    AgentIdentity, MAX_UNTRUSTED_CHARS, McpContent, McpToolResponse, UNTRUSTED_END, UNTRUSTED_START,
-};
+use crate::{AgentIdentity, McpContent, McpToolResponse, sanitize_for_agent};
 use arbitraitor_model::finding::Finding;
 use arbitraitor_model::verdict::{Confidence, Severity};
 use serde::Deserialize;
-
-/// Wraps untrusted text so downstream agents can quote it as data, not instructions.
-#[must_use]
-pub fn sanitize_for_agent(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect();
-    let escaped_markers = cleaned
-        .replace(UNTRUSTED_START, "[escaped-untrusted-start]")
-        .replace(UNTRUSTED_END, "[escaped-untrusted-end]");
-    let mut bounded: String = escaped_markers.chars().take(MAX_UNTRUSTED_CHARS).collect();
-    if escaped_markers.chars().count() > MAX_UNTRUSTED_CHARS {
-        bounded.push_str("\n[truncated]");
-    }
-    format!("{UNTRUSTED_START}\n{bounded}\n{UNTRUSTED_END}")
-}
 
 pub(crate) fn sanitize_json(value: Value) -> Value {
     match value {

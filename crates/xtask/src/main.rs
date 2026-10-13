@@ -7,9 +7,10 @@ use std::time::{Duration, SystemTime};
 const REPO_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
 const USAGE: &str = "usage: xtask docs-check | cleanup [worktrees|artifacts] [--yes] [--days <n>] | \
-     mint-github-token";
+     check-wasmtime-lock | mint-github-token";
 
 mod github_mint;
+mod wasmtime_lock;
 
 fn repo_root() -> PathBuf {
     Path::new(REPO_ROOT)
@@ -790,6 +791,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+        Some("check-wasmtime-lock") => match wasmtime_lock::run(&root) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(reason) => {
+                eprintln!("error: {reason}");
+                ExitCode::FAILURE
+            }
+        },
         Some("cleanup") => match parse_cleanup_args(&args[2..]) {
             Ok((opts, run_worktrees, run_artifacts)) => {
                 run_cleanup(&root, &opts, run_worktrees, run_artifacts)
