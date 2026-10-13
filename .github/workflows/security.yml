@@ -30,7 +30,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c  # v4.3.0
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2.87.27
         with:
           tool: cargo-deny
       - name: Guard RUSTSEC-2026-0327 wasmtime waiver
@@ -47,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c  # v4.3.0
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe  # v2.87.27
         with:
           tool: cargo-audit
       - name: Guard RUSTSEC-2026-0327 wasmtime waiver
