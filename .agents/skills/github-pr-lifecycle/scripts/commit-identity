@@ -22,8 +22,14 @@
 # Subcommands:
 #   check [path]   Verify that the AUTHOR identity a local commit would get
 #                  (GIT_AUTHOR_* env, else user.name/user.email) matches the
-#                  declared bot author shape. Commits without the bot author
-#                  and DCO sign-off fail with exit 3 and a remediation hint.
+#                  declared bot author shape, and that the COMMITTER identity
+#                  is NOT the bot (the committer must stay the operator —
+#                  `git -c user.name=<bot> commit` is forbidden). Commits
+#                  without the bot author fail with exit 3 and a remediation
+#                  hint. The DCO trailer is reported as a CONVENTION HINT,
+#                  not a verification: in a repo with no commits yet the
+#                  check is skipped (the caller is expected to pass `-s`), not
+#                  failed.
 #   env            Print the author override for `eval` (read-only; no secrets).
 #
 # Usage (agents): before ANY local `git commit` destined for a PR branch:
@@ -59,15 +65,27 @@ case "$SUBCOMMAND" in
     # user.name/user.email config. Evaluate exactly what the commit would use.
     AMBIENT_NAME="${GIT_AUTHOR_NAME:-$(git -C "$TOP" config user.name 2>/dev/null || true)}"
     AMBIENT_EMAIL="${GIT_AUTHOR_EMAIL:-$(git -C "$TOP" config user.email 2>/dev/null || true)}"
-    DCO_OK=false
+    # A plain `git commit` takes the committer from GIT_COMMITTER_* env first,
+    # then user.name/user.email config. The committer must stay the OPERATOR
+    # identity: the ruleset verifies signatures against the committer's keys,
+    # and the bot owns no signing key, so `-c user.name=<bot>` produces a
+    # commit that can never verify.
+    COMMITTER_NAME="${GIT_COMMITTER_NAME:-$(git -C "$TOP" config user.name 2>/dev/null || true)}"
+    COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$(git -C "$TOP" config user.email 2>/dev/null || true)}"
+    DCO_HINT="unknown"
     if [ -n "${GIT_AUTHOR_NAME:-}" ] || git -C "$TOP" config user.name >/dev/null 2>&1; then
-      # The commit command must carry `-s`; detect the DCO trailer posture by
-      # checking whether the caller set the ARBITRAITOR_DCO_OK marker (set by
-      # wrappers that always pass -s) OR whether the last commit in this repo
-      # carries the trailer (the ambient convention).
-      if [ "${ARBITRAITOR_DCO_OK:-}" = "1" ] \
-        || git -C "$TOP" log -1 --format='%(trailers:key=Signed-off-by,valueonly)' 2>/dev/null | grep -q .; then
-        DCO_OK=true
+      # DCO is a convention hint, NOT a verification: the caller is expected
+      # to pass `-s`. Check the marker (set by wrappers that always pass -s)
+      # or the last commit's trailer; a repo with NO commits yet has no
+      # convention to observe, so the hint is skipped, never failed.
+      if [ "${ARBITRAITOR_DCO_OK:-}" = "1" ]; then
+        DCO_HINT="ok (caller marker)"
+      elif ! git -C "$TOP" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+        DCO_HINT="skipped (no commits yet; pass -s)"
+      elif git -C "$TOP" log -1 --format='%(trailers:key=Signed-off-by,valueonly)' 2>/dev/null | grep -q .; then
+        DCO_HINT="ok (last commit carries the trailer)"
+      else
+        DCO_HINT="missing"
       fi
     fi
 
@@ -76,22 +94,26 @@ case "$SUBCOMMAND" in
     if [ -z "$AMBIENT_NAME" ] || [ -z "$AMBIENT_EMAIL" ]; then
       MATCH=false
       REASON="no user.name/user.email configured (and no GIT_AUTHOR_* env)"
+    elif [ "$COMMITTER_NAME" = "$BOT_NAME" ] || [ "$COMMITTER_EMAIL" = "$BOT_EMAIL" ]; then
+      # The committer must NEVER be the bot: that identity has no registered
+      # signing key, so the commit can never verify (required_signatures).
+      MATCH=false
+      REASON="the COMMITTER must stay the operator identity — never commit with -c user.name=$BOT_NAME (the bot owns no signing key; the commit could never verify)"
     elif [ "$AMBIENT_NAME" != "$BOT_NAME" ] || [ "$AMBIENT_EMAIL" != "$BOT_EMAIL" ]; then
       # The operator identity is EXPECTED as the committer; it is a violation
       # only as the AUTHOR (no --author= override was passed).
       MATCH=false
       REASON="commits must be authored as $BOT_AUTHOR (pass --author=...); the ambient identity is reserved for the committer"
-    elif [ "$DCO_OK" != "true" ]; then
-      MATCH=false
-      REASON="the DCO Signed-off-by trailer (-s) is missing from the commit convention"
     fi
 
-    echo "path:     $TOP"
-    echo "author:   ${AMBIENT_NAME:-<unset>} <${AMBIENT_EMAIL:-<unset>}>"
+    echo "path:      $TOP"
+    echo "author:    ${AMBIENT_NAME:-<unset>} <${AMBIENT_EMAIL:-<unset>}>"
+    echo "committer: ${COMMITTER_NAME:-<unset>} <${COMMITTER_EMAIL:-<unset>}>"
+    echo "dco-hint:  $DCO_HINT (convention hint, not a verification; the commit command must carry -s)"
     if [ "$MATCH" = true ]; then
-      echo "result:   OK (author is the service principal; committer stays ambient)"
+      echo "result:    OK (author is the service principal; committer stays ambient)"
     else
-      echo "result:   POLICY VIOLATION — $REASON"
+      echo "result:    POLICY VIOLATION — $REASON"
       echo "" >&2
       echo "remediation: author PR-branch commits as the service principal with DCO:" >&2
       echo "  git commit --author='$BOT_AUTHOR' -s -m \"...\"" >&2

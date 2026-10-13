@@ -8,7 +8,8 @@ signing key. Verified commits come from exactly two sources:
 
 1. **App-API-created commits.** Commits created via GraphQL
    `createCommitOnBranch` by the `arbsec-agent` App installation are signed by
-   GitHub (`web-flow` committer) and verify as `reason=valid`. The REST
+   GitHub (committer `GitHub <noreply@github.com>`, shown as `web-flow`) and
+   verify as `reason=valid`. The REST
    `git/commits` endpoint does **not** sign, even with an installation token
    (verified empirically in orchestraitor, 2026-10-01).
 2. **Real GPG/SSH signatures** from a key registered to the committing
@@ -47,6 +48,20 @@ Behavior (mirrors `orc github push-branch` in orchestraitor):
    re-reads the ref to confirm the move outcome (the payload carries only a
    nullable `clientMutationId`; a spurious error envelope after a successful
    move is downgraded to a warning after a provable re-read).
+
+### Deltas from the orchestraitor implementation
+
+This is a scoped port of `orc github push-branch`; the following are NOT
+ported: `--re-land` (deliberate re-landing of an already-landed tree), stdin
+`-` support for `--body-file`, and the typed detached-HEAD error of the
+original (here, a detached HEAD with no `--branch` fails on the generic
+branch resolution instead). Consequence: a branch that was rebased onto
+another commit but whose TREE equals the remote head exits with "nothing to
+land" - the change set is tree-based, so there is nothing to re-create. If
+that state genuinely needs re-landing, re-create the branch tip with a
+follow-up commit (e.g. an empty commit made through the landing path) or land
+the tree-identical re-sign manually; plain `git push` stays forbidden in
+every case.
 
 ## Why plain `git push` is forbidden for PR branches
 

@@ -24,7 +24,7 @@
 //! 3. Compute the change set between the remote-head tree (existing branch)
 //!    or the base tree (new branch) and the local branch's committed tree —
 //!    never the index or working directory.
-//! 4. Land via a UNIQUE temp branch (`push-branch/tmp-<uuid>`) so the
+//! 4. Land via a UNIQUE temp branch (`push-branch/tmp-<nanos>`) so the
 //!    tree-equality and `signature.isValid` gates run BEFORE the real ref
 //!    moves; delete the temp ref on every path.
 //! 5. Move the real ref with an exact-head CAS precondition
@@ -155,6 +155,13 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         Some(b) => b.clone(),
         None => git(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?,
     };
+    if local_branch == "HEAD" {
+        return Err(
+            "detached HEAD — pass --branch <local> explicitly to name the branch whose tree \
+             should be landed"
+                .to_string(),
+        );
+    }
     let remote_branch = opts
         .remote_branch
         .clone()
@@ -183,7 +190,14 @@ fn run_inner(args: &[String]) -> Result<(), String> {
     {
         // Existing remote branch: diff against the REMOTE HEAD tree (never
         // the base — an earlier landing may have moved the remote past it).
-        let tree = remote_head_tree(&token, &cwd, head_oid.clone(), &remote_branch)?;
+        let tree = remote_head_tree(
+            &token,
+            &cwd,
+            &owner,
+            &repo,
+            head_oid.clone(),
+            &remote_branch,
+        )?;
         (tree, None, Some(head_oid))
     } else {
         // New remote branch: diff base is --base, else the default branch,
@@ -197,7 +211,7 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             .ok_or_else(|| {
                 format!("base ref {base_ref} does not exist on {owner}/{repo} — pass --base <ref>")
             })?;
-        let tree = remote_head_tree(&token, &cwd, base_head.clone(), &base_ref)?;
+        let tree = remote_head_tree(&token, &cwd, &owner, &repo, base_head.clone(), &base_ref)?;
         (tree, Some(base_head), None)
     };
 
@@ -208,19 +222,21 @@ fn run_inner(args: &[String]) -> Result<(), String> {
              nothing to land"
         ));
     }
+    // Build the payload BEFORE the dry-run report so the fail-closed
+    // executable-addition and object-type checks surface in dry-runs too.
+    let file_changes = build_file_changes(&cwd, &changes, &diff_base_tree, &local_tree)?;
     if opts.dry_run {
-        let (adds, dels, mods) = changes
+        let (adds, dels) = changes
             .iter()
-            .fold((0u32, 0u32, 0u32), |(a, d, m), (st, _)| match st.as_str() {
-                "A" => (a + 1, d, m),
-                "D" => (a, d + 1, m),
-                _ => (a, d, m + 1),
+            .fold((0u32, 0u32), |(a, d), (st, _)| match st.as_str() {
+                "D" => (a, d + 1),
+                _ => (a + 1, d), // A/M/T all ship as FileAddition
             });
         eprintln!(
             "dry-run: would land {owner}/{repo} {remote_branch} at tree {local_tree}\n\
              change set base: {diff_base_tree}\n\
              message: {}\n\
-             fileChanges: {adds} addition(s), {dels} deletion(s), {mods} modification(s)",
+             fileChanges: {adds} addition(s), {dels} deletion(s)",
             opts.message.as_deref().unwrap_or_default(),
         );
         return Ok(());
@@ -260,7 +276,6 @@ fn run_inner(args: &[String]) -> Result<(), String> {
         .ok_or("createRef response missing ref.id")?
         .to_string();
 
-    let file_changes = build_file_changes(&cwd, &changes, &diff_base_tree, &local_tree)?;
     let commit = match graphql.create_commit_on_branch(
         &owner,
         &repo,
@@ -272,12 +287,12 @@ fn run_inner(args: &[String]) -> Result<(), String> {
     ) {
         Ok(c) => c,
         Err(e) => {
-            let _ = graphql.delete_ref(&temp_ref_id);
+            cleanup_temp_ref(&graphql, &temp_ref_id, &temp_branch);
             return Err(e);
         }
     };
     if let Err(e) = verify_landed_commit(&commit, &local_tree, &local_branch) {
-        let _ = graphql.delete_ref(&temp_ref_id);
+        cleanup_temp_ref(&graphql, &temp_ref_id, &temp_branch);
         return Err(e);
     }
     let new_head = commit
@@ -304,11 +319,23 @@ fn run_inner(args: &[String]) -> Result<(), String> {
             )
             .map(|_| ()),
     };
-    let _ = graphql.delete_ref(&temp_ref_id);
+    cleanup_temp_ref(&graphql, &temp_ref_id, &temp_branch);
     swing?;
 
     eprintln!("landed {remote_branch} at {new_head} (App-signed, tree {local_tree})");
     Ok(())
+}
+
+/// Best-effort temp-ref cleanup; a leaked ref is WARNED about by name (it
+/// must be deleted by hand: `gh api -X DELETE repos/<o>/<r>/git/refs/heads/<ref>`)
+/// but never masks the primary error path.
+fn cleanup_temp_ref(graphql: &GraphqlSession, temp_ref_id: &str, temp_branch: &str) {
+    if let Err(e) = graphql.delete_ref(temp_ref_id) {
+        eprintln!(
+            "WARNING: failed to delete temporary ref `refs/heads/{temp_branch}` (id {temp_ref_id}): \
+             {e} — the ref is still visible on the remote and should be deleted manually"
+        );
+    }
 }
 
 // --- GraphQL session ---------------------------------------------------------
@@ -327,8 +354,20 @@ impl GraphqlSession {
         let payload_file = SecretFile::temp(payload.as_bytes())?;
         let header_file =
             SecretFile::temp(format!("Authorization: Bearer {}", self.bearer).as_bytes())?;
+        // --max-time bounds a hung TLS connection (never hang the agent).
+        // /usr/bin/curl is invoked directly to bypass the arbitraitor curl
+        // shim (which strips Authorization headers) — the absolute path is
+        // the documented mint posture (github_mint.rs).
         let out = Command::new("/usr/bin/curl")
-            .args(["-sS", "--fail-with-body", "-X", "POST", "-H"])
+            .args([
+                "-sS",
+                "--fail-with-body",
+                "--max-time",
+                "60",
+                "-X",
+                "POST",
+                "-H",
+            ])
             .arg(format!("@{}", header_file.path.display()))
             .args(["-H", "Accept: application/vnd.github+json", "-H"])
             .arg("Content-Type: application/json")
@@ -594,25 +633,46 @@ fn parse_github_slug(url: &str) -> (Option<String>, Option<String>) {
     parse_github_slug_inner(url).unwrap_or((None, None))
 }
 
-// Only github.com remotes yield a slug; other hosts return (None, None) so
-// the caller reports a typed error instead of landing elsewhere.
+// Only github.com remotes (exact host, no port) yield a slug; any other
+// host, a `github.com:<port>` URL form, or foreign userinfo returns
+// (None, None) so the caller reports a typed error instead of silently
+// landing elsewhere — a tampered origin must not redirect the target.
 fn parse_github_slug_inner(url: &str) -> Option<(Option<String>, Option<String>)> {
-    for scheme in ["https://", "http://", "git@", "ssh://git@"] {
+    // scp form first: git@github.com:owner/repo.git (colon separator).
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        let slug = rest.trim_end_matches(".git").trim_end_matches('/');
+        return Some(match slug.split_once('/') {
+            Some((o, r)) if !o.is_empty() && !r.is_empty() => {
+                (Some(o.to_string()), Some(r.to_string()))
+            }
+            _ => (None, None),
+        });
+    }
+    for scheme in ["https://", "http://", "git@", "ssh://"] {
         if let Some(rest) = url.strip_prefix(scheme) {
-            let host_and_path = rest.strip_prefix("github.com")?;
-            let slug = host_and_path
-                .strip_prefix('/')
-                .or_else(|| host_and_path.strip_prefix(':'))?;
-            let slug = slug.trim_end_matches(".git").trim_end_matches('/');
-            return match slug.split_once('/') {
-                Some((o, r)) if !o.is_empty() && !r.is_empty() => {
-                    Some((Some(o.to_string()), Some(r.to_string())))
-                }
-                _ => Some((None, None)),
+            // Strip exact `git@` userinfo; any other userinfo is rejected.
+            let host_and_path = match rest.split_once('@') {
+                Some(("git", remaining)) => remaining,
+                Some(_) => return Some((None, None)),
+                None => rest,
             };
+            let Some((host, path)) = host_and_path.split_once('/') else {
+                return Some((None, None));
+            };
+            // A ':' in the authority is a port (or malformed scp) — reject.
+            if host.contains(':') || host != "github.com" {
+                return Some((None, None));
+            }
+            let slug = path.trim_end_matches(".git").trim_end_matches('/');
+            return Some(match slug.split_once('/') {
+                Some((o, r)) if !o.is_empty() && !r.is_empty() => {
+                    (Some(o.to_string()), Some(r.to_string()))
+                }
+                _ => (None, None),
+            });
         }
     }
-    None
+    Some((None, None))
 }
 
 /// `git diff-tree -r -z --no-renames --no-commit-id --name-status` between
@@ -679,6 +739,22 @@ fn build_file_changes(
         match status.as_str() {
             "D" => deletions.push(serde_json::json!({ "path": path })),
             "A" | "M" | "T" => {
+                // Only blobs can ride FileAddition: symlinks (120000) and
+                // gitlinks (160000) would land as regular-file content,
+                // silently changing the tree — fail closed instead.
+                let obj_type = git(cwd, &["cat-file", "-t", &format!("{local_tree}:{path}")])?;
+                if obj_type != "blob" {
+                    return Err(format!(
+                        "`{path}` is a {obj_type} ({mode_note}) in the local tree — \
+                         createCommitOnBranch FileAddition only carries regular-file blobs, so \
+                         this change set cannot be landed as-is (tree gate would refuse it)",
+                        mode_note = if obj_type == "commit" {
+                            "gitlink/submodule 160000"
+                        } else {
+                            "symlink 120000"
+                        }
+                    ));
+                }
                 let contents = Command::new("git")
                     .current_dir(cwd)
                     .args(["cat-file", "blob", &format!("{local_tree}:{path}")])
@@ -712,7 +788,6 @@ fn build_file_changes(
                     "path": path,
                     "contents": base64_encode(&contents.stdout),
                 }));
-                let _ = base_tree; // change set already diffed against the right base
             }
             other => return Err(format!("unsupported diff status `{other}` for {path}")),
         }
@@ -780,42 +855,91 @@ struct SecretFile {
 
 struct TempDirGuard {
     path: std::path::PathBuf,
+    /// Session-scoped guard: removing the dir would break subsequent
+    /// SecretFile calls in the same process, so Drop only deletes this
+    /// instance's file's parent at process exit (the LAST guard dropped).
+    session: bool,
 }
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        if !self.session {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+        // Session dirs: removed on process exit by the OS from /tmp per
+        // tmpfiles policy; contents are 0600 inside a 0700 dir, so residue
+        // is unreadable to other local users. mint's PID-named sweep does
+        // not apply here (multiple files per dir).
     }
 }
 
 impl SecretFile {
+    /// Writes `contents` to a 0600 file inside a private 0700 session temp
+    /// dir (created atomically via `DirBuilder::mode`, mirroring
+    /// `github_mint::SecretFile` — no chmod-after-create TOCTOU window).
+    /// Non-unix platforms fail closed: they cannot enforce POSIX modes, and
+    /// secret material must never land under default ACLs (github_mint
+    /// posture). One session dir (created lazily, reused for every call in
+    /// this process) limits crash residue to a single directory per run.
     fn temp(contents: &[u8]) -> Result<Self, String> {
-        let base = std::env::temp_dir().join(format!(
-            "xtask-push-branch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        std::fs::create_dir_all(&base).map_err(|e| format!("tempdir: {e}"))?;
-        // 0700
-        #[cfg(unix)]
+        #[cfg(not(unix))]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("tempdir permissions: {e}"))?;
+            let _ = contents;
+            return Err(
+                "non-unix platforms are unsupported for push-branch: POSIX file modes cannot \
+                 be enforced, and the installation token must never land under default ACLs"
+                    .to_string(),
+            );
         }
-        let dir = TempDirGuard { path: base };
-        let path = dir.path.join("secret");
-        std::fs::write(&path, contents).map_err(|e| format!("tempfile write: {e}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            static SESSION_DIR: std::sync::OnceLock<std::path::PathBuf> =
+                std::sync::OnceLock::new();
+            let base = SESSION_DIR.get_or_init(|| {
+                let p = std::env::temp_dir().join(format!(
+                    "xtask-push-branch-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ));
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    std::fs::DirBuilder::new()
+                        .mode(0o700)
+                        .recursive(true)
+                        .create(&p)
+                        .map_err(|e| format!("tempdir: {e}"))
+                        .expect("session tempdir creation");
+                }
+                p
+            });
+            // Session dir is removed at process end via atexit-style guard:
+            // leak-safe across SIGKILL is impossible for temp secrets; the
+            // 0600 mode + PID-unique name keeps residue unusable to other
+            // local users, and the next run's PID differs.
+            let file = base.join(format!(
+                "secret-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::write(&file, contents).map_err(|e| format!("tempfile write: {e}"))?;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| format!("tempfile permissions: {e}"))?;
+            // Write-then-chmod on a 0700 dir is safe (no TOCTOU exposure:
+            // the parent denies traversal to other users).
+            Ok(Self {
+                _dir: TempDirGuard {
+                    path: base.clone(),
+                    session: true,
+                },
+                path: file,
+            })
         }
-        Ok(Self { _dir: dir, path })
     }
 }
 
@@ -825,11 +949,13 @@ impl SecretFile {
 fn remote_head_tree(
     token: &str,
     cwd: &std::path::Path,
+    owner: &str,
+    repo: &str,
     head_oid: String,
     remote_branch: &str,
 ) -> Result<String, String> {
-    if !fetch_authenticated(token, cwd, &head_oid)
-        && !fetch_authenticated(token, cwd, remote_branch)
+    if !fetch_authenticated(token, cwd, owner, repo, &head_oid)
+        && !fetch_authenticated(token, cwd, owner, repo, remote_branch)
     {
         // fall through to rev-parse; the error below carries the remediation
     }
@@ -837,11 +963,18 @@ fn remote_head_tree(
         return Ok(tree);
     }
     Err(format!(
-        "cannot read the remote head {head_oid} tree locally — pass --base <ref> or fetch the          repository first"
+        "cannot read the remote head {head_oid} tree locally — pass --base <ref> or fetch the \
+         repository first"
     ))
 }
 
-fn fetch_authenticated(token: &str, cwd: &std::path::Path, what: &str) -> bool {
+fn fetch_authenticated(
+    token: &str,
+    cwd: &std::path::Path,
+    owner: &str,
+    repo: &str,
+    what: &str,
+) -> bool {
     let authorization = format!(
         "basic {}",
         base64_encode(format!("x-access-token:{token}").as_bytes())
@@ -851,7 +984,7 @@ fn fetch_authenticated(token: &str, cwd: &std::path::Path, what: &str) -> bool {
         .args([
             "fetch",
             "--quiet",
-            "https://github.com/arbsec/arbitraitor.git",
+            &format!("https://github.com/{owner}/{repo}.git"),
             what,
         ])
         .env("GIT_CONFIG_COUNT", "1")
@@ -912,6 +1045,34 @@ mod tests {
         assert_eq!(
             parse_github_slug("git@github.com:arbsec/arbitraitor.git"),
             (Some("arbsec".to_string()), Some("arbitraitor".to_string()))
+        );
+        assert_eq!(
+            parse_github_slug("ssh://git@github.com/arbsec/arbitraitor.git"),
+            (Some("arbsec".to_string()), Some("arbitraitor".to_string()))
+        );
+        // Port forms must be REJECTED, not misparsed (gen-1 M4): the old
+        // parser produced owner "22" from ssh://git@github.com:22/owner/repo.
+        assert_eq!(
+            parse_github_slug("ssh://git@github.com:22/owner/repo.git"),
+            (None, None)
+        );
+        assert_eq!(
+            parse_github_slug("https://github.com:443/owner/repo.git"),
+            (None, None)
+        );
+        // Foreign userinfo rejected (not silently stripped).
+        assert_eq!(
+            parse_github_slug("https://evil@github.com/owner/repo.git"),
+            (None, None)
+        );
+        // Host-lookalike rejections.
+        assert_eq!(
+            parse_github_slug("https://github.com.evil.com/x/y"),
+            (None, None)
+        );
+        assert_eq!(
+            parse_github_slug("https://github.com@evil.com/x"),
+            (None, None)
         );
         assert_eq!(parse_github_slug("https://example.com/x/y"), (None, None));
     }
