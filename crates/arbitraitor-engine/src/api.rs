@@ -1527,14 +1527,20 @@ impl ArbitraitorApi {
                     Ok(("withheld", None, None))
                 }
             }
-            arbitraitor_fetch::EgressBodyTreatment::Unscanned => Ok((
-                "returned_unscanned",
-                response
-                    .delivered
-                    .then(|| u64::try_from(response.body.len()).ok())
-                    .flatten(),
-                response.delivered.then(|| response.body.clone()),
-            )),
+            arbitraitor_fetch::EgressBodyTreatment::Unscanned => {
+                if response.delivered {
+                    Ok((
+                        "returned_unscanned",
+                        u64::try_from(response.body.len()).ok(),
+                        Some(response.body.clone()),
+                    ))
+                } else {
+                    // Unreachable while the transport fails closed on size
+                    // (http_error_status_is_failure), but the label must
+                    // not claim "returned" for a withheld body.
+                    Ok(("withheld", None, None))
+                }
+            }
         }
     }
 
@@ -1557,14 +1563,30 @@ impl ArbitraitorApi {
         } else {
             Some(content_type.to_owned())
         };
-        self.analyze_and_finalize(
+        let (inspection, operation) = self.analyze_and_finalize(
             operation,
             body,
             &digest,
             source_url,
             Some(&synthetic_fetch_receipt(&digest, body.len() as u64)),
             content_type,
-        )
+        )?;
+        // Tag the inspection receipt as egress-class (G2-L1): the body
+        // digest must not masquerade as an artifact CAS identity in
+        // query_receipts(). Inert either way — no CAS entry, so
+        // lookup_verdict_for_release fails closed.
+        let receipt_path = self
+            .receipts_dir
+            .join(format!("{}.json", inspection.sha256));
+        if let Ok(data) = std::fs::read(&receipt_path)
+            && let Ok(mut receipt) = serde_json::from_slice::<arbitraitor_receipt::Receipt>(&data)
+        {
+            receipt.policy.operation_class = Some("egress".to_owned());
+            if let Ok(json) = serde_json::to_vec_pretty(&receipt) {
+                let _ = std::fs::write(&receipt_path, json);
+            }
+        }
+        Ok((inspection, operation))
     }
 
     /// Persists an egress receipt under its request-identity key.

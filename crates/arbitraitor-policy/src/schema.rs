@@ -257,6 +257,18 @@ impl EgressGrant {
                 self.id
             ));
         }
+        if self.query_policy == EgressQueryPolicy::Bounded
+            && self.max_query_bytes.is_none()
+            && self.max_query_params.is_none()
+        {
+            // §11.6: a bounded grant without bounds is semantically
+            // `allowed` — reject at load rather than defaulting to
+            // unlimited.
+            return Err(format!(
+                "egress grant {} is bounded but sets neither max_query_bytes nor max_query_params",
+                self.id
+            ));
+        }
         Ok(())
     }
 }

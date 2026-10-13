@@ -907,9 +907,11 @@ async fn inspect_url(
 /// `sha256` stays `None` because egress bytes never become artifacts.
 async fn http_egress(url: &str, state: &DaemonState) -> DaemonResponse {
     if !url.starts_with("https://") {
-        return error_response(format!(
-            "invalid URL: http_egress requires https (spec §11.6 transport floor): {url}"
-        ));
+        // No URL echo: the caller-supplied string can carry userinfo
+        // credentials, and the response/log path is unredacted.
+        return error_response(
+            "invalid URL: http_egress requires https (spec §11.6 transport floor)".to_owned(),
+        );
     }
     match state
         .api

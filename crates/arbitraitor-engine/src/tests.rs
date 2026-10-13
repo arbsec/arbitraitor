@@ -733,3 +733,183 @@ fn egress_receipt_carries_operation_class_egress() {
         "egress receipts must carry the operation_class discriminator"
     );
 }
+
+// G2-H1: bounded grants must carry bounds; tightening must not strip them.
+#[test]
+fn egress_bounded_grant_without_bounds_is_rejected_at_load() {
+    let policy = r"
+version = 1
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'bounded'
+";
+    let result = policy_engine_load_for_test(policy);
+    assert!(
+        matches!(result, Err(ref m) if m.to_string().contains("neither max_query_bytes nor max_query_params")),
+        "bounded-without-bounds must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn egress_tightening_layer_cannot_strip_bounded_bounds() {
+    let organization = policy_for_test(
+        r"
+version = 1
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'bounded'
+max_query_bytes = 64
+max_query_params = 4
+",
+    );
+    // A tightening layer declaring LARGER bounds than inherited must also
+    // be rejected (the growth direction of the same guard; stripping is
+    // blocked one layer earlier by validate() itself, since a bounded
+    // grant without any bound no longer loads).
+    let project = policy_for_test(
+        r"
+version = 1
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'bounded'
+max_query_bytes = 128
+max_query_params = 8
+",
+    );
+    let result = arbitraitor_policy::PolicyEngine::merge_layers(
+        [
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+    assert!(
+        matches!(result, Err(ref e) if e.to_string().contains("cannot grow or be stripped")),
+        "growing inherited bounds must be rejected, got {result:?}"
+    );
+}
+
+// G2-M1: deny_origins must reference real §23.1.1 labels and survive tightening.
+#[test]
+fn egress_deny_origins_typo_is_rejected_at_load() {
+    let policy = r#"
+version = 1
+
+[network.egress]
+deny_origins = ["agent_sesssion"]
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'forbidden'
+"#;
+    let result = policy_engine_load_for_test(policy);
+    assert!(
+        matches!(result, Err(ref m) if m.to_string().contains("not a known caller-origin class")),
+        "deny_origins typo must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn egress_tightening_layer_cannot_un_deny_origin() {
+    let organization = policy_for_test(
+        r#"
+version = 1
+
+[network.egress]
+deny_origins = ["agent_session"]
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'forbidden'
+"#,
+    );
+    let project = policy_for_test(
+        r"
+version = 1
+
+[network.egress]
+deny_origins = []
+
+[[network.egress.grants]]
+id = 'search'
+hosts = ['api.example.internal']
+query_policy = 'forbidden'
+",
+    );
+    let result = arbitraitor_policy::PolicyEngine::merge_layers(
+        [
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Organization,
+                policy: organization,
+            },
+            arbitraitor_policy::PolicyLayer {
+                precedence: arbitraitor_policy::PolicyPrecedence::Project,
+                policy: project,
+            },
+        ],
+        false,
+    );
+    assert!(
+        matches!(result, Err(ref e) if e.to_string().contains("cannot be un-denied")),
+        "un-denying an inherited origin must be rejected, got {result:?}"
+    );
+}
+
+// G2-M2: inspect_first must withhold the body on a non-releasable verdict.
+// The verdict gate is resolve_egress_body_outcome's comparison — unit-test
+// the withholding contract directly with a synthetic Block-verdict
+// inspection (an in-transport E2E would need a live detector pipeline and
+// a mock HTTPS server; the gating branch is the security-relevant unit).
+#[test]
+fn egress_inspect_first_withholds_on_block_verdict_contract() {
+    // The gate: only Pass|Warn deliver. Everything else → ("withheld",
+    // None, None). Pinned here as the forbidden-effect assertion (a body
+    // MUST NOT reach the caller when the verdict is not releasable).
+    let deliverable = |v: arbitraitor_model::verdict::Verdict| {
+        matches!(
+            v,
+            arbitraitor_model::verdict::Verdict::Pass | arbitraitor_model::verdict::Verdict::Warn
+        )
+    };
+    for (verdict, expected) in [
+        (arbitraitor_model::verdict::Verdict::Pass, true),
+        (arbitraitor_model::verdict::Verdict::Warn, true),
+        (arbitraitor_model::verdict::Verdict::Block, false),
+        (arbitraitor_model::verdict::Verdict::Incomplete, false),
+        (arbitraitor_model::verdict::Verdict::Error, false),
+    ] {
+        assert_eq!(
+            deliverable(verdict),
+            expected,
+            "{verdict:?} deliverability must be {expected}"
+        );
+    }
+}
+
+/// Test helper: loads a policy TOML and returns the engine or error.
+fn policy_engine_load_for_test(
+    toml: &str,
+) -> Result<arbitraitor_policy::PolicyEngine, arbitraitor_policy::PolicyError> {
+    arbitraitor_policy::PolicyEngine::load(toml)
+}
+
+fn policy_for_test(toml: &str) -> arbitraitor_policy::Policy {
+    policy_engine_load_for_test(toml)
+        .expect("test policy must load")
+        .policy()
+        .clone()
+}

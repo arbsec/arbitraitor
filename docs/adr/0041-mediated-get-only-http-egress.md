@@ -93,7 +93,28 @@ injected-header identity.
 (query policy, `body_treatment`, size/content-type bounds) but does not fix
 the TOML schema; the grant schema is designed and tested in #799 against
 `arbitraitor-policy`'s existing `NetworkConfig` layering (ADR-0017
-monotonicity applies to every property).
+monotonicity applies to every property). Implementation decisions recorded
+at #801 review:
+
+- **`deny_origins`**: `network.egress.deny_origins` lists §23.1.1 origin
+  classes denied before grant evaluation; entries validate against the
+  known class labels at load (typos fail closed) and cannot be removed by
+  a tightening layer (additions are allowed — they only deny more).
+- **`bounded` requires bounds**: a bounded grant without
+  `max_query_bytes`/`max_query_params` is semantically `allowed` and is
+  rejected at load; bounds compare as ceiling (absent = unbounded) during
+  tightening so inherited bounds cannot be stripped or grown.
+- **`inspect_first` delivery semantics**: `Pass` delivers unmodified;
+  `Warn` delivers with the verdict recorded on the inspection receipt
+  (ADR-0013: warn is release-permitted-with-warning);
+  `Incomplete`/`Block`/`Error` withhold the body entirely.
+- **Non-2xx responses fail closed** (typed transport boundary), never
+  deliver error-page bodies as if they were granted content.
+- **Receipt discriminator**: egress receipts carry
+  `policy.operation_class = "egress"` so audit consumers never mistake the
+  request-identity key for a CAS digest; `inspect_first` also writes the
+  inspection receipt for the body (keyed by body digest, no release path —
+  lookup fails closed), a dual-receipt shape by design.
 
 ## Consequences
 

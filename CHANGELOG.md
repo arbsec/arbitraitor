@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns the bounded response body to the caller. Policy gains the
   `[network.egress]` section — grants with mandatory query policy
   (`forbidden`/`pinned`/`bounded`/`allowed`), `body_treatment`
-  (`unscanned`/`inspect_first`), response bounds, and a
-  `credential_query_params` receipt-redaction denylist — under ADR-0017
-  monotonic tightening (lower layers cannot mint grants, widen hosts or
-  query policy, or relax body treatment). Receipts gain the `EgressInfo`
+  (`unscanned`/`inspect_first`), response bounds, a
+  `credential_query_params` receipt-redaction denylist, and a
+  `deny_origins` §23.1.1 origin-deny knob — under ADR-0017 monotonic
+  tightening (lower layers cannot mint grants, widen hosts or query policy,
+  grow/strip bounded-query bounds, un-deny origins, or relax body
+  treatment; bounded grants must declare bounds at load). Receipts gain the `EgressInfo`
   bucket (grant id, §23.1.1 caller origin, credential-class-redacted
   URLs, query policy, body outcome). MCP gains the `http_egress` tool
   (Inspect class; default server now registers eight tools) and the

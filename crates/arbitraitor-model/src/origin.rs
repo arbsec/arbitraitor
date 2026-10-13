@@ -43,6 +43,19 @@ pub enum CallerOrigin {
 }
 
 impl CallerOrigin {
+    /// All receipt/diagnostic labels, in enum order. Used by policy
+    /// load-time validation so a `deny_origins` typo fails closed instead
+    /// of silently denying nothing.
+    pub const KNOWN_LABELS: &'static [&'static str] = &[
+        "human_tty",
+        "human_ipc",
+        "ci",
+        "mcp_server",
+        "agent_session",
+        "daemon_local",
+        "unknown",
+    ];
+
     /// Returns the string label used in receipts and diagnostics.
     #[must_use]
     pub fn as_str(&self) -> &'static str {

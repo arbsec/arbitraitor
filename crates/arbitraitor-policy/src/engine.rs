@@ -309,6 +309,19 @@ fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
     for grant in &policy.network.egress.grants {
         grant.validate().map_err(PolicyError::Invalid)?;
     }
+    // deny_origins entries must be real §23.1.1 class labels — a typo
+    // (e.g. "agent_sesssion") would silently deny nothing (G2-M1).
+    for origin in &policy.network.egress.deny_origins {
+        if !arbitraitor_model::origin::CallerOrigin::KNOWN_LABELS
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case(origin))
+        {
+            return Err(PolicyError::Invalid(format!(
+                "network.egress.deny_origins: {origin:?} is not a known caller-origin class (expected one of {labels})",
+                labels = arbitraitor_model::origin::CallerOrigin::KNOWN_LABELS.join(", ")
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -397,19 +410,23 @@ fn check_egress(
         }
         // §11.6: when both layers bound the query, the inherited bounds are
         // the ceiling — a tightening layer may shrink them but never grow
-        // them.
+        // or strip them. `None` on a bounded grant means unbounded for that
+        // dimension (validate() only requires one of the two bounds), so
+        // None must compare as +infinity, not 0 — otherwise a lower layer
+        // could strip inherited bounds by omitting them (G2-H1).
+        let bound = |b: Option<usize>| b.unwrap_or(usize::MAX);
         if grant.query_policy == EgressQueryPolicy::Bounded
             && base.query_policy == EgressQueryPolicy::Bounded
         {
-            if grant.max_query_bytes.unwrap_or(0) > base.max_query_bytes.unwrap_or(0) {
+            if bound(grant.max_query_bytes) > bound(base.max_query_bytes) {
                 violations.push(format!(
-                    "network.egress.grants[{}]: bounded query bounds cannot grow (max_query_bytes {:?} > inherited {:?})",
+                    "network.egress.grants[{}]: bounded query bounds cannot grow or be stripped (max_query_bytes {:?} > inherited {:?})",
                     grant.id, grant.max_query_bytes, base.max_query_bytes
                 ));
             }
-            if grant.max_query_params.unwrap_or(0) > base.max_query_params.unwrap_or(0) {
+            if bound(grant.max_query_params) > bound(base.max_query_params) {
                 violations.push(format!(
-                    "network.egress.grants[{}]: bounded query bounds cannot grow (max_query_params {:?} > inherited {:?})",
+                    "network.egress.grants[{}]: bounded query bounds cannot grow or be stripped (max_query_params {:?} > inherited {:?})",
                     grant.id, grant.max_query_params, base.max_query_params
                 ));
             }
@@ -459,6 +476,20 @@ fn check_egress(
         {
             violations.push(format!(
                 "network.egress.credential_query_params: {param} cannot be removed by a tightening layer"
+            ));
+        }
+    }
+    // deny_origins: additions only deny more origins (tightening, allowed);
+    // removing an inherited entry un-denies a low-trust origin class and is
+    // rejected (G2-M1 — same invariant-24 class as the grant checks).
+    for origin in &inherited.deny_origins {
+        if !candidate
+            .deny_origins
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(origin))
+        {
+            violations.push(format!(
+                "network.egress.deny_origins: {origin} cannot be un-denied by a tightening layer"
             ));
         }
     }
