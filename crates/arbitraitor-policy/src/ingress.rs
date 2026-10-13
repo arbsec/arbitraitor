@@ -42,6 +42,10 @@ pub enum IngressDenyReason {
     /// The presented credential did not match the configured relay
     /// credential.
     CredentialMismatch,
+    /// The configured relay credential was empty or whitespace-only —
+    /// embedder misconfiguration; never authenticate against an empty
+    /// secret.
+    MissingConfiguredCredential,
     /// The envelope's delivery key was empty — a delivery identity is
     /// required for dedup and audit.
     MissingDeliveryKey,
@@ -111,6 +115,15 @@ pub fn authenticate_envelope(
     configured_credential: &secrecy::SecretString,
     context: &IngressContext,
 ) -> IngressDecision {
+    // Fail closed on a missing configured credential: an empty (or
+    // whitespace-only) configured secret is embedder misconfiguration, and
+    // an empty==empty constant-time comparison would otherwise authenticate
+    // every envelope presenting an empty credential.
+    if configured_credential.expose_secret().trim().is_empty() {
+        return IngressDecision::Denied {
+            reason: IngressDenyReason::MissingConfiguredCredential,
+        };
+    }
     if !verify_relay_credential(presented_credential, configured_credential) {
         return IngressDecision::Denied {
             reason: IngressDenyReason::CredentialMismatch,
@@ -180,6 +193,42 @@ mod tests {
             decision,
             IngressDecision::Denied {
                 reason: IngressDenyReason::CredentialMismatch
+            }
+        );
+    }
+
+    #[test]
+    fn empty_configured_credential_denies_even_when_presented_matches() {
+        // Empty == empty would otherwise authenticate in constant time:
+        // a missing configured secret is misconfiguration, not a valid
+        // shared credential.
+        let decision = authenticate_envelope(&secret(""), &secret(""), &context());
+        assert_eq!(
+            decision,
+            IngressDecision::Denied {
+                reason: IngressDenyReason::MissingConfiguredCredential
+            }
+        );
+    }
+
+    #[test]
+    fn whitespace_configured_credential_denies_even_when_presented_matches() {
+        let decision = authenticate_envelope(&secret("   "), &secret("   "), &context());
+        assert_eq!(
+            decision,
+            IngressDecision::Denied {
+                reason: IngressDenyReason::MissingConfiguredCredential
+            }
+        );
+    }
+
+    #[test]
+    fn empty_configured_credential_denies_nonempty_presented() {
+        let decision = authenticate_envelope(&secret("relay-key-1"), &secret(""), &context());
+        assert_eq!(
+            decision,
+            IngressDecision::Denied {
+                reason: IngressDenyReason::MissingConfiguredCredential
             }
         );
     }

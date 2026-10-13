@@ -42,14 +42,33 @@ fn affected(version: &str) -> bool {
     (at_least((39, 0, 0)) && below((48, 0, 4))) || (at_least((49, 0, 0)) && below((49, 0, 2)))
 }
 
-/// Returns `true` when `deny.toml` no longer carries an ignore entry for the
-/// advisory, meaning the waiver was dropped and any wasmtime copy is fair
-/// game for `cargo deny`/`cargo audit` to police on their own.
-fn waiver_dropped(root: &Path) -> bool {
-    let Ok(deny) = fs::read_to_string(root.join("deny.toml")) else {
-        return false;
-    };
-    !deny.contains(ADVISORY)
+/// Outcome of checking where the RUSTSEC-2026-0327 waiver lives.
+enum WaiverState {
+    /// `deny.toml` carries the advisory waiver: enforce the lockfile pin.
+    Active,
+    /// The waiver was dropped from `deny.toml` and no stale reference
+    /// remains anywhere: any wasmtime copy is fair game for `cargo deny`/
+    /// `cargo audit` to police on their own; the guard is inert.
+    Dropped,
+    /// The waiver was dropped from `deny.toml` but `security.yml` still
+    /// passes `--ignore` for the advisory to `cargo audit`: the suppression
+    /// lives on with no lockfile pin — fail loudly.
+    Asymmetric,
+}
+
+/// Classifies the waiver state from `deny.toml` and the security workflow.
+fn waiver_state(root: &Path) -> WaiverState {
+    let deny_has_waiver = fs::read_to_string(root.join("deny.toml"))
+        .map(|deny| deny.contains(ADVISORY))
+        .unwrap_or(false);
+    let workflow_ignores = fs::read_to_string(root.join(".github/workflows/security.yml"))
+        .map(|workflow| workflow.contains(ADVISORY))
+        .unwrap_or(false);
+    match (deny_has_waiver, workflow_ignores) {
+        (true, _) => WaiverState::Active,
+        (false, true) => WaiverState::Asymmetric,
+        (false, false) => WaiverState::Dropped,
+    }
 }
 
 /// One `[[package]]` block: crate name, version, and its direct
@@ -132,8 +151,17 @@ fn dependency_edges(lock: &str) -> PackageEdges {
 /// `yara-x` (directly or via `yara-x-*` macros/parser crates). Anything
 /// else fails the check with the offending edge named.
 pub fn run(root: &Path) -> Result<(), String> {
-    if waiver_dropped(root) {
-        return Ok(());
+    match waiver_state(root) {
+        WaiverState::Active => {}
+        WaiverState::Dropped => return Ok(()),
+        WaiverState::Asymmetric => {
+            return Err(format!(
+                "{ADVISORY} waiver was dropped from deny.toml but \
+                 .github/workflows/security.yml still passes --ignore {ADVISORY} to \
+                 cargo audit: the suppression lives on with no lockfile pin. Remove the \
+                 stale --ignore from the workflow, or restore the deny.toml waiver."
+            ));
+        }
     }
     let lock = fs::read_to_string(root.join("Cargo.lock"))
         .map_err(|e| format!("cannot read Cargo.lock: {e}"))?;
@@ -211,13 +239,29 @@ mod tests {
     }
 
     fn write_guard_dir(dir: &Path, deny_contains_advisory: bool, lock: &str) {
-        fs::create_dir_all(dir).expect("create guard dir");
+        write_guard_dir_with_workflow(dir, deny_contains_advisory, deny_contains_advisory, lock);
+    }
+
+    fn write_guard_dir_with_workflow(
+        dir: &Path,
+        deny_contains_advisory: bool,
+        workflow_contains_advisory: bool,
+        lock: &str,
+    ) {
+        fs::create_dir_all(dir.join(".github/workflows")).expect("create guard dir");
         let deny = if deny_contains_advisory {
             format!("ignore = [\n    {{ id = \"{ADVISORY}\", reason = \"test\" }},\n]\n")
         } else {
             String::from("ignore = []\n")
         };
         fs::write(dir.join("deny.toml"), deny).expect("write deny.toml");
+        let workflow = if workflow_contains_advisory {
+            format!("run: cargo audit --ignore {ADVISORY}\n")
+        } else {
+            String::from("run: cargo audit\n")
+        };
+        fs::write(dir.join(".github/workflows/security.yml"), workflow)
+            .expect("write security.yml");
         fs::write(dir.join("Cargo.lock"), lock).expect("write Cargo.lock");
     }
 
@@ -285,7 +329,21 @@ dependencies = []
 name = "wasmtime"
 version = "44.0.0"
 "#;
-        write_guard_dir(&dir, false, lock);
+        write_guard_dir_with_workflow(&dir, false, false, lock);
         run(&dir).expect("dropped waiver means no local pinning to enforce");
+    }
+
+    #[test]
+    fn run_fails_when_waiver_dropped_but_workflow_still_ignores() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-asymmetric");
+        let lock = r#"
+[[package]]
+name = "wasmtime"
+version = "44.0.0"
+"#;
+        write_guard_dir_with_workflow(&dir, false, true, lock);
+        let error = run(&dir).expect_err("stale workflow ignore with dropped waiver must fail");
+        assert!(error.contains("deny.toml"), "{error}");
+        assert!(error.contains("security.yml"), "{error}");
     }
 }
