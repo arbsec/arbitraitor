@@ -7,12 +7,9 @@ use std::time::{Duration, SystemTime};
 const REPO_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
 const USAGE: &str = "usage: xtask docs-check | cleanup [worktrees|artifacts] [--yes] [--days <n>] | \
-     check-wasmtime-lock | mint-github-token | push-branch [--owner <o>] [--repo <name|owner/name>] \
-     [--branch <local>] [--remote-branch <name>] [--base <ref>] --message <subject> \
-     [--body-file <path>] [--dry-run]";
+     check-wasmtime-lock | mint-github-token";
 
 mod github_mint;
-mod github_push;
 mod wasmtime_lock;
 
 fn repo_root() -> PathBuf {
@@ -22,6 +19,12 @@ fn repo_root() -> PathBuf {
         .expect("could not determine repo root from CARGO_MANIFEST_DIR")
         .to_path_buf()
 }
+
+mod github_push;
+
+const PUSH_BRANCH_USAGE: &str = "usage: xtask push-branch [--owner <o>] [--repo <name|owner/name>] \
+     [--branch <local>] [--remote-branch <name>] [--base <ref>] --message <subject> \
+     [--body-file <path>] [--dry-run]";
 
 struct Adr {
     number: String,
@@ -815,6 +818,7 @@ fn main() -> ExitCode {
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
             eprintln!("{USAGE}");
+            eprintln!("{PUSH_BRANCH_USAGE}");
             ExitCode::FAILURE
         }
     }

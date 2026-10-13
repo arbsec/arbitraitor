@@ -9,14 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- App-signed branch landing (`xtask push-branch`): agent branch pushes land
-  via GraphQL `createCommitOnBranch` behind tree-equality and verification
-  gates with an exact-head CAS ref swing — the landed commit is signed by
-  GitHub itself (`web-flow` committer, `verified: true`), eliminating the
-  misattribution class where a plain `git push` authenticated through the
-  ambient credential helper as the operator's personal account (observed on
-  PR #801). `commit-identity` check script added to the pr-lifecycle skill;
-  `git push` on PR branches is now forbidden by the workflow policy.
 - Ingress-envelope authentication (PR #807, receipt schema v3): relay
   deliveries authenticate through a shared credential before any payload
   processing. Receipts gain the `ingress` bucket (`IngressInfo`:
@@ -181,6 +173,14 @@ caps pending record files at
   recorded in ADR-0041. Adds `http_egress` to the §33.1 MCP capability list
   and a `HttpEgressTool` note to §40.3; tech-stack §4.7 specifies the
   egress client. Documentation-only; the operation lands with #799.
+- App-signed branch landing (`xtask push-branch`): agent branch pushes land
+  via GraphQL `createCommitOnBranch` behind tree-equality and verification
+  gates with an exact-head CAS ref swing — the landed commit is signed by
+  GitHub itself (`web-flow` committer, `verified: true`), eliminating the
+  misattribution class where a plain `git push` authenticated through the
+  ambient credential helper as the operator's personal account (observed on
+  PR #801). `commit-identity` check script added to the pr-lifecycle skill;
+  `git push` on PR branches is now forbidden by the workflow policy.
 
 ### Changed
 
