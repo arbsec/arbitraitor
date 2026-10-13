@@ -504,6 +504,7 @@ impl ArbitraitorApi {
             source,
             Some(&fetch_receipt),
             fetch_receipt.metadata.content_type.clone(),
+            true,
         )?;
         Ok(inspection)
     }
@@ -594,6 +595,7 @@ impl ArbitraitorApi {
             &requested,
             None,
             entry.as_ref().and_then(|m| m.content_type.clone()),
+            true,
         )?;
         Ok(inspection)
     }
@@ -632,6 +634,7 @@ impl ArbitraitorApi {
             &path.to_string_lossy(),
             None,
             None,
+            true,
         )?;
         Ok(inspection)
     }
@@ -974,6 +977,7 @@ impl ArbitraitorApi {
     /// Returns the inspection result plus the terminal operation (in
     /// `AwaitingApproval`) so callers and tests can observe the state
     /// machine's position.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn analyze_and_finalize(
         &self,
         operation: PipelineOperation,
@@ -982,6 +986,7 @@ impl ArbitraitorApi {
         requested_source: &str,
         fetch_receipt: Option<&arbitraitor_fetch::FetchReceipt>,
         content_type: Option<String>,
+        store_children: bool,
     ) -> Result<(InspectionResult, PipelineOperation), EngineError> {
         let mut operation = operation;
         let classification = classify(bytes);
@@ -1000,8 +1005,15 @@ impl ArbitraitorApi {
         let result = self.coordinator.analyze_with_retrieval(bytes, retrieval);
         operation = operation.transition_to(PipelineState::Analyzing)?;
 
-        self.store
-            .with_store(|store| discover_and_store_children(store, bytes, self.store_max_bytes))?;
+        // §11.6 inspect_first: child discovery is suppressed for egress
+        // bodies (ADR-0041 "without CAS population" — extracted children
+        // must not persist in the queryable store; the body itself is never
+        // CAS-stored). Artifact-path callers keep the expansion stage.
+        if store_children {
+            self.store.with_store(|store| {
+                discover_and_store_children(store, bytes, self.store_max_bytes)
+            })?;
+        }
         operation = operation.transition_to(PipelineState::Expanding)?;
 
         let (verdict, policy_trace) = self.resolve_verdict(&result);
@@ -1123,6 +1135,13 @@ impl ArbitraitorApi {
         let data = std::fs::read(&path)?;
         let receipt: Receipt = serde_json::from_slice(&data)
             .map_err(|error| EngineError::Receipt(format!("{}: {error}", path.display())))?;
+        // Gen-3 M1 (defense in depth): an egress-class receipt must never
+        // authorize release even if one ever lands in the artifact
+        // namespace. The namespace move in inspect_egress_body keeps them
+        // out; this guard holds the invariant independently.
+        if receipt.policy.operation_class.as_deref() == Some("egress") {
+            return Err(EngineError::NoReceipt(sha256.to_owned()));
+        }
         Ok(receipt.verdict.verdict)
     }
 }
@@ -1544,6 +1563,18 @@ impl ArbitraitorApi {
         }
     }
 
+    /// Test-only passthrough to the real §11.6 body-outcome gate.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn resolve_egress_body_outcome_for_test(
+        &self,
+        fetch_grant: &arbitraitor_fetch::EgressGrant,
+        response: &arbitraitor_fetch::EgressResponse,
+        url: &str,
+    ) -> Result<EgressBodyOutcome, EngineError> {
+        self.resolve_egress_body_outcome(fetch_grant, response, url)
+    }
+
     /// §11.6 `inspect_first` body path: run the egress body through the
     /// inspection pipeline in-memory (no CAS write) and return the
     /// inspection result whose verdict gates delivery.
@@ -1570,20 +1601,43 @@ impl ArbitraitorApi {
             source_url,
             Some(&synthetic_fetch_receipt(&digest, body.len() as u64)),
             content_type,
+            false,
         )?;
-        // Tag the inspection receipt as egress-class (G2-L1): the body
-        // digest must not masquerade as an artifact CAS identity in
-        // query_receipts(). Inert either way — no CAS entry, so
-        // lookup_verdict_for_release fails closed.
-        let receipt_path = self
+        // The inspection receipt was persisted at the artifact-key path
+        // ({sha256}.json) by analyze_and_finalize — the same namespace
+        // lookup_verdict_for_release reads. Move it into the egress
+        // namespace so it can never clobber an artifact receipt at the
+        // same digest (gen-3 M1: an artifact re-served through an
+        // inspect_first grant would otherwise replace the artifact's
+        // verdict/findings/audit trail), and tag it operation_class =
+        // 'egress' so audit consumers see the dual-receipt shape.
+        let artifact_key_path = self
             .receipts_dir
             .join(format!("{}.json", inspection.sha256));
-        if let Ok(data) = std::fs::read(&receipt_path)
+        let egress_key_path = self.receipts_dir.join(format!("egress-body-{digest}.json"));
+        let mut tagged = None;
+        if let Ok(data) = std::fs::read(&artifact_key_path)
             && let Ok(mut receipt) = serde_json::from_slice::<arbitraitor_receipt::Receipt>(&data)
         {
             receipt.policy.operation_class = Some("egress".to_owned());
-            if let Ok(json) = serde_json::to_vec_pretty(&receipt) {
-                let _ = std::fs::write(&receipt_path, json);
+            tagged = serde_json::to_vec_pretty(&receipt).ok();
+        }
+        match tagged {
+            Some(json) => {
+                std::fs::write(&egress_key_path, json)
+                    .map_err(|error| EngineError::Receipt(error.to_string()))?;
+                // The artifact-namespace copy must not survive: leaving it
+                // would reintroduce the clobber on the next lookup.
+                std::fs::remove_file(&artifact_key_path)
+                    .map_err(|error| EngineError::Receipt(error.to_string()))?;
+            }
+            // Tagging failed (read/parse/serialize): fail loudly rather
+            // than leave an untagged artifact-namespace receipt (gen-3 L3
+            // — silent swallow was the original defect).
+            None => {
+                return Err(EngineError::Receipt(
+                    "egress inspection receipt could not be read for egress tagging".to_owned(),
+                ));
             }
         }
         Ok((inspection, operation))

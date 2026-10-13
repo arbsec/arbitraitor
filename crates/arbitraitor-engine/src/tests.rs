@@ -211,6 +211,7 @@ fn analyze_and_finalize_drives_operation_to_awaiting_approval() {
             path.to_str().unwrap_or(""),
             None,
             None,
+            true,
         )
         .expect("analysis tail must succeed");
 
@@ -869,35 +870,53 @@ query_policy = 'forbidden'
     );
 }
 
-// G2-M2: inspect_first must withhold the body on a non-releasable verdict.
-// The verdict gate is resolve_egress_body_outcome's comparison — unit-test
-// the withholding contract directly with a synthetic Block-verdict
-// inspection (an in-transport E2E would need a live detector pipeline and
-// a mock HTTPS server; the gating branch is the security-relevant unit).
+// G2-M2 + gen-3 L2: inspect_first must withhold the body on a
+// non-releasable verdict. Calls the REAL gate (resolve_egress_body_outcome)
+// with a synthetic response and an inspect_first grant; FAIL_CLOSED policy
+// yields a fail-closed (non-releasable) verdict for unmatched content, so
+// the withheld branch is exercised end-to-end through the production gate.
 #[test]
-fn egress_inspect_first_withholds_on_block_verdict_contract() {
-    // The gate: only Pass|Warn deliver. Everything else → ("withheld",
-    // None, None). Pinned here as the forbidden-effect assertion (a body
-    // MUST NOT reach the caller when the verdict is not releasable).
-    let deliverable = |v: arbitraitor_model::verdict::Verdict| {
-        matches!(
-            v,
-            arbitraitor_model::verdict::Verdict::Pass | arbitraitor_model::verdict::Verdict::Warn
-        )
+fn egress_inspect_first_withholds_non_releasable_verdict() {
+    use arbitraitor_fetch::{EgressBodyTreatment, EgressGrant, EgressQueryPolicy, EgressResponse};
+
+    let api = crate::ArbitraitorApi::new(crate::api::Config {
+        policy_toml: crate::FAIL_CLOSED_POLICY_TOML.to_owned(),
+        ..crate::api::Config::default()
+    })
+    .expect("fail-closed engine");
+    let grant = EgressGrant {
+        id: "g".to_owned(),
+        hosts: vec!["h".to_owned()],
+        path_prefix: String::new(),
+        query_policy: EgressQueryPolicy::Forbidden,
+        pinned_query: None,
+        max_query_bytes: None,
+        max_query_params: None,
+        max_response_bytes: None,
+        allowed_content_types: Vec::new(),
+        body_treatment: EgressBodyTreatment::InspectFirst,
     };
-    for (verdict, expected) in [
-        (arbitraitor_model::verdict::Verdict::Pass, true),
-        (arbitraitor_model::verdict::Verdict::Warn, true),
-        (arbitraitor_model::verdict::Verdict::Block, false),
-        (arbitraitor_model::verdict::Verdict::Incomplete, false),
-        (arbitraitor_model::verdict::Verdict::Error, false),
-    ] {
-        assert_eq!(
-            deliverable(verdict),
-            expected,
-            "{verdict:?} deliverability must be {expected}"
-        );
-    }
+    let response = EgressResponse {
+        grant_id: "g".to_owned(),
+        requested_url: "https://h/x".to_owned(),
+        final_url: "https://h/x".to_owned(),
+        redirect_chain: Vec::new(),
+        status: 200,
+        content_type: "application/octet-stream".to_owned(),
+        body: b"payload".to_vec(),
+        body_treatment: EgressBodyTreatment::InspectFirst,
+        delivered: true,
+    };
+    let (outcome, _delivered, body) = api
+        .resolve_egress_body_outcome_for_test(&grant, &response, "https://h/x")
+        .expect("outcome resolution must succeed");
+    // Forbidden-effect assertion: under FAIL_CLOSED policy the verdict for
+    // an unmatched payload is not releasable, so the body must be withheld.
+    assert_eq!(outcome, "withheld", "non-releasable body must be withheld");
+    assert!(
+        body.is_none(),
+        "withheld body must be None, never delivered"
+    );
 }
 
 /// Test helper: loads a policy TOML and returns the engine or error.

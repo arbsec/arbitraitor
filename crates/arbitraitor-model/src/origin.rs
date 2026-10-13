@@ -83,3 +83,32 @@ impl CallerOrigin {
         !matches!(self, Self::HumanTty | Self::HumanIpc)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::CallerOrigin;
+
+    #[test]
+    fn known_labels_covers_every_variant() {
+        // L1: a new variant added to either as_str() or KNOWN_LABELS but
+        // not both must fail here — the two lists must stay in sync or
+        // policy validation silently stops matching a class.
+        let all: Vec<CallerOrigin> = vec![
+            CallerOrigin::HumanTty,
+            CallerOrigin::HumanIpc,
+            CallerOrigin::Ci,
+            CallerOrigin::McpServer,
+            CallerOrigin::AgentSession,
+            CallerOrigin::DaemonLocal,
+            CallerOrigin::Unknown,
+        ];
+        assert_eq!(all.len(), CallerOrigin::KNOWN_LABELS.len());
+        for origin in all {
+            assert!(
+                CallerOrigin::KNOWN_LABELS.contains(&origin.as_str()),
+                "label {:?} missing from KNOWN_LABELS",
+                origin.as_str()
+            );
+        }
+    }
+}
