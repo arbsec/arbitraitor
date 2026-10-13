@@ -8,6 +8,7 @@
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::os::fd::AsFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -156,14 +157,30 @@ impl NativeExecution {
         );
         configure_filesystem_isolation(&mut command, &fs_rules);
 
+        // Put the child in its own process group so the wall-clock watchdog
+        // can kill the binary and any children it spawns with a single
+        // group kill (mirrors the script/PowerShell paths; spec §9).
+        command.process_group(0);
+
         debug!(binary = %binary_path.display(), "spawning native binary");
         let child = command
             .spawn()
             .map_err(|source| ExecError::Spawn { source })?;
+        // Arm the wall-clock watchdog so the deadline covers the whole
+        // child lifetime (the same fence the script/PowerShell paths
+        // enforce; RLIMIT_CPU cannot bound a child that sleeps or blocks
+        // on I/O).
+        let watchdog = crate::spawn::arm_wall_clock(
+            rustix::process::Pid::from_child(&child),
+            self.resource_limits.wall_clock_secs,
+        );
         // Limits were applied in pre_exec before execve — no race window.
         let output = child
             .wait_with_output()
             .map_err(|source| ExecError::Wait { source })?;
+        // Reaped: resolve the watchdog. Expiry (typed error) takes
+        // precedence over the child's signal-death exit status.
+        crate::spawn::finish_wall_clock(watchdog)?;
         Ok(crate::ExecutionResult {
             exit_code: output.status.code(),
             stdout: output.stdout,
@@ -589,6 +606,7 @@ mod tests {
             process_count: None,
             fd_count: Some(32),
             output_size_bytes: None,
+            wall_clock_secs: None,
         };
         let result = NativeExecution::new()?
             .with_resource_limits(limits)
@@ -627,6 +645,7 @@ mod tests {
             process_count: None,
             fd_count: Some(64),
             output_size_bytes: None,
+            wall_clock_secs: None,
         };
         let result = NativeExecution::new()?
             .with_resource_limits(limits)

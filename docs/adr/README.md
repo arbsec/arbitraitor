@@ -63,6 +63,7 @@ supersede it.
 | [0039](0039-receipt-envelope-structure.md) | Receipt envelope structure (spec §31.1) | Accepted | #492 |
 | [0040](0040-wasmtime-security-floor.md) | Wasmtime security floor in Cargo.toml | Accepted | — |
 | [0041](0041-mediated-get-only-http-egress.md) | Mediated GET-only HTTP egress for agent web tools | Accepted | #797 |
+| [0042](0042-wall-clock-deadline-process-group-kill.md) | Wall-clock deadline and process-group kill for mediated execution | Accepted | #760 |
 
 ## Format
 

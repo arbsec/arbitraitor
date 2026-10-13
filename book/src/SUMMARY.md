@@ -76,6 +76,7 @@
   - [ADR 0039: Receipt envelope structure](./adr/0039-receipt-envelope-structure.md)
   - [ADR 0040: Wasmtime security floor in Cargo.toml](./adr/0040-wasmtime-security-floor.md)
   - [ADR 0041: Mediated GET-only HTTP egress for agent web tools](./adr/0041-mediated-get-only-http-egress.md)
+  - [ADR 0042: Wall-clock deadline and process-group kill for mediated execution](./adr/0042-wall-clock-deadline-process-group-kill.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)
