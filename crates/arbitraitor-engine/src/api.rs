@@ -1306,12 +1306,19 @@ fn fetch_grant_view(grant: &arbitraitor_policy::EgressGrant) -> arbitraitor_fetc
 /// `egress/<grant>/<url>/<unix-millis nonce>`. Never collides with an
 /// artifact receipt (those are keyed by the artifact digest).
 fn egress_receipt_key(grant_id: &str, url: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    // Per-process monotonic counter + nanosecond timestamp: two calls in
+    // the same millisecond (the gen-4 LOW-1 collision) can no longer share
+    // a key — the counter alone disambiguates same-process calls, and the
+    // nanos cover cross-process restarts within a millisecond.
+    static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let call = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let digest = Sha256::digest(format!("egress/{grant_id}/{url}/{nonce}").as_bytes());
+    let digest = Sha256::digest(format!("egress/{grant_id}/{url}/{nonce}/{call}").as_bytes());
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
         let _ = write!(hex, "{byte:02x}");
@@ -1624,10 +1631,20 @@ impl ArbitraitorApi {
         }
         match tagged {
             Some(json) => {
-                std::fs::write(&egress_key_path, json)
+                // Write-to-temp + atomic rename (gen-4 LOW-2): a crash can
+                // no longer leave an untagged receipt at the artifact key.
+                // The temp file lives beside the destination (same
+                // filesystem, atomic rename guarantee) with a unique name.
+                let temp_path = self
+                    .receipts_dir
+                    .join(format!(".egress-body-tmp-{digest}-{}", std::process::id()));
+                std::fs::write(&temp_path, json)
+                    .map_err(|error| EngineError::Receipt(error.to_string()))?;
+                std::fs::rename(&temp_path, &egress_key_path)
                     .map_err(|error| EngineError::Receipt(error.to_string()))?;
                 // The artifact-namespace copy must not survive: leaving it
-                // would reintroduce the clobber on the next lookup.
+                // would reintroduce the clobber on the next lookup. Remove
+                // only after the rename has landed.
                 std::fs::remove_file(&artifact_key_path)
                     .map_err(|error| EngineError::Receipt(error.to_string()))?;
             }
