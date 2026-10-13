@@ -125,8 +125,13 @@ monotonicity applies to every property).
   URL. Name denylists cannot enumerate every credential parameter, so an
   unlisted query value that matches the credential value-shape rules in
   §11.6 (high-entropy opaque tokens, JWT-shaped or UUID-shaped values in
-  credential-position parameters) must never reach a receipt either:
-  implementations (#799) apply these value-shape safeguards in addition to
+  credential-position parameters) must never reach a receipt either. For
+  values matching neither the denylist nor the value shapes and not
+  otherwise establishable as non-credential, the fallback is fail-closed:
+  before a receipt is recorded, the unestablishable value is redacted to
+  its class, and an unredactable value fails the request rather than
+  reaching the receipt — across requested URLs, final URLs, and redirect
+  chains. Implementations (#799) apply these safeguards in addition to
   the denylist, and policy authors MUST NOT grant `allowed` query policy on
   hosts known to accept credentials in query parameters — use
   `pinned`/`bounded` so the grant shape itself bounds what can leak.

@@ -743,11 +743,16 @@ this capability; ADR-0041 records the decision.
   value-shape rules** — high-entropy opaque tokens (≥24 mixed-case
   alphanumeric/URL-safe characters), JWT-shaped values (three dot-separated
   base64url segments), or UUID-shaped values in a credential-position
-  parameter — must never reach a receipt either: implementations (#799)
-  apply these value-shape safeguards in addition to the denylist, and
-  policy authors MUST NOT grant `allowed` query policy on hosts known to
-  accept credentials in query parameters — use `pinned`/`bounded` so the
-  grant shape itself bounds what can leak.
+  parameter — must never reach a receipt either. For values matching
+  neither the denylist nor the value shapes and not otherwise establishable
+  as non-credential, the fallback is fail-closed: before a receipt is
+  recorded, the unestablishable value is redacted to its class (an
+  unredactable value fails the request rather than reaching the receipt).
+  This fallback applies to requested URLs, final URLs, and redirect chains.
+  Implementations (#799) apply these safeguards in addition to the
+  denylist, and policy authors MUST NOT grant `allowed` query policy on
+  hosts known to accept credentials in query parameters — use
+  `pinned`/`bounded` so the grant shape itself bounds what can leak.
 - **Grant-scoped.** Every request executes under an egress grant: an explicit
   policy object scoping the operation to allowlisted host(s), the `GET`
   method, a path prefix, response size, and response content types. A request
