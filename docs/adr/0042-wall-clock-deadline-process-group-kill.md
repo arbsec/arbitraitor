@@ -56,8 +56,14 @@ so the harness can record "stopped at deadline" (spec §9.24-style
    seccomp denial of `setsid`/`setpgid`) was rejected: the fence's purpose
    is a resource backstop, not containment — filesystem, network, and
    process containment are Landlock/unshare/seccomp's job
-   (ADR-0008/0020/0021), and a detached survivor holds no parent resources
-   (its inherited pipe FDs close when the reaped parent group dies).
+   (ADR-0008/0020/0021), and a detached survivor does not hang the parent
+   either: the output-drain threads are deadline-aware (they poll a shared
+   expiry flag the deadline thread raises after the group kill, exiting
+   with their partial bytes instead of waiting for a pipe EOF that a
+   `setsid` survivor holding the inherited write-ends could defer
+   indefinitely), so the parent reaps the child and reports
+   `WallClockExpired` at the deadline even when an out-of-group descendant
+   survives.
    `ESRCH`
    from the group kill is treated as success (the goal — a dead group — is
    met); any other kill error is surfaced as

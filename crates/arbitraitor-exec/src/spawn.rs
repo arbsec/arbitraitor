@@ -113,6 +113,12 @@ struct Watchdog {
     limit_secs: u64,
     /// Set by the deadline thread when it has killed the process group.
     expired: AtomicBool,
+    /// Shared with the output-drain threads: set by the deadline thread
+    /// after the group kill so a drain blocked on a pipe held open by an
+    /// out-of-group descendant (a `setsid` survivor the kill cannot reach)
+    /// wakes and exits promptly instead of hanging the parent past the
+    /// deadline.
+    drain_expired: Arc<AtomicBool>,
     /// Set by the deadline thread when the group kill errored (non-ESRCH).
     /// The caller surfaces [`ExecError::WallClockKillFailed`] when the child
     /// is not confirmed dead.
@@ -131,6 +137,7 @@ impl Watchdog {
         Self {
             limit_secs,
             expired: AtomicBool::new(false),
+            drain_expired: Arc::new(AtomicBool::new(false)),
             kill_failed: Mutex::new(None),
             done: AtomicBool::new(false),
         }
@@ -220,6 +227,12 @@ pub(crate) fn arm_wall_clock(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
         }
+        // Wake the output-drain threads only after the kill has been
+        // attempted: a drain blocked on a pipe write-end still held by an
+        // out-of-group descendant (e.g. a `setsid` survivor) observes this
+        // flag and exits promptly with its partial bytes instead of
+        // blocking the parent past the deadline.
+        thread_state.drain_expired.store(true, Ordering::Release);
     });
     WallClockGuard {
         state: Some(state),
@@ -274,7 +287,8 @@ pub(crate) fn finish_wall_clock(mut guard: WallClockGuard) -> Result<(), ExecErr
     Ok(())
 }
 
-/// Reads stdout and stderr concurrently, enforcing a combined byte cap.
+/// Reads stdout and stderr concurrently, enforcing a combined byte cap and
+/// honoring the wall-clock deadline.
 ///
 /// Both pipes are drained in dedicated threads so that a child writing to both
 /// streams cannot deadlock against a full pipe the parent is not reading. If
@@ -285,6 +299,18 @@ pub(crate) fn finish_wall_clock(mut guard: WallClockGuard) -> Result<(), ExecErr
 /// `watchdog` must be the guard armed for this child by
 /// [`arm_wall_clock`] (a disabled guard is fine). The deadline covers the
 /// whole child lifetime because the guard is armed at spawn time.
+///
+/// Expiry bounds the parent even when a descendant escaped the process group:
+/// a `setsid` survivor keeps the pipes' write-ends open, so an unbounded
+/// blocking read would hang past the deadline. Instead the deadline thread
+/// kills the group, then raises [`Watchdog::drain_expired`], which the drain
+/// threads poll (they never block on a read for more than one poll interval)
+/// so they exit promptly with whatever partial bytes they captured. The main
+/// thread reaps the child directly (never joins the drains first) and joins
+/// the drains only afterwards, when the flag guarantees they are finishing.
+///
+/// If the child exits normally first, the flag is never set and the drains
+/// end at EOF exactly as before.
 ///
 /// On success returns the exit code (if any) and the captured stdout/stderr.
 ///
@@ -303,19 +329,28 @@ pub(crate) fn read_with_limit(
     let stderr = child.stderr.take();
     let pid = rustix::process::Pid::from_child(child);
     let total = Arc::new(AtomicU64::new(0));
+    // `None` when the deadline is disabled: the drains then run to EOF (the
+    // historical behavior — the caller opted out of the fence).
+    let drain_flag = watchdog
+        .state
+        .as_ref()
+        .map(|state| Arc::clone(&state.drain_expired));
+    let drain_expired = drain_flag.as_ref();
 
-    let stdout_handle = stdout.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid));
-    let stderr_handle = stderr.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid));
+    let stdout_handle =
+        stdout.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid, drain_expired));
+    let stderr_handle =
+        stderr.map(|stream| drain_stream(stream, Arc::clone(&total), limit, pid, drain_expired));
 
-    let captured_stdout = stdout_handle
-        .map(|handle| handle.join().unwrap_or_default())
-        .unwrap_or_default();
-    let captured_stderr = stderr_handle
-        .map(|handle| handle.join().unwrap_or_default())
-        .unwrap_or_default();
+    // Reap the direct child FIRST: joining the drains here would let an
+    // out-of-group descendant holding a pipe write-end block the parent past
+    // the deadline. The drains are guaranteed to exit soon after expiry (the
+    // flag) or EOF (normal completion), so they are joined after the reap.
+    let status = child.wait().map_err(|source| ExecError::Wait { source })?;
+    let captured_stdout = stdout_handle.map(|handle| handle.join().unwrap_or_default());
+    let captured_stderr = stderr_handle.map(|handle| handle.join().unwrap_or_default());
 
     let actual = total.load(Ordering::Relaxed);
-    let status = child.wait().map_err(|source| ExecError::Wait { source })?;
 
     // Reaped: resolve the watchdog before interpreting the result. Expiry
     // (with its typed error) takes precedence over the child's exit status
@@ -326,7 +361,11 @@ pub(crate) fn read_with_limit(
     if actual > limit {
         return Err(ExecError::OutputExceeded { limit, actual });
     }
-    Ok((status.code(), captured_stdout, captured_stderr))
+    Ok((
+        status.code(),
+        captured_stdout.unwrap_or_default(),
+        captured_stderr.unwrap_or_default(),
+    ))
 }
 
 /// Kills the child's process group at deadline expiry, treating ESRCH as
@@ -350,19 +389,56 @@ fn kill_child_group_at_deadline(pid: rustix::process::Pid) -> Result<(), ExecErr
 /// Drains a single pipe into a buffer, updating the shared byte counter.
 ///
 /// When the counter crosses `limit`, the producing child is killed so the
-/// sibling pipe observes EOF and the loop can exit instead of blocking on a
+/// sibling stream observes EOF and the loop can exit instead of blocking on a
 /// full pipe the stopped producer can no longer drain.
-fn drain_stream<R: Read + Send + 'static>(
-    mut stream: R,
+///
+/// `expired` bounds the drain against the wall-clock deadline: when set (by
+/// the deadline thread after the process-group kill), the drain exits
+/// promptly with its partial bytes even though an out-of-group descendant
+/// (a `setsid` survivor the group kill cannot reach) still holds a write-end
+/// of the pipe. With a flag, the fd is flipped to `O_NONBLOCK` so reads never
+/// block: each iteration re-checks the flag and sleeps
+/// [`DRAIN_POLL_INTERVAL_MS`] between would-block attempts, so the drain
+/// observes expiry within one poll interval. Without a flag (`None`,
+/// deadline disabled) the drain is the historical blocking read-to-EOF loop.
+fn drain_stream<R: Read + std::os::unix::io::AsFd + Send + 'static>(
+    stream: R,
     total: Arc<AtomicU64>,
     limit: u64,
     pid: rustix::process::Pid,
+    expired: Option<&Arc<AtomicBool>>,
 ) -> thread::JoinHandle<Vec<u8>> {
+    let deadline_aware = expired.is_some();
+    let expired = expired.cloned();
     thread::spawn(move || {
+        let mut stream = stream;
+        // Non-blocking setup is best-effort: on failure fall back to
+        // blocking reads. The flag is then only observed between reads that
+        // return data, but the overall run is still bounded by the deadline
+        // thread's group kill.
+        let setup = if deadline_aware {
+            set_nonblocking(&stream)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = setup {
+            tracing::warn!(error = %error, "could not set pipe non-blocking for deadline-aware drain");
+        }
         let mut buffer = Vec::new();
         let mut chunk = [0_u8; 8192];
         loop {
+            if expired
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                break;
+            }
             match stream.read(&mut chunk) {
+                // Non-blocking pipe with no data yet: sleep one poll
+                // interval so the expiry flag is re-checked promptly.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(DRAIN_POLL_INTERVAL_MS));
+                }
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     let read_bytes = read as u64;
@@ -382,11 +458,31 @@ fn drain_stream<R: Read + Send + 'static>(
     })
 }
 
+/// Milliseconds between expiry-flag checks in the deadline-aware drain loop.
+const DRAIN_POLL_INTERVAL_MS: u64 = 25;
+
+/// Flips a readable stream's fd to non-blocking mode so reads return
+/// immediately instead of blocking while the expiry flag is pending.
+fn set_nonblocking(stream: &impl std::os::unix::io::AsFd) -> std::io::Result<()> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
+    let fd = stream.as_fd();
+    let mut flags = fcntl_getfl(fd).map_err(rustix_to_io_error)?;
+    flags.insert(OFlags::NONBLOCK);
+    fcntl_setfl(fd, flags).map_err(rustix_to_io_error)
+}
+
+/// Converts a rustix error into a [`std::io::Error`].
+fn rustix_to_io_error(error: rustix::io::Errno) -> std::io::Error {
+    std::io::Error::from_raw_os_error(error.raw_os_error())
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+    use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
 
@@ -433,6 +529,65 @@ mod tests {
             }
             other => return Err(format!("expected OutputExceeded, got {other:?}").into()),
         }
+        Ok(())
+    }
+
+    /// Resolves when the `setsid` helper binary is installed, else `Err`
+    /// (callers skip the test).
+    fn setsid_or_skip() -> Result<&'static str, &'static str> {
+        if Path::new("/usr/bin/setsid").exists() {
+            Ok("/usr/bin/setsid")
+        } else if Path::new("/bin/setsid").exists() {
+            Ok("/bin/setsid")
+        } else {
+            Err("setsid not installed")
+        }
+    }
+
+    #[test]
+    fn deadline_bounds_drain_when_setsid_descendant_holds_stdout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Regression test for the CodeRabbit finding: a descendant that
+        // escapes the process group (setsid) inherits the pipe write-ends,
+        // so the group kill cannot end its output and an EOF-blocking drain
+        // would hang the parent past the deadline. The drain must observe
+        // the shared expiry flag and exit promptly; the call must return
+        // WallClockExpired in bounded time.
+        let bash = bash_or_skip()?;
+        let setsid = setsid_or_skip()?;
+        let mut command = Command::new(bash);
+        command.arg("-c").arg(format!(
+            // A grandchild in a new session (the group kill cannot reach it)
+            // that inherits and holds the pipe write-ends forever — no
+            // redirect, unlike a well-behaved daemon — plus a marker byte so
+            // the drain has captured data at expiry. Mirrors production
+            // wiring with process_group(0).
+            "{setsid} sleep 30 &\n\
+             echo started\n\
+             exec sleep 30\n"
+        ));
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        command.process_group(0);
+        let mut child = command.spawn()?;
+        let watchdog =
+            crate::spawn::arm_wall_clock(rustix::process::Pid::from_child(&child), Some(1));
+        let started = std::time::Instant::now();
+        let result = read_with_limit(&mut child, DEFAULT_OUTPUT_LIMIT, watchdog);
+        let elapsed = started.elapsed();
+        match result {
+            Err(ExecError::WallClockExpired { limit_secs: 1 }) => {}
+            Err(ExecError::WallClockExpired { limit_secs }) => {
+                return Err(format!("expected limit_secs 1, got {limit_secs}").into());
+            }
+            other => {
+                return Err(format!("expected WallClockExpired, got {other:?}").into());
+            }
+        }
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "expiry must bound the parent even with an out-of-group pipe holder: {elapsed:?}"
+        );
         Ok(())
     }
 

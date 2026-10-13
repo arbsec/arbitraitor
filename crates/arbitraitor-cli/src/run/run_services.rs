@@ -137,9 +137,10 @@ impl RunServices for DefaultRunServices {
     }
 }
 
-/// Maps a script-execution failure to a [`RunFailure`], distinguishing
-/// wall-clock expiry from ordinary execution failure so harnesses can record
-/// "stopped at deadline" rather than a crash (issue #760).
+/// Maps a script or native execution failure to a [`RunFailure`],
+/// distinguishing wall-clock expiry from ordinary execution failure so
+/// harnesses can record "stopped at deadline" rather than a crash (issue
+/// #760).
 ///
 /// Deadline expiry maps to `RunFailure::AnalysisIncomplete` (exit code 34,
 /// "incomplete due to resource limit") because the mediated run was aborted
@@ -384,7 +385,7 @@ fn execute_native_artifact(
         .map_err(|error| RunFailure::Execution(error.to_string()))?
         .execute(&path)
         .map(execution_output)
-        .map_err(|error| RunFailure::Execution(error.to_string()))
+        .map_err(|error| map_exec_failure(&error))
 }
 
 #[cfg(not(target_os = "linux"))]
