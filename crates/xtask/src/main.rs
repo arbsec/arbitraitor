@@ -20,6 +20,12 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+mod github_push;
+
+const PUSH_BRANCH_USAGE: &str = "usage: xtask push-branch [--owner <o>] [--repo <name|owner/name>] \
+     [--branch <local>] [--remote-branch <name>] [--base <ref>] --message <subject> \
+     [--body-file <path>] [--dry-run]";
+
 struct Adr {
     number: String,
     title: String,
@@ -808,9 +814,11 @@ fn main() -> ExitCode {
             }
         },
         Some("mint-github-token") => github_mint::run(),
+        Some("push-branch") => github_push::run(&args[2..]),
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
             eprintln!("{USAGE}");
+            eprintln!("{PUSH_BRANCH_USAGE}");
             ExitCode::FAILURE
         }
     }

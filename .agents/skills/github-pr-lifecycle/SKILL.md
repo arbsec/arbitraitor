@@ -45,6 +45,23 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   unchecked — checkboxes are verified facts, not intentions.
 
 2. CI             Push commits; watch checks with `pr-checks`.
+                  **Land every commit via `cargo run -p xtask -- push-branch --message "..."`**
+                  (the App-signed landing path — see
+                  [`references/verified-commit-path.md`](references/verified-commit-path.md)):
+                  it creates the remote commit through GraphQL
+                  `createCommitOnBranch` (committer `GitHub <noreply@github.com>`,
+                  `verified: true`), moving the real ref only after tree-equality
+                  and verification gates pass, behind an exact-head CAS
+                  precondition. NEVER use plain `git push` for PR branches: the
+                  credential helper can silently authenticate as the operator's
+                  personal account (misattributed ref updates, incident
+                  2026-10-13 on PR #801), and a locally-created bot-identity
+                  commit can never verify. Before any local `git commit` destined
+                  for a PR branch, run `bash .agents/skills/github-pr-lifecycle/scripts/commit-identity
+                  check` — the author must be the service principal (`--author=`),
+                  the committer must stay the operator identity (never the
+                  bot), and the script prints a DCO convention hint (the
+                  commit command must carry `-s`).
                   Classify each failure:
                     transient (timeout, 429, 5xx, runner OOM)  → bounded retry per arbitraitor-workflow.md "Failure classification"
                     real failure                              → fix root cause; do NOT reroll
@@ -137,7 +154,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 - **Review threads via GraphQL.** `gh pr view` has no `reviewThreads` field (verified, see `gh-capabilities.md`). Use `gh api graphql` with the `pullRequest.reviewThreads` connection.
 - **Dry-run first.** `merge-gate --dry-run` prints the verdict and the exact `gh pr merge` command it would run; writes nothing.
 - **Match-head-commit.** `gh pr merge --squash` uses `--match-head-commit` to refuse merge if the head moved between the gate check and the merge call.
-- **Service identity, not personal accounts.** Agent-driven PR, issue, and review operations MUST authenticate as the project's GitHub App service identity — never a personal account. PRs, comments, and reviews attribute to the bot identity; commits are authored with the bot identity and DCO sign-off, while the committer stays the ambient local git identity of the operator (whose registered signing key satisfies required_signatures) — never the bot, which owns no signing key. For arbsec that is the `arbsec-agent` App (org-owned, installation-scoped; tokens minted from the App private key). Until the App is registered, personal owner auth is an explicitly labelled fallback only, never an equal option.
+- **Service identity, not personal accounts.** Agent-driven PR, issue, and review operations MUST authenticate as the project's GitHub App service identity — never a personal account. PRs, comments, and reviews attribute to the bot identity. Branch commits land via `xtask push-branch` (App-API `createCommitOnBranch`: author is the bot per the commit message, committer is GitHub `web-flow`, `verified: true` — no local signing key involved). Local multi-commit chains keep the audited local shape (author=bot + DCO `-s`, committer=operator identity) and are landed tree-identically by `push-branch`. Never `git push` a PR branch: the credential helper can silently authenticate as the operator's personal account, and a locally-created bot-identity commit can never verify (`required_signatures`). For arbsec that is the `arbsec-agent` App (org-owned, installation-scoped; tokens minted from the App private key). Until the App is registered, personal owner auth is an explicitly labelled fallback only, never an equal option.
 
 ## How this skill relates to project policy
 
