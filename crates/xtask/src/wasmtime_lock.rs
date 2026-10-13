@@ -98,17 +98,24 @@ fn dependency_edges(lock: &str) -> PackageEdges {
     let mut version = String::new();
     let mut deps = BTreeSet::new();
     let mut in_deps = false;
+    // Whether the current section is a `[[package]]` block. Field
+    // collection (name/version/dependencies) and the flush paths are
+    // gated on this so keys inside `[[patch.unused]]`, `[patch.*]`,
+    // `[metadata]`, ... sections can never be mistaken for package
+    // fields.
+    let mut in_package = false;
     for line in lock.lines() {
         let trimmed_line = line.trim();
         if trimmed_line.starts_with('[') {
-            // Section header. Flush accumulated state ONLY for an exact
-            // `[[package]]` header; any other section (`[[patch.unused]]`,
-            // `[patch.*]`, `[metadata]`, ...) must discard the pending
-            // name/version/deps without emitting and without inheriting
-            // the previous package block's identity — otherwise a trailing
-            // patch entry could masquerade as a package and launder an
-            // affected wasmtime edge through a waived parent name.
-            if trimmed_line == "[[package]]" && !name.is_empty() {
+            // Section header. Because field collection below is gated on
+            // `in_package`, any pending name/version/deps here can only
+            // have come from a `[[package]]` block, so flush it on every
+            // header — a non-package header (`[[patch.unused]]`,
+            // `[patch.*]`, `[metadata]`, ...) must not discard the real
+            // package block that just ended, but neither can it launder
+            // its own keys into package fields and masquerade as a
+            // package.
+            if in_package && !name.is_empty() {
                 edges.push((
                     std::mem::take(&mut name),
                     std::mem::take(&mut version),
@@ -119,7 +126,11 @@ fn dependency_edges(lock: &str) -> PackageEdges {
                 version.clear();
                 deps.clear();
             }
+            in_package = trimmed_line == "[[package]]";
             in_deps = false;
+            continue;
+        }
+        if !in_package {
             continue;
         }
         if in_deps {
@@ -168,7 +179,9 @@ fn dependency_edges(lock: &str) -> PackageEdges {
             _ => {}
         }
     }
-    if !name.is_empty() {
+    // A file ending inside a package section flushes normally; a trailing
+    // non-package section leaves `in_package` false so nothing is emitted.
+    if in_package && !name.is_empty() {
         edges.push((name, version, deps));
     }
     edges
@@ -661,5 +674,99 @@ version = "45.0.3"
         write_guard_dir(&dir, true, lock);
         let error = run(&dir).expect_err("prefix-matched ghost parent must not waive the edge");
         assert!(error.contains("yara-x-evil"), "{error}");
+    }
+
+    #[test]
+    fn valid_lockfile_with_trailing_unused_wasmtime_patch_passes() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-trailing-patch-valid");
+        // A valid lockfile: exactly one resolved wasmtime copy (45.0.3, via
+        // yara-x with a versionless edge) plus a trailing [[patch.unused]]
+        // entry naming wasmtime 44.0.0. The patch entry must NOT be counted
+        // as a second wasmtime copy, or the versionless edge would fail
+        // closed with "multiple wasmtime copies" and reject a valid
+        // lockfile.
+        let lock = r#"
+[[package]]
+name = "yara-x"
+version = "1.20.0"
+dependencies = [
+ "wasmtime",
+]
+
+[[package]]
+name = "wasmtime"
+version = "45.0.3"
+
+[[patch.unused]]
+name = "wasmtime"
+version = "44.0.0"
+"#;
+        write_guard_dir(&dir, true, lock);
+        run(&dir).expect("trailing [[patch.unused]] wasmtime entry must not look like a copy");
+    }
+
+    #[test]
+    fn unused_patch_between_packages_does_not_create_phantom_edge() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-patch-between-packages");
+        // A [[patch.unused]] block between two [[package]] blocks: its
+        // collected name/version/dependencies must be discarded at the
+        // next [[package]] header, not flushed as a phantom wasmtime copy.
+        // With the fix there is exactly one wasmtime copy (44.0.0), so the
+        // dependent's versionless edge resolves to it and the affected
+        // copy is flagged — never a "multiple wasmtime copies" error.
+        let lock = r#"
+[[package]]
+name = "zzz-evil-relay"
+version = "0.1.0"
+dependencies = [
+ "wasmtime",
+]
+
+[[patch.unused]]
+name = "wasmtime"
+version = "44.0.0"
+dependencies = [
+ "something-else 1.0.0",
+]
+
+[[package]]
+name = "wasmtime"
+version = "44.0.0"
+"#;
+        write_guard_dir(&dir, true, lock);
+        let error = run(&dir).expect_err("inter-block patch must not suppress the real flagging");
+        assert!(error.contains("wasmtime 44.0.0"), "{error}");
+        assert!(error.contains("zzz-evil-relay"), "{error}");
+        assert!(!error.contains("multiple wasmtime copies"), "{error}");
+    }
+
+    #[test]
+    fn fields_outside_package_sections_are_ignored() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-fields-outside-packages");
+        // A trailing [metadata] section carrying name/version/dependencies
+        // keys that reference wasmtime: those fields must contribute no
+        // edges, so the guard sees only the single waived 45.0.3 copy and
+        // passes.
+        let lock = r#"
+[[package]]
+name = "yara-x"
+version = "1.20.0"
+dependencies = [
+ "wasmtime 45.0.3",
+]
+
+[[package]]
+name = "wasmtime"
+version = "45.0.3"
+
+[metadata]
+name = "wasmtime"
+version = "44.0.0"
+dependencies = [
+ "wasmtime 45.0.3",
+]
+"#;
+        write_guard_dir(&dir, true, lock);
+        run(&dir).expect("[metadata] fields must not create edges or copies");
     }
 }
