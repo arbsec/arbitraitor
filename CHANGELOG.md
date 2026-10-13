@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ambient credential helper as the operator's personal account (observed on
   PR #801). `commit-identity` check script added to the pr-lifecycle skill;
   `git push` on PR branches is now forbidden by the workflow policy.
+- Ingress-envelope authentication (PR #807, receipt schema v3): relay
+  deliveries authenticate through a shared credential before any payload
+  processing. Receipts gain the `ingress` bucket (`IngressInfo`:
+  credential id, durable GitHub delivery key, transport node identity,
+  accept/deny outcome, typed deny reason); the receipt schema version
+  bumps to 3 and v2 documents are migrated in place on parse
+  (`migrated_from_v2` clears any `ingress` bucket a crafted v2 document
+  carries, so it is normalized, not trusted). The policy crate gains the
+  public `authenticate_envelope` function and typed `IngressDecision`
+  (fail-closed credential, delivery-key, and repository checks), and
+  policies may condition on `ingress.*` fields. `xtask` gains the
+  `check-wasmtime-lock` subcommand, a guard enforcing the
+  RUSTSEC-2026-0327 lockfile-waiver posture: it fails when the
+  `deny.toml` waiver is dropped while the security workflow still passes
+  `--ignore RUSTSEC-2026-0327` to cargo audit, and it rejects any
+  affected `wasmtime` copy not covered by the waiver (the waived
+  `45.0.3` copy must be reached only through the exact waiver parent
+  set).
 - Mediated HTTP egress (#799, spec §11.6 / ADR-0041):
   `ArbitraitorApi::http_egress` executes grant-authorized GETs through the
   hardened transport path (per-hop resolution + connected-peer
@@ -36,6 +54,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon gains the `HttpEgress` request. The bounded body is never an
   artifact and never releasable/executable by Arbitraitor; GET-only by
   construction (spec §39.7 upload line unchanged).
+- `arbitraitor_exec::ResourceLimits::wall_clock_secs` and
+  `arbitraitor_exec::DEFAULT_WALL_CLOCK_SECS` (300 s, ADR-0042): a
+  default-on wall-clock deadline for mediated execution that fires even when
+  the child consumes no CPU (which `RLIMIT_CPU` cannot stop). On expiry the
+  child's process group is killed — the interpreter and every descendant
+  that remained in its default group die together (a script that calls
+  `setsid`/`setpgid` opts out, which is observable malicious behavior) —
+  and execution fails with the new typed error
+  `arbitraitor_exec::ExecError::WallClockExpired`, distinguishable from an
+  ordinary crash; a failed group kill fails closed with
+  `ExecError::WallClockKillFailed` when the child is not confirmed dead.
+  The fence is enforced on every Unix platform (script, PowerShell, and
+  native paths); the CPU/memory/process/fd limits remain Linux-only.
+  Setting `wall_clock_secs = None` disables the fence for explicitly
+  trusted, caller-driven paths. The CLI `run` pipeline maps deadline expiry
+  to exit code 34 (analysis incomplete due to resource limit) so harnesses
+  record "stopped at deadline" (#760). Native-path output is now capped at
+  `ResourceLimits::output_size_bytes` (default 10 MiB), failing with
+  `ExecError::OutputExceeded`, matching the script/PowerShell paths.
+- `arbitraitor-exec` children are now spawned in their own process group
+  (script, PowerShell, and native paths), matching the plugin host's
+  existing containment and enabling the deadline's group-wide kill.
 - `arbitraitor-engine` crate (ADR-0038, accepted): the single consolidated
   pipeline engine owning fetch → store → analyze → provenance → receipt →
   verdict → release. Public surface: `Arbitraitor`, `ArbitraitorBuilder`,
