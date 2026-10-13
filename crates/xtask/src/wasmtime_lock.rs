@@ -14,6 +14,11 @@ use std::path::Path;
 
 /// Advisory ID the waiver covers.
 const ADVISORY: &str = "RUSTSEC-2026-0327";
+/// The `cargo audit` suppression flag the security workflow must pass while
+/// the waiver is active. Matching the full flag (not the bare advisory ID)
+/// keeps comments, step names, or unrelated mentions of the ID from being
+/// mistaken for an active suppression.
+const IGNORE_FLAG: &str = "--ignore RUSTSEC-2026-0327";
 /// The only wasmtime version the waiver is scoped to.
 const WAIVED_VERSION: &str = "45.0.3";
 
@@ -62,7 +67,7 @@ fn waiver_state(root: &Path) -> WaiverState {
         .map(|deny| deny.contains(ADVISORY))
         .unwrap_or(false);
     let workflow_ignores = fs::read_to_string(root.join(".github/workflows/security.yml"))
-        .map(|workflow| workflow.contains(ADVISORY))
+        .map(|workflow| workflow.contains(IGNORE_FLAG))
         .unwrap_or(false);
     match (deny_has_waiver, workflow_ignores) {
         (true, _) => WaiverState::Active,
@@ -167,20 +172,49 @@ pub fn run(root: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot read Cargo.lock: {e}"))?;
     let edges = dependency_edges(&lock);
 
+    // Cargo writes a versionless edge (`"wasmtime"`) when the lockfile has
+    // exactly one wasmtime copy. Collect the wasmtime versions FIRST and
+    // resolve every versionless edge against that set; an ambiguous or
+    // unknown target fails closed instead of silently matching the wrong
+    // (or no) copy.
+    let wasmtime_versions: Vec<String> = edges
+        .iter()
+        .filter(|(name, _, _)| name == "wasmtime")
+        .map(|(_, version, _)| version.clone())
+        .collect();
+    let resolve_edge_version = |dep_version: &str| -> Result<String, String> {
+        if !dep_version.is_empty() {
+            return Ok(dep_version.to_owned());
+        }
+        match wasmtime_versions.as_slice() {
+            [] => Err(format!(
+                "{ADVISORY}: Cargo.lock contains a versionless wasmtime \
+                 dependency edge but no wasmtime [[package]] block; cannot \
+                 determine which copy the edge targets"
+            )),
+            [only] => Ok(only.clone()),
+            many => Err(format!(
+                "{ADVISORY}: Cargo.lock contains a versionless wasmtime \
+                 dependency edge but multiple wasmtime copies ({}); cannot \
+                 determine which copy the edge targets",
+                many.join(", ")
+            )),
+        }
+    };
+
     // Reverse edges: (dependent name, dependent version) -> wasmtime copy
-    // version. Keys of the map are the wasmtime versions in the lockfile.
+    // version. Keys of the map are the resolved wasmtime versions.
     let mut parents_of: Vec<(String, Vec<String>)> = Vec::new();
     for (name, version, deps) in &edges {
         for (dep_name, dep_version) in deps {
             if dep_name != "wasmtime" {
                 continue;
             }
-            let entry = parents_of
-                .iter_mut()
-                .find(|(v, _)| v == dep_version || dep_version.is_empty());
+            let resolved = resolve_edge_version(dep_version)?;
+            let entry = parents_of.iter_mut().find(|(v, _)| v == &resolved);
             match entry {
                 Some((_, parents)) => parents.push(format!("{name} {version}")),
-                None => parents_of.push((dep_version.clone(), vec![format!("{name} {version}")])),
+                None => parents_of.push((resolved, vec![format!("{name} {version}")])),
             }
         }
     }
@@ -345,5 +379,96 @@ version = "44.0.0"
         let error = run(&dir).expect_err("stale workflow ignore with dropped waiver must fail");
         assert!(error.contains("deny.toml"), "{error}");
         assert!(error.contains("security.yml"), "{error}");
+    }
+
+    #[test]
+    fn workflow_comment_mentioning_advisory_is_not_an_ignore() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-comment-only");
+        let lock = r#"
+[[package]]
+name = "wasmtime"
+version = "44.0.0"
+"#;
+        write_guard_dir(&dir, false, lock);
+        // The workflow mentions the advisory ID only in a comment and a step
+        // name; without the actual --ignore flag this must classify as
+        // Dropped, not Asymmetric.
+        fs::write(
+            dir.join(".github/workflows/security.yml"),
+            r#"# RUSTSEC-2026-0327 waiver removed; do not re-add --ignore
+- name: audit (RUSTSEC-2026-0327 unwaived)
+  run: cargo audit
+"#,
+        )
+        .expect("write security.yml");
+        run(&dir).expect("comment-only advisory mention must not count as an ignore");
+    }
+
+    #[test]
+    fn versionless_edge_resolves_single_wasmtime_copy_and_flags_affected() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-versionless-single");
+        // Cargo writes the edge without a version disambiguator when the
+        // lockfile holds exactly one wasmtime copy.
+        let lock = r#"
+[[package]]
+name = "arbitraitor-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "wasmtime",
+]
+
+[[package]]
+name = "wasmtime"
+version = "44.0.0"
+"#;
+        write_guard_dir(&dir, true, lock);
+        let error = run(&dir).expect_err("versionless edge to an affected copy must be flagged");
+        assert!(error.contains("wasmtime 44.0.0"), "{error}");
+        assert!(error.contains("arbitraitor-plugin-host"), "{error}");
+    }
+
+    #[test]
+    fn versionless_edge_with_multiple_wasmtime_copies_fails_closed() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-versionless-ambiguous");
+        let lock = r#"
+[[package]]
+name = "arbitraitor-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "wasmtime",
+]
+
+[[package]]
+name = "wasmtime"
+version = "45.0.3"
+
+[[package]]
+name = "wasmtime"
+version = "44.0.0"
+"#;
+        write_guard_dir(&dir, true, lock);
+        let error =
+            run(&dir).expect_err("versionless edge with two wasmtime copies must fail closed");
+        assert!(error.contains("versionless wasmtime"), "{error}");
+        assert!(error.contains("45.0.3"), "{error}");
+        assert!(error.contains("44.0.0"), "{error}");
+    }
+
+    #[test]
+    fn versionless_edge_with_no_wasmtime_package_fails_closed() {
+        let dir = std::env::temp_dir().join("xtask-wasmtime-guard-versionless-orphan");
+        let lock = r#"
+[[package]]
+name = "arbitraitor-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "wasmtime",
+]
+"#;
+        write_guard_dir(&dir, true, lock);
+        let error =
+            run(&dir).expect_err("versionless edge with zero wasmtime packages must fail closed");
+        assert!(error.contains("versionless wasmtime"), "{error}");
+        assert!(error.contains("no wasmtime [[package]] block"), "{error}");
     }
 }

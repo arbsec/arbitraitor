@@ -1494,8 +1494,8 @@ fn validate_field(field: &str) -> Result<(), PolicyError> {
         return Ok(());
     }
     Err(PolicyError::Invalid(format!(
-        "field path must start with 'finding.', 'context.', 'caller_origin.', \
-         'execution.', 'integrity.', or 'findings.': '{field}'"
+        "field path must start with 'finding.', 'context.', 'ingress.', \
+         'caller_origin.', 'execution.', 'integrity.', or 'findings.': '{field}'"
     )))
 }
 
