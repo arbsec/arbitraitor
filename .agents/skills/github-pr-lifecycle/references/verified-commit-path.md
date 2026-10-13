@@ -79,10 +79,12 @@ every case.
 ## Commit identity for local commits
 
 `bash .agents/skills/github-pr-lifecycle/scripts/commit-identity check`
-verifies that a local `git commit` would be **authored** as
+checks that a local `git commit` would be **authored** as
 `arbsec-agent[bot] <334074867+arbsec-agent[bot]@users.noreply.github.com>`
-(`--author=`) with a DCO `Signed-off-by:` trailer (`-s`), while the
-**committer** stays the operator identity. Local chains are landed
+(`--author=`) and that the **committer** stays the operator identity (never
+the bot); it also prints a DCO convention hint - the commit command must
+carry `-s` - which is informational, not a verification. Local chains are
+landed
 tree-identically by `push-branch`; the local commit metadata stays for audit.
 
 ## What NOT to do

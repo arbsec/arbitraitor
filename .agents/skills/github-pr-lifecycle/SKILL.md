@@ -59,8 +59,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   commit can never verify. Before any local `git commit` destined
                   for a PR branch, run `bash .agents/skills/github-pr-lifecycle/scripts/commit-identity
                   check` — the author must be the service principal (`--author=`),
-                  the committer stays the operator identity, and the message
-                  carries the DCO trailer (`-s`).
+                  the committer must stay the operator identity (never the
+                  bot), and the script prints a DCO convention hint (the
+                  commit command must carry `-s`).
                   Classify each failure:
                     transient (timeout, 429, 5xx, runner OOM)  → bounded retry per arbitraitor-workflow.md "Failure classification"
                     real failure                              → fix root cause; do NOT reroll
