@@ -75,6 +75,7 @@
   - [ADR 0038: Pipeline engine crate extraction and naming](./adr/0038-pipeline-engine-crate-extraction.md)
   - [ADR 0039: Receipt envelope structure](./adr/0039-receipt-envelope-structure.md)
   - [ADR 0040: Wasmtime security floor in Cargo.toml](./adr/0040-wasmtime-security-floor.md)
+  - [ADR 0041: Mediated GET-only HTTP egress for agent web tools](./adr/0041-mediated-get-only-http-egress.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)

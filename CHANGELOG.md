@@ -105,6 +105,15 @@ caps pending record files at
   `user.name`/`user.email` stay the operator's — never `-c` them to the
   bot); setting the committer to the bot fails as `UNKNOWN_KEY` (no
   bot-owned signing key).
+- Spec §11.6 (new, v0.7): **mediated HTTP egress** — a GET-only,
+  grant-scoped, return-to-caller operation class for agent web tools,
+  executed daemon-side under the §11.2/§11.4 transport rules, ADR-0018
+  connected-peer verification, and §31.2/§11.5 receipts (ADR-0041, #797).
+  POST/bodies remain out of model (§39.7, §9 invariants 9/24); body-bearing
+  methods are explicitly deferred with two candidate policy-class designs
+  recorded in ADR-0041. Adds `http_egress` to the §33.1 MCP capability list
+  and a `HttpEgressTool` note to §40.3; tech-stack §4.7 specifies the
+  egress client. Documentation-only; the operation lands with #799.
 
 ### Changed
 

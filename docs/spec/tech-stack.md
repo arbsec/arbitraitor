@@ -369,6 +369,24 @@ Start with the system resolver. Add Hickory behind a resolver trait when determi
 - use cancellation tokens across retrieval and analysis;
 - distinguish connect, first-byte, idle-read, and total deadlines.
 
+### 4.7 Mediated egress client (v0.7)
+
+Spec §11.6 defines the mediated HTTP egress operation class; the client
+stays behind the `Fetcher` trait (§4.1) and reuses the same connector
+hardening as retrieval (§4.4, §4.5). Egress-specific requirements:
+
+- one egress client per grant evaluation; policy binds host, method (`GET`
+  only), path prefix, response size, and content types before connect;
+- connected-address verification is re-run for egress exactly as for
+  retrieval — rebinding and private/metadata destinations fail closed
+  (ADR-0018);
+- the response body is bounded and returned to the caller; it is never
+  written to the CAS and never enters analysis;
+- request construction rejects bodies at the type level (a body-carrying
+  request cannot be built);
+- one receipt per request through the shared receipt pipeline;
+- no response caching; no connection reuse across different grants.
+
 ---
 
 ## 5. Filesystem and content-addressed store
