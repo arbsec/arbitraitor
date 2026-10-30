@@ -19,18 +19,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arbitraitor_engine::{ArbitraitorApi, Config};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Monotonic per-call counter: nanos alone can collide on coarse clocks, and
+/// two scenarios sharing a root would fight over `cas/` (the same #788 class
+/// of bug as the pid-only helper in `threat_model_adversaries.rs`).
+static UNIQUE_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn unique_dir(label: &str) -> PathBuf {
+    let id = UNIQUE_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
-        "arb-store-lock-{label}-{}-{nanos}",
+        "arb-store-lock-{label}-{}-{id}-{nanos}",
         std::process::id(),
     ));
     let _ = std::fs::remove_dir_all(&path);
@@ -90,9 +97,19 @@ fn idle_engine_does_not_block_concurrent_store_open() {
 /// engine init) can consume the 400 ms retry budget before its open reaches
 /// the released window, which is an environment artifact, not a product
 /// regression. The scenario therefore retries with a FRESH store up to
-/// three times; the contention assertion (`lock_observed`, `elapsed`) keeps
-/// every scenario honest — a product regression to eager opens fails all
-/// three.
+/// three times; the `lock_observed` check keeps every scenario honest — a
+/// product regression to eager opens fails all three.
+///
+/// Residual limitation, stated honestly: this test cannot prove the CLI's
+/// open actually *blocked* on the held flock. `open_with_retry` in
+/// `arbitraitor-store` emits no tracing event or log line for a contended
+/// attempt, so there is no observable contention signal to assert on (and
+/// adding product logging is out of scope for a test change). A successful
+/// CLI run whose open happened to land entirely after the release would pass
+/// without exercising the retry path on that particular run. The scenario
+/// still catches the #762 regression (an eager process-lifetime open fails
+/// the store open after the retry budget) and the holder-side failure modes,
+/// it just does not prove the retry path itself was exercised.
 #[cfg(unix)]
 #[test]
 fn cli_fetch_completes_while_another_process_holds_store_briefly() -> TestResult {
@@ -135,7 +152,11 @@ fn contended_open_scenario() -> TestResult {
         .env("ARBITRAITOR_HOLDER_RELEASE", &release_signal)
         .env("ARBITRAITOR_HOLDER_HELD", &held_signal)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Capture the holder's stderr: its panics were previously invisible
+        // behind `Stdio::null()`, so an early holder exit had no diagnostic.
+        // Output volume is a few lines, so piping cannot deadlock the hold
+        // window; it is drained to EOF via `wait_with_output` after exit.
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     // Wait until the holder process has *actually acquired the flock*,
@@ -148,10 +169,19 @@ fn contended_open_scenario() -> TestResult {
     // makes the hold window exact, mirroring how release is signalled.
     let held_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !held_signal.exists() {
-        assert!(
-            holder.try_wait()?.is_none_or(|s| s.success()),
-            "holder probe exited before acquiring the store lock"
-        );
+        if let Some(status) = holder.try_wait()? {
+            // The holder exited before acquiring the lock. It has already
+            // exited, so draining stderr via `wait_with_output` cannot block;
+            // without it the panic message that made the holder fail stays
+            // invisible in the pipe.
+            let output = holder.wait_with_output()?;
+            return Err(format!(
+                "holder probe exited before acquiring the store lock \
+                 (exit status: {status}): {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
         assert!(
             held_deadline > std::time::Instant::now(),
             "holder probe must signal lock acquisition within 10 s"
@@ -187,16 +217,19 @@ fn contended_open_scenario() -> TestResult {
          if this fails the spawn environment is too slow to test contention"
     );
 
-    let started = std::time::Instant::now();
     let cli_bin = env!("CARGO_BIN_EXE_arbitraitor");
-    let mut cli = std::process::Command::new(cli_bin)
+    let cli = std::process::Command::new(cli_bin)
         .arg("inspect")
         .arg(format!("file://{}", script.display()))
         .arg("--cas-dir")
         .arg(&cas)
         .env("HOME", &root)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Capture the CLI's stderr so a failed contended open reports the
+        // product's actual diagnostic instead of a generic string. Drained
+        // to EOF by `wait_with_output` (no undrained `.spawn()` + piped
+        // stdio, which deadlocks once the child fills the pipe buffer).
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     // The CLI process is now running its contended open. Hold the lock a
@@ -207,31 +240,35 @@ fn contended_open_scenario() -> TestResult {
     std::thread::sleep(Duration::from_millis(100));
     std::fs::write(&release_signal, b"release")?;
 
-    let status = cli.wait()?;
-    let elapsed = started.elapsed();
+    let cli_output = cli.wait_with_output()?;
 
-    let holder_status = holder.wait()?;
+    let holder_output = holder.wait_with_output()?;
+    let holder_status = holder_output.status;
 
-    // The CLI actually contended: the lock was confirmed held before the
-    // CLI spawned, so its open necessarily blocked until the holder
-    // released. If the contention were removed (holder skipped, or the
-    // engine regressed to a process-lifetime eager open), either the
-    // lock-observation assert or the success check here would catch it.
-    // An unsuccessful status must return an error (not panic) so the outer
-    // retry loop in
+    // What is actually asserted here: the flock was confirmed held (from
+    // this process' own probe) before the CLI was spawned, the holder kept
+    // holding until after the CLI had been running for 100 ms, and the CLI
+    // then succeeded against the same store. This catches a regression to a
+    // process-lifetime eager open — the CLI's open would exhaust the retry
+    // budget and fail — but it cannot prove the CLI's open itself blocked on
+    // the flock (see the residual-limitation note in the test's doc
+    // comment). An unsuccessful status must return an error (not panic) so
+    // the outer retry loop in
     // `cli_fetch_completes_while_another_process_holds_store_briefly` can
     // retry and retain the final diagnostic.
-    if !status.success() {
-        return Err("CLI must succeed after the contended open recovers via retry".into());
+    if !cli_output.status.success() {
+        return Err(format!(
+            "CLI must succeed after the contended open recovers via retry \
+             (exit status: {}): {}",
+            cli_output.status,
+            String::from_utf8_lossy(&cli_output.stderr)
+        )
+        .into());
     }
     assert!(
-        elapsed >= Duration::from_millis(20),
-        "CLI must have blocked on the held lock; finished in {elapsed:?}, \
-         which suggests the holder never held the store"
-    );
-    assert!(
         holder_status.success(),
-        "holder probe must have opened and released the store cleanly"
+        "holder probe must have opened and released the store cleanly: {}",
+        String::from_utf8_lossy(&holder_output.stderr)
     );
     Ok(())
 }

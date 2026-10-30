@@ -1246,8 +1246,9 @@ fn releasable_linux_xattr_names(
     file: &File,
     stage: &'static str,
 ) -> Result<Vec<CString>, ReleaseError> {
-    let mut empty = [0_u8; 0];
-    let size = match rustix::fs::flistxattr(file.as_fd(), &mut empty) {
+    // rustix 1.1.6 stopped treating a zero-length buffer as a size query, so the
+    // size has to be asked for explicitly.
+    let size = match rustix::fs::flistxattr_query(file.as_fd()) {
         Ok(size) => size,
         Err(error) if is_absent_or_unsupported_xattr_error(error) => return Ok(Vec::new()),
         Err(source) => {
@@ -1479,8 +1480,7 @@ mod tests {
         let file = fs::File::open(path)?;
         let name = CString::new(name)
             .map_err(|source| io::Error::new(io::ErrorKind::InvalidInput, source))?;
-        let mut empty = [0_u8; 0];
-        let size = match rustix::fs::fgetxattr(file.as_fd(), name.as_c_str(), &mut empty) {
+        let size = match rustix::fs::fgetxattr_query(file.as_fd(), name.as_c_str()) {
             Ok(size) => size,
             Err(error) if is_absent_or_unsupported_xattr_error(error) => return Ok(None),
             Err(error) => return Err(rustix_to_io(error)),
@@ -1495,8 +1495,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn releasable_xattr_names(path: &Path) -> io::Result<Vec<Vec<u8>>> {
         let file = fs::File::open(path)?;
-        let mut empty = [0_u8; 0];
-        let size = match rustix::fs::flistxattr(file.as_fd(), &mut empty) {
+        let size = match rustix::fs::flistxattr_query(file.as_fd()) {
             Ok(size) => size,
             Err(error) if is_absent_or_unsupported_xattr_error(error) => return Ok(Vec::new()),
             Err(error) => return Err(rustix_to_io(error)),
