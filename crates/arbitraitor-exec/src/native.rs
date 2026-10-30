@@ -22,7 +22,7 @@ use arbitraitor_sandbox::SandboxConfig;
 use arbitraitor_sandbox::{
     PathRule, ProcessResourceLimits, configure_filesystem_isolation, configure_resource_limits,
 };
-use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
+use rustix::fs::{XattrFlags, fgetxattr, fgetxattr_query, fsetxattr};
 use tracing::debug;
 
 use crate::{
@@ -409,8 +409,10 @@ fn verify_platform_quarantine(binary_path: &Path) -> Result<(), ExecError> {
         source,
     })?;
     let name = xattr_name(LINUX_ORIGIN_XATTR, "prepare-linux-origin-xattr-verify")?;
-    let mut empty = [0_u8; 0];
-    let size = match fgetxattr(file.as_fd(), name.as_c_str(), &mut empty) {
+    // rustix 1.1.6 stopped treating a zero-length buffer as a size query, so the
+    // size has to be asked for explicitly. An empty value is still treated as a
+    // missing quarantine marker below, which keeps this check fail-closed.
+    let size = match fgetxattr_query(file.as_fd(), name.as_c_str()) {
         Ok(size) => size,
         Err(error) if is_missing_xattr(error) => {
             return Err(ExecError::NativeQuarantineMissing {

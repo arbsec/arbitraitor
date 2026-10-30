@@ -103,72 +103,69 @@ wasmparser = { version = "0.258", default-features = false, features = ["compone
 wasmtime-internal-core-250b128af4f17eb8 = { package = "wasmtime-internal-core", version = "49", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std"] }
+cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
 libc = { version = "0.2" }
 linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "ioctl", "no_std", "prctl"] }
-pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
-regalloc2 = { version = "0.15", features = ["checker", "enable-serde"] }
+object = { version = "0.40", default-features = false, features = ["archive", "read_core", "unaligned", "write"] }
+pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
 rustix = { version = "1", features = ["fs", "mm", "param", "process", "termios", "time"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tracing = { version = "0.1" }
-wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
-cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
+cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
 libc = { version = "0.2" }
-pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
-wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
+wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.aarch64-apple-darwin.dependencies]
-cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
+cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
 errno = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
-libc = { version = "0.2" }
-pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
-regalloc2 = { version = "0.15", features = ["checker", "enable-serde"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+object = { version = "0.40", default-features = false, features = ["archive", "read_core", "unaligned", "write"] }
+pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
 rustix = { version = "1", features = ["fs", "mm", "param", "process", "termios", "time"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tracing = { version = "0.1" }
-wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
-cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
-libc = { version = "0.2" }
-pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
-wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
+libc = { version = "0.2", features = ["extra_traits"] }
+pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
+wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
-cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std"] }
+cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
 libc = { version = "0.2" }
 linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "ioctl", "no_std", "prctl"] }
-pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
-regalloc2 = { version = "0.15", features = ["checker", "enable-serde"] }
+object = { version = "0.40", default-features = false, features = ["archive", "read_core", "unaligned", "write"] }
+pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
 rustix = { version = "1", features = ["fs", "mm", "param", "process", "termios", "time"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tracing = { version = "0.1" }
-wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 [target.aarch64-unknown-linux-gnu.build-dependencies]
-cranelift-bitset-cc1132317cff3a65 = { package = "cranelift-bitset", version = "0.132", default-features = false, features = ["enable-serde"] }
+cranelift-bitset-460a3860acfbbddd = { package = "cranelift-bitset", version = "0.135", default-features = false, features = ["enable-serde"] }
 libc = { version = "0.2" }
-pulley-interpreter-ee4d35eadd6672ac = { package = "pulley-interpreter", version = "45", default-features = false, features = ["disas", "interp", "std"] }
-wasmtime-internal-core-ee4d35eadd6672ac = { package = "wasmtime-internal-core", version = "45", default-features = false, features = ["anyhow", "serde", "std"] }
+pulley-interpreter-af972fb15260cd59 = { package = "pulley-interpreter", version = "48", default-features = false, features = ["disas", "interp", "std"] }
+wasmtime-internal-core-af972fb15260cd59 = { package = "wasmtime-internal-core", version = "48", default-features = false, features = ["anyhow", "serde", "std"] }
 
 ### END HAKARI SECTION
