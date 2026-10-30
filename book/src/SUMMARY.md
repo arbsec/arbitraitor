@@ -78,6 +78,7 @@
   - [ADR 0041: Mediated GET-only HTTP egress for agent web tools](./adr/0041-mediated-get-only-http-egress.md)
   - [ADR 0042: Wall-clock deadline and process-group kill for mediated execution](./adr/0042-wall-clock-deadline-process-group-kill.md)
   - [ADR 0043: No Wasmtime compilation cache](./adr/0043-no-wasmtime-compilation-cache.md)
+  - [ADR 0044: Sandbox API stability for cross-project consumption](./adr/0044-sandbox-api-stability-cross-project-consumption.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)
