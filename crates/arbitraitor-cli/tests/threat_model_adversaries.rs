@@ -6,6 +6,10 @@
 //!
 //! **Does NOT resolve #271** — this is partial coverage.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use arbitraitor_core::config::Config;
 use arbitraitor_core::secret::SecretResolver;
 use arbitraitor_exec::release::{ReleasePolicy, release_artifact};
@@ -15,16 +19,79 @@ use arbitraitor_store::ContentStore;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// Creates a test temp directory using the same pattern as the existing
-/// release tests in `arbitraitor-exec/src/release.rs` to avoid macOS
-/// `/var/folders/...` symlink resolution issues with `TempDir::new()`.
-fn temp_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let dir = std::env::temp_dir().join(format!("arb-adversary-test-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+/// Monotonic per-call counter so concurrent tests never share a directory.
+static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A per-test temp root that removes itself on drop, including on panic or
+/// early `?` return, so unique directories do not leak into `$TMPDIR`.
+struct TempRoot(std::path::PathBuf);
+
+impl std::ops::Deref for TempRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TempRoot {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        // Best-effort: a failed removal must not mask the test's own result.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Creates a unique per-call test temp directory, using the same pid +
+/// monotonic-counter (+ nanos) pattern as the release tests in
+/// `arbitraitor-exec/src/release.rs`. The directory must be unique per call:
+/// `cargo test` runs every test of a binary as threads of one process, so a
+/// pid-only path made sibling tests delete and repopulate each other's roots
+/// — the #788 flake. The final canonicalize stays for the same macOS reason
+/// as before: resolve symlinks (e.g. `/var` -> `/private/var`) so that
+/// `release_artifact`'s `O_NOFOLLOW` path traversal succeeds.
+fn temp_dir() -> Result<TempRoot, Box<dyn std::error::Error>> {
+    let id = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!(
+        "arb-adversary-test-{}-{id}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir)?;
     // Canonicalize to resolve symlinks (e.g. macOS /var -> /private/var)
     // so that release_artifact's O_NOFOLLOW path traversal succeeds.
-    Ok(std::fs::canonicalize(dir)?)
+    Ok(TempRoot(std::fs::canonicalize(dir)?))
+}
+
+mod temp_dir_uniqueness {
+    use super::*;
+
+    /// Regression for #788: two `temp_dir()` calls must return distinct
+    /// directories, and creating the second must not delete the first.
+    /// Under the old pid-only helper both calls returned the same path and
+    /// the second call's `remove_dir_all` wiped the first root.
+    #[test]
+    fn temp_dir_calls_are_unique_and_independent() -> TestResult {
+        let first = temp_dir()?;
+        let second = temp_dir()?;
+        assert_ne!(
+            first.as_ref(),
+            second.as_ref(),
+            "each temp_dir() call must return a distinct directory"
+        );
+        assert!(
+            std::fs::metadata(&first)?.is_dir(),
+            "the first root must still exist after the second is created"
+        );
+        Ok(())
+    }
 }
 
 async fn stored_digest(
@@ -64,7 +131,6 @@ mod adversary_17_project_config {
 
         let config = Config::load_from_layers(Some(&system), None, &project)?;
         assert_eq!(config.fetch.max_bytes, 524_288);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -76,7 +142,6 @@ mod adversary_17_project_config {
 
         let config = Config::load_from_layers(None, None, &project)?;
         assert!(config.integrity.require_digest);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -87,7 +152,6 @@ mod adversary_17_project_config {
         std::fs::write(&system, "[fetch]\nmax_bytes = 5242880\n")?;
         let config = Config::load_from_layers(Some(&system), None, &root)?;
         assert_eq!(config.fetch.max_bytes, 5_242_880);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -96,7 +160,6 @@ mod adversary_17_project_config {
         let root = temp_dir()?;
         let config = Config::load_from_layers(None, None, &root)?;
         assert_eq!(config, Config::default());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -114,7 +177,6 @@ mod adversary_17_project_config {
             matches!(result, Err(ConfigError::PolicyWeakening { .. })),
             "project config must not raise fetch.max_bytes (ADR-0017)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -129,7 +191,6 @@ mod adversary_17_project_config {
             matches!(result, Err(ConfigError::PolicyWeakening { .. })),
             "project config must not enable execution (ADR-0017)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -144,7 +205,6 @@ mod adversary_17_project_config {
             matches!(result, Err(ConfigError::PolicyWeakening { .. })),
             "project config must not disable detectors (ADR-0017)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -162,7 +222,6 @@ mod adversary_17_project_config {
             matches!(result, Err(ConfigError::PolicyWeakening { .. })),
             "project config must not relax integrity requirements (ADR-0017)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -180,7 +239,6 @@ mod adversary_17_project_config {
             matches!(result, Err(ConfigError::PolicyWeakening { .. })),
             "project config must not weaken default_action (ADR-0017)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -232,7 +290,6 @@ mod adversary_20_release_destination {
             result.is_err(),
             "release to symlink destination must be rejected (invariant 18)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -254,7 +311,6 @@ mod adversary_20_release_destination {
             b"old content",
             "existing file must be preserved"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -281,7 +337,6 @@ mod adversary_20_release_destination {
             bytes,
             "released bytes must match scanned bytes (invariant 2)"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -297,7 +352,6 @@ mod adversary_20_release_destination {
             result.is_err(),
             "release to nonexistent parent dir must fail"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -317,7 +371,6 @@ mod adversary_21_secret_leakage {
                 .resolve("secret://file/../../../etc/passwd")
                 .is_err()
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -329,7 +382,6 @@ mod adversary_21_secret_leakage {
         std::fs::write(secret_root.join("key"), "val")?;
         let resolver = SecretResolver::new().with_files(true, Some(secret_root));
         assert!(resolver.resolve("secret://file//etc/passwd").is_err());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -343,7 +395,6 @@ mod adversary_21_secret_leakage {
         std::os::unix::fs::symlink(&target, secret_root.join("link"))?;
         let resolver = SecretResolver::new().with_files(true, Some(secret_root));
         assert!(resolver.resolve("secret://file/link").is_err());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -356,7 +407,6 @@ mod adversary_21_secret_leakage {
         let resolver = SecretResolver::new().with_files(true, Some(secret_root));
         let result = resolver.resolve("secret://file/api_key")?;
         assert_eq!(result, "test-value");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
