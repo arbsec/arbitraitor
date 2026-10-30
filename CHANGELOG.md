@@ -277,7 +277,7 @@ caps pending record files at
   accumulate patch lag. The bump changes no behaviour and adds no
   dependency; it surfaces two lints, both fixed in the code rather than
   silenced:
-  - `clippy::assert_is_empty` (new in Clippy 1.99) rewrites 159
+  - `clippy::assert_is_empty` (new in Clippy 1.99) rewrites 160
     `assert!(x.is_empty())` / `assert!(!x.is_empty())` assertions into
     `assert_eq!` / `assert_ne!` against an empty value, so a failing test
     prints the offending contents. No assertion is weakened and no

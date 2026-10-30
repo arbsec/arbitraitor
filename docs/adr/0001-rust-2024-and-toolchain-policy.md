@@ -63,7 +63,7 @@ The MSRV has not moved; only the pinned bootstrap toolchain has.
   new dependency, and no blanket `#[allow]`:
   - `clippy::assert_is_empty` (new in Clippy 1.99.0; `pedantic` upstream, so
     it reaches this workspace through `pedantic = "warn"` and CI's
-    `-D warnings`). The 159 assertions that only checked emptiness
+    `-D warnings`). The 160 assertions that only checked emptiness
     (`assert!(x.is_empty())`, `assert!(!x.is_empty())`) now compare against
     an empty value (`assert_eq!` / `assert_ne!`), following the lint's own
     suggestion, so a failure prints the offending contents instead of only
