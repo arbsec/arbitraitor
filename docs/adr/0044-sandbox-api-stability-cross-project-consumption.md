@@ -113,6 +113,13 @@ behaviour of a crate that crates.io has never seen.
   accident: when this repository moves a dependency that the consumer's
   documented dependency set names, the consumer's pin is revisited in the
   same effort.
+- The rule covers defaults, not only types. A default inside the consumed
+  crates changes the consumer's observable behaviour without changing a single
+  type: the open implementation issue (#794) shows the default `RLIMIT_NPROC`
+  of the mediated-execution path making the consumer's mediated-script test
+  fail on a busy host, with a caller-side override of the limit explicitly
+  ruled out as a fix. A default change in the consumed surface is a
+  coordinated release event in the same way a type change is.
 - Spec §40.5 no longer claims the agent harness reaches Arbitraitor through
   the MCP gateway; it pins the crates in-process and says so.
 
