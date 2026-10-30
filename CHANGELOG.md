@@ -185,21 +185,6 @@ caps pending record files at
 
 ### Changed
 
-- **The Wasm plugin runtime no longer uses Wasmtime's on-disk compilation
-  cache** (ADR-0043). The `cache` feature is dropped from the `wasmtime`
-  dependency in `arbitraitor-plugin-host`, so `WasmEngine::new` no longer
-  builds a `wasmtime::Cache`. A component is now recompiled on every load
-  instead of once per cache key — slower for repeated loads of the same
-  plugin, mitigated (not eliminated) by the unchanged
-  `parallel-compilation` feature. The trade-off is deliberate:
-  - the cache wrote compiled code to a path outside the CAS, so its contents
-    were not covered by digest verification — a tampering and
-    cache-poisoning surface on the plugin sandbox boundary;
-  - the feature pulls `wasmtime-internal-cache`, which requires `zstd ^0.13`
-    in every published Wasmtime release (48.0.0–50.0.1). Dropping it is the
-    only way to remove the advisory-laden `zstd 0.13.3` / `zstd-safe 7.3.0`
-    copies from the graph without a waiver, and it is why no Wasmtime bump
-    could have fixed them.
 - **CLI, MCP, and daemon now route through `arbitraitor-engine`**
   (ADR-0038): the three divergent pipeline compositions are unified, which
   closes silent coverage holes and changes observable behavior on every
@@ -271,37 +256,24 @@ caps pending record files at
   parser keeps its documented record-and-proceed contract: its short-option
   table is only partially modelled, so rejecting unknown flags there would
   refuse valid invocations (follow-up issue #818).
+- **The Wasm plugin runtime no longer uses Wasmtime's on-disk compilation
+  cache** (ADR-0043). The `cache` feature is dropped from the `wasmtime`
+  dependency in `arbitraitor-plugin-host`, so `WasmEngine::new` no longer
+  builds a `wasmtime::Cache`. A component is now recompiled on every load
+  instead of once per cache key — slower for repeated loads of the same
+  plugin, mitigated (not eliminated) by the unchanged
+  `parallel-compilation` feature. The trade-off is deliberate:
+  - the cache wrote compiled code to a path outside the CAS, so its contents
+    were not covered by digest verification — a tampering and
+    cache-poisoning surface on the plugin sandbox boundary;
+  - the feature pulls `wasmtime-internal-cache`, which requires `zstd ^0.13`
+    in every published Wasmtime release (48.0.0–50.0.1). Dropping it is the
+    only way to remove the advisory-laden `zstd 0.13.3` / `zstd-safe 7.3.0`
+    copies from the graph without a waiver, and it is why no Wasmtime bump
+    could have fixed them.
 
 ### Fixed
 
-- **The security gate is green again: `cargo audit` goes from 39
-  vulnerabilities to 0, with no new waiver.** `security.yml` is path-gated, so
-  the RustSec database drifted out from under `main` without a failing run:
-  any PR touching `Cargo.toml`/`Cargo.lock` failed `Advisory Check` and
-  `Dependency Policy` on advisories it did not introduce. Three independent
-  causes, three fixes:
-  - `zip` was a direct `8.6` dependency still inside
-    RUSTSEC-2026-0367/0368/0369; it is now `9.1`, which fixes all three.
-  - `zstd 0.13.3` / `zstd-safe 7.3.0` were reachable only through Wasmtime's
-    `cache` feature and `zip`'s default `zstd` feature; both are gone (see the
-    `Changed` entry above).
-  - the resolved `wasmtime` copies trailed the published fix versions;
-    `cargo update` now resolves the direct copy to 49.0.5 and yara-x's
-    transitive copy to 48.0.8, both above every published fix version.
-  With those resolved, the RUSTSEC-2026-0222/0269/0316/0327 ignores became
-  unmatched and were pruned from `deny.toml` and from the `cargo audit`
-  command line in `security.yml`, together with the stale comment claiming
-  the direct Wasmtime floor covered them. RUSTSEC-2025-0141 (unmaintained
-  `bincode`, transitive via yara-x, no vulnerability recorded) is the only
-  remaining ignore and now carries an explicit `reason`.
-- **Linux xattr reads survive the `rustix` 1.1.6 buffer change**: native
-  execution failed closed on every binary with `NativeQuarantineMissing`, and
-  release silently stopped clearing releasable xattrs, because both sites
-  probed the attribute size with a zero-length buffer — an idiom `rustix`
-  1.1.6 removed in favour of the dedicated `fgetxattr_query` /
-  `flistxattr_query` calls. The size probes use the dedicated API again, so
-  quarantine verification and release xattr clearing behave as before and
-  still fail closed.
 - **url-discovery: template URLs inside a downloaded data document no longer
   reject the caller's static-URL fetch** (#751) — fetching a static, literal
   URL whose response is a data document full of template-shaped URI examples
@@ -573,6 +545,34 @@ caps pending record files at
   and rejects a token that carries an option curl itself does not
   recognize (see `### Changed`) instead of re-scanning its value as flags.
   Emitting `-w`/`--write-out` output itself remains unimplemented (#782).
+- **The security gate is green again: `cargo audit` goes from 39
+  vulnerabilities to 0, with no new waiver.** `security.yml` is path-gated, so
+  the RustSec database drifted out from under `main` without a failing run:
+  any PR touching `Cargo.toml`/`Cargo.lock` failed `Advisory Check` and
+  `Dependency Policy` on advisories it did not introduce. Three independent
+  causes, three fixes:
+  - `zip` was a direct `8.6` dependency still inside
+    RUSTSEC-2026-0367/0368/0369; it is now `9.1`, which fixes all three.
+  - `zstd 0.13.3` / `zstd-safe 7.3.0` were reachable only through Wasmtime's
+    `cache` feature and `zip`'s default `zstd` feature; both are gone (see the
+    `Changed` entry above).
+  - the resolved `wasmtime` copies trailed the published fix versions;
+    `cargo update` now resolves the direct copy to 49.0.5 and yara-x's
+    transitive copy to 48.0.8, both above every published fix version.
+  With those resolved, the RUSTSEC-2026-0222/0269/0316/0327 ignores became
+  unmatched and were pruned from `deny.toml` and from the `cargo audit`
+  command line in `security.yml`, together with the stale comment claiming
+  the direct Wasmtime floor covered them. RUSTSEC-2025-0141 (unmaintained
+  `bincode`, transitive via yara-x, no vulnerability recorded) is the only
+  remaining ignore and now carries an explicit `reason`.
+- **Linux xattr reads survive the `rustix` 1.1.6 buffer change**: native
+  execution failed closed on every binary with `NativeQuarantineMissing`, and
+  release silently stopped clearing releasable xattrs, because both sites
+  probed the attribute size with a zero-length buffer — an idiom `rustix`
+  1.1.6 removed in favour of the dedicated `fgetxattr_query` /
+  `flistxattr_query` calls. The size probes use the dedicated API again, so
+  quarantine verification and release xattr clearing behave as before and
+  still fail closed.
 
 ### Changed (CI)
 
