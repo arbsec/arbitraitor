@@ -155,10 +155,11 @@ mod tests {
     /// Fast and deterministic, so it runs in CI (not `#[ignore]`).
     ///
     /// Verifies only `RLIMIT_CPU` and `RLIMIT_NOFILE`. `RLIMIT_NPROC` is
-    /// deliberately omitted because it is enforced per real-user-ID across the
-    /// whole system, not per-process — setting it here would EAGAIN the test
-    /// runner's own user. NPROC enforcement is covered by the ignored
-    /// `process_limit_prevents_fork` test in an isolated environment.
+    /// deliberately omitted because it is enforced per real-user-ID per user
+    /// namespace, not per process — setting it here would EAGAIN the test
+    /// runner's own user. NPROC enforcement is covered by
+    /// `crates/arbitraitor-sandbox/tests/tier4a/`, which runs the check inside
+    /// a fresh user namespace whose task count it controls.
     #[cfg(target_os = "linux")]
     #[test]
     fn pre_exec_limits_applied_before_exec() -> Result<(), Box<dyn std::error::Error>> {
@@ -343,39 +344,6 @@ mod tests {
             stdout.contains("as_kb=8192") || !output.status.success(),
             "RLIMIT_AS not enforced; status={:?} stdout={stdout:?}",
             output.status
-        );
-        Ok(())
-    }
-
-    /// `RLIMIT_NPROC` set in `pre_exec` must constrain fork. `RLIMIT_NPROC` is
-    /// enforced per real-user-ID across the whole system, so this test is
-    /// inherently environment-sensitive and `#[ignore]`.
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "RLIMIT_NPROC is per-user; run in an isolated environment with --ignored"]
-    fn process_limit_prevents_fork() -> Result<(), Box<dyn std::error::Error>> {
-        use std::process::Command;
-
-        let limits = ProcessResourceLimits {
-            process_count: Some(2),
-            ..ProcessResourceLimits::empty()
-        };
-
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            // Attempt to spawn several grandchildren; under a tight NPROC the
-            // forks must fail rather than succeed unboundedly.
-            "ok=0; for i in 1 2 3 4 5; do if ( : ) >/dev/null 2>&1; then ok=$((ok+1)); fi; done; echo forked=$ok",
-        ]);
-        configure_resource_limits(&mut command, &limits);
-        configure_command(&mut command, SandboxConfig::default());
-
-        let output = command.output()?;
-        let stdout = String::from_utf8(output.stdout)?;
-        assert!(
-            !stdout.contains("forked=5"),
-            "RLIMIT_NPROC did not constrain forking; stdout was: {stdout:?}"
         );
         Ok(())
     }

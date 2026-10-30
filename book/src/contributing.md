@@ -62,6 +62,20 @@ cargo nextest run -p arbitraitor-shell
 cargo tarpaulin --workspace
 ```
 
+### Sandbox verification (tier 4a)
+
+`crates/arbitraitor-sandbox/tests/tier4a/` holds the host-syscall containment
+suite for spec §43.10 — seccomp-BPF, the `prctl` hardening pair, Landlock,
+`RLIMIT_NPROC`, the connect-back pattern, and the kernel-feature preconditions.
+It runs with the workspace tests (`cargo nextest run -p arbitraitor-sandbox`);
+no virtual machine or extra setup is needed.
+
+The binary also contains `probes::*` entry points marked `#[ignore]`. That is
+deliberate: each parent test re-executes the same test binary so the probe runs
+under the exact `pre_exec` hooks production installs and reports back through a
+`KEY=value` file. Running a probe on its own proves nothing, so never promote
+those `#[ignore]` markers away.
+
 ### Pre-PR checks
 
 Before opening a PR, run:
