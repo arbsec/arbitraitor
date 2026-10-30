@@ -6858,7 +6858,7 @@ The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pat
 
 **prctl hardening** (pattern from OpenAI codex-rs `process-hardening`):
 
-- `PR_SET_DUMPABLE, 0` — `ptrace(PTRACE_ATTACH)` from parent returns `EPERM`;
+- `PR_SET_DUMPABLE, 0` — `ptrace(PTRACE_ATTACH)` from parent returns `EPERM`; the assertion is binding on the in-process `apply_sandbox` API, while the shipped `pre_exec` + `execve` wiring resets the flag, so the end-to-end control is tracked by #835;
 - `PR_SET_NO_NEW_PRIVS, 1` — child cannot gain new privileges via `setuid` binaries.
 
 **setrlimit enforcement:**

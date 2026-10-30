@@ -17,8 +17,9 @@
 
 // Test-only raw syscalls: creating the unconnected client socket for the
 // connect-back pattern and attaching `ptrace` are the two operations the
-// public `arbitraitor-sandbox` API and `rustix` do not wrap. Each use is a
-// single syscall with a `// SAFETY:` note and no pointer escapes.
+// public `arbitraitor-sandbox` API does not wrap, and that no safe API exposes
+// under the crate's enabled `rustix` feature set (`net` is not enabled). Each
+// use is a single syscall with a `// SAFETY:` note and no pointer escapes.
 #![allow(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -33,7 +34,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rustix::process::{Pid, Signal};
+use rustix::process::{Pid, Signal, WaitOptions};
 
 /// Result type for a parent test.
 pub(crate) type TestResult = Result<(), Box<dyn Error>>;
@@ -481,19 +482,18 @@ pub(crate) fn ptrace_attach(pid: u32) -> io::Result<()> {
 /// `WUNTRACED` *without* reaping the probe; [`ChildGuard::wait`] still performs
 /// the final reap after detach.
 pub(crate) fn wait_for_ptrace_stop(pid: u32) -> io::Result<bool> {
-    let raw = i32::try_from(pid).map_err(|_| io::Error::other("pid does not fit in pid_t"))?;
+    let child = Pid::from_raw(
+        i32::try_from(pid).map_err(|_| io::Error::other("pid does not fit in pid_t"))?,
+    )
+    .ok_or_else(|| io::Error::other("pid is not a valid child pid"))?;
     let deadline = Instant::now() + EVENT_TIMEOUT;
     loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: `waitpid(2)` with `WNOHANG` never blocks, and writes the
-        // child status into the stack-local `status` only when it returns the
-        // pid. The pid is a live child of this process.
-        let ret = unsafe { libc::waitpid(raw, &raw mut status, libc::WUNTRACED | libc::WNOHANG) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if ret > 0 {
-            return Ok(libc::WIFSTOPPED(status));
+        // `WNOHANG` never blocks, and `UNTRACED` reports the stop without
+        // reaping; the pid is a live child of this process.
+        match rustix::process::waitpid(Some(child), WaitOptions::NOHANG | WaitOptions::UNTRACED) {
+            Ok(Some((_, status))) => return Ok(status.stopped()),
+            Ok(None) => {}
+            Err(error) => return Err(io::Error::from(error)),
         }
         if Instant::now() >= deadline {
             return Err(io::Error::other(format!(
