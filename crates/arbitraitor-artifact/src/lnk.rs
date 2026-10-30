@@ -625,14 +625,14 @@ mod tests {
     fn inspect_returns_no_findings_for_clean_lnk() {
         let data = build_lnk(FLAG_HAS_ARGUMENTS | FLAG_UNICODE, Some("--help"));
         let findings = inspect(&data);
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]
     fn inspect_returns_no_findings_when_arguments_absent() {
         let data = build_lnk(0, None);
         let findings = inspect(&data);
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]
@@ -661,19 +661,19 @@ mod tests {
         let args = " ".repeat(100) + "notepad.exe";
         let data = build_lnk(FLAG_HAS_ARGUMENTS | FLAG_UNICODE, Some(&args));
         let findings = inspect(&data);
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]
     fn inspect_returns_empty_for_non_lnk() {
         let findings = inspect(b"PK\x03\x04not a lnk file");
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]
     fn inspect_returns_empty_for_truncated_lnk() {
         let findings = inspect(&[0x4c, 0x00]);
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]

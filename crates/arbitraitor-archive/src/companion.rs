@@ -299,7 +299,7 @@ mod tests {
 
         let found = discover_companion_artifacts(dir.path());
 
-        assert!(found.is_empty());
+        assert_eq!(found, [] as [CompanionArtifact; 0]);
         Ok(())
     }
 
@@ -330,7 +330,10 @@ mod tests {
         );
         assert_eq!(parsed.components[1].name, "tokio");
         assert!(parsed.components[1].purl.is_none());
-        assert!(parsed.vex_statements.is_empty());
+        assert_eq!(
+            parsed.vex_statements,
+            [] as [arbitraitor_model::vex::VexStatement; 0]
+        );
         Ok(())
     }
 
@@ -357,7 +360,7 @@ mod tests {
         let parsed = parse_companion(&artifact, &default_limits())?;
 
         assert_eq!(parsed.format, CompanionFormat::OpenVex);
-        assert!(parsed.components.is_empty());
+        assert_eq!(parsed.components, [] as [Component; 0]);
         assert_eq!(parsed.vex_statements.len(), 1);
         assert_eq!(
             parsed.vex_statements[0].vulnerability.as_str(),

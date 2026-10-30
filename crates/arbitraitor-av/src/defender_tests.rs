@@ -31,7 +31,7 @@ fn parse_clean_output() -> Result<(), Box<dyn Error>> {
     let result = parse_scan_output(Some(0), "Scan finished.\nNo threats found.")?;
 
     assert!(!result.threat_found);
-    assert!(result.threat_names.is_empty());
+    assert_eq!(result.threat_names, [] as [std::string::String; 0]);
     assert_eq!(result.exit_code, Some(0));
     Ok(())
 }

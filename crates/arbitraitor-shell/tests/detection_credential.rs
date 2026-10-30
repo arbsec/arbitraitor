@@ -124,6 +124,6 @@ fn detects_url_shortener_usage() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn does_not_flag_plain_https_download() -> Result<(), Box<dyn std::error::Error>> {
     let findings = findings_for("curl -fsSL https://example.invalid/install.sh\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }

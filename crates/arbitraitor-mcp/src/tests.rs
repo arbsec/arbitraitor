@@ -2004,7 +2004,10 @@ fn headless_mcp_server_flow_resolves_and_executes() -> Result<(), Box<dyn std::e
     )?;
 
     // 2b. record shows the resolution and is listable as no-longer-pending.
-    assert!(store.list_pending(SystemTime::now())?.is_empty());
+    assert_eq!(
+        store.list_pending(SystemTime::now())?,
+        [] as [headless::PendingApprovalRecord; 0]
+    );
 
     // 3. Agent retries the identical request: the stored approval is
     //    consumed and a plan-bound token is minted.
@@ -2403,7 +2406,10 @@ fn headless_open_refuses_group_or_world_writable_dir() -> Result<(), Box<dyn std
     let tight = tempfile::TempDir::new()?;
     std::fs::set_permissions(tight.path(), std::fs::Permissions::from_mode(0o700))?;
     let accepted = PendingApprovalStore::open(tight.path(), headless_mac_key())?;
-    assert!(accepted.list_pending(SystemTime::now())?.is_empty());
+    assert_eq!(
+        accepted.list_pending(SystemTime::now())?,
+        [] as [headless::PendingApprovalRecord; 0]
+    );
     Ok(())
 }
 

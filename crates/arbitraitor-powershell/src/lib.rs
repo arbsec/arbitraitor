@@ -519,7 +519,10 @@ mod tests {
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].name, "Get-Content");
         assert_eq!(result.commands[0].arguments, ["file.txt"]);
-        assert!(result.commands[0].parameters.is_empty());
+        assert_eq!(
+            result.commands[0].parameters,
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[test]
@@ -582,7 +585,10 @@ mod tests {
     fn detects_amsi_bypass_reflection() {
         let result = normalize("[Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')");
 
-        assert!(!result.amsi_bypass_indicators.is_empty());
+        assert_ne!(
+            result.amsi_bypass_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(result.amsi_bypass_indicators.contains(
             &"[Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')".to_owned()
         ));
@@ -592,7 +598,10 @@ mod tests {
     fn detects_amsi_bypass_bracket_syntax() {
         let result = normalize("[Amsi]::Bypass");
 
-        assert!(!result.amsi_bypass_indicators.is_empty());
+        assert_ne!(
+            result.amsi_bypass_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .amsi_bypass_indicators
@@ -604,7 +613,10 @@ mod tests {
     fn detects_amsi_bypass_scriptblock() {
         let result = normalize("[ScriptBlock]::LogResurrection");
 
-        assert!(!result.amsi_bypass_indicators.is_empty());
+        assert_ne!(
+            result.amsi_bypass_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .amsi_bypass_indicators
@@ -637,7 +649,10 @@ mod tests {
     fn detects_hidden_window_style() {
         let result = normalize("powershell.exe -WindowStyle Hidden -Command evil");
 
-        assert!(!result.hidden_window_indicators.is_empty());
+        assert_ne!(
+            result.hidden_window_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .hidden_window_indicators
@@ -650,21 +665,30 @@ mod tests {
     fn detects_hidden_window_w() {
         let result = normalize("powershell -w hidden -c evil");
 
-        assert!(!result.hidden_window_indicators.is_empty());
+        assert_ne!(
+            result.hidden_window_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
     fn detects_hidden_window_numeric() {
         let result = normalize("powershell -WindowStyle 1 -Command evil");
 
-        assert!(!result.hidden_window_indicators.is_empty());
+        assert_ne!(
+            result.hidden_window_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
     fn detects_registry_modification_hklm() {
         let result = normalize("Set-ItemProperty HKLM:\\Software\\Evil -Name 'Disabled' -Value 1");
 
-        assert!(!result.registry_modification_indicators.is_empty());
+        assert_ne!(
+            result.registry_modification_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
@@ -673,21 +697,30 @@ mod tests {
             "New-ItemProperty -Path HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run -Name 'Evil' -Value 'malware.exe'",
         );
 
-        assert!(!result.registry_modification_indicators.is_empty());
+        assert_ne!(
+            result.registry_modification_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
     fn detects_registry_modification_remove_item() {
         let result = normalize("Remove-Item HKLM:\\Software\\Evil -Recurse");
 
-        assert!(!result.registry_modification_indicators.is_empty());
+        assert_ne!(
+            result.registry_modification_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
     fn detects_credential_access_get_credential() {
         let result = normalize("Get-Credential");
 
-        assert!(!result.credential_access_indicators.is_empty());
+        assert_ne!(
+            result.credential_access_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .credential_access_indicators
@@ -699,7 +732,10 @@ mod tests {
     fn detects_credential_access_convertto_securestring() {
         let result = normalize("ConvertTo-SecureString -String 'encrypted'");
 
-        assert!(!result.credential_access_indicators.is_empty());
+        assert_ne!(
+            result.credential_access_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .credential_access_indicators
@@ -711,7 +747,10 @@ mod tests {
     fn detects_credential_access_convertfrom_securestring() {
         let result = normalize("ConvertFrom-SecureString -SecureString $secure");
 
-        assert!(!result.credential_access_indicators.is_empty());
+        assert_ne!(
+            result.credential_access_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .credential_access_indicators
@@ -723,14 +762,20 @@ mod tests {
     fn detects_credential_access_with_credential_parameter() {
         let result = normalize("Get-WmiObject -Class Win32_Process -Credential admin");
 
-        assert!(!result.credential_access_indicators.is_empty());
+        assert_ne!(
+            result.credential_access_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
     fn detects_process_injection_reflective_pe() {
         let result = normalize("Invoke-ReflectivePEInjection");
 
-        assert!(!result.process_injection_indicators.is_empty());
+        assert_ne!(
+            result.process_injection_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .process_injection_indicators
@@ -742,7 +787,10 @@ mod tests {
     fn detects_process_injection_mimikatz() {
         let result = normalize("Invoke-Mimikatz");
 
-        assert!(!result.process_injection_indicators.is_empty());
+        assert_ne!(
+            result.process_injection_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(
             result
                 .process_injection_indicators
@@ -754,7 +802,10 @@ mod tests {
     fn detects_process_injection_mimikatz_command() {
         let result = normalize("sekurlsa::logonpasswords");
 
-        assert!(!result.process_injection_indicators.is_empty());
+        assert_ne!(
+            result.process_injection_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
@@ -784,12 +835,27 @@ mod tests {
     fn no_false_positives_on_normal_commands() {
         let result = normalize("Get-Process | Select-Object Name, Id");
 
-        assert!(result.amsi_bypass_indicators.is_empty());
+        assert_eq!(
+            result.amsi_bypass_indicators,
+            [] as [std::string::String; 0]
+        );
         assert!(!result.execution_policy_bypass);
-        assert!(result.hidden_window_indicators.is_empty());
-        assert!(result.registry_modification_indicators.is_empty());
-        assert!(result.credential_access_indicators.is_empty());
-        assert!(result.process_injection_indicators.is_empty());
+        assert_eq!(
+            result.hidden_window_indicators,
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            result.registry_modification_indicators,
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            result.credential_access_indicators,
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            result.process_injection_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     // Regression tests for Issue 2: Invoke-Command detection
@@ -827,7 +893,10 @@ mod tests {
     fn detects_hidden_window_colon_syntax() {
         let result = normalize("powershell -w:Hidden -Command evil");
 
-        assert!(!result.hidden_window_indicators.is_empty());
+        assert_ne!(
+            result.hidden_window_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     // Regression test for Issue 5: Get-WmiObject false positive
@@ -835,7 +904,10 @@ mod tests {
     fn no_false_positive_get_wmiobject_without_credential() {
         let result = normalize("Get-WmiObject Win32_Process");
 
-        assert!(result.credential_access_indicators.is_empty());
+        assert_eq!(
+            result.credential_access_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 
     // Regression test for Issue 6: String literal false positive
@@ -843,6 +915,9 @@ mod tests {
     fn no_false_positive_invoke_mimikatz_string_literal() {
         let result = normalize("Write-Output \"Invoke-Mimikatz\"");
 
-        assert!(result.process_injection_indicators.is_empty());
+        assert_eq!(
+            result.process_injection_indicators,
+            [] as [std::string::String; 0]
+        );
     }
 }

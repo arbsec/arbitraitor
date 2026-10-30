@@ -1016,7 +1016,7 @@ fn wrappers_install_parses_all_targets() -> Result<(), Box<dyn std::error::Error
     match cli.command {
         Command::Wrappers(cmd) => match cmd.subcommand {
             WrappersSubcommand::Install(install) => {
-                assert!(install.targets.is_empty());
+                assert_eq!(install.targets, [] as [std::string::String; 0]);
                 assert!(!cmd.use_scripts);
             }
             _ => return Err("parsed wrong subcommand".into()),

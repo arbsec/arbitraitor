@@ -449,7 +449,7 @@ checksum = "c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d7"
     #[test]
     fn parse_empty_lockfile() -> Result<(), CargoLockError> {
         let lock = parse_cargo_lock("version = 4\n")?;
-        assert!(lock.packages.is_empty());
+        assert_eq!(lock.packages, [] as [CargoPackage; 0]);
         Ok(())
     }
 
@@ -532,7 +532,7 @@ checksum = "c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d728e5b7d3c8d7"
         "#;
         let analysis = analyse_build_script(src);
         assert!(analysis.categories.is_empty());
-        assert!(analysis.dangerous_patterns.is_empty());
+        assert_eq!(analysis.dangerous_patterns, [] as [std::string::String; 0]);
         assert!(analysis.incomplete_coverage);
     }
 

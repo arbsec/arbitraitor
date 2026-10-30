@@ -75,7 +75,10 @@ fn detector_failure_is_recorded_and_verdict_is_incomplete() {
 
     let result = coordinator.analyze(b"not empty");
 
-    assert!(result.findings.is_empty());
+    assert_eq!(
+        result.findings,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     assert_eq!(result.verdict, Verdict::Incomplete);
     assert_eq!(result.detector_results.len(), 1);
     assert!(matches!(
@@ -112,7 +115,10 @@ fn slow_detector_timeout_is_recorded_and_verdict_is_incomplete() {
 
     let result = coordinator.analyze(b"not empty");
 
-    assert!(result.findings.is_empty());
+    assert_eq!(
+        result.findings,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     assert_eq!(result.verdict, Verdict::Incomplete);
     assert_eq!(result.detector_results.len(), 1);
     assert!(matches!(
@@ -235,7 +241,10 @@ fn all_findings_carry_correct_artifact_digest() {
 
     let result = coordinator.analyze(bytes);
 
-    assert!(!result.findings.is_empty());
+    assert_ne!(
+        result.findings,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     for finding in &result.findings {
         assert_eq!(
             finding.artifact_sha256, expected,
@@ -527,7 +536,10 @@ fn reputation_detector_reports_no_findings_without_matches()
     let detector = ReputationDetector::new(store);
     let ctx = test_context(b"different payload", None);
 
-    assert!(detector.analyze(&ctx)?.is_empty());
+    assert_eq!(
+        detector.analyze(&ctx)?,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     Ok(())
 }
 
@@ -544,7 +556,10 @@ fn reputation_detector_ignores_expired_entries() -> Result<(), Box<dyn std::erro
     let detector = ReputationDetector::new(store);
     let ctx = test_context(bytes, None);
 
-    assert!(detector.analyze(&ctx)?.is_empty());
+    assert_eq!(
+        detector.analyze(&ctx)?,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     Ok(())
 }
 

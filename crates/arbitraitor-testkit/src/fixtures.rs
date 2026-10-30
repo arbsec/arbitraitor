@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn binary_and_archive_fixtures_have_expected_markers() {
-        assert!(empty_file().is_empty());
+        assert_eq!(empty_file(), [] as [u8; 0]);
         assert_eq!(random_bytes(32).len(), 32);
         assert!(zip_bomb().starts_with(b"PK\x03\x04"));
         assert!(

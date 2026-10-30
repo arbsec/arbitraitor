@@ -158,7 +158,10 @@ mod end_to_end {
     #[test]
     fn empty_snapshot_no_findings() -> Result<(), Box<dyn std::error::Error>> {
         let detector = DepVulnDetector::empty(test_digest());
-        assert!(detector.analyze(&ctx(cargo_lock()))?.is_empty());
+        assert_eq!(
+            detector.analyze(&ctx(cargo_lock()))?,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         Ok(())
     }
 
@@ -179,7 +182,10 @@ mod end_to_end {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::High);
         assert!(findings[0].id.contains("serde"));
-        assert!(!findings[0].taxonomies.is_empty());
+        assert_ne!(
+            findings[0].taxonomies,
+            [] as [arbitraitor_model::taxonomy::TaxonomyRef; 0]
+        );
         Ok(())
     }
 
@@ -218,7 +224,10 @@ mod end_to_end {
             )],
             test_digest(),
         );
-        assert!(detector.analyze(&ctx(cargo_lock()))?.is_empty());
+        assert_eq!(
+            detector.analyze(&ctx(cargo_lock()))?,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         Ok(())
     }
 
@@ -372,7 +381,7 @@ mod config_and_detector {
         );
         assert!(!detector.is_enabled());
         let findings = detector.analyze(&ctx(cargo_lock()))?;
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
         Ok(())
     }
 

@@ -1829,7 +1829,7 @@ mod tests {
         let stmt = receipt.to_intoto_statement()?;
         assert_eq!(stmt.statement_type, "https://in-toto.io/Statement/v1");
         assert_eq!(stmt.predicate_type, "https://arbitraitor.dev/verdict/v1");
-        assert!(!stmt.subject.is_empty());
+        assert_ne!(stmt.subject, [] as [IntotoSubject; 0]);
         Ok(())
     }
 
@@ -1972,8 +1972,11 @@ mod tests {
     fn envelope_policy_bucket_contains_digest_and_audit_trail() {
         let receipt = sample_receipt();
         assert_eq!(receipt.policy.policy_digest.as_deref(), Some("policy:01"));
-        assert!(receipt.policy.audit_trail.is_empty());
-        assert!(receipt.policy.allow_rule_metadata.is_empty());
+        assert_eq!(receipt.policy.audit_trail, [] as [AuditEvent; 0]);
+        assert_eq!(
+            receipt.policy.allow_rule_metadata,
+            [] as [AllowRuleMetadata; 0]
+        );
     }
 
     #[test]

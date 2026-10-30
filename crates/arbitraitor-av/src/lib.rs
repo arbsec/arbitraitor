@@ -800,7 +800,10 @@ mod tests {
             enabled_policy(true),
         );
 
-        assert!(result.findings.is_empty());
+        assert_eq!(
+            result.findings,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         assert_eq!(result.verdict, Verdict::Pass);
     }
 
@@ -850,7 +853,10 @@ mod tests {
             enabled_policy(false),
         );
 
-        assert!(result.findings.is_empty());
+        assert_eq!(
+            result.findings,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         assert_eq!(result.verdict, Verdict::Pass);
     }
 
@@ -994,7 +1000,10 @@ mod tests {
         policy.max_signature_age_hours = Some(0);
         let result = analyze(adapter, policy);
 
-        assert!(result.findings.is_empty());
+        assert_eq!(
+            result.findings,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         assert_eq!(result.verdict, Verdict::Pass);
     }
 

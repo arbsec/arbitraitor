@@ -934,7 +934,10 @@ mod tests {
         let clustered = parse(&["curl", "-sS", "https://example.com"])?;
         assert!(clustered.silent);
         assert!(clustered.show_error);
-        assert!(clustered.unsupported_options.is_empty());
+        assert_eq!(
+            clustered.unsupported_options,
+            [] as [std::string::String; 0]
+        );
 
         // -sofile.txt: silent plus `-o` with an attached value.
         let attached = parse(&["curl", "-sofile.txt", "https://example.com"])?;

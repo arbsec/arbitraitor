@@ -454,7 +454,7 @@ mod tests {
         let json = serde_json::json!({});
         let f = convert_tirith_finding(&json, &digest);
         assert_eq!(f.severity, Severity::Medium);
-        assert!(!f.id.is_empty());
+        assert_ne!(f.id, "");
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod tests {
         let json = serde_json::json!({"findings": []});
         let stdout = serde_json::to_vec(&json)?;
         let findings = parse_tirith_findings(&stdout, &digest)?;
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
         Ok(())
     }
 

@@ -290,7 +290,7 @@ mod tests {
 
         assert_eq!(signature.method, SigningMethod::Minisign);
         assert_eq!(signature.key_id, Some(hex_upper(key.pk.keynum())));
-        assert!(!signature.signature.is_empty());
+        assert_ne!(signature.signature, [] as [u8; 0]);
 
         // Verify the signature round-trips through minisign verification.
         let signature_text = std::str::from_utf8(&signature.signature)?;

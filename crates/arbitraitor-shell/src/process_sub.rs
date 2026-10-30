@@ -583,13 +583,13 @@ mod tests {
     fn ignores_quoted_substitution_markers() {
         let source = "echo 'this is <(not a substitution)'";
         let subs = find_process_substitutions(source);
-        assert!(subs.is_empty());
+        assert_eq!(subs, [] as [ProcessSubstitution; 0]);
     }
 
     #[test]
     fn ignores_heredoc_markers() {
         let source = "cat <<(not_procsub)";
         let subs = find_process_substitutions(source);
-        assert!(subs.is_empty());
+        assert_eq!(subs, [] as [ProcessSubstitution; 0]);
     }
 }

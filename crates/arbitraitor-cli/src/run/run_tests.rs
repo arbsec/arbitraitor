@@ -197,7 +197,7 @@ async fn run_passes_spec_flags_to_execution_services()
         .execution_options
         .ok_or("execution options were not captured")?;
     assert_eq!(options.interpreter, PathBuf::from("/usr/local/bin/zsh"));
-    assert!(options.interpreter_args.is_empty());
+    assert_eq!(options.interpreter_args, [] as [std::string::String; 0]);
     assert_eq!(
         options.working_directory,
         Some(PathBuf::from("/tmp/arbitraitor-run"))

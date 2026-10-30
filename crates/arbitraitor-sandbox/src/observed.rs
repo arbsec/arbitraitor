@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(log.schema_version, OBSERVED_EVENT_SCHEMA_VERSION);
         assert!(log.is_empty());
         assert_eq!(log.len(), 0);
-        assert!(log.as_slice().is_empty());
+        assert_eq!(log.as_slice(), []);
         assert_eq!(log.iter().count(), 0);
     }
 

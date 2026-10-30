@@ -1356,7 +1356,10 @@ mod tests {
         let source = "echo hello\n";
         let parse = parser.parse_str(source);
         let result = normalize(&parse.ast, source)?;
-        assert!(result.process_substitutions.is_empty());
+        assert_eq!(
+            result.process_substitutions,
+            [] as [crate::process_sub::ProcessSubstitution; 0]
+        );
         Ok(())
     }
 

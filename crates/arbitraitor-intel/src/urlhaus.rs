@@ -396,8 +396,8 @@ mod tests {
     fn empty_payload_produces_zero_entries() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
         let adapter = UrlhausAdapter::new();
-        assert!(adapter.parse(b"")?.is_empty());
-        assert!(adapter.parse(b"   \n\t  ")?.is_empty());
+        assert_eq!(adapter.parse(b"")?, [] as [FeedEntry; 0]);
+        assert_eq!(adapter.parse(b"   \n\t  ")?, [] as [FeedEntry; 0]);
         Ok(())
     }
 

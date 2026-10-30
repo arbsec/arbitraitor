@@ -81,7 +81,10 @@ fn finding_with_taxonomy_attaches_refs() {
 #[test]
 fn finding_without_taxonomy_has_empty_vec() {
     let finding = sample_finding();
-    assert!(finding.taxonomies.is_empty());
+    assert_eq!(
+        finding.taxonomies,
+        [] as [arbitraitor_model::taxonomy::TaxonomyRef; 0]
+    );
 }
 
 #[test]
@@ -110,7 +113,10 @@ fn old_json_without_taxonomies_deserializes_as_empty() -> TestResult {
         "location":null,"remediation":null,"references":[],"tags":[]
     }"#;
     let finding: Finding = serde_json::from_str(old_json)?;
-    assert!(finding.taxonomies.is_empty());
+    assert_eq!(
+        finding.taxonomies,
+        [] as [arbitraitor_model::taxonomy::TaxonomyRef; 0]
+    );
     Ok(())
 }
 

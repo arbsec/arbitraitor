@@ -188,7 +188,7 @@ pub(crate) fn resolve_real_binary_in_path(
     miette::bail!(
         "could not resolve real binary for '{tool}' outside {}",
         shim_dir.display()
-    )
+    );
 }
 
 fn is_executable_file(path: &Path) -> bool {

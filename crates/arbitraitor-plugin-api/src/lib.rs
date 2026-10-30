@@ -579,13 +579,19 @@ mod tests {
         assert_eq!(base.capabilities(), &CapabilitySet::default());
 
         let detector: &dyn DetectorPlugin = &plugin;
-        assert!(detector.analyze(b"artifact", &context).is_empty());
+        assert_eq!(
+            detector.analyze(b"artifact", &context),
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
 
         let wrapper: &dyn WrapperPlugin = &plugin;
         assert!(wrapper.parse_command(&["curl".to_owned()]).is_err());
 
         let intelligence: &dyn IntelligencePlugin = &plugin;
-        assert!(intelligence.query(&indicator).is_empty());
+        assert_eq!(
+            intelligence.query(&indicator),
+            [] as [arbitraitor_intel::FeedEntry; 0]
+        );
 
         let provenance: &dyn ProvenancePlugin = &plugin;
         assert_eq!(

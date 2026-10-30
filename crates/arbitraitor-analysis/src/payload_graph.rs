@@ -260,13 +260,13 @@ mod tests {
     #[test]
     fn children_of_leaf_node_is_empty() {
         let graph = sample_graph();
-        assert!(graph.children(2).is_empty());
+        assert_eq!(graph.children(2), [] as [usize; 0]);
     }
 
     #[test]
     fn parents_of_root_node_is_empty() {
         let graph = sample_graph();
-        assert!(graph.parents(0).is_empty());
+        assert_eq!(graph.parents(0), [] as [usize; 0]);
     }
 
     #[test]

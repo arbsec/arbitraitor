@@ -270,7 +270,7 @@ mod tests {
         let entries = adapter.parse(payload.as_bytes())?;
 
         // Then
-        assert!(entries.is_empty());
+        assert_eq!(entries, [] as [FeedEntry; 0]);
         Ok(())
     }
 

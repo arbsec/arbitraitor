@@ -1548,10 +1548,12 @@ fn handle_init(cmd: &InitCommand, shim_dir: &Path) -> Result<()> {
         })?,
         None => match shell_init::detect_shell() {
             Some(detected) => detected.shell,
-            None => miette::bail!(
-                "could not detect shell; specify one explicitly: {}",
-                supported_shells_list()
-            ),
+            None => {
+                miette::bail!(
+                    "could not detect shell; specify one explicitly: {}",
+                    supported_shells_list()
+                );
+            }
         },
     };
 

@@ -46,7 +46,7 @@ pub fn run(command: &PmCommand) -> Result<()> {
     match tool.as_str() {
         "npm" => run_npm(args),
         other => {
-            miette::bail!("unsupported package manager tool: '{other}'; currently supported: npm")
+            miette::bail!("unsupported package manager tool: '{other}'; currently supported: npm");
         }
     }
 }
@@ -227,7 +227,7 @@ mod tests {
             Command::Pm(cmd) => match cmd.subcommand {
                 super::PmSubcommand::Run { tool, args } => {
                     assert_eq!(tool, "npm");
-                    assert!(args.is_empty());
+                    assert_eq!(args, [] as [std::string::String; 0]);
                 }
             },
             _ => return Err("parsed wrong command".into()),

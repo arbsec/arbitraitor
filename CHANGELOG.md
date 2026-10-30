@@ -271,6 +271,21 @@ caps pending record files at
     only way to remove the advisory-laden `zstd 0.13.3` / `zstd-safe 7.3.0`
     copies from the graph without a waiver, and it is why no Wasmtime bump
     could have fixed them.
+- **Rust toolchain pinned to 1.99.1** (ADR-0001). `.mise.toml` and
+  `rust-toolchain.toml` move from 1.98.1 to 1.99.1, keeping the pinned
+  compiler on current stable so security-sensitive dependencies do not
+  accumulate patch lag. The bump changes no behaviour and adds no
+  dependency; it surfaces two lints, both fixed in the code rather than
+  silenced:
+  - `clippy::assert_is_empty` (new in Clippy 1.99) rewrites 160
+    `assert!(x.is_empty())` / `assert!(!x.is_empty())` assertions into
+    `assert_eq!` / `assert_ne!` against an empty value, so a failing test
+    prints the offending contents. No assertion is weakened and no
+    `#[allow]` is added.
+  - rustc's `semicolon_in_expressions_from_non_local_macros` moves four
+    `miette::bail!` calls in `arbitraitor-cli` out of expression position
+    into statement position. `bail!` already diverges, so the control flow
+    is unchanged.
 
 ### Fixed
 

@@ -107,7 +107,7 @@ async fn fetch_blocks_loopback_by_default() -> Result<(), Box<dyn std::error::Er
         .ok_or("loopback fetch should be blocked")?;
 
     assert!(matches!(error, FetchError::ProhibitedAddress { address } if address.is_loopback()));
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -129,7 +129,7 @@ async fn redirect_target_is_validated_against_ssrf_policy() -> Result<(), Box<dy
     assert!(
         matches!(error, FetchError::ProhibitedAddress { address } if address.to_string() == "169.254.169.254")
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -168,7 +168,7 @@ async fn http_fetch_streams_exact_response_bytes() -> Result<(), Box<dyn std::er
         Some("application/octet-stream")
     );
     assert!(receipt.metadata.connected_ip.is_some());
-    assert!(!receipt.metadata.resolved_ips.is_empty());
+    assert_ne!(receipt.metadata.resolved_ips, [] as [std::net::IpAddr; 0]);
     Ok(())
 }
 
@@ -284,7 +284,7 @@ async fn required_digest_missing_fails_before_fetch() -> Result<(), Box<dyn std:
         .ok_or("missing required digest should fail")?;
 
     assert!(matches!(error, FetchError::RequiredDigestMissing));
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -326,7 +326,7 @@ async fn redirects_are_not_followed_by_default() -> Result<(), Box<dyn std::erro
         error,
         FetchError::RedirectLimitExceeded { limit: 0 }
     ));
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -381,7 +381,7 @@ async fn credential_cross_protocol_redirect_fails_closed() -> Result<(), Box<dyn
         }
     ));
     assert!(!format!("{error}").contains("super-secret-token"));
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -425,7 +425,7 @@ async fn size_limit_stops_streaming_before_sink_write() -> Result<(), Box<dyn st
             observed: 8
         }
     ));
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
