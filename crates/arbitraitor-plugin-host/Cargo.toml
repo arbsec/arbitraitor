@@ -43,13 +43,16 @@ tracing = { workspace = true }
 #   runtime            — Engine, Store, and instance management
 #   component-model    — Component Model support (ADR-0006)
 #   parallel-compilation — speed up compilation of large components
-#   cache              — on-disk compilation cache to avoid recompilation
+# The `cache` feature is deliberately not enabled: it pulls
+# `wasmtime-internal-cache`, which requires `zstd ^0.13` in every published
+# release and so keeps an advisory-laden zstd copy in the lockfile; it also
+# writes an on-disk compilation artifact that is a tampering surface. See
+# ADR-0043.
 wasmtime = { version = ">=49.0.2", default-features = false, features = [
     "cranelift",
     "runtime",
     "component-model",
     "parallel-compilation",
-    "cache",
 ], optional = true }
 arbitraitor-workspace-hack = { version = "0.1", path = "../arbitraitor-workspace-hack" }
 

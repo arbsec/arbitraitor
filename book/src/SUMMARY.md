@@ -77,6 +77,7 @@
   - [ADR 0040: Wasmtime security floor in Cargo.toml](./adr/0040-wasmtime-security-floor.md)
   - [ADR 0041: Mediated GET-only HTTP egress for agent web tools](./adr/0041-mediated-get-only-http-egress.md)
   - [ADR 0042: Wall-clock deadline and process-group kill for mediated execution](./adr/0042-wall-clock-deadline-process-group-kill.md)
+  - [ADR 0043: No Wasmtime compilation cache](./adr/0043-no-wasmtime-compilation-cache.md)
 <!-- markdownlint-enable MD057 -->
 - [Troubleshooting](./how-to/troubleshoot.md)
 - [Contributing](./contributing.md)

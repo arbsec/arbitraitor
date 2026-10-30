@@ -479,6 +479,26 @@ async fn exact_byte_server(
     Ok((format!("http://{addr}/artifact"), handle))
 }
 
+/// Reads up to the end of the request head so the accepted connection holds no
+/// unread bytes when the response is written. A mock server that answers before
+/// draining the request leaves the request in the kernel buffer, and closing the
+/// socket then emits an RST that races the response — the client sees a canceled
+/// request instead of the redirect.
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(());
+        }
+    }
+}
+
 async fn metadata_redirect_server() -> Result<String, std::io::Error> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let addr = listener.local_addr()?;
@@ -486,6 +506,7 @@ async fn metadata_redirect_server() -> Result<String, std::io::Error> {
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
+        let _ = read_request_head(&mut stream).await;
         let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(response.as_bytes()).await;
         let _ = stream.shutdown().await;
@@ -541,6 +562,7 @@ async fn redirect_server(target_url: String) -> Result<String, std::io::Error> {
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
+        let _ = read_request_head(&mut stream).await;
         let response = format!(
             "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
