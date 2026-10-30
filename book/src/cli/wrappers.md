@@ -286,6 +286,22 @@ semantics:
 | `-O` / `--remote-name` | Bytes written to a file named after the URL's last path segment |
 | wget `-O <file>` | Same as curl `-o <file>` |
 
+Output destinations come only from options the caller actually wrote: the
+value of an unsupported option is never re-parsed as flags, so
+`curl -w%{http_code} URL` still writes the body to stdout instead of to a
+path derived from the format string. Short options may be clustered and may
+carry their value attached (`-sS`, `-o file.txt`, `-ofile.txt`, `-HX:y`),
+exactly as real `curl` accepts them.
+
+A short option that is not part of curl's short-option table at all is
+rejected with an `unsupported curl option` error rather than guessed at:
+real `curl` refuses such an invocation too (exit 2), and because short
+options cluster there is no way to know where an unknown option's value
+ends. Known-but-unsupported short options (`-w`, `-v`, `-J`, …) are
+recorded in the invocation's unsupported-option list and the fetch
+proceeds; only security-critical ones (e.g. `-k`, `-x`) hard-reject the
+invocation.
+
 When the verdict is anything other than Pass (Warn, Prompt, Block, Error,
 Incomplete):
 
