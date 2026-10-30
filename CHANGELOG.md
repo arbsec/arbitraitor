@@ -501,6 +501,20 @@ caps pending record files at
   yara-x bumps wasmtime. Same yara-x pin as the existing
   RUSTSEC-2026-0269 ignore; both drop when yara-x requires a patched
   wasmtime.
+- **wrapper: the attached value of an unsupported curl short option is no
+  longer re-parsed as flags** (#816) — `curl -w%{http_code} URL` was scanned
+  one character at a time, the `o` inside the write-out format matched the
+  value-taking arm, and the response body was written to a file named `de}`
+  (the wrapper derives its destination from the parsed `-o`), a §26.2
+  destination-safety divergence from real curl. The same class read
+  `-eao/home/u/.bashrc` (referer plus append-output) as
+  `-o /home/u/.bashrc`. `parse_short_options` now mirrors curl's
+  short-option table — which options take a value and which do not, so
+  clusters such as `-vfsS` are attributed correctly regardless of order —
+  and drops the remainder of a token after an option curl itself rejects,
+  exactly as the separate-argument form already did, instead of scanning it
+  for more flags. Emitting `-w`/`--write-out` output itself remains
+  unimplemented (#782).
 
 ### Changed (CI)
 

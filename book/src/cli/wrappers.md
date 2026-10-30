@@ -286,6 +286,13 @@ semantics:
 | `-O` / `--remote-name` | Bytes written to a file named after the URL's last path segment |
 | wget `-O <file>` | Same as curl `-o <file>` |
 
+Output destinations come only from options the caller actually wrote: the
+value of an unsupported option is never re-parsed as flags, so
+`curl -w%{http_code} URL` still writes the body to stdout instead of to a
+path derived from the format string. Short options may be clustered and may
+carry their value attached (`-sS`, `-o file.txt`, `-ofile.txt`, `-HX:y`),
+exactly as real `curl` accepts them.
+
 When the verdict is anything other than Pass (Warn, Prompt, Block, Error,
 Incomplete):
 

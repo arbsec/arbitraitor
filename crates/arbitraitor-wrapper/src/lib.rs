@@ -330,13 +330,25 @@ impl<'a> CurlParser<'a> {
                 reason: format!("{name} requires a non-negative integer"),
             })
     }
+    /// Parses a clustered short-option token such as `-sS` or `-sofile.txt`.
+    ///
+    /// curl clusters short options and treats the remainder of the token as
+    /// the value of a value-taking option, so the value-taking and no-value
+    /// sets below mirror curl's own short-option table. Options the wrapper
+    /// does not model are still recorded in
+    /// [`CurlArgs::unsupported_options`] — that list is the enforcement
+    /// channel the CLI's `bail_on_critical` path filters.
     fn parse_short_options(&mut self, token: &str) -> Result<(), WrapperError> {
-        let mut chars = token[1..].char_indices().peekable();
+        // `token[1..]` drops the leading `-`; the offsets below index into it.
+        let body = &token[1..];
+        let mut chars = body.char_indices().peekable();
         while let Some((offset, flag)) = chars.next() {
             match flag {
-                'o' | 'H' | 'A' | 'd' | 'X' | 'F' | 'T' | 'u' | 'x' | 'U' | 'K' | 'E' => {
+                // curl short options that take a value.
+                'o' | 'H' | 'A' | 'd' | 'X' | 'F' | 'T' | 'u' | 'x' | 'U' | 'K' | 'E' | 'b'
+                | 'c' | 'C' | 'D' | 'e' | 'm' | 'P' | 'Q' | 'r' | 't' | 'w' | 'y' | 'Y' | 'z' => {
                     let value = if let Some((next_offset, _)) = chars.peek().copied() {
-                        token[(next_offset + 1)..].to_owned()
+                        body[next_offset..].to_owned()
                     } else {
                         self.required_next_value(&format!("-{flag}"))?
                     };
@@ -353,14 +365,29 @@ impl<'a> CurlParser<'a> {
                     self.args.unsupported_options.push("-k".to_owned());
                 }
                 'O' => self.args.remote_name = true,
+                // curl short options that take no value. Recognizing them
+                // keeps a cluster such as `-vfsS` from being read as one
+                // unknown option with an attached value.
+                '#' | '0' | '1' | '2' | '3' | '4' | '6' | 'a' | 'B' | 'g' | 'G' | 'h' | 'i'
+                | 'j' | 'l' | 'M' | 'n' | 'N' | 'p' | 'q' | 'R' | 'v' | 'V' | 'Z' | ':' => {
+                    self.args.unsupported_options.push(format!("-{flag}"));
+                }
                 _ => {
                     self.args.unsupported_options.push(format!("-{flag}"));
-                    if chars.peek().is_none() {
+                    // curl rejects an option it does not know, so the token
+                    // cannot be honoured. Whatever follows is that option's
+                    // attached value (curl's convention) and is dropped
+                    // exactly like `consume_unknown_option_value` drops the
+                    // separate-argument form. Re-scanning those characters as
+                    // flags made a value such as the `o` in `-w%{http_code}`
+                    // apply as `-o` and redirect the response body to a bogus
+                    // path (§26.2 destination safety).
+                    if body[offset + flag.len_utf8()..].is_empty() {
                         self.consume_unknown_option_value();
                     }
+                    break;
                 }
             }
-            let _ = offset;
         }
         Ok(())
     }
@@ -372,7 +399,8 @@ impl<'a> CurlParser<'a> {
             'A' => self.args.user_agent = Some(value),
             'd' => self.args.data = Some(value),
             'X' => self.args.request_method = Some(value),
-            'F' | 'T' | 'u' | 'x' | 'U' | 'K' | 'E' => {
+            'F' | 'T' | 'u' | 'x' | 'U' | 'K' | 'E' | 'b' | 'c' | 'C' | 'D' | 'e' | 'm' | 'P'
+            | 'Q' | 'r' | 't' | 'w' | 'y' | 'Y' | 'z' => {
                 self.args.unsupported_options.push(format!("-{flag}"));
             }
             _ => {}
@@ -758,6 +786,124 @@ mod tests {
         assert_eq!(args.user_agent.as_deref(), Some("TestAgent"));
         Ok(())
     }
+
+    #[test]
+    fn write_out_attached_value_is_not_reparsed_as_output() -> Result<(), WrapperError> {
+        // Real curl accepts the attached form `-w<format>`. The format
+        // `%{http_code}` contains an `o`, and re-scanning the attached value
+        // as a flag cluster used to match `-o` and set the destination to the
+        // tail after that `o` (`de}`), writing the response body to a bogus
+        // path instead of stdout (spec §26.2 destination safety).
+        let args = parse(&["curl", "-w%{http_code}", "https://example.com"])?;
+
+        assert_eq!(args.output, None, "-w's value must never become the output");
+        assert!(
+            args.unsupported_options.contains(&"-w".to_owned()),
+            "write-out is unsupported and must still be reported"
+        );
+        assert!(
+            !args.unsupported_options.contains(&"-o".to_owned()),
+            "-o may only be recorded when the user wrote `-o` as an option"
+        );
+        assert_eq!(args.url.as_deref(), Some("https://example.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn referer_attached_value_does_not_derive_output() -> Result<(), WrapperError> {
+        // `-eao/home/user/.bashrc` is referer (`-e`) with the attached value
+        // `ao/home/user/.bashrc`; it must not be read as `-e -a -o <path>`.
+        let args = parse(&["curl", "-eao/home/user/.bashrc", "https://example.com"])?;
+
+        assert_eq!(args.output, None);
+        assert!(args.unsupported_options.contains(&"-e".to_owned()));
+        assert!(!args.unsupported_options.contains(&"-o".to_owned()));
+        assert_eq!(args.url.as_deref(), Some("https://example.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_option_values_are_never_output_sources() -> Result<(), WrapperError> {
+        // No character a user wrote inside another option's value may be
+        // applied as a value-taking option. `%{http_code}` (write-out),
+        // `https://o.example/x` (referer), and an option curl itself rejects
+        // (`-7`) all carry an `o` that must stay inert.
+        for token in ["-w%{http_code}", "-ehttps://o.example/x", "-7o/path"] {
+            let args = parse(&["curl", token, "https://example.com"])?;
+            assert_eq!(args.output, None, "{token} must not set an output path");
+            assert!(
+                !args.unsupported_options.contains(&"-o".to_owned()),
+                "{token} must not report a bogus -o option"
+            );
+            assert_eq!(args.url.as_deref(), Some("https://example.com"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_short_option_attached_value_is_not_scanned_as_flags() -> Result<(), WrapperError> {
+        // curl rejects `-7` outright, so the wrapper records it and drops the
+        // tail as its attached value rather than attributing `-s`/`-S` to the
+        // user.
+        let args = parse(&["curl", "-7sS", "https://example.com"])?;
+
+        assert!(args.unsupported_options.contains(&"-7".to_owned()));
+        assert!(!args.unsupported_options.contains(&"-s".to_owned()));
+        assert!(!args.unsupported_options.contains(&"-S".to_owned()));
+        assert!(!args.silent);
+        assert!(!args.show_error);
+        assert_eq!(args.url.as_deref(), Some("https://example.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn curl_short_cluster_regressions_keep_known_option_behaviour() -> Result<(), WrapperError> {
+        // -sS: cluster of known no-value flags.
+        let clustered = parse(&["curl", "-sS", "https://example.com"])?;
+        assert!(clustered.silent);
+        assert!(clustered.show_error);
+        assert!(clustered.unsupported_options.is_empty());
+
+        // -sofile.txt: silent plus `-o` with an attached value.
+        let attached = parse(&["curl", "-sofile.txt", "https://example.com"])?;
+        assert!(attached.silent);
+        assert_eq!(attached.output.as_deref(), Some("file.txt"));
+
+        // -o file.txt: separate value.
+        let separate = parse(&["curl", "-o", "file.txt", "https://example.com"])?;
+        assert_eq!(separate.output.as_deref(), Some("file.txt"));
+
+        // -H 'Accept: x': separate header value.
+        let header = parse(&["curl", "-H", "Accept: x", "https://example.com"])?;
+        assert_eq!(header.headers, vec![("accept".to_owned(), "x".to_owned())]);
+
+        // -HX:y: attached header value.
+        let attached_header = parse(&["curl", "-HX:y", "https://example.com"])?;
+        assert_eq!(
+            attached_header.headers,
+            vec![("x".to_owned(), "y".to_owned())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn critical_short_option_after_no_value_flag_is_still_enforced() -> Result<(), WrapperError> {
+        // `-vx <proxy-url>` is verbose plus the critical proxy option. Both
+        // are modelled, so the enforcement channel keeps the proxy record and
+        // the proxy URL is consumed as `-x`'s value instead of being fetched.
+        let args = parse(&["curl", "-vx", "http://proxy:3128", "https://example.com/"])?;
+
+        assert!(args.unsupported_options.contains(&"-v".to_owned()));
+        assert!(args.unsupported_options.contains(&"-x".to_owned()));
+        assert!(
+            args.unsupported_options
+                .iter()
+                .any(|opt| is_critical_unsupported_option(opt))
+        );
+        assert_eq!(args.urls, ["https://example.com/"]);
+        Ok(())
+    }
+
     #[test]
     fn remote_name_from_url_strips_query_and_fragment() -> Result<(), WrapperError> {
         // Query and fragments (which may carry secrets) must not leak into
