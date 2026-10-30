@@ -24,7 +24,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use arbitraitor_sandbox::{
@@ -40,6 +40,10 @@ use crate::harness::{
 const MAP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Poll interval while waiting for the map.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// How many times the `RLIMIT_NPROC` arm may be re-run to match the task count
+/// the kernel actually accounts for. The second attempt converges unless the
+/// ambient count changes underneath it.
+const CALIBRATION_ATTEMPTS: u32 = 3;
 
 /// Appends `KEY=value` to this probe's report file.
 fn record(key: &str, value: impl fmt::Display) -> Result<(), Box<dyn Error>> {
@@ -266,7 +270,14 @@ fn nproc_inside() -> Result<(), Box<dyn Error>> {
 
     // Baseline arm: no limit at all. Two forks must succeed in this namespace,
     // which is what excludes an ambient `EAGAIN` from the evidence.
-    let baseline = run_forker(&workdir, "forker-baseline.report", None)?;
+    let (baseline_status, baseline) = run_forker(&workdir, "forker-baseline.report", None)?;
+    if !baseline_status.success() {
+        return Err(format!(
+            "the unconstrained baseline forker exited with {baseline_status:?}; an ambient failure \
+             is never enforcement evidence: {baseline:?}"
+        )
+        .into());
+    }
     record("BASELINE_FORK1", baseline.text("FORK1")?)?;
     record("BASELINE_FORK2", baseline.text("FORK2")?)?;
     record(
@@ -275,26 +286,56 @@ fn nproc_inside() -> Result<(), Box<dyn Error>> {
     )?;
 
     // Calibration. `RLIMIT_NPROC` is compared against the number of tasks the
-    // namespace's real uid owns: this probe's own threads, the supervisor
-    // thread `ChildGuard::wait` holds while it watches the forker, and the
-    // forker's threads. Exactly one task of slack leaves room for the first
-    // fork, so the *second* one is the one the limit must deny. The forker
-    // reports `TASKS_BEFORE_FORK`, so the parent verifies this arithmetic
-    // instead of trusting it.
+    // namespace's real uid owns, and that count is never quite what a caller
+    // predicts: libtest's own threads, this probe's threads, the supervisor
+    // thread `ChildGuard::wait` holds while it watches the forker and the
+    // forker's threads all count, and how many there are differs between
+    // environments. So the limit is not predicted: the forker reports the
+    // count it actually observed immediately before its first fork, and the
+    // probe re-runs the arm with `observed + 1` until the limit in force
+    // matches that measurement. One task of slack leaves room for the first
+    // fork, so the second one is the one the limit must deny.
     let probe_tasks = thread_count()?;
-    let supervisor_tasks = 1;
     let forker_threads: u32 = baseline.int("FORKER_THREADS")?.try_into()?;
-    let limit = probe_tasks
-        .checked_add(supervisor_tasks)
-        .and_then(|value| value.checked_add(forker_threads))
-        .and_then(|value| value.checked_add(1))
+    let mut limit = probe_tasks
+        .checked_add(forker_threads)
+        .and_then(|value| value.checked_add(2))
         .ok_or_else(|| "task count overflow while calibrating RLIMIT_NPROC".to_string())?;
-    record("LIMIT", limit)?;
     record("PROBE_THREADS", probe_tasks)?;
 
     // Limited arm: the same forker, with the limit applied by the crate's
     // `configure_resource_limits` hook in `pre_exec`.
-    let limited = run_forker(&workdir, "forker-limited.report", Some(limit))?;
+    let mut attempt = 0_u32;
+    let limited = loop {
+        attempt = attempt
+            .checked_add(1)
+            .ok_or_else(|| "attempt counter overflow while calibrating RLIMIT_NPROC".to_string())?;
+        let (status, report) = run_forker(
+            &workdir,
+            &format!("forker-limited-{attempt}.report"),
+            Some(limit),
+        )?;
+        let observed = u32::try_from(report.int("TASKS_BEFORE_FORK")?)
+            .map_err(|error| format!("negative task count in the report: {error}"))?;
+        let calibrated = observed
+            .checked_add(1)
+            .ok_or_else(|| "task count overflow while calibrating RLIMIT_NPROC".to_string())?;
+        record(&format!("ATTEMPT{attempt}_LIMIT"), limit)?;
+        record(&format!("ATTEMPT{attempt}_STATUS"), format!("{status:?}"))?;
+        if calibrated == limit {
+            record("ATTEMPTS", attempt)?;
+            record("LIMIT", limit)?;
+            break report;
+        }
+        if attempt >= CALIBRATION_ATTEMPTS {
+            return Err(format!(
+                "could not calibrate RLIMIT_NPROC in {attempt} attempts: with limit={limit} the \
+                 namespace held {observed} tasks before the first fork; the report it wrote is {report:?}"
+            )
+            .into());
+        }
+        limit = calibrated;
+    };
     record("FORK1", limited.text("FORK1")?)?;
     record("TASKS_BEFORE_FORK", limited.text("TASKS_BEFORE_FORK")?)?;
     record("TASKS_AFTER_FORK1", limited.text("TASKS_AFTER_FORK1")?)?;
@@ -352,11 +393,15 @@ fn spawn_holder() -> io::Result<std::process::Child> {
 }
 
 /// Runs the forker probe with an optional `RLIMIT_NPROC` applied in `pre_exec`.
+///
+/// The status is returned next to the report instead of being turned into an
+/// error here: a calibration attempt whose limit was too low exits non-zero by
+/// design, and the caller needs the report it wrote to re-calibrate.
 fn run_forker(
     workdir: &Path,
     report_name: &str,
     process_count: Option<u32>,
-) -> Result<Report, Box<dyn Error>> {
+) -> Result<(ExitStatus, Report), Box<dyn Error>> {
     let report_path = workdir.join(report_name);
     let mut command = crate::harness::probe_command("nproc_forker", &report_path)?;
     command.stdin(std::process::Stdio::null());
@@ -367,13 +412,11 @@ fn run_forker(
     configure_resource_limits(&mut command, &limits);
     let mut run = crate::harness::ChildGuard::spawn(&mut command)?;
     let status = run.wait("nproc_forker")?;
-    if !status.success() {
-        return Err(format!(
-            "nproc forker `{report_name}` failed with {status:?}; the record it did write is \
-             retried below: {}",
-            std::fs::read_to_string(&report_path).unwrap_or_default()
+    let report = Report::read(&report_path).map_err(|error| {
+        format!(
+            "nproc forker `{report_name}` did not leave a readable report ({error}); it exited with \
+             {status:?}"
         )
-        .into());
-    }
-    Report::read(&report_path)
+    })?;
+    Ok((status, report))
 }
