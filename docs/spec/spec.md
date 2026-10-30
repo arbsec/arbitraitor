@@ -1,7 +1,7 @@
 # Arbitraitor: Secure Download and Execution Gate
 
 **Status:** Draft product and technical specification after second adversarial review (Oracle, 2026-06-29)
-**Version:** 0.9
+**Version:** 0.10
 **Date:** 2026-10-30
 **Implementation language:** Rust
 **Project name:** Arbitraitor
@@ -73,6 +73,14 @@
 > - §42.12: recorded `vmtest` as an assessed, not-adopted forward candidate, with the rationale for revisiting it.
 > - §49: added an open design question for OCI-image payload corpus sourcing, with a follow-up issue.
 > - Header: corrected the stale version and date (`0.5` / `2026-06-29` → `0.9` / `2026-10-30`).
+>
+> **Changelog vs v0.9 (2026-10-30):**
+>
+> - §43.10: corrected the seccomp assertions to the implemented deny action — a denied syscall fails with `EPERM` (`SECCOMP_RET_ERRNO | EPERM`, ADR-0020) instead of being killed with `SIGSYS`, and the connect-back test asserts `EPERM` instead of `ECONNREFUSED`/`EACCES`.
+> - §43.10: split the section into assertions binding at tier 4a today and required controls that are tracked but not yet implemented (#827 `PR_SET_PDEATHSIG` and the unconfirmed effective-controls matrix, #828 `ptrace`/`execve` filtering, #829 `RLIMIT_FSIZE`/`RLIMIT_CORE`, #831 DNS rebinding, #832 seccomp ABI hardening). Every requirement keeps its text and its issue.
+> - §43.10: replaced the invented hard-requirement compatibility mode with a tier-4a test-harness probe precondition, and recorded library-level fail-closed Landlock as an open maintainer decision (#830).
+> - §43.10: the DNS-rebinding assertion is deferred pending an injectable resolver in `arbitraitor-fetch` (#831); the local-double design is retained as the required approach.
+> - §43.11: the tier-4a coverage row no longer claims DNS-rebinding verification before it is exercisable.
 >
 > Arbitraitor is a policy-enforced download, inspection, provenance verification, and execution gate for content retrieved from untrusted or semi-trusted sources. It buffers the complete payload, analyzes the exact bytes that may later be consumed, recursively inspects referenced payloads where possible, and only releases or executes content when configured policy permits it.
 
@@ -6840,23 +6848,22 @@ Each entry records: name, SHA-256, source (inline/malwarebazaar/thezoo/malshare/
 
 The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pattern**: for each sandbox surface, ship both a happy-path test (allowed behavior succeeds) and an adversarial-path test (denied behavior is blocked with the correct signal). These are host-syscall assertions and run at tier 4a (§43.8): none of them needs a virtual machine, because the controls under test are host-kernel features applied to host processes, and the forbidden effect is observable directly on the host. A microVM enters only at tier 4b (§43.11), where a live sample is executed natively.
 
+**Binding assertions versus outstanding controls.** The bullets under each surface below state behaviour the crate implements today; the tier-4a tests for them are binding on every push. Controls this section requires that the crate does **not** yet implement are collected under **Outstanding controls** at the end of the section, each keeping its requirement text and naming the tracking issue that lands the control and its assertion together. A control in that class is not covered by tier 4a until its assertion lands: an open tracking issue is never evidence of a passing test, and no containment claim may cite one.
+
 **seccomp-BPF filters:**
 
 - Happy-path: a process using only allowed syscalls exits 0;
-- Adversarial-path: a process attempting a denied syscall is killed with `SIGSYS` (signal 31);
-- Coverage: `ptrace(PTRACE_TRACEME)`, `execve` of unapproved binary, network `connect` to blocked address.
+- Adversarial-path: a process attempting a denied syscall fails with `EPERM` — the call returns `-1` with `errno` set to `EPERM` and has no other effect. Every denied syscall returns `SECCOMP_RET_ERRNO | EPERM`; killing the process (`SECCOMP_RET_KILL`) is a considered-and-rejected alternative, because terminating a plugin that merely probes for network capability obscures the policy failure and defeats graceful capability-denied handling (ADR-0020). The assertion pins `EPERM` **and** the absence of the forbidden effect — an error alone is not enforcement evidence;
+- Coverage today: network `connect` to a blocked address is denied. The filter denies fifteen network syscalls (`socket`, `socketpair`, `connect`, `bind`, `listen`, `accept4`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `getsockname`, `getpeername`, `setsockopt`, `getsockopt`, `shutdown`, plus `accept` on `x86_64`) and nothing else, with allow-by-default fall-through. `ptrace` and `execve` filtering are required but not implemented — see **Outstanding controls**.
 
 **prctl hardening** (pattern from OpenAI codex-rs `process-hardening`):
 
 - `PR_SET_DUMPABLE, 0` — `ptrace(PTRACE_ATTACH)` from parent returns `EPERM`;
-- `PR_SET_PDEATHSIG, SIGKILL` — child receives `SIGKILL` when parent exits;
 - `PR_SET_NO_NEW_PRIVS, 1` — child cannot gain new privileges via `setuid` binaries.
 
 **setrlimit enforcement:**
 
-- `RLIMIT_NPROC = 1` — second `fork()` returns `EAGAIN`;
-- `RLIMIT_FSIZE` — write beyond limit triggers `SIGXFSZ`;
-- `RLIMIT_CORE = 0` — no core dump generated on `abort()`.
+- `RLIMIT_NPROC = 1` — second `fork()` returns `EAGAIN`.
 
 **`RLIMIT_NPROC` environment sensitivity (binding).** `RLIMIT_NPROC` is evaluated against the real UID's system-wide process count, not against a per-process budget. On a shared runner the ambient process count can already sit at or above the limit, so the adversarial assertion can pass **vacuously** — `fork()` fails with `EAGAIN` even when the sandbox never applied the limit — while the happy path can fail for the same reason. Tests MUST therefore establish a controlled baseline in the same environment before asserting the denied effect: prove that `fork()` succeeds with the limit unset (or set high), then apply the low limit and assert `EAGAIN`. The test MUST run under a UID and user namespace whose process count the test controls. An ambient `EAGAIN` is never enforcement evidence: the workflow policy's "Testing expectations" rule applies — never claim a sandbox test passed because an error occurred; assert that the forbidden effect did not happen. The same host-dependence affects the default `RLIMIT_NPROC` value that the mediated-execution path applies, tracked separately in the implementation issue (#794); the tier-4a test obligation above stands independently of how that default is resolved.
 
@@ -6864,16 +6871,16 @@ The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pat
 
 - Write outside allowed paths → `EACCES`;
 - Write inside allowed paths → success;
-- `CompatLevel::HardRequirement` in tests — refuses to start on kernels without Landlock support (no silent weakening).
+- Probe precondition: the tier-4a test asserts that the Landlock probe reports kernel support **before** the ruleset is installed, and fails with an explicit message when it does not. This is a test-harness precondition, not a library API: `arbitraitor-sandbox` exposes no hard-requirement compatibility mode, and on a kernel without Landlock the install hook returns success without installing a ruleset so subprocess plugins degrade gracefully (ADR-0021). Library-level fail-closed — refusing to start when a required control is unavailable — is **not** current behaviour; it is an open maintainer decision tracked by #830.
 
-The kernel-feature probe (Landlock ABI, seccomp, and unprivileged user-namespace availability) fails loudly in blocking CI: a missing control is a hard failure, not a skip. On non-Linux platforms the test skips with an explicit marker.
+**Kernel-feature precondition (harness obligation).** The kernel-feature probe (Landlock ABI, seccomp, and unprivileged user-namespace availability) fails loudly in blocking CI: a missing control is a hard failure, not a skip. On non-Linux platforms the test skips with an explicit marker. The obligation binds the tier-4a **test**, not the sandbox crate: on Linux the test decides that a required control is unavailable and fails, and a tier-4a skip is never reported as containment evidence.
 
 **Network isolation verification (connect-back pattern):**
 
 - Bind a listener on the parent network namespace on a unique port;
 - Run a sandboxed process that attempts `connect()` to that port;
 - Assert: listener does NOT receive a connection within timeout → sandbox is enforcing;
-- Assert: sandboxed process receives `ECONNREFUSED` or `EACCES`.
+- Assert: sandboxed process receives `EPERM` — neither `ECONNREFUSED` nor `EACCES`. A denied syscall returns `SECCOMP_RET_ERRNO | EPERM` (ADR-0020); `ECONNREFUSED` would mean the connection reached the listener and the filter did not apply, and `EACCES` is not what the filter returns. Because `socket` and `socketpair` are denied too, a probe that opens a fresh socket fails at `socket()` with `EPERM`; to exercise `connect()` itself the probe wraps a descriptor inherited from the parent and observes the failure there. The listener-silence assertion above is the assertion that proves enforcement — the errno assertion pins which failure was observed.
 
 **DNS rebinding verification:**
 
@@ -6883,6 +6890,18 @@ The kernel-feature probe (Landlock ABI, seccomp, and unprivileged user-namespace
 - Verify Arbitraitor rejects the rebinding attempt with appropriate error.
 
 The DNS double is a local resolver process owned by the test — bound to an ephemeral port on a loopback address, serving scripted answers in sequence. CI MUST NOT depend on a live external DNS-rebinding service.
+
+The design above stands, but the assertion is not exercisable yet: name resolution in `arbitraitor-fetch` goes straight to `tokio::net::lookup_host` and the connected-peer check is crate-private, so no test can point a scripted double at the resolver (`resolv.conf` cannot express a port), and CI may not use a live external rebinding service. The existing unit tests cover the connected-peer-versus-resolved-set check only; they do not exercise rebinding. Tracked by #831.
+
+**Outstanding controls (required, not yet asserted).** Each entry is a normative requirement of this section that the current implementation does not meet. Its requirement text is preserved, and the tracking issue lands the control and the tier-4a assertion with it. Until then these are gaps, not evidence: they MUST NOT be cited for a `contained` assurance claim (§27.7, ADR-0007).
+
+- **`ptrace` and `execve` coverage — #828.** Requirement: coverage of `ptrace(PTRACE_TRACEME)`, `execve` of an unapproved binary, and network `connect` to a blocked address. Only the network third is implemented: the filter carries no `ptrace` or `execve` rule and there is no exec allowlist. On landing, each gains its own adversarial-path assertion under **seccomp-BPF filters** above.
+- **`PR_SET_PDEATHSIG, SIGKILL` — child receives `SIGKILL` when parent exits — #827.** Not applied today: the prctl path sets only `PR_SET_NO_NEW_PRIVS` and `PR_SET_DUMPABLE`, while the effective-controls matrix reports the control as available without a probe or an applied path that confirms it. #827 tracks both the missing death signal and the unconfirmed matrix entries.
+- **`RLIMIT_FSIZE` — write beyond limit triggers `SIGXFSZ` — #829.** Not applied: the limit set carries CPU time, address space, process count, and open file descriptors only.
+- **`RLIMIT_CORE = 0` — no core dump generated on `abort()` — #829.** Not applied; same limit set.
+- **Landlock hard-requirement mode (no silent weakening) — #830.** Requirement: refuses to start on kernels without Landlock support (no silent weakening). No hard-requirement compatibility mode exists in the crate, and the install path degrades silently by documented intent (ADR-0021), so the requirement is unmet at the library layer. The tier-4a probe precondition above is the harness substitute until the maintainer decides whether a requested containment level fails closed when a required control is unavailable (§27.7).
+- **DNS rebinding end-to-end assertion — #831.** Requirement as stated under **DNS rebinding verification**. Blocked on an injectable resolver, or an equivalent seam, in `arbitraitor-fetch`.
+- **seccomp ABI hardening question — #832.** The filter compares `seccomp_data.arch` against the build architecture's `AUDIT_ARCH_*` value and returns `EPERM` on mismatch instead of terminating the process, and it does not mask the x32 syscall bit. Whether either is reachable to slip a denied syscall past the denylist is **unproven by execution**; this entry records a hardening question whose deliverable is a probe, not a known enforcement gap.
 
 **Limits of detonation evidence.** A microVM guest can detect that it is virtualized: the CPUID hypervisor-present bit, hypervisor vendor strings, and device and timing artifacts are all observable from inside the guest, and neither default Firecracker nor comparable VMM configurations conceal them. Consequently:
 
@@ -6898,7 +6917,7 @@ Detonation reports MUST label each result as belonging to the behaviour class or
 | fmt, clippy, check | ubuntu-latest | every push | <2 min | Lint gate |
 | nextest (default) | ubuntu-latest | every push | <10 min | Tier 1+2 — unit + CLI smoke |
 | nextest --features container-tests | ubuntu-latest | every push, non-blocking | <30 min | Tier 3 — integration with testcontainers |
-| nextest (default group) — tier 4a | ubuntu-latest | every push, blocking | <10 min | Tier 4a — host-syscall sandbox verification (seccomp, prctl, setrlimit, Landlock, connect-back, DNS rebinding) |
+| nextest (default group) — tier 4a | ubuntu-latest | every push, blocking | <10 min | Tier 4a — host-syscall sandbox verification (seccomp, prctl, setrlimit, Landlock, connect-back; DNS rebinding joins when #831 lands) |
 | cargo-deny, cargo-audit | ubuntu-latest | every push | <5 min | Security |
 | Firecracker deep e2e (tier 4b) | KVM-capable Linux host (local workstation today; self-hosted bare-metal when added) | manual + scheduled only after a self-hosted runner exists | <60 min | Tier 4b — microVM detonation |
 
