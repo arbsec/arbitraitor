@@ -256,6 +256,21 @@ caps pending record files at
   by "ADR-0038 (accepted)" references. The pre-existing ADR-0037 number is
   the Wasmtime CVE risk register; carrying it in spec §40 was a stale
   cross-reference.
+- **wrapper: a genuinely unknown curl short option is now a hard error**
+  (#816) — previously an unknown short option was recorded and parsing
+  continued, either dropping the rest of the token or re-parsing it as
+  flags (see the Fixed entry below). Short options cluster, so the extent
+  of an unknown option's value is undefined; the curl shim now fails with
+  `unsupported curl option -X in <token>` instead of guessing, matching
+  real `curl`, which exits 2 and honours nothing on the line.
+  Known-but-unsupported short options are unaffected and still proceed with
+  a record in `unsupported_options`: the modelled value-taking and no-value
+  sets together cover curl's whole short-option table. Unknown long options
+  keep their record-and-proceed behaviour, because they cannot be clustered
+  and carry an unambiguous `=value` or separate argument. wget's short
+  parser keeps its documented record-and-proceed contract: its short-option
+  table is only partially modelled, so rejecting unknown flags there would
+  refuse valid invocations (follow-up issue #818).
 
 ### Fixed
 
@@ -545,6 +560,19 @@ caps pending record files at
   yara-x bumps wasmtime. Same yara-x pin as the existing
   RUSTSEC-2026-0269 ignore; both drop when yara-x requires a patched
   wasmtime.
+- **wrapper: the attached value of an unsupported curl short option is no
+  longer re-parsed as flags** (#816) — `curl -w%{http_code} URL` was scanned
+  one character at a time, the `o` inside the write-out format matched the
+  value-taking arm, and the response body was written to a file named `de}`
+  (the wrapper derives its destination from the parsed `-o`), a §26.2
+  destination-safety divergence from real curl. The same class read
+  `-eao/home/u/.bashrc` (referer plus append-output) as
+  `-o /home/u/.bashrc`. `parse_short_options` now mirrors curl's
+  short-option table — which options take a value and which do not, so
+  clusters such as `-vfsS` are attributed correctly regardless of order —
+  and rejects a token that carries an option curl itself does not
+  recognize (see `### Changed`) instead of re-scanning its value as flags.
+  Emitting `-w`/`--write-out` output itself remains unimplemented (#782).
 
 ### Changed (CI)
 

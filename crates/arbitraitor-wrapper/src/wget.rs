@@ -352,6 +352,20 @@ impl<'a> WgetParser<'a> {
                     if rest.is_empty() {
                         self.consume_unknown_value();
                     }
+                    // Deliberately NOT the curl parser's fail-closed policy
+                    // (see `CurlParser::parse_short_options`): wget's short
+                    // option table is only partially modelled here (`-O`,
+                    // `-U`, `-T`, `-q`, `-v`), so "unknown" also covers valid
+                    // wget flags such as `-x`, `-k`, `-P` or the multi-letter
+                    // forms (`-nd`, `-np`). Rejecting them would refuse real
+                    // wget invocations. The unknown flag itself is recorded,
+                    // and wget's only short-form critical option is `-e`
+                    // (--execute), which this parser records when reached —
+                    // a `-e` sitting mid-cluster after an unknown flag is
+                    // dropped with the tail (tracked in #818);
+                    // because the wrapper never honours wgetrc directives that
+                    // loss cannot enable a TLS bypass, it only loses a
+                    // rejection signal.
                     return Ok(());
                 }
             }
