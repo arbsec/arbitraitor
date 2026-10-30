@@ -6785,7 +6785,7 @@ Arbitraitor adopts a four-tier testing model aligned with industry best practice
 
 **Test-runner integration.** Use `cargo nextest` test groups to separate tiers:
 
-- `cargo nextest run` — tiers 1+2 (blocking, <10 min)
+- `cargo nextest run` — tiers 1+2+4a (blocking, <10 min)
 - `cargo nextest run --features container-tests` — tier 3 (non-blocking, <30 min)
 - tier 4a — part of the default `cargo nextest` group above; blocking, on every push
 - tier 4b — the dedicated microVM feature gate (named in §42.12); manual or local-KVM execution only, never a scheduled CI position, and never enabled by an ordinary pull-request job
@@ -6794,9 +6794,9 @@ Arbitraitor adopts a four-tier testing model aligned with industry best practice
 
 ### 43.9 Threat corpus management
 
-Arbitraitor maintains a structured threat corpus under `fixtures/` with safe, synthetic test samples for every detection category, plus on-demand fetching from public malware databases for tier-4b detonation.
+Arbitraitor specifies a structured threat corpus under `fixtures/` with safe, synthetic test samples for every detection category, plus on-demand fetching from public malware databases for tier-4b detonation.
 
-**Corpus consumers.** Corpus entries feed the static-analysis path at tiers 1–3 as inert bytes — never executed — and the detonation path at tier 4b only. **Live samples are never executed outside tier 4b** (§43.3).
+**Corpus consumers.** Corpus entries feed the static-analysis path at tiers 1–3 as inert bytes — never executed — and the detonation path at tier 4b only. **Live samples are never executed outside tier 4b** (§43.8).
 
 **In-repo fixtures (safe, committed to git):**
 
@@ -6889,7 +6889,7 @@ The DNS double is a local resolver process owned by the test — bound to an eph
 - A tier-4b **behaviour** verdict — what a sample did, did not do, or reached for — is a **lower bound**: an environment-aware sample may withhold behaviour. §27.7 already requires the product to state that malware may detect the sandbox; this paragraph does not restate it, it bounds what a detonation result may be used to claim.
 - Tier-4b **containment** assertions — what crossed the guest boundary, what reached the host, what egressed — are unaffected: those are observations about the boundary, not about the sample's intent.
 
-Detonation reports MUST label each result as belonging to the behaviour class or the containment class. Tier 4b is the Linux evidence behind ADR-0007's `contained` assurance level; §40.9 and ADR-0044 record why that verification exists and how its results are consumed.
+Detonation reports MUST label each result as belonging to the behaviour class or the containment class. Tier 4a (§43.10) is the Linux evidence behind ADR-0007's `contained` assurance level: the host-syscall sandbox assertions are the blocking, every-push evidence, and tier 4b complements them with live-sample boundary observations that cannot run in CI. §40.9 and ADR-0044 record why that verification exists and how its results are consumed.
 
 ### 43.11 CI isolation strategy
 
