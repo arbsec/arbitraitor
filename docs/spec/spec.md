@@ -1,8 +1,8 @@
 # Arbitraitor: Secure Download and Execution Gate
 
 **Status:** Draft product and technical specification after second adversarial review (Oracle, 2026-06-29)
-**Version:** 0.5
-**Date:** 2026-06-29
+**Version:** 0.9
+**Date:** 2026-10-30
 **Implementation language:** Rust
 **Project name:** Arbitraitor
 
@@ -62,6 +62,17 @@
 > - §33.1: added `http_egress` to the MCP capability list, referencing §11.6.
 > - §40.3: added `HttpEgressTool` note (specified, landing with #799).
 > - docs/spec/tech-stack.md §4.7: added the egress client requirements mirroring §11.6 behind the `Fetcher` trait boundary.
+>
+> **Changelog vs v0.8 (2026-10-30):**
+>
+> - §43.8: split tier 4 into 4a (host-syscall sandbox verification) and 4b (microVM detonation); `vmtest` removed from the normative testing and CI positions; KVM availability is now probed at runtime and skipped with an explicit marker instead of assumed.
+> - §43.9: corpus sources revised — MalwareBazaar restricted to pinned-SHA-256 fetches inside the per-IP quota, theZoo and the DataDog package dataset restricted to individual-file fetches, VX Underground removed as a source, and a package-ecosystem corpus class added.
+> - §43.10: re-scoped the paired-test pattern to tier 4a (host-kernel controls need no virtual machine); added the `RLIMIT_NPROC` environment-sensitivity requirement; replaced the external DNS-rebinding service with a local DNS double under test control; added the "Limits of detonation evidence" paragraph.
+> - §43.11: corrected the CI matrix — the `vmtest` nightly job removed, a blocking tier-4a row added, tier 4b restricted to manual and local execution; replaced the cloud cost model; added the normative "Detonation host controls" list.
+> - §40.9: added the cross-project sandbox and execution-control consumption contract; §40.5 and §40.5.1 amended for the first-party commit-pinned git-dependency carve-out; ADR-0044 records the decision.
+> - §42.12: recorded `vmtest` as an assessed, not-adopted forward candidate, with the rationale for revisiting it.
+> - §49: added an open design question for OCI-image payload corpus sourcing, with a follow-up issue.
+> - Header: corrected the stale version and date (`0.5` / `2026-06-29` → `0.9` / `2026-10-30`).
 >
 > Arbitraitor is a policy-enforced download, inspection, provenance verification, and execution gate for content retrieved from untrusted or semi-trusted sources. It buffers the complete payload, analyzes the exact bytes that may later be consumed, recursively inspects referenced payloads where possible, and only releases or executes content when configured policy permits it.
 
@@ -4697,13 +4708,19 @@ integration surfaces over a single engine serve them:
 | MCP gateway | MCP JSON-RPC over stdio | Subprocess spawned by consumer | Same user, separate process | AI agent harnesses, IDEs, MCP-client runtimes |
 
 The agent harness the project intends to build around Arbitraitor's ideas
-uses the MCP gateway (§33 and §6.4). It is a separate product in a separate
-repository. It does not duplicate the pipeline; it adds agent-specific
-concerns (prompt injection as content findings, receipt summarization into
-the agent context, replannable approval tokens extending ADR-0013,
-agent-side policy enforced by Arbitraitor's monotonic project configuration
-per ADR-0017). Those concerns live in the harness; the pipeline engine lives
-in Arbitraitor.
+consumes Arbitraitor's security crates directly. It is a separate product in a
+separate repository (`arbsec/orchestraitor`), and it does not duplicate the
+pipeline: it adds agent-specific concerns (prompt injection as content
+findings, receipt summarization into the agent context, replannable approval
+tokens extending ADR-0013, agent-side policy enforced by Arbitraitor's
+monotonic project configuration per ADR-0017). Those concerns live in the
+harness; the pipeline engine lives in Arbitraitor.
+
+That harness does **not** consume Arbitraitor over the MCP gateway: it pins
+Arbitraitor's crates in-process by commit-pinned git dependency (§40.5.1,
+§40.9) and calls them directly. The MCP gateway (§33, §40.3) remains the
+surface for AI agents and IDEs that are not Rust consumers and cannot link
+Arbitraitor's crates.
 
 #### 40.5.1 Library contract constraints
 
@@ -4716,6 +4733,14 @@ in Arbitraitor.
   `arbitraitor-plugin-host`) remain `publish = false` and are not part of the
   public embedding surface. Third parties that need finer-grained
   composability propose changes via issues, not crate dependencies.
+- **First-party carve-out.** Same-organisation sibling products may consume
+  `publish = false` workspace crates via commit-pinned git dependencies. This
+  is a supported consumption mode, governed by §40.9 and ADR-0044, and it is
+  distinct from the crates.io stability promise in §40.6: it carries a
+  coordinated-update obligation (a breaking change to a consumed crate
+  requires a consumer revision bump in the same effort) in place of a SemVer
+  promise to the ecosystem. It does not extend to third parties outside the
+  organisation.
 
 ### 40.6 Public API stability contract
 
@@ -4808,6 +4833,59 @@ privacy, authentication, rate limiting, and significantly more operational
 security than a single-tenant workstation product. The MCP remote
 conformance contract in §33.6 is the longest-range target; it does not
 commit to a deployment model.
+
+### 40.9 Sandbox and execution-control consumption contract (cross-project)
+
+Sandboxing and containment are owned and implemented by Arbitraitor
+(`arbitraitor-sandbox`, `arbitraitor-exec`). The ownership boundary is
+normative: `.agents/project/arbitraitor-workflow.md` records that sandboxing,
+process hardening, and mediated execution are Arbitraitor's to implement
+here, and the consumer's own specification says the same — "Sandbox backends
+and their common capability interface are owned and implemented by Arbitraitor.
+Orchestraitor selects a requested profile, sends the action plan to
+Arbitraitor, and consumes the effective-control report" (`arbsec/orchestraitor`
+§9.6), and "Orchestraitor may contain adapters that translate orchestration
+requests into Arbitraitor calls, but those adapters must not make independent
+allow, deny, containment, trust, approval, or promotion decisions"
+(`arbsec/orchestraitor` §16.1).
+
+A consuming harness — first `arbsec/orchestraitor` — MAY select a requested
+sandbox profile and consume the resulting effective-control reports. It MUST
+NOT make independent allow, deny, containment, trust, approval, or promotion
+decisions.
+
+**Consumed surface.**
+
+- `arbitraitor_sandbox::EffectiveControls` — the platform capability probe
+  matrix, paired with `ControlState`;
+- `arbitraitor_exec::EffectiveControls` — the per-control receipt proof
+  matrix;
+- `arbitraitor_sandbox::SandboxMode` and
+  `arbitraitor_sandbox::compute_effective_controls(mode, platform)` — how a
+  requested profile is resolved against the host's actual capabilities;
+- `arbitraitor_sandbox::configure_command` and
+  `arbitraitor_sandbox::apply_sandbox` — how the resolved controls are
+  applied to a command.
+
+The semantics of the control reports themselves are specified in §27.7 and
+are deliberately not restated here. The consumer's obligation to negotiate
+capabilities at runtime — a version match alone is not evidence that a
+control is effective — is the consumer's own (`arbsec/orchestraitor` §16.7)
+and is likewise not restated here.
+
+**Consumption mechanism and stability.** The consumer pins Arbitraitor's
+crates by commit-pinned git dependency; `arbitraitor-core`,
+`arbitraitor-model`, `arbitraitor-policy`, `arbitraitor-sandbox`,
+`arbitraitor-exec`, `arbitraitor-receipt`, `arbitraitor-mcp`, and
+`arbitraitor-plugin-api` are consumed in-process. Because those crates are
+`publish = false` and are consumed by git pin, their public API is
+SemVer-relevant in practice even though crates.io never sees them. Breaking
+changes to the consumed surface therefore require a coordinated consumer
+update — a consumer revision bump in the same effort — and every breaking
+change is flagged in the release PR. Additive changes are preferred. The
+first-party carve-out that makes this consumption mode supported is in
+§40.5.1; ADR-0044 records the decision, the alternatives, and the breakage
+class it exists to catch.
 
 ---
 
@@ -6360,6 +6438,8 @@ Implementation corrections (post-v0.4):
 - §34 update framework → ADR-0012
 - §38.5 panic=abort → ADR-0019
 - §39.4 plugin runtime → ADR-0006, ADR-0011, ADR-0020, ADR-0021
+- §40.9 sandbox and execution-control consumption → ADR-0044
+- §43.10 sandbox verification → ADR-0007, ADR-0044
 
 Open ADR candidates for v0.6: macOS containment strategy (research), SLSA Build L3 commitment (research), remote MCP Authorization conformance (deferred to remote-service milestone), in-toto Statement receipt envelope (research).
 
@@ -6515,6 +6595,7 @@ Rejected until release cadence or trust boundaries require separation.
 8. **Package-manager mediation:** determine which Homebrew and Arch lifecycle stages can be reliably controlled without patching upstream tools.
 9. **redb crash recovery:** test power-loss and corruption scenarios before storing authoritative approval metadata.
 10. **release reproducibility:** compare artifacts from independent builds and document unavoidable variance.
+11. **MicroVM-based sandbox verification (`vmtest`):** the `vmtest` crate exists and is maintained (crates.io 0.18.0; upstream repository Apache-2.0, QEMU-based, so it runs without KVM). It is not adopted as a normative tier, and no `vm-tests` feature gate is enabled in any CI schedule, because there is no implemented consumer of a tier-4b detonation harness and no motivated kernel-matrix test case behind it — the host-syscall assertions of §43.10 are tier 4a and need no virtual machine at all. Revisit with a concrete need, for example a specific kernel-escape report that requires testing across a kernel matrix.
 
 These should be GitHub Research issues linked to ADRs, not hidden implementation assumptions.
 
@@ -6688,61 +6769,76 @@ Test:
 
 ### 43.8 End-to-end testing tiers
 
-Arbitraitor adopts a four-tier testing model aligned with industry best practices (ClamAV, Trivy, Firecracker, osquery). Each tier provides progressively stronger isolation, matching the isolation level to the threat surface under test.
+Arbitraitor adopts a four-tier testing model aligned with industry best practices (ClamAV, Trivy, Firecracker, osquery). Each tier provides progressively stronger isolation, matching the isolation level to the threat surface under test. Tier 4 is split into **4a** (host-syscall sandbox verification) and **4b** (microVM detonation) because the two answer different questions and have different availability and cost profiles: 4a asks *does the host-kernel control actually deny the forbidden effect*, 4b asks *what does a live sample do when it runs natively*.
 
 | Tier | Isolation | Tooling | Purpose | CI trigger |
 |------|-----------|---------|---------|-------------|
 | Unit | None | `cargo nextest` | Internal logic, parsers, YARA matching, policy evaluation | every push |
 | CLI | Process | `assert_cmd`, `predicates` | Exit codes, stdout/stderr, error paths, subcommand surface | every push |
 | Integration | Container | `testcontainers`, `duct`, `wiremock` | HTTP backends, daemon, full pipeline against disposable services | every push (non-blocking) |
-| E2E / VM | VM / microVM | `vmtest` (kernel-target mode), self-hosted bare-metal for Firecracker | Sandbox escapes, native execution, kernel-level isolation, real malware detonation | nightly + manual |
+| E2E sandbox (4a) | Host kernel features (seccomp/Landlock/rlimits/namespaces) | Integration tests in the default `cargo nextest` group | §43.10's sandbox-control assertions — the containment evidence that proves the boundary | every push, blocking |
+| E2E detonation (4b) | microVM (Firecracker, KVM) | Detonation harness (implementation follow-up) | Native execution of live samples, behaviour observation, kernel-boundary escape attempts | manual / local KVM host; scheduled only once a runner exists |
 
-**Container-VM boundary.** Containers are sufficient for userspace threats (malformed archives, malicious scripts, SSRF, network attacks). VMs are mandatory when the threat surface is at the kernel boundary: `prctl`/`seccomp` holes, `close_range` bypasses, `setrlimit` enforcement, Landlock enforcement, and malicious native ELF execution.
+**Container-VM boundary.** Containers are sufficient for userspace threats (malformed archives, malicious scripts, SSRF, network attacks). Host-syscall sandbox controls — `prctl`/`seccomp` holes, `close_range` bypasses, `setrlimit` enforcement, Landlock enforcement — are verified on the host at tier 4a, not inside a VM: the controls under test are host-kernel features applied to host processes, and the assertions in §43.10 are observable directly on the host. A microVM is mandatory only where the threat surface is the kernel boundary of a *live sample*: native execution of live malware and kernel-escape research, at tier 4b.
 
-**GitHub Actions constraint.** GitHub-hosted runners do not officially support nested virtualization (`/dev/kvm` is not exposed). `vmtest` in kernel-target mode works on standard runners (no KVM needed). Firecracker-based microVM tests require self-hosted bare-metal runners with KVM access — these run on a weekly schedule, not on every PR.
+**KVM availability is never assumed.** Tier 4b jobs probe `/dev/kvm` at runtime and, when it is absent, **skip with an explicit marker** — never a silent pass, and never a hard failure for an optional tier. No CI claim about tier 4b may be made on a runner that skipped.
 
 **Test-runner integration.** Use `cargo nextest` test groups to separate tiers:
 
 - `cargo nextest run` — tiers 1+2 (blocking, <10 min)
 - `cargo nextest run --features container-tests` — tier 3 (non-blocking, <30 min)
-- `cargo nextest run --features vm-tests` — tier 4 (nightly, <20 min for vmtest; <60 min for Firecracker)
+- tier 4a — part of the default `cargo nextest` group above; blocking, on every push
+- tier 4b — the dedicated microVM feature gate (named in §42.12); manual or local-KVM execution only, never a scheduled CI position, and never enabled by an ordinary pull-request job
 
 **Golden files.** Integration and e2e tests use golden-file comparison (Trivy pattern). Golden files live in `testdata/*.golden` and are regenerated with a `--update` flag that is only enabled on a designated update job, never in regular CI. Golden files are committed and reviewed.
 
 ### 43.9 Threat corpus management
 
-Arbitraitor maintains a structured threat corpus under `fixtures/` with safe, synthetic test samples for every detection category, plus on-demand fetching from public malware databases for VM-based e2e tests.
+Arbitraitor maintains a structured threat corpus under `fixtures/` with safe, synthetic test samples for every detection category, plus on-demand fetching from public malware databases for tier-4b detonation.
+
+**Corpus consumers.** Corpus entries feed the static-analysis path at tiers 1–3 as inert bytes — never executed — and the detonation path at tier 4b only. **Live samples are never executed outside tier 4b** (§43.3).
 
 **In-repo fixtures (safe, committed to git):**
 
 - EICAR test string (68 bytes) in plain, ZIP, encrypted ZIP, double ZIP, tarball, and 7z formats — one per archive format supported by §19;
 - Synthetic shell scripts — one per detection category in §10 (28+ categories: download-and-execute, base64 obfuscation, reverse shell, credential access, persistence, destructive behavior, privilege escalation, etc.);
 - Synthetic archive hazards — one per hazard type in §19 (15 types: path traversal, symlink escape, zip bomb, duplicate entries, etc.);
-- GTFOBins-derived test vectors — legitimate binaries used dangerously, for "living off the land" testing.
+- GTFOBins-derived test vectors — legitimate binaries used dangerously, for "living off the land" testing;
+- Package-ecosystem install-time payloads — npm and PyPI package artifacts analysed as inert bytes (see below).
 
 **On-demand malware samples (never committed to git):**
 
-Real malware samples are fetched at test time from public databases, verified by SHA-256, stored in `target/corpus/` (gitignored), and only downloaded when `--features vm-tests` is active. The corpus includes:
+Real malware samples are fetched at test time from public databases, verified by SHA-256, stored in `target/corpus/` (gitignored), and only downloaded on the tier-4b entry path (§43.8) — by an operator on a detonation host, never by an ordinary CI job. The corpus includes:
 
 | Database | Access | Use case |
 |----------|--------|----------|
-| MalwareBazaar (abuse.ch) | Free API (Auth-Key), 2,000 downloads/day/IP | Fetch by SHA256, filter by family/tag/YARA rule |
-| theZoo (ytisf/theZoo) | GitHub repo, password-protected ZIPs | Curated Linux malware (Mirai, backdoors, rootkits) |
-| VX Underground | Direct download + torrents | APT samples, historical malware |
-| MalShare | Free API key, daily quota | Automated bulk sample fetching |
+| MalwareBazaar (abuse.ch) | Free API (Auth-Key), 2,000 downloads/day/IP, pinned-SHA-256 fetch only, ELF-filtered for the Linux detonation host | Fetch a pinned sample by SHA-256; filter by family/tag/YARA rule at query time |
+| theZoo (ytisf/theZoo) | Individual-file fetch only — cloning the repository is forbidden | Curated Linux malware (Mirai, backdoors, rootkits) |
+| MalShare | Free API key, daily quota | Fallback source when a pinned sample is temporarily unreachable |
+| DataDog malicious-software-packages dataset | Apache-2.0, individual-file fetch only — cloning the repository is forbidden | npm and PyPI install-time payloads |
 | EICAR | Direct download (68 bytes) | Baseline detection, safe to commit |
+
+**Source-access rules.**
+
+- **MalwareBazaar** is queried by pinned SHA-256 only. The corpus never enumerates the provider's catalogue and never pulls the provider's bulk hourly or daily exports; the per-IP daily download quota (2,000/day/IP) is the hard bound. This keeps the corpus inside the provider's fair-use posture for the free API.
+- **theZoo** is fetched one file at a time. Cloning the repository would place live samples into a git object store on a key-bearing workstation, and is forbidden.
+- **The DataDog malicious-software-packages dataset** is likewise fetched one file at a time. It is an ~84 GB repository; a clone is neither operationally viable nor acceptable.
+- **VX Underground is removed as a corpus source.** It offers no stable, machine-readable, per-sample access path that could be verified; in the 2026-10-30 review the site did not serve a usable archive to automated fetches. It MUST NOT be automated, and it is not a substitute for the sources above.
+- **MalShare** remains a fallback for pinned samples that are temporarily unreachable, subject to its daily quota.
+
+**Package-ecosystem corpus class.** Install-time payloads from public package registries are a first-class corpus class, because package artifacts are what §19 inspects and what §39.14 mediates — the corpus must exercise that path. npm and PyPI payloads come from the DataDog malicious-software-packages dataset (Apache-2.0), which stores each sample as an encrypted ZIP (password `infected`) and publishes a per-ecosystem `manifest.json` naming the malicious packages and, for compromised packages, the affected versions. Package artifacts are analysed as inert bytes at tiers 1–3 — install scripts are parsed, never run — and are executed only at tier 4b. **OCI-image payloads are not yet covered by a verified byte source**; that sourcing is an open question (§49) tracked by issue #824, and until it is answered no OCI payload is fetched or executed.
 
 **Corpus index format** (`fixtures/corpus/INDEX.toml`):
 
-Each entry records: name, SHA-256, source (inline/malwarebazaar/thezoo/malshare/vxunderground), family, expected verdict (block/warn/pass), expected finding category, and tags.
+Each entry records: name, SHA-256, source (inline/malwarebazaar/thezoo/malshare/datadog-malicious-packages), family, expected verdict (block/warn/pass), expected finding category, and tags. The `source` enum is kept in lockstep with the database table above.
 
-**GitHub dual-use policy.** GitHub explicitly allows dual-use security research content. Synthetic test fixtures and EICAR are safe to commit. Real malware binaries are fetched on-demand and never stored in the repository. A `SECURITY.md` file documents the abuse-contact channel per GitHub policy.
+**GitHub dual-use policy.** GitHub's acceptable-use policies permit dual-use security-research content, which covers synthetic fixtures, proofs of concept, and EICAR. They do **not** grant redistribution rights over third-party live samples, and they are not a basis for committing them: real malware binaries are fetched on demand, never stored in the repository, and never redistributed by Arbitraitor. A `SECURITY.md` file documents the abuse-contact channel per GitHub policy.
 
 **Safe encoding for build-time fixtures.** When test samples need to be embedded in source (e.g., for fuzzing seeds), they are stored as base64-encoded or XOR-obfuscated bytes, decoded at build time by `include_bytes!` + a decoder function. The source repository holds ciphertext, not plaintext.
 
 ### 43.10 Sandbox verification testing
 
-The sandbox crate (`arbitraitor-sandbox`) is verified using the **Firecracker paired-test pattern**: for each sandbox surface, ship both a happy-path test (allowed behavior succeeds) and an adversarial-path test (denied behavior is blocked with the correct signal).
+The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pattern**: for each sandbox surface, ship both a happy-path test (allowed behavior succeeds) and an adversarial-path test (denied behavior is blocked with the correct signal). These are host-syscall assertions and run at tier 4a (§43.8): none of them needs a virtual machine, because the controls under test are host-kernel features applied to host processes, and the forbidden effect is observable directly on the host. A microVM enters only at tier 4b (§43.11), where a live sample is executed natively.
 
 **seccomp-BPF filters:**
 
@@ -6762,11 +6858,15 @@ The sandbox crate (`arbitraitor-sandbox`) is verified using the **Firecracker pa
 - `RLIMIT_FSIZE` — write beyond limit triggers `SIGXFSZ`;
 - `RLIMIT_CORE = 0` — no core dump generated on `abort()`.
 
+**`RLIMIT_NPROC` environment sensitivity (binding).** `RLIMIT_NPROC` is evaluated against the real UID's system-wide process count, not against a per-process budget. On a shared runner the ambient process count can already sit at or above the limit, so the adversarial assertion can pass **vacuously** — `fork()` fails with `EAGAIN` even when the sandbox never applied the limit — while the happy path can fail for the same reason. Tests MUST therefore establish a controlled baseline in the same environment before asserting the denied effect: prove that `fork()` succeeds with the limit unset (or set high), then apply the low limit and assert `EAGAIN`. The test MUST run under a UID and user namespace whose process count the test controls. An ambient `EAGAIN` is never enforcement evidence: the workflow policy's "Testing expectations" rule applies — never claim a sandbox test passed because an error occurred; assert that the forbidden effect did not happen.
+
 **Landlock filesystem isolation:**
 
 - Write outside allowed paths → `EACCES`;
 - Write inside allowed paths → success;
 - `CompatLevel::HardRequirement` in tests — refuses to start on kernels without Landlock support (no silent weakening).
+
+The kernel-feature probe (Landlock ABI, seccomp, and unprivileged user-namespace availability) fails loudly in blocking CI: a missing control is a hard failure, not a skip. On non-Linux platforms the test skips with an explicit marker.
 
 **Network isolation verification (connect-back pattern):**
 
@@ -6777,10 +6877,19 @@ The sandbox crate (`arbitraitor-sandbox`) is verified using the **Firecracker pa
 
 **DNS rebinding verification:**
 
-- Configure a DNS rebinder (using `rebindx` or `rbndr.us` pattern) to alternate between a safe IP and `127.0.0.1`;
+- Run a **local DNS double under test control** that alternates between a safe IP and `127.0.0.1`;
 - First resolution returns safe IP → allowed;
 - Second resolution returns `127.0.0.1` → must be rejected by SSRF protection;
 - Verify Arbitraitor rejects the rebinding attempt with appropriate error.
+
+The DNS double is a local resolver process owned by the test — bound to an ephemeral port on a loopback address, serving scripted answers in sequence. CI MUST NOT depend on a live external DNS-rebinding service.
+
+**Limits of detonation evidence.** A microVM guest can detect that it is virtualized: the CPUID hypervisor-present bit, hypervisor vendor strings, and device and timing artifacts are all observable from inside the guest, and neither default Firecracker nor comparable VMM configurations conceal them. Consequently:
+
+- A tier-4b **behaviour** verdict — what a sample did, did not do, or reached for — is a **lower bound**: an environment-aware sample may withhold behaviour. §27.7 already requires the product to state that malware may detect the sandbox; this paragraph does not restate it, it bounds what a detonation result may be used to claim.
+- Tier-4b **containment** assertions — what crossed the guest boundary, what reached the host, what egressed — are unaffected: those are observations about the boundary, not about the sample's intent.
+
+Detonation reports MUST label each result as belonging to the behaviour class or the containment class. Tier 4b is the Linux evidence behind ADR-0007's `contained` assurance level; §40.9 and ADR-0044 record why that verification exists and how its results are consumed.
 
 ### 43.11 CI isolation strategy
 
@@ -6789,18 +6898,25 @@ The sandbox crate (`arbitraitor-sandbox`) is verified using the **Firecracker pa
 | fmt, clippy, check | ubuntu-latest | every push | <2 min | Lint gate |
 | nextest (default) | ubuntu-latest | every push | <10 min | Tier 1+2 — unit + CLI smoke |
 | nextest --features container-tests | ubuntu-latest | every push, non-blocking | <30 min | Tier 3 — integration with testcontainers |
-| vmtest kernel-target | ubuntu-latest | nightly | <20 min | Tier 4 — sandbox verification (no KVM needed) |
-| Firecracker deep e2e | self-hosted bare-metal | weekly + manual | <60 min | Tier 4-deep — microVM detonation with real malware |
+| nextest (default group) — tier 4a | ubuntu-latest | every push, blocking | <10 min | Tier 4a — host-syscall sandbox verification (seccomp, prctl, setrlimit, Landlock, connect-back, DNS rebinding) |
 | cargo-deny, cargo-audit | ubuntu-latest | every push | <5 min | Security |
+| Firecracker deep e2e (tier 4b) | KVM-capable Linux host (local workstation today; self-hosted bare-metal when added) | manual + scheduled only after a self-hosted runner exists | <60 min | Tier 4b — microVM detonation |
 
-**Self-hosted runner policy.** When a self-hosted bare-metal runner is added for Firecracker tests:
+**Self-hosted runner policy (forward requirements).** No self-hosted runner exists as of this revision. Tier 4b MUST NOT appear in CI schedules until one is added. When one is added:
 
 - Pin labels (`self-hosted`, `baremetal`, `firecracker-ok`) so PRs from forks cannot schedule jobs on it;
 - Run ephemeral — boot from a fresh image each CI run, or use a pool of pre-baked AMIs;
 - Network-isolate the runner if e2e tests detonate malware — separate VPC with no IAM access to other resources;
-- Resource caps per run — explicit `num_cpus`, `memory` in vmtest configuration.
+- Resource caps per run — explicit `num_cpus`, `memory` in the detonation harness configuration.
 
-**Cost model.** Standard runners ($0.008/min) cover tiers 1-3 and vmtest kernel-target. Self-hosted bare-metal (AWS `.metal` spot, ~$0.10-0.40/hr) is only needed for the weekly Firecracker deep e2e tier.
+**Cost model.** Hosted runner minutes cover tiers 1–4a. Tier 4b costs approximately nothing on a local KVM host: it consumes no hosted minutes, and this spec commits to no cloud-hosted microVM or bare-metal allocation for it.
+
+**Detonation host controls.** A tier-4b detonation host is a single-tenant machine dedicated to executing live samples. The following are normative and auditable:
+
+1. **Namespaced VMM.** The VMM MUST run inside a dedicated user namespace and network namespace, and guest network devices MUST be created inside that network namespace. No host bridge, host-namespace TAP device, or host network interface may be reachable from the guest; host overlay or mesh-VPN interfaces in particular MUST NOT be guest-reachable.
+2. **Disk-backed guest images.** Guest images MUST reside on disk-backed filesystems and MUST NOT be placed on tmpfs, where they would consume RAM rather than disk (§9 invariant 4 — bounded processing).
+3. **Bounded VMM process, no root.** No jailer-style root helper is used. The VMM process itself MUST be bounded by delegated cgroup v2 (`systemd-run --user -p MemoryMax=… -p CPUQuota=…`) or by an explicit `setrlimit` set in the launcher. This is weaker than jailer-class isolation: cgroup and rlimit bounds constrain the VMM's resource consumption, not its kernel attack surface, and a kernel-boundary escape from the VMM process itself would reach the host. That is acceptable on a single-tenant detonation host — the host is dedicated to detonation, carries no credentials, and is not a workstation — but it is not equivalent to jailer isolation and MUST NOT be described as such.
+4. **Default-deny guest egress.** Guest egress MUST be default-deny or sinkholed except where a test explicitly requires controlled egress, with canary listeners asserting that no unexpected connect-back occurred (the §43.10 connect-back pattern).
 
 ---
 
@@ -7169,6 +7285,7 @@ The first useful public release should include:
 22. How should plugin permission changes be surfaced in unattended enterprise deployments?
 23. Should command-wrapper plugins be allowed to render custom review UI, or only structured fields interpreted by the core? *(answered: only structured fields — see §39.15 and ADR-0011; remains open for v1.0 plugin-SDK review)*
 24. Is `redb` sufficiently robust under crash and corruption testing for the local metadata index, or should the project accept SQLite FFI? *(research issue — ADR-0005 keeps redb; reopen if crash tests fail)*
+25. Which byte source supplies OCI-image install-time payloads for the package-ecosystem threat corpus? The npm and PyPI classes are sourced from the DataDog malicious-software-packages dataset (§43.9), which does not cover OCI image layers. Until a source is chosen, no OCI payload is fetched or executed, and OCI install-time content is analysed only as inert bytes. *(research issue #824)*
 
 **Open research ADR candidates for v0.6 (not blockers for v0.5):**
 

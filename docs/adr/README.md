@@ -65,6 +65,7 @@ supersede it.
 | [0041](0041-mediated-get-only-http-egress.md) | Mediated GET-only HTTP egress for agent web tools | Accepted | #797 |
 | [0042](0042-wall-clock-deadline-process-group-kill.md) | Wall-clock deadline and process-group kill for mediated execution | Accepted | #760 |
 | [0043](0043-no-wasmtime-compilation-cache.md) | No Wasmtime compilation cache | Accepted | #773 |
+| [0044](0044-sandbox-api-stability-cross-project-consumption.md) | Sandbox API stability for cross-project consumption | Accepted | — |
 
 ## Format
 
