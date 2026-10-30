@@ -641,7 +641,7 @@ mod tests {
         let script = bash_or_skip()?;
         let result = script.execute(b"echo hello\n")?;
         assert_eq!(result.stdout, b"hello\n");
-        assert!(result.stderr.is_empty());
+        assert_eq!(result.stderr, [] as [u8; 0]);
         assert_eq!(result.exit_code, Some(0));
         Ok(())
     }

@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(finding.line, 3);
         assert!(finding.column > 0);
         assert_eq!(finding.level, "info");
-        assert!(!finding.message.is_empty());
+        assert_ne!(finding.message, "");
         Ok(())
     }
 

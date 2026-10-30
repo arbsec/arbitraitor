@@ -319,7 +319,10 @@ async fn list_artifacts_returns_metadata() -> Result<(), Box<dyn std::error::Err
     let root = unique_dir("list");
     let api = ArbitraitorApi::new(test_config(&root))?;
 
-    assert!(api.list_artifacts()?.is_empty());
+    assert_eq!(
+        api.list_artifacts()?,
+        [] as [arbitraitor_engine::ArtifactSummary; 0]
+    );
 
     let url = mock_http_server(b"artifact-one", "text/plain").await;
     let result = api.fetch(&url).await?;

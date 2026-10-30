@@ -363,7 +363,7 @@ source = { virtual = "." }
     #[test]
     fn parse_empty_lockfile() -> TestResult {
         let lock = parse_uv_lock("version = 1\n")?;
-        assert!(lock.packages.is_empty());
+        assert_eq!(lock.packages, [] as [UvPackage; 0]);
         Ok(())
     }
 

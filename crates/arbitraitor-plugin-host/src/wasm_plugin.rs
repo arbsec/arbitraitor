@@ -391,7 +391,7 @@ mod tests {
         let plugin = WasmPlugin::from_bytes(&engine, VALID_COMPONENT)
             .unwrap_or_else(|e| panic!("load: {e}"));
         let findings = plugin.analyze(b"", &make_context(b""));
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]

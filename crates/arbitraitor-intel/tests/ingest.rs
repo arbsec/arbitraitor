@@ -178,7 +178,7 @@ async fn ingest_feed_empty_payload_reports_zero_entries() -> Result<(), Box<dyn 
     let report = ingest_feed(&adapter, &fetcher, &mut store, &FetchPolicy::default()).await?;
 
     assert_eq!(report.entries_added, 0);
-    assert!(store.entries().is_empty());
+    assert_eq!(store.entries(), []);
     let _ = std::fs::remove_file(store_path);
     Ok(())
 }

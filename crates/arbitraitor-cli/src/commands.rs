@@ -1485,7 +1485,7 @@ fn execute_approval_path(command: &ExecuteCommand) -> Result<&Path> {
         .into_diagnostic()?;
         return Ok(path);
     }
-    miette::bail!("missing approval file; pass --approval <PATH>")
+    miette::bail!("missing approval file; pass --approval <PATH>");
 }
 
 pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {

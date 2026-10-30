@@ -57,7 +57,7 @@ async fn https_upgrade_rejects_plain_http() -> Result<(), Box<dyn std::error::Er
         matches!(error, FetchError::InvalidScheme { ref scheme } if scheme == "http"),
         "expected InvalidScheme for http, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -86,7 +86,7 @@ async fn mixed_content_detected() -> Result<(), Box<dyn std::error::Error>> {
         matches!(error, FetchError::InvalidScheme { ref scheme } if scheme == "http"),
         "expected InvalidScheme for mixed content, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -183,7 +183,7 @@ async fn large_response_capped() -> Result<(), Box<dyn std::error::Error>> {
             if kind == SizeLimitKind::Compressed && limit == cap),
         "expected SizeExceeded with cap {cap}, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 

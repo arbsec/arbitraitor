@@ -66,7 +66,7 @@ async fn ssrf_rejects_ip_literal() -> Result<(), Box<dyn std::error::Error>> {
         matches!(error, FetchError::ProhibitedAddress { address } if address.is_loopback()),
         "expected ProhibitedAddress for loopback, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -89,7 +89,7 @@ async fn ssrf_rejects_localhost() -> Result<(), Box<dyn std::error::Error>> {
         matches!(error, FetchError::ProhibitedAddress { address } if address.is_loopback()),
         "expected ProhibitedAddress after DNS resolution to loopback, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -114,7 +114,7 @@ async fn ssrf_rejects_169_254_169_254() -> Result<(), Box<dyn std::error::Error>
             if address.to_string() == "169.254.169.254"),
         "expected ProhibitedAddress for metadata IP, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -136,7 +136,7 @@ async fn ssrf_rejects_0_0_0_0() -> Result<(), Box<dyn std::error::Error>> {
             if address.to_string() == "0.0.0.0"),
         "expected ProhibitedAddress for 0.0.0.0, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -164,7 +164,7 @@ async fn ssrf_rejects_ipv6_loopback() -> Result<(), Box<dyn std::error::Error>> 
         ),
         "rejection reason must not be a non-loopback address, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 
@@ -208,7 +208,7 @@ async fn ssrf_redirect_to_internal() -> Result<(), Box<dyn std::error::Error>> {
             if address.to_string() == "169.254.169.254"),
         "expected ProhibitedAddress for redirect to metadata, got {error:?}"
     );
-    assert!(sink.as_bytes().is_empty());
+    assert_eq!(sink.as_bytes(), [] as [u8; 0]);
     Ok(())
 }
 

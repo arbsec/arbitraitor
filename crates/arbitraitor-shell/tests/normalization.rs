@@ -154,7 +154,10 @@ fn oversized_decode_is_truncated_or_skipped() -> Result<(), Box<dyn std::error::
     let oversized = "QQ==".repeat(600_000);
     let source = format!("echo {oversized} | base64 -d\n");
     let result = normalize_source(&source)?;
-    assert!(result.decoded_artifacts.is_empty());
+    assert_eq!(
+        result.decoded_artifacts,
+        [] as [arbitraitor_shell::DecodedArtifact; 0]
+    );
     Ok(())
 }
 

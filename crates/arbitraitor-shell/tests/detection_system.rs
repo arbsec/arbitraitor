@@ -107,7 +107,7 @@ fn detects_insecure_tls_flags() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn does_not_flag_legitimate_sudo_install_script() -> Result<(), Box<dyn std::error::Error>> {
     let findings = findings_for("sudo apt-get install -y curl\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 
@@ -115,27 +115,27 @@ fn does_not_flag_legitimate_sudo_install_script() -> Result<(), Box<dyn std::err
 fn does_not_flag_writing_to_user_config() -> Result<(), Box<dyn std::error::Error>> {
     let findings =
         findings_for("mkdir -p ~/.config/tool && echo theme=dark > ~/.config/tool/config\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 
 #[test]
 fn does_not_flag_set_errexit() -> Result<(), Box<dyn std::error::Error>> {
     let findings = findings_for("set -e\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 
 #[test]
 fn does_not_flag_tls_verification_defaults() -> Result<(), Box<dyn std::error::Error>> {
     let findings = findings_for("curl https://example.invalid/install.sh\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 
 #[test]
 fn does_not_flag_home_conf_file_edit() -> Result<(), Box<dyn std::error::Error>> {
     let findings = findings_for("echo option=true >> ~/project/app.conf\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }

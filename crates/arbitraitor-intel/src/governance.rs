@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn collapse_empty_input_returns_empty() {
-        assert!(duplicate_collapse(&[]).is_empty());
+        assert_eq!(duplicate_collapse(&[]), [] as [FeedEntry; 0]);
     }
 
     #[test]

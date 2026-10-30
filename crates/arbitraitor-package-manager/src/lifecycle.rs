@@ -128,7 +128,7 @@ mod tests {
     fn handles_package_without_scripts_field() -> TestResult {
         let json = br#"{"name": "bare", "version": "1.0.0"}"#;
         let scripts = parse_lifecycle_scripts(json)?;
-        assert!(scripts.is_empty());
+        assert_eq!(scripts, [] as [LifecycleScript; 0]);
         Ok(())
     }
 

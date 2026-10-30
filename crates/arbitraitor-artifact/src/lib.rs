@@ -642,7 +642,10 @@ mod tests {
 
     #[test]
     fn inspect_lnk_returns_empty_for_non_lnk() {
-        assert!(inspect_lnk(b"PK\x03\x04not a lnk").is_empty());
+        assert_eq!(
+            inspect_lnk(b"PK\x03\x04not a lnk"),
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
     }
 
     #[test]
@@ -685,7 +688,10 @@ mod tests {
             data.extend_from_slice(&unit.to_le_bytes());
         }
 
-        assert!(inspect_lnk(&data).is_empty());
+        assert_eq!(
+            inspect_lnk(&data),
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
     }
 
     #[test]

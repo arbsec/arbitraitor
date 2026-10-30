@@ -236,7 +236,7 @@ fn empty_zip_archive_lists_no_entries() -> Result<(), Box<dyn Error>> {
     let data = writer.finish()?.into_inner();
     let mut reader = open_archive(&data, ArtifactType::ZipArchive)?;
 
-    assert!(reader.entries()?.is_empty());
+    assert_eq!(reader.entries()?, [] as [ArchiveEntry; 0]);
     Ok(())
 }
 
@@ -322,7 +322,7 @@ fn hazard_detection_allows_clean_archive_metadata() {
 
     let findings = detect_archive_hazards(&[first, second], &test_limits());
 
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
 }
 
 #[test]
@@ -350,7 +350,7 @@ fn tar_consensus_allows_clean_tar_members() -> Result<(), Box<dyn Error>> {
 
     let findings = detect_tar_parser_differentials(&data, &primary_entries, &test_limits());
 
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 

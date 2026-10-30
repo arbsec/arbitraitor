@@ -1154,7 +1154,7 @@ mod tests {
         assert_eq!(config.policy.default_action, "prompt");
         assert_eq!(config.policy.non_interactive_prompt_action, "block");
         assert!(config.policy.policy_file.is_none());
-        assert!(config.policy.rules.is_empty());
+        assert_eq!(config.policy.rules, [] as [InlineRule; 0]);
         assert!(config.detectors.shell_analysis);
         assert!(config.detectors.powershell_analysis);
         assert!(config.detectors.archive_inspection);
@@ -1378,7 +1378,7 @@ non_interactive_prompt_action = "block"
         let engine = config.build_policy_engine()?;
 
         assert_eq!(engine.policy().version, 1);
-        assert!(engine.policy().rules.is_empty());
+        assert_eq!(engine.policy().rules, [] as [arbitraitor_policy::Rule; 0]);
         Ok(())
     }
 
@@ -1419,7 +1419,7 @@ deny_environment_patterns = ["MY_SECRET_"]
         assert!(detectors.powershell_analysis);
         assert!(detectors.archive_inspection);
         assert!(detectors.provenance_verification);
-        assert!(detectors.yara_rule_packs.is_empty());
+        assert_eq!(detectors.yara_rule_packs, [] as [std::path::PathBuf; 0]);
     }
 
     #[test]

@@ -50,7 +50,10 @@ while read -r line; do echo "$line"; done < input.txt
 "#,
     );
 
-    assert!(result.parse_errors.is_empty());
+    assert_eq!(
+        result.parse_errors,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     assert!(
         result
             .ast
@@ -174,7 +177,7 @@ fn handles_null_bytes_without_shifting_spans() -> Result<(), Box<dyn std::error:
 fn rejects_invalid_utf8_before_parsing() -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = parser()?;
     let result = parser.parse_bytes(b"#!/bin/sh\necho ok\xff\n");
-    assert!(result.ast.is_empty());
+    assert_eq!(result.ast, [] as [ShellNode; 0]);
     assert_eq!(result.source_stats.parsed_bytes, 0);
     assert!(result.source_stats.invalid_utf8_rejected);
     assert!(
@@ -195,7 +198,7 @@ fn rejects_oversized_input_before_parsing() -> Result<(), Box<dyn std::error::Er
         ..ParserConfig::default()
     })?;
     let result = parser.parse_str("if then echo unterminated syntax that must not be parsed\n");
-    assert!(result.ast.is_empty());
+    assert_eq!(result.ast, [] as [ShellNode; 0]);
     assert_eq!(result.source_stats.parsed_bytes, 0);
     assert!(result.source_stats.truncated);
     assert!(
@@ -237,7 +240,10 @@ fn bounds_deeply_nested_input_by_max_depth() -> Result<(), Box<dyn std::error::E
 fn parses_c_style_for_loop_body_commands() -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = parser()?;
     let result = parser.parse_str("for ((i=0; i<3; i++)); do curl https://example.invalid; done\n");
-    assert!(result.parse_errors.is_empty());
+    assert_eq!(
+        result.parse_errors,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     assert!(result.ast.iter().any(|node| matches!(
         node,
         ShellNode::Loop(loop_node) if loop_node.kind == "c_style_for_statement"

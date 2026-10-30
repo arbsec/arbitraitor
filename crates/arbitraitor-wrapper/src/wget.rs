@@ -527,12 +527,18 @@ mod tests {
         let result = parse(&["wget", "https://example.com/file"])?;
         assert_eq!(result.url, "https://example.com/file");
         assert_eq!(result.output_path, None);
-        assert!(result.headers.is_empty());
+        assert_eq!(
+            result.headers,
+            [] as [(std::string::String, std::string::String); 0]
+        );
         assert_eq!(result.user_agent, None);
         assert_eq!(result.timeout_secs, None);
         assert_eq!(result.max_redirect, None);
         assert!(!result.no_check_certificate);
-        assert!(result.findings.is_empty());
+        assert_eq!(
+            result.findings,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         Ok(())
     }
 
@@ -741,7 +747,10 @@ mod tests {
     #[test]
     fn plain_invocation_produces_no_findings() -> Result<(), WrapperError> {
         let result = parse(&["wget", "https://example.com/file"])?;
-        assert!(result.findings.is_empty());
+        assert_eq!(
+            result.findings,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         Ok(())
     }
 
@@ -795,7 +804,10 @@ mod tests {
         let result = parse(&["wget", "-q", "https://example.com/file"])?;
 
         assert!(!result.no_check_certificate);
-        assert!(result.findings.is_empty());
+        assert_eq!(
+            result.findings,
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
         assert!(
             !result
                 .unsupported_options

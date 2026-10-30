@@ -111,6 +111,6 @@ fn detects_unicode_confusable_command_name() -> Result<(), Box<dyn std::error::E
 #[test]
 fn does_not_flag_legitimate_unicode_echo() -> Result<(), Box<dyn std::error::Error>> {
     let findings = findings_for("echo 'Привет мир café'\nprintf '正常なテキスト'\n")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }

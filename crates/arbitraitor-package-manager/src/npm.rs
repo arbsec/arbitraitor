@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn parse_empty_lockfile() -> TestResult {
         let lock = parse_package_lock(br#"{"lockfileVersion": 3, "packages": {}}"#)?;
-        assert!(lock.packages.is_empty());
+        assert_eq!(lock.packages, [] as [NpmPackage; 0]);
         Ok(())
     }
 

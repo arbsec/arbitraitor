@@ -172,7 +172,7 @@ mod tests {
     ) -> std::result::Result<(), Box<dyn Error>> {
         assert_eq!(adapter.name(), expected_name);
         assert_eq!(adapter.source_class(), expected_class);
-        assert!(adapter.fetch_indicators()?.is_empty());
+        assert_eq!(adapter.fetch_indicators()?, [] as [FeedEntry; 0]);
         Ok(())
     }
 

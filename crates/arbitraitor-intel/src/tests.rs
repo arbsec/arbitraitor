@@ -83,13 +83,12 @@ fn queries_by_url_indicator() -> std::result::Result<(), Box<dyn Error>> {
     store.add_entry(sample_entry(indicator.clone()))?;
 
     assert_eq!(store.query(&indicator).len(), 1);
-    assert!(
-        store
-            .query(&sample_indicator(
-                IndicatorType::ExactUrl,
-                "https://example.invalid/other.sh"
-            ))
-            .is_empty()
+    assert_eq!(
+        store.query(&sample_indicator(
+            IndicatorType::ExactUrl,
+            "https://example.invalid/other.sh"
+        )),
+        [] as [&FeedEntry; 0]
     );
     let _ = fs::remove_file(path);
     Ok(())
@@ -216,7 +215,7 @@ fn expired_entries_are_ignored_by_match_indicator() -> std::result::Result<(), B
     let mut store = IntelStore::open(&path)?;
     store.add_entry(expired)?;
 
-    assert!(match_indicator(&store, &indicator).is_empty());
+    assert_eq!(match_indicator(&store, &indicator), [] as [MatchResult; 0]);
     let _ = fs::remove_file(path);
     Ok(())
 }

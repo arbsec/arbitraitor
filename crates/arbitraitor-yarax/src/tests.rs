@@ -74,7 +74,10 @@ fn scan_with_no_match_produces_no_findings() -> Result<(), Box<dyn std::error::E
 
     let result = coordinator.analyze(b"benign content");
 
-    assert!(result.findings.is_empty());
+    assert_eq!(
+        result.findings,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     Ok(())
 }
 
@@ -85,7 +88,7 @@ fn invalid_rule_syntax_returns_error() -> Result<(), Box<dyn std::error::Error>>
     let error = scanner.add_rules("rule broken { condition: }");
 
     assert!(matches!(error, Err(YaraError::Compile(_))));
-    assert!(scanner.scan(b"anything").is_empty());
+    assert_eq!(scanner.scan(b"anything"), [] as [super::YaraMatch; 0]);
     Ok(())
 }
 
@@ -197,7 +200,10 @@ fn shell_script_rule_does_not_match_pe_artifact() -> Result<(), Box<dyn std::err
 
     let result = coordinator.analyze(b"MZ\x90\0pe-like bytes");
 
-    assert!(result.findings.is_empty());
+    assert_eq!(
+        result.findings,
+        [] as [arbitraitor_model::finding::Finding; 0]
+    );
     Ok(())
 }
 

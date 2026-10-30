@@ -214,7 +214,7 @@ mod tests {
         }];
 
         let findings = registry.validate_coverage(&kind, &results, &sha);
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]
@@ -244,6 +244,6 @@ mod tests {
         let sha = Sha256Digest::new([0xcc; 32]);
         let kind = ArtifactKind::GenericText;
         let findings = registry.validate_coverage(&kind, &[], &sha);
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 }

@@ -291,7 +291,7 @@ mod tests {
             test_finding(FindingCategory::CredentialAccess, Severity::High, "b"),
         ];
         let report = ExplainabilityReport::from_findings(&findings);
-        assert!(!report.recommendations.is_empty());
+        assert_ne!(report.recommendations, [] as [std::string::String; 0]);
         assert!(
             report
                 .recommendations

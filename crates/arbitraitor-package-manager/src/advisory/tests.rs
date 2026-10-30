@@ -32,7 +32,7 @@ fn clean_lockfile_yields_pass_verdict() {
     };
     let outcome = analyze(&lock, &[], "10.8.0", digest());
     assert_eq!(outcome.verdict, AdvisoryVerdict::Pass);
-    assert!(outcome.findings.is_empty());
+    assert_eq!(outcome.findings, [] as [PackageFinding; 0]);
     assert_eq!(outcome.receipt.packages_inspected, 1);
     assert_eq!(outcome.receipt.packages_blocked, 0);
     assert_eq!(outcome.receipt.packages_incomplete, 0);
@@ -121,7 +121,7 @@ fn registry_url_is_not_flagged() {
     };
     let outcome = analyze(&lock, &[], "10.8.0", digest());
     assert_eq!(outcome.verdict, AdvisoryVerdict::Pass);
-    assert!(outcome.findings.is_empty());
+    assert_eq!(outcome.findings, [] as [PackageFinding; 0]);
 }
 
 #[test]

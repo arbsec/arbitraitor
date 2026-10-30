@@ -565,7 +565,7 @@ mod tests {
             .execute(&binary)?;
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout, b"hello\n");
-        assert!(result.stderr.is_empty());
+        assert_eq!(result.stderr, [] as [u8; 0]);
         verify_platform_quarantine(&binary)?;
         fs::remove_dir_all(root)?;
         Ok(())

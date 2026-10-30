@@ -394,7 +394,7 @@ mod tests {
         assert!(!store.is_rollback("rule_packs", 1));
         assert!(!store.is_rollback("rule_packs", 0));
         assert_eq!(store.last_seen("rule_packs"), None);
-        assert!(store.rollback_history().is_empty());
+        assert_eq!(store.rollback_history(), []);
     }
 
     #[test]

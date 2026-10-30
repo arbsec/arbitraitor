@@ -1564,7 +1564,7 @@ mod tests {
     fn discover_skips_nested_entries() {
         let names = vec!["nested/dir/pkg.vex.json".to_owned()];
         let found = discover_companion_artifacts(&names);
-        assert!(found.is_empty());
+        assert_eq!(found, [] as [CompanionArtifact; 0]);
     }
 
     #[test]

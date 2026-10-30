@@ -262,7 +262,7 @@ fn detects_chmod_then_execution_of_downloaded_file() -> Result<(), Box<dyn std::
 fn ignores_normal_curl_download_without_execution() -> Result<(), Box<dyn std::error::Error>> {
     let findings =
         detect_source("curl -fsSL -o artifact.tar.gz https://example.com/artifact.tar.gz")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 
@@ -270,13 +270,13 @@ fn ignores_normal_curl_download_without_execution() -> Result<(), Box<dyn std::e
 fn ignores_base64_encoding_without_execution() -> Result<(), Box<dyn std::error::Error>> {
     let findings = detect_source("printf %s hello | base64 > hello.b64")?;
     assert!(!has_tag(&findings, "decode-to-execute"));
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }
 
 #[test]
 fn ignores_non_executed_variable_usage() -> Result<(), Box<dyn std::error::Error>> {
     let findings = detect_source("name=world; echo \"hello $name\"")?;
-    assert!(findings.is_empty());
+    assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     Ok(())
 }

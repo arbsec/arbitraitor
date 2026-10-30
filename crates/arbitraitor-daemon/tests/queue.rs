@@ -237,7 +237,7 @@ async fn completed_status_after_execution() {
         OperationStatus::Completed(result) => result,
         other => panic!("expected Completed, got {other:?}"),
     };
-    assert!(!result.sha256.is_empty());
+    assert_ne!(result.sha256, "");
     assert!(result.duration_ms < 5_000);
 }
 

@@ -1254,10 +1254,10 @@ mod tests {
         assert_eq!(meta.signature_status, SignatureStatus::Unsigned);
         assert_eq!(meta.provenance_status, ProvenanceStatus::Missing);
         assert_eq!(meta.conformance_status, ConformanceStatus::Pending);
-        assert!(meta.version_history.is_empty());
-        assert!(meta.supported_platforms.is_empty());
-        assert!(meta.requested_permissions.is_empty());
-        assert!(meta.known_vulnerabilities.is_empty());
+        assert_eq!(meta.version_history, [] as [std::string::String; 0]);
+        assert_eq!(meta.supported_platforms, [] as [std::string::String; 0]);
+        assert_eq!(meta.requested_permissions, [] as [std::string::String; 0]);
+        assert_eq!(meta.known_vulnerabilities, [] as [std::string::String; 0]);
     }
 
     #[test]

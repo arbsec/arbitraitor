@@ -680,7 +680,7 @@ ftp = 'ftp://mirror.example.org/pub'
     #[test]
     fn python_source_with_no_urls_returns_empty() {
         let urls = extract_urls_from_python("def hello():\n    return 'hi'\n");
-        assert!(urls.is_empty());
+        assert_eq!(urls, [] as [DiscoveredUrl; 0]);
     }
 
     // --- JavaScript ------------------------------------------------------
@@ -705,7 +705,7 @@ ftp = 'ftp://mirror.example.org/pub'
     #[test]
     fn javascript_source_with_no_urls_returns_empty() {
         let urls = extract_urls_from_javascript("const x = 42;\n");
-        assert!(urls.is_empty());
+        assert_eq!(urls, [] as [DiscoveredUrl; 0]);
     }
 
     // --- JSON ------------------------------------------------------------
@@ -741,13 +741,13 @@ ftp = 'ftp://mirror.example.org/pub'
     #[test]
     fn invalid_json_returns_empty() {
         let urls = extract_urls_from_json("{not valid json}");
-        assert!(urls.is_empty());
+        assert_eq!(urls, [] as [DiscoveredUrl; 0]);
     }
 
     #[test]
     fn empty_json_returns_empty() {
         let urls = extract_urls_from_json("{}");
-        assert!(urls.is_empty());
+        assert_eq!(urls, [] as [DiscoveredUrl; 0]);
     }
 
     // --- HTML ------------------------------------------------------------
@@ -791,7 +791,7 @@ ftp = 'ftp://mirror.example.org/pub'
     #[test]
     fn html_with_no_urls_returns_empty() {
         let urls = extract_urls_from_html("<p>no links here</p>");
-        assert!(urls.is_empty());
+        assert_eq!(urls, [] as [DiscoveredUrl; 0]);
     }
 
     // --- Config ----------------------------------------------------------
@@ -819,8 +819,14 @@ url = "https://example.com/api"
 
     #[test]
     fn empty_config_returns_empty() {
-        assert!(extract_urls_from_config("", ConfigFormat::Json).is_empty());
-        assert!(extract_urls_from_config("", ConfigFormat::Toml).is_empty());
+        assert_eq!(
+            extract_urls_from_config("", ConfigFormat::Json),
+            [] as [DiscoveredUrl; 0]
+        );
+        assert_eq!(
+            extract_urls_from_config("", ConfigFormat::Toml),
+            [] as [DiscoveredUrl; 0]
+        );
     }
 
     // --- Dynamic URL expressions -----------------------------------------
@@ -854,7 +860,7 @@ url = "https://example.com/api"
     fn static_url_produces_no_dynamic_expressions() {
         let source = r#"url = "https://example.com/static""#;
         let exprs = detect_dynamic_url_expressions(source, UrlSource::Python);
-        assert!(exprs.is_empty());
+        assert_eq!(exprs, [] as [DynamicUrlExpression; 0]);
     }
 
     // --- Bounded extraction ----------------------------------------------
@@ -863,7 +869,7 @@ url = "https://example.com/api"
     fn source_exceeding_max_size_returns_empty() {
         let huge = "https://example.com ".repeat(MAX_SOURCE_SIZE);
         let urls = extract_urls_from_python(&huge);
-        assert!(urls.is_empty());
+        assert_eq!(urls, [] as [DiscoveredUrl; 0]);
     }
 
     #[test]
@@ -877,10 +883,10 @@ url = "https://example.com/api"
 
     #[test]
     fn empty_input_returns_empty() {
-        assert!(extract_urls_from_python("").is_empty());
-        assert!(extract_urls_from_javascript("").is_empty());
-        assert!(extract_urls_from_json("").is_empty());
-        assert!(extract_urls_from_html("").is_empty());
+        assert_eq!(extract_urls_from_python(""), [] as [DiscoveredUrl; 0]);
+        assert_eq!(extract_urls_from_javascript(""), [] as [DiscoveredUrl; 0]);
+        assert_eq!(extract_urls_from_json(""), [] as [DiscoveredUrl; 0]);
+        assert_eq!(extract_urls_from_html(""), [] as [DiscoveredUrl; 0]);
     }
 
     // --- RetrievalPolicy -------------------------------------------------
@@ -1128,7 +1134,10 @@ url = "https://example.com/api"
             result.is_ok(),
             "large document must not fail closed, got: {result:?}"
         );
-        assert!(result.unwrap_or_default().is_empty());
+        assert_eq!(
+            result.unwrap_or_default(),
+            [] as [arbitraitor_model::finding::Finding; 0]
+        );
     }
 
     #[test]
@@ -1245,7 +1254,7 @@ url = "https://example.com/api"
         let findings = UrlDiscoveryDetector
             .analyze(&test_ctx(b""))
             .expect("detector should analyze empty input");
-        assert!(findings.is_empty());
+        assert_eq!(findings, [] as [arbitraitor_model::finding::Finding; 0]);
     }
 
     #[test]
