@@ -136,6 +136,15 @@ Plugins declare capabilities in their WIT interface and cannot exceed them at ru
 | Memory | Bounded (128 MB default) |
 | Execution fuel | Bounded (1B instructions default) |
 | Host calls | Bounded by count and deadline |
+| Compilation cache | None — components are recompiled per load (ADR-0043) |
+
+The engine does not use Wasmtime's on-disk compilation cache. Every plugin load
+recompiles the component; the cost is paid per load (parallel compilation keeps
+it proportional to the component's size) and in exchange no compiled-code
+artifact is written outside the CAS, where it would sit beyond digest
+verification and outside the sandbox boundary's accounting. See
+<!-- markdownlint-disable-next-line MD057 -->
+[ADR 0043](../adr/0043-no-wasmtime-compilation-cache.md).
 
 ### Component Model execution (ADR-0006)
 
