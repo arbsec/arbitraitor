@@ -6846,9 +6846,9 @@ Each entry records: name, SHA-256, source (inline/malwarebazaar/thezoo/malshare/
 
 ### 43.10 Sandbox verification testing
 
-The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pattern**: for each sandbox surface, ship both a happy-path test (allowed behavior succeeds) and an adversarial-path test (denied behavior is blocked with the correct signal). These are host-syscall assertions and run at tier 4a (§43.8): none of them needs a virtual machine, because the controls under test are host-kernel features applied to host processes, and the forbidden effect is observable directly on the host. A microVM enters only at tier 4b (§43.11), where a live sample is executed natively.
+The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pattern**: for each sandbox surface, ship both a happy-path test (allowed behavior succeeds) and an adversarial-path test (denied behavior is blocked with the correct error or signal). These are host-syscall assertions and run at tier 4a (§43.8): none of them needs a virtual machine, because the controls under test are host-kernel features applied to host processes, and the forbidden effect is observable directly on the host. A microVM enters only at tier 4b (§43.11), where a live sample is executed natively.
 
-**Binding assertions versus outstanding controls.** The bullets under each surface below state behaviour the crate implements today; the tier-4a tests for them are binding on every push. Controls this section requires that the crate does **not** yet implement are collected under **Outstanding controls** at the end of the section, each keeping its requirement text and naming the tracking issue that lands the control and its assertion together. A control in that class is not covered by tier 4a until its assertion lands: an open tracking issue is never evidence of a passing test, and no containment claim may cite one.
+**Binding assertions versus outstanding controls.** The bullets under each surface below state behaviour the crate implements today; the tier-4a tests for them are binding on every push, except where a surface's own text states that its assertion is deferred to an outstanding control. Controls this section requires that the crate does **not** yet implement are collected under **Outstanding controls** at the end of the section, each keeping its requirement text and naming the tracking issue that lands the control and its assertion together. A control in that class is not covered by tier 4a until its assertion lands: an open tracking issue is never evidence of a passing test, and no containment claim may cite one.
 
 **seccomp-BPF filters:**
 
@@ -6882,7 +6882,7 @@ The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pat
 - Assert: listener does NOT receive a connection within timeout → sandbox is enforcing;
 - Assert: sandboxed process receives `EPERM` — neither `ECONNREFUSED` nor `EACCES`. A denied syscall returns `SECCOMP_RET_ERRNO | EPERM` (ADR-0020); `ECONNREFUSED` would mean the connection reached the listener and the filter did not apply, and `EACCES` is not what the filter returns. Because `socket` and `socketpair` are denied too, a probe that opens a fresh socket fails at `socket()` with `EPERM`; to exercise `connect()` itself the probe wraps a descriptor inherited from the parent and observes the failure there. The listener-silence assertion above is the assertion that proves enforcement — the errno assertion pins which failure was observed.
 
-**DNS rebinding verification:**
+**DNS rebinding verification (required design — assertion deferred; see Outstanding controls):**
 
 - Run a **local DNS double under test control** that alternates between a safe IP and `127.0.0.1`;
 - First resolution returns safe IP → allowed;
