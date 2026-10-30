@@ -293,6 +293,15 @@ path derived from the format string. Short options may be clustered and may
 carry their value attached (`-sS`, `-o file.txt`, `-ofile.txt`, `-HX:y`),
 exactly as real `curl` accepts them.
 
+A short option that is not part of curl's short-option table at all is
+rejected with an `unsupported curl option` error rather than guessed at:
+real `curl` refuses such an invocation too (exit 2), and because short
+options cluster there is no way to know where an unknown option's value
+ends. Known-but-unsupported short options (`-w`, `-v`, `-J`, …) are
+recorded in the invocation's unsupported-option list and the fetch
+proceeds; only security-critical ones (e.g. `-k`, `-x`) hard-reject the
+invocation.
+
 When the verdict is anything other than Pass (Warn, Prompt, Block, Error,
 Incomplete):
 
