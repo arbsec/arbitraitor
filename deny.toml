@@ -9,28 +9,15 @@ version = 2
 db-path = "~/.cargo/advisory-dbs"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# bincode is unmaintained (RUSTSEC-2025-0141, superseded by RUSTSEC-2026-0185).
-# It is a transitive dependency via yara-x which we cannot remove without
-# upstream changes. Tracked for resolution when yara-x drops bincode or we
-# migrate to an alternative YARA runtime.
-# RUSTSEC-2026-0222 and RUSTSEC-2026-0269 affect the wasmtime 43.0.2 copy
-# pulled in transitively by yara-x 1.19.0 (whose wasmtime requirement is
-# ^43.0.2); our direct wasmtime dependency is floored at >=49.0.2, which is
-# above all fix versions. The 43.x copy cannot be bumped without upstream
-# yara-x releasing a version with a newer wasmtime dep (yara-x 1.20.0 still
-# pins wasmtime ^45.0.3, inside 0269's affected range).
-# RUSTSEC-2026-0316 affects that same yara-x 1.20.0 wasmtime 45.0.3 copy
-# (dynamic record lifting can allocate beyond the hostcall fuel limit,
-# low severity). No patched 45.x exists — fixes landed in >=36.0.16,
-# >=48.0.3, and >=49.0.1 — so it cannot be resolved by cargo update until
-# yara-x bumps wasmtime. Same yara-x pin as the high-severity
-# RUSTSEC-2026-0269 ignore above.
+# The ignore list is reserved for advisories that have been formally evaluated
+# and accepted; it carries exactly one entry today. Every wasmtime and zstd
+# waiver that used to live here is gone: `zip` moved to 9.x (fixing
+# RUSTSEC-2026-0367/0368/0369), the `wasmtime` `cache` feature was dropped
+# (ADR-0043) so no `zstd ^0.13` copy remains in the graph, and `cargo update`
+# moved both the direct and the yara-x-pinned wasmtime copies above every
+# published fix version (direct 49.0.5, yara-x-pinned 48.0.8).
 ignore = [
-    "RUSTSEC-2025-0141",
-    "RUSTSEC-2026-0222",
-    { id = "RUSTSEC-2026-0269", reason = "yara-x 1.19.0 requires wasmtime ^43.0.2, resolving the transitive copy to 43.0.2; no yara-x release with a fixed wasmtime range exists yet (1.20.0 requires wasmtime ^45.0.3, still affected). Our direct wasmtime floor is >=49.0.2 (patched). Drop this ignore when yara-x requires a patched wasmtime." },
-    { id = "RUSTSEC-2026-0316", reason = "yara-x 1.20.0 requires wasmtime ^45.0.3, resolving the transitive copy to 45.0.3 (dynamic record lifting can allocate beyond the hostcall fuel limit, low severity). No patched 45.x exists — fixes are in >=36.0.16, >=48.0.3, >=49.0.1 — so this is not resolvable by cargo update. High-severity sibling RUSTSEC-2026-0269 for the same yara-x wasmtime pin is already ignored. Drop this ignore when yara-x requires a patched wasmtime." },
-    { id = "RUSTSEC-2026-0327", reason = "yara-x 1.20.0 resolves the transitive wasmtime copy to 45.0.3 (component async-lifted callback result count unvalidated, causing a native stack buffer overflow). No patched 45.x exists — fixes are in >=48.0.4, >=49.0.2 — so this is not resolvable by cargo update. The direct wasmtime copy is now 49.0.2 (patched for 0325/0326, which do not affect 45.0.3 — unaffected below 47.0.0); the 0325/0326 ignores that briefly covered it were removed in favor of the upgrade. Drop this ignore when yara-x requires a patched wasmtime." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 2.0.1 is unmaintained (informational only, no vulnerability recorded). It is a transitive dependency of yara-x and cannot be removed without an upstream yara-x change or a migration to a different YARA runtime. Tracked for resolution when yara-x drops bincode." },
 ]
 
 [licenses]

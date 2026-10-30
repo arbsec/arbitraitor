@@ -33,7 +33,9 @@ jobs:
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037  # v2.87.32
         with:
           tool: cargo-deny
-      - name: Guard RUSTSEC-2026-0327 wasmtime waiver
+      # Inert unless a wasmtime advisory waiver is re-added to deny.toml; it
+      # pins what such a waiver would actually cover (see crates/xtask/src/wasmtime_lock.rs).
+      - name: Guard wasmtime lockfile waiver
         run: cargo run -q -p xtask -- check-wasmtime-lock
       - name: Run cargo-deny
         run: cargo deny check
@@ -50,11 +52,15 @@ jobs:
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037  # v2.87.32
         with:
           tool: cargo-audit
-      - name: Guard RUSTSEC-2026-0327 wasmtime waiver
+      # Inert unless a wasmtime advisory waiver is re-added to deny.toml; it
+      # pins what such a waiver would actually cover (see crates/xtask/src/wasmtime_lock.rs).
+      - name: Guard wasmtime lockfile waiver
         run: cargo run -q -p xtask -- check-wasmtime-lock
       - name: Run cargo-audit
         # Ignore list must mirror deny.toml [advisories].ignore. 0141 is the
-        # unmaintained-bincode advisory (transitive via yara-x); 0222/0269/0316/
-        # 0325/0326/0327 apply to the yara-x-pinned wasmtime 45.0.3 copy (see
-        # deny.toml comments for the upstream tracking rationale).
-        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0222 --ignore RUSTSEC-2026-0269 --ignore RUSTSEC-2026-0316 --ignore RUSTSEC-2026-0327
+        # unmaintained-bincode advisory (transitive via yara-x, informational
+        # only). The wasmtime and zstd waivers that used to live here are gone:
+        # `zip` moved to 9.x, the wasmtime `cache` feature was dropped
+        # (ADR-0043), and `cargo update` lifted both wasmtime copies above
+        # every published fix version.
+        run: cargo audit --ignore RUSTSEC-2025-0141

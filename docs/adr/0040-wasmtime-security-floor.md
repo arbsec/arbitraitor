@@ -75,6 +75,14 @@ explicitly deferred as "a separate decision that requires its own ADR".
   fix above the current floor; the floor documents the minimum
   security-acceptable version rather than the resolved version.
 
+**Status update (2026-10-30):** the removal condition in Decision 3 has been
+met. yara-x 1.22.1 requires `wasmtime ^48.0.6` (resolved to 48.0.8), above
+every published fix version, so the RUSTSEC-2026-0269 ignore was withdrawn
+together with its 0222/0316/0327 siblings. The floor has since been raised to
+`>=49.0.2`; the current resolved versions and feature set are recorded in
+[ADR 0037](0037-wasmtime-cve-risk-register.md) and
+[ADR 0043](0043-no-wasmtime-compilation-cache.md).
+
 ## Alternatives considered
 
 ### Keep `>=29` and bump only the lockfile

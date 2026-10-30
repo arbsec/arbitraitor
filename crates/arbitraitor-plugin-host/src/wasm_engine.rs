@@ -95,7 +95,7 @@ pub enum WasmEngineError {
 /// The engine is constructed with `default-features = false` on the `wasmtime`
 /// crate, meaning no WASI, no ambient filesystem, and no networking are linked.
 /// This type enforces fuel consumption, epoch interruption, bounded memory and
-/// tables, and a compilation cache.
+/// tables.
 pub struct WasmEngine {
     engine: Engine,
     config: WasmEngineConfig,
@@ -107,7 +107,7 @@ impl WasmEngine {
     /// # Errors
     ///
     /// Returns [`WasmEngineError::EngineCreation`] if Wasmtime cannot be
-    /// initialised (for example, the compilation cache cannot be created).
+    /// initialised (for example, Wasmtime rejects the configuration).
     pub fn new(config: WasmEngineConfig) -> Result<Self, WasmEngineError> {
         let mut wasm_config = Config::new();
 
@@ -117,12 +117,6 @@ impl WasmEngine {
             .epoch_interruption(true)
             .parallel_compilation(true)
             .wasm_component_model(true);
-
-        // Enable the on-disk compilation cache so repeated loads of the same
-        // component do not recompile. Uses Wasmtime's default cache config.
-        let cache = wasmtime::Cache::new(wasmtime::CacheConfig::new())
-            .map_err(|e| WasmEngineError::EngineCreation(e.to_string()))?;
-        wasm_config.cache(Some(cache));
 
         let engine = Engine::new(&wasm_config)
             .map_err(|e| WasmEngineError::EngineCreation(e.to_string()))?;

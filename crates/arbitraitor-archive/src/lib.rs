@@ -490,7 +490,7 @@ impl ArchiveReader for ZipReader {
         for index in 0..archive.len() {
             tracker.check_time()?;
             let file = archive.by_index(index)?;
-            let name = safe_entry_name(file.name())?;
+            let name = safe_entry_name(&file.name()?)?;
             let size = file.size();
             let compressed_size = file.compressed_size();
             let is_dir = file.is_dir();

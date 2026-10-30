@@ -441,8 +441,8 @@ mod tests {
         let file: String = archive
             .file_names()
             .next()
-            .map(str::to_owned)
-            .ok_or("at least one file")?;
+            .ok_or("at least one file")??
+            .into_owned();
         let entry = archive.by_name(&file)?;
         let compressed = entry.compressed_size();
         let uncompressed = entry.size();

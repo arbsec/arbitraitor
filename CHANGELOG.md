@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--ignore RUSTSEC-2026-0327` to cargo audit, and it rejects any
   affected `wasmtime` copy not covered by the waiver (the waived
   `45.0.3` copy must be reached only through the exact waiver parent
-  set).
+  set). The waiver itself was withdrawn by the security-gate fix below,
+  which leaves the guard inert until one is re-added.
 - Mediated HTTP egress (#799, spec §11.6 / ADR-0041):
   `ArbitraitorApi::http_egress` executes grant-authorized GETs through the
   hardened transport path (per-hop resolution + connected-peer
@@ -240,6 +241,36 @@ caps pending record files at
   by "ADR-0038 (accepted)" references. The pre-existing ADR-0037 number is
   the Wasmtime CVE risk register; carrying it in spec §40 was a stale
   cross-reference.
+- **wrapper: a genuinely unknown curl short option is now a hard error**
+  (#816) — previously an unknown short option was recorded and parsing
+  continued, either dropping the rest of the token or re-parsing it as
+  flags (see the Fixed entry below). Short options cluster, so the extent
+  of an unknown option's value is undefined; the curl shim now fails with
+  `unsupported curl option -X in <token>` instead of guessing, matching
+  real `curl`, which exits 2 and honours nothing on the line.
+  Known-but-unsupported short options are unaffected and still proceed with
+  a record in `unsupported_options`: the modelled value-taking and no-value
+  sets together cover curl's whole short-option table. Unknown long options
+  keep their record-and-proceed behaviour, because they cannot be clustered
+  and carry an unambiguous `=value` or separate argument. wget's short
+  parser keeps its documented record-and-proceed contract: its short-option
+  table is only partially modelled, so rejecting unknown flags there would
+  refuse valid invocations (follow-up issue #818).
+- **The Wasm plugin runtime no longer uses Wasmtime's on-disk compilation
+  cache** (ADR-0043). The `cache` feature is dropped from the `wasmtime`
+  dependency in `arbitraitor-plugin-host`, so `WasmEngine::new` no longer
+  builds a `wasmtime::Cache`. A component is now recompiled on every load
+  instead of once per cache key — slower for repeated loads of the same
+  plugin, mitigated (not eliminated) by the unchanged
+  `parallel-compilation` feature. The trade-off is deliberate:
+  - the cache wrote compiled code to a path outside the CAS, so its contents
+    were not covered by digest verification — a tampering and
+    cache-poisoning surface on the plugin sandbox boundary;
+  - the feature pulls `wasmtime-internal-cache`, which requires `zstd ^0.13`
+    in every published Wasmtime release (48.0.0–50.0.1). Dropping it is the
+    only way to remove the advisory-laden `zstd 0.13.3` / `zstd-safe 7.3.0`
+    copies from the graph without a waiver, and it is why no Wasmtime bump
+    could have fixed them.
 
 ### Fixed
 
@@ -501,6 +532,52 @@ caps pending record files at
   yara-x bumps wasmtime. Same yara-x pin as the existing
   RUSTSEC-2026-0269 ignore; both drop when yara-x requires a patched
   wasmtime.
+- **wrapper: the attached value of an unsupported curl short option is no
+  longer re-parsed as flags** (#816) — `curl -w%{http_code} URL` was scanned
+  one character at a time, the `o` inside the write-out format matched the
+  value-taking arm, and the response body was written to a file named `de}`
+  (the wrapper derives its destination from the parsed `-o`), a §26.2
+  destination-safety divergence from real curl. The same class read
+  `-eao/home/u/.bashrc` (referer plus append-output) as
+  `-o /home/u/.bashrc`. `parse_short_options` now mirrors curl's
+  short-option table — which options take a value and which do not, so
+  clusters such as `-vfsS` are attributed correctly regardless of order —
+  and rejects a token that carries an option curl itself does not
+  recognize (see `### Changed`) instead of re-scanning its value as flags.
+  Emitting `-w`/`--write-out` output itself remains unimplemented (#782).
+- **The security gate is green again: `cargo audit` goes from 39
+  vulnerabilities to 0, with no new waiver.** `security.yml` is path-gated, so
+  the RustSec database drifted out from under `main` without a failing run:
+  any PR touching `Cargo.toml`/`Cargo.lock` failed `Advisory Check` and
+  `Dependency Policy` on advisories it did not introduce. Three independent
+  causes, three fixes:
+  - `zip` was a direct `8.6` dependency still inside
+    RUSTSEC-2026-0367/0368/0369; it is now `9.1`, which fixes all three.
+  - `zstd 0.13.3` / `zstd-safe 7.3.0` were reachable only through Wasmtime's
+    `cache` feature and `zip`'s default `zstd` feature; both are gone (see the
+    `Changed` entry above).
+  - the resolved `wasmtime` copies trailed the published fix versions;
+    `cargo update` now resolves the direct copy to 49.0.5 and yara-x's
+    transitive copy to 48.0.8, both above every published fix version. The
+    same lockfile regeneration moved `yara-x` 1.20.0 → 1.22.1, which is what
+    lifted its `wasmtime` pin to `^48.0.6` and so allowed that copy to move.
+  With those resolved, the RUSTSEC-2026-0222/0269/0316/0327 ignores became
+  unmatched and were pruned from `deny.toml` and from the `cargo audit`
+  command line in `security.yml`, together with the stale comment claiming
+  the direct Wasmtime floor covered them. RUSTSEC-2025-0141 (unmaintained
+  `bincode`, transitive via yara-x, no vulnerability recorded) is the only
+  remaining ignore and now carries an explicit `reason`.
+- **Linux xattr reads survive the `rustix` 1.1.6 buffer change**: native
+  execution failed closed on every binary with `NativeQuarantineMissing`, and
+  release silently stopped clearing releasable xattrs, because both sites
+  probed the attribute size with a zero-length buffer — an idiom `rustix`
+  1.1.6 removed in favour of the dedicated `fgetxattr_query` /
+  `flistxattr_query` calls. The size probes use the dedicated API again, so
+  quarantine verification and release xattr clearing behave as before and
+  still fail closed. This window existed only inside this PR's own lockfile
+  regeneration and was closed before merge: `main` pins `rustix` 1.1.5, and
+  the version bump and this repair land in the same commit, so no released
+  build, receipt, or verdict was ever affected.
 
 ### Changed (CI)
 
