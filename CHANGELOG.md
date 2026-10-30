@@ -558,7 +558,9 @@ caps pending record files at
     `Changed` entry above).
   - the resolved `wasmtime` copies trailed the published fix versions;
     `cargo update` now resolves the direct copy to 49.0.5 and yara-x's
-    transitive copy to 48.0.8, both above every published fix version.
+    transitive copy to 48.0.8, both above every published fix version. The
+    same lockfile regeneration moved `yara-x` 1.20.0 → 1.22.1, which is what
+    lifted its `wasmtime` pin to `^48.0.6` and so allowed that copy to move.
   With those resolved, the RUSTSEC-2026-0222/0269/0316/0327 ignores became
   unmatched and were pruned from `deny.toml` and from the `cargo audit`
   command line in `security.yml`, together with the stale comment claiming
@@ -572,7 +574,10 @@ caps pending record files at
   1.1.6 removed in favour of the dedicated `fgetxattr_query` /
   `flistxattr_query` calls. The size probes use the dedicated API again, so
   quarantine verification and release xattr clearing behave as before and
-  still fail closed.
+  still fail closed. This window existed only inside this PR's own lockfile
+  regeneration and was closed before merge: `main` pins `rustix` 1.1.5, and
+  the version bump and this repair land in the same commit, so no released
+  build, receipt, or verdict was ever affected.
 
 ### Changed (CI)
 
