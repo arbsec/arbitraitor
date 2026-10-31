@@ -633,6 +633,17 @@ pub struct ResourceLimits {
     /// Maximum virtual memory in bytes.
     pub memory_bytes: Option<u64>,
     /// Maximum number of processes or threads.
+    ///
+    /// On Linux this is applied as `RLIMIT_NPROC`, which the kernel evaluates
+    /// against the **real UID's system-wide** process count, not against the
+    /// sandboxed process tree. A fixed value therefore cannot express a
+    /// per-execution cap: it under-contains (the invoking user's other
+    /// processes consume the budget) and over-restricts (a legitimate `fork`
+    /// fails with `EAGAIN` on a busy desktop). The default is `None`; callers
+    /// that know their environment may still set it explicitly.
+    ///
+    /// Real process-tree containment requires cgroup v2 `pids.max`, which is
+    /// per-cgroup rather than per-UID (#840, follow-up to #794).
     pub process_count: Option<u32>,
     /// Maximum number of open file descriptors.
     pub fd_count: Option<u32>,
@@ -664,7 +675,7 @@ impl Default for ResourceLimits {
         Self {
             cpu_time_secs: Some(60),
             memory_bytes: Some(512 * 1024 * 1024), // 512 MB
-            process_count: Some(64),
+            process_count: None,
             fd_count: Some(64),
             output_size_bytes: Some(10 * 1024 * 1024), // 10 MB
             wall_clock_secs: Some(DEFAULT_WALL_CLOCK_SECS),

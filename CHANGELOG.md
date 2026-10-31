@@ -289,6 +289,17 @@ caps pending record files at
 
 ### Fixed
 
+- **Mediated execution no longer applies a fixed default process-count limit**
+  (#794) — `arbitraitor_exec::ResourceLimits::default()` set
+  `process_count: Some(64)`, which a Linux host enforces as `RLIMIT_NPROC`
+  against the invoking user's **system-wide** process count, not the sandboxed
+  process tree. On any machine where the user already owned 64 or more
+  processes, the first `fork` inside the sandbox failed with `EAGAIN`
+  (`fork: retry: Resource temporarily unavailable`), so ordinary approved
+  scripts, commands with pipelines, and `cargo install`-style builds broke
+  while nothing was actually contained. The default is now `None`. Explicit
+  `Some(n)` values still apply; real process-tree containment requires cgroup
+  v2 `pids.max`, tracked as #840 (follow-up to #794).
 - **`arbitraitor execute` and `arbitraitor run` now exit `50` when an approved
   execution fails** (#837) — both commands previously reported the wrong
   result on a failed approved execution: `execute` printed the child's status

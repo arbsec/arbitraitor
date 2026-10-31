@@ -419,16 +419,37 @@ fn relative_command_is_rejected() {
 }
 
 #[test]
-fn resource_limits_have_conservative_defaults() {
+fn resource_limits_default_to_bounded_values_without_a_process_cap() {
     let limits = ResourceLimits::default();
     assert_eq!(limits.cpu_time_secs, Some(60));
     assert_eq!(limits.memory_bytes, Some(512 * 1024 * 1024));
-    assert_eq!(limits.process_count, Some(64));
+    // No process-count limit by default: `RLIMIT_NPROC` is per real UID
+    // system-wide, so a fixed value contains nothing and breaks `fork` on
+    // ordinary desktops (issue #794). See `default_process_count_is_unset`.
+    assert_eq!(limits.process_count, None);
     assert_eq!(limits.fd_count, Some(64));
     assert_eq!(limits.output_size_bytes, Some(10 * 1024 * 1024));
     // The wall-clock fence is on by default (issue #760): a hung mediated
     // child must die without caller intervention.
     assert_eq!(limits.wall_clock_secs, Some(DEFAULT_WALL_CLOCK_SECS));
+}
+
+#[test]
+fn default_process_count_is_unset() {
+    // Regression guard for issue #794. Linux enforces `RLIMIT_NPROC` against
+    // the invoking user's **system-wide** process count, not against the
+    // sandboxed child's process tree. The previous default of 64 therefore
+    // counted every other process the user owned and made the first `fork`
+    // inside the sandbox fail with `EAGAIN` on any busy desktop, while
+    // providing no containment. Do not reintroduce a fixed default; real
+    // process-tree containment is cgroup v2 `pids.max`.
+    let limits = ResourceLimits::default();
+    assert!(
+        limits.process_count.is_none(),
+        "default ResourceLimits must not set RLIMIT_NPROC (per-UID, system-wide); \
+         got {:?}",
+        limits.process_count
+    );
 }
 
 #[test]
