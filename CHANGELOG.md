@@ -298,7 +298,10 @@ caps pending record files at
   signal, spawn failure, or sandbox rejection now exits `50` (Execution failed
   after approval). The child's code remains visible on the printed
   `exit code:` line and on the receipt; it is no longer the process exit code.
-  Approval validation failures keep their existing exit code.
+  Approval validation failures keep their existing exit code. Approved
+  execution currently requires a Linux host: on other Unix platforms `execute`
+  exits `1` with `exec setup failed: failed to determine current uid` (tracked
+  as #839).
 - **url-discovery: template URLs inside a downloaded data document no longer
   reject the caller's static-URL fetch** (#751) — fetching a static, literal
   URL whose response is a data document full of template-shaped URI examples

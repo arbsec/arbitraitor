@@ -1029,6 +1029,10 @@ missing/invalid/expired approval, plan mismatch, digest mismatch, and
 unsupported artifact types — exit `1`. See
 [Exit codes](#exit-codes) for the full table.
 
+Approved execution currently requires a Linux host. On other Unix platforms
+`execute` exits `1` with `exec setup failed: failed to determine current uid`
+pending [#839](https://github.com/arbsec/arbitraitor/issues/839).
+
 ### Flags
 
 | Flag | Description |

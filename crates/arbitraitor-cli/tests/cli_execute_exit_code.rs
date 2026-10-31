@@ -13,6 +13,20 @@
 //! `network_isolated = true`, while these tests run with `--network` to stay
 //! independent of user-namespace availability; the approval's canonical plan
 //! digest is still verified by `execute`).
+//!
+//! # macOS
+//!
+//! Three of these tests are skipped on non-Linux hosts. `running_as_root()`
+//! (`crates/arbitraitor-exec/src/lib.rs:1591`) reads `/proc/self/status`, which
+//! does not exist on macOS, so every approved execution fails with
+//! `exec setup failed: failed to determine current uid` before the child is
+//! spawned. That is a tracked product defect, not an unsupported platform —
+//! macOS `mediated` execution is promised by spec §3.11 (`docs/spec/spec.md:230`)
+//! and §27.4 (`docs/spec/spec.md:2352`). The affected tests are marked with
+//! `#[cfg_attr(not(target_os = "linux"), ignore = "...")]` so the skip is
+//! explicit rather than a silent pass (spec §43.8, `docs/spec/spec.md:6792`),
+//! and the file still type-checks on macOS. See issue #839 for the defect and
+//! its acceptance criteria.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -201,6 +215,10 @@ fn assert_exit(output: &Output, expected: i32) {
 /// this the failure assertions could pass vacuously (e.g. if the harness
 /// itself broke before reaching the child).
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "macOS: running_as_root() requires procfs — tracked product defect, see #839"
+)]
 fn approved_execution_child_exit_zero_exits_zero() -> TestResult {
     let fixture = Fixture::new()?;
     let sha256 = store_artifact(&fixture, b"#!/bin/sh\necho control-arm\nexit 0\n")?;
@@ -220,6 +238,10 @@ fn approved_execution_child_exit_zero_exits_zero() -> TestResult {
 /// A non-zero child exit is an execution failure: exit 50, not 0 and not the
 /// child's own code.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "macOS: running_as_root() requires procfs — tracked product defect, see #839"
+)]
 fn approved_execution_child_exit_non_zero_exits_50() -> TestResult {
     let fixture = Fixture::new()?;
     let sha256 = store_artifact(&fixture, b"#!/bin/sh\nexit 3\n")?;
@@ -239,6 +261,10 @@ fn approved_execution_child_exit_non_zero_exits_50() -> TestResult {
 /// Death by signal has no exit code (`exit_code == None`); it is still an
 /// execution failure and must exit 50.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "macOS: running_as_root() requires procfs — tracked product defect, see #839"
+)]
 fn approved_execution_child_killed_by_signal_exits_50() -> TestResult {
     let fixture = Fixture::new()?;
     let sha256 = store_artifact(&fixture, b"#!/bin/sh\nkill -TERM $$\n")?;
