@@ -364,7 +364,10 @@ fn finish_run(
     if exit_code == 0 {
         Ok(EXIT_SUCCESS)
     } else {
-        Ok(exit_code)
+        // A non-zero child exit or signal death is "execution failed after
+        // approval" (spec §29), not a code to propagate: the child's own code
+        // is recorded on the receipt and printed above. Issue #837.
+        Ok(EXIT_EXECUTION_FAILED)
     }
 }
 
