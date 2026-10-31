@@ -1494,7 +1494,15 @@ mod tests {
         // scan that cannot see processes).
         const MARKER: &str = "arbitraitor-760-grandchild-marker";
         let script = bash_with_deadline(1)?;
-        let script_text = format!("exec sleep 30 {MARKER} &\nsleep 30 {MARKER}\n");
+        // The grandchild is spawned by command substitution, not `&`: an
+        // asynchronous job gets its stdin redirected from `/dev/null`, which
+        // the execution's filesystem allowlist does not grant, so it would
+        // never run (and the marker scan would pass vacuously). The
+        // substitution subshell is a descendant in the interpreter's process
+        // group; it survives a direct-child-only kill, so this still proves
+        // the group kill. `exec -a` keeps the marker in the child's
+        // `argv[0]` without passing it to `sleep` as a (invalid) duration.
+        let script_text = format!("x=$(exec -a {MARKER} sleep 30)\n");
         let error = match script.execute(script_text.as_bytes()) {
             Err(err) => err,
             Ok(result) => {

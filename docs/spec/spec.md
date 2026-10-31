@@ -1,8 +1,8 @@
 # Arbitraitor: Secure Download and Execution Gate
 
 **Status:** Draft product and technical specification after second adversarial review (Oracle, 2026-06-29)
-**Version:** 0.10
-**Date:** 2026-10-30
+**Version:** 0.11
+**Date:** 2026-10-31
 **Implementation language:** Rust
 **Project name:** Arbitraitor
 
@@ -81,6 +81,10 @@
 > - §43.10: replaced the invented hard-requirement compatibility mode with a tier-4a test-harness probe precondition, and recorded library-level fail-closed Landlock as an open maintainer decision (#830).
 > - §43.10: the DNS-rebinding assertion is deferred pending an injectable resolver in `arbitraitor-fetch` (#831); the local-double design is retained as the required approach.
 > - §43.11: the tier-4a coverage row no longer claims DNS-rebinding verification before it is exercisable.
+>
+> **Changelog vs v0.10 (2026-10-31):**
+>
+> - §43.10: recorded that mediated execution applies no default `RLIMIT_NPROC` — the previous fixed default was evaluated against the real UID's system-wide process count and broke `fork` on any host already past the limit (#794); real process-tree containment moves to the cgroup v2 `pids.max` follow-up (#840).
 >
 > Arbitraitor is a policy-enforced download, inspection, provenance verification, and execution gate for content retrieved from untrusted or semi-trusted sources. It buffers the complete payload, analyzes the exact bytes that may later be consumed, recursively inspects referenced payloads where possible, and only releases or executes content when configured policy permits it.
 
@@ -6865,7 +6869,7 @@ The sandbox crate (`arbitraitor-sandbox`) is verified with the **paired-test pat
 
 - `RLIMIT_NPROC = 1` — second `fork()` returns `EAGAIN`.
 
-**`RLIMIT_NPROC` environment sensitivity (binding).** `RLIMIT_NPROC` is evaluated against the real UID's system-wide process count, not against a per-process budget. On a shared runner the ambient process count can already sit at or above the limit, so the adversarial assertion can pass **vacuously** — `fork()` fails with `EAGAIN` even when the sandbox never applied the limit — while the happy path can fail for the same reason. Tests MUST therefore establish a controlled baseline in the same environment before asserting the denied effect: prove that `fork()` succeeds with the limit unset (or set high), then apply the low limit and assert `EAGAIN`. The test MUST run under a UID and user namespace whose process count the test controls. An ambient `EAGAIN` is never enforcement evidence: the workflow policy's "Testing expectations" rule applies — never claim a sandbox test passed because an error occurred; assert that the forbidden effect did not happen. The same host-dependence affects the default `RLIMIT_NPROC` value that the mediated-execution path applies, tracked separately in the implementation issue (#794); the tier-4a test obligation above stands independently of how that default is resolved.
+**`RLIMIT_NPROC` environment sensitivity (binding).** `RLIMIT_NPROC` is evaluated against the real UID's system-wide process count, not against a per-process budget. On a shared runner the ambient process count can already sit at or above the limit, so the adversarial assertion can pass **vacuously** — `fork()` fails with `EAGAIN` even when the sandbox never applied the limit — while the happy path can fail for the same reason. Tests MUST therefore establish a controlled baseline in the same environment before asserting the denied effect: prove that `fork()` succeeds with the limit unset (or set high), then apply the low limit and assert `EAGAIN`. The test MUST run under a UID and user namespace whose process count the test controls. An ambient `EAGAIN` is never enforcement evidence: the workflow policy's "Testing expectations" rule applies — never claim a sandbox test passed because an error occurred; assert that the forbidden effect did not happen. Mediated execution therefore applies no default `RLIMIT_NPROC` (#794): a process-count limit is applied only when a caller explicitly requests one, and real process-tree containment requires the cgroup v2 `pids.max` control tracked by #840. The tier-4a test obligation above stands independently of that default.
 
 **Landlock filesystem isolation:**
 

@@ -385,6 +385,19 @@ CPU/memory/fd limits are Linux-only. Embedders can tighten, loosen, or
 disable the fence per execution via
 `arbitraitor_exec::ResourceLimits::wall_clock_secs` (ADR-0042).
 
+### Process-count limit
+
+No process-count limit is applied by default. The mechanism available to the
+execution broker, `RLIMIT_NPROC`, is evaluated against the invoking user's
+**system-wide** process count, not against the child's process tree, so a fixed
+value both fails to contain the sandboxed job and breaks legitimate `fork`
+once the user owns more processes than the limit — on a normal desktop the
+first external command in an approved script then dies with `fork: retry:
+Resource temporarily unavailable` (issue #794). Callers that know their
+environment may still set `ResourceLimits::process_count` explicitly. Real
+process-tree containment requires cgroup v2 `pids.max` (per-cgroup, not
+per-UID), which is tracked as #840.
+
 ## Wrappers command
 
 ```sh
