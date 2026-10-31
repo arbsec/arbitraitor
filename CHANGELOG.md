@@ -289,6 +289,16 @@ caps pending record files at
 
 ### Fixed
 
+- **`arbitraitor execute` and `arbitraitor run` now exit `50` when an approved
+  execution fails** (#837) — both commands previously reported the wrong
+  result on a failed approved execution: `execute` printed the child's status
+  and returned exit `0` unconditionally, and `run` propagated the child's own
+  code instead of the documented `50`. Per spec §29 and the
+  `ExitCode::ExecutionFailed` contract, a non-zero child exit, death by
+  signal, spawn failure, or sandbox rejection now exits `50` (Execution failed
+  after approval). The child's code remains visible on the printed
+  `exit code:` line and on the receipt; it is no longer the process exit code.
+  Approval validation failures keep their existing exit code.
 - **url-discovery: template URLs inside a downloaded data document no longer
   reject the caller's static-URL fetch** (#751) — fetching a static, literal
   URL whose response is a data document full of template-shaped URI examples

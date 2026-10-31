@@ -603,7 +603,10 @@ async fn run_main() -> Result<()> {
             commands::approve(&command, &config)?;
         }
         Command::Execute(command) => {
-            commands::execute(&command, &config)?;
+            let exit_code = commands::execute(&command, &config)?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Command::Report(command) => {
             commands::report(&command)?;

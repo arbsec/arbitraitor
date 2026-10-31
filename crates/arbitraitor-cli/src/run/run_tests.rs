@@ -13,9 +13,9 @@ use sha2::{Digest, Sha256};
 
 use super::run_services::{build_run_receipt, validate_cli_policy_override};
 use super::{
-    DeprecatedRunAliases, EXIT_SUCCESS, ExecutionMode, ExecutionOutput, InspectedArtifact,
-    RunApprovalFlags, RunCommand, RunExecutionOptions, RunFailure, RunFuture, RunServices,
-    run_with_services,
+    DeprecatedRunAliases, EXIT_EXECUTION_FAILED, EXIT_SUCCESS, ExecutionMode, ExecutionOutput,
+    InspectedArtifact, RunApprovalFlags, RunCommand, RunExecutionOptions, RunFailure, RunFuture,
+    RunServices, run_with_services,
 };
 use arbitraitor_model::exit_code::ExitCode;
 use arbitraitor_receipt::ApprovalInfo;
@@ -304,7 +304,9 @@ async fn run_writes_approval_binding_exit_status_to_receipt()
 
     let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
 
-    assert_eq!(code, 7);
+    // The process exits 50 ("execution failed after approval", spec §29); the
+    // child's own code is not propagated, only recorded on the receipt.
+    assert_eq!(code, EXIT_EXECUTION_FAILED);
     assert_eq!(
         services
             .receipt_approval

@@ -1017,6 +1017,18 @@ arbitraitor execute --approval <APPROVAL> [flags]
 Executes an artifact from CAS using a previously generated approval file.
 The legacy positional approval path is still accepted for compatibility but emits a deprecation warning; use `--approval <PATH>` for new scripts.
 
+### Exit codes
+
+`execute` exits `0` only when the approved execution completed successfully.
+If the approved artifact fails to run — the child exits non-zero, is killed
+by a signal, or the sandbox rejects the dispatch — `execute` exits `50`
+(Execution failed after approval). The child's own exit code is printed as
+`exit code: <N>` but is not propagated; use the printed line (or the
+receipt) when the child's status matters. Approval validation failures —
+missing/invalid/expired approval, plan mismatch, digest mismatch, and
+unsupported artifact types — exit `1`. See
+[Exit codes](#exit-codes) for the full table.
+
 ### Flags
 
 | Flag | Description |

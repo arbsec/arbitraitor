@@ -1488,7 +1488,7 @@ fn execute_approval_path(command: &ExecuteCommand) -> Result<&Path> {
     miette::bail!("missing approval file; pass --approval <PATH>");
 }
 
-pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
+pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<i32> {
     let approval_path = execute_approval_path(command)?;
     let approval_bytes = std::fs::read(approval_path).into_diagnostic()?;
     let approval: crate::approval::ApprovalFile = serde_json::from_slice(&approval_bytes)
@@ -1556,9 +1556,20 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
     let execution = arbitraitor_exec::script::ScriptExecution::bash()
         .map_err(|e| miette::miette!("exec setup failed: {e}"))?
         .with_network_isolated(!command.network);
-    let result = execution
-        .execute(&bytes)
-        .map_err(|e| miette::miette!("execution failed: {e}"))?;
+    // The artifact was approved and dispatched to the interpreter. Any failure
+    // from here on is an execution failure (spawn failure, sandbox rejection),
+    // never a successful run: spec §29 reserves exit 50 for "execution failed
+    // after approval" and `ExitCode::ExecutionFailed` documents exactly this
+    // (crash, signal, sandbox rule). Returning a code through the handler —
+    // rather than bailing — keeps main's exit-code ownership with the caller,
+    // matching `run`. Issue #837.
+    let result = match execution.execute(&bytes) {
+        Ok(result) => result,
+        Err(error) => {
+            writeln!(std::io::stderr().lock(), "execution failed: {error}").into_diagnostic()?;
+            return Ok(ExitCode::ExecutionFailed.as_i32());
+        }
+    };
 
     let mut stdout = std::io::stdout().lock();
     if !result.stdout.is_empty() {
@@ -1570,8 +1581,26 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<()> {
             .write_all(&result.stderr)
             .into_diagnostic()?;
     }
-    writeln!(stdout, "exit code: {:?}", result.exit_code.unwrap_or(50)).into_diagnostic()?;
-    Ok(())
+    writeln!(
+        stdout,
+        "exit code: {}",
+        result
+            .exit_code
+            .unwrap_or(ExitCode::ExecutionFailed.as_i32())
+    )
+    .into_diagnostic()?;
+    // Non-zero child exit or death by signal: the approved execution did not
+    // complete successfully, so the process must not report success. The
+    // child's own code is reported above and on the receipt; it is not
+    // propagated (spec §29 / book/src/cli/run.md). Issue #837.
+    if result
+        .exit_code
+        .is_some_and(|code| code == ExitCode::Success.as_i32())
+    {
+        Ok(ExitCode::Success.as_i32())
+    } else {
+        Ok(ExitCode::ExecutionFailed.as_i32())
+    }
 }
 
 /// Stub handler for `arbitraitor report <subcommand>`.
@@ -1965,11 +1994,13 @@ mod tests {
 
         // We don't assert exit-code because the bash sandbox may reject the
         // script via unshare/Landlock/network policy independent of the
-        // content-type gate. What we DO assert is that the gate did NOT
-        // bail with "is not executable" — i.e. it permitted the
-        // ShellScript artifact to proceed to ScriptExecution::execute().
+        // content-type gate; a sandbox rejection now surfaces as the typed
+        // execution-failure code (50) rather than an error. What we DO assert
+        // is that the gate did NOT bail with "is not executable" — i.e. it
+        // permitted the ShellScript artifact to proceed to
+        // ScriptExecution::execute().
         match result {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(err) => {
                 let msg = format!("{err}");
                 assert!(
