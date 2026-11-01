@@ -316,7 +316,7 @@ arbitraitor run <URL or file path> [flags]
 |------|-------------|
 | `--native` | Pre-approve native binary execution without interactive prompt |
 | `--non-interactive` | Skip interactive approval prompts (block if approval needed) |
-| `--network` | Allow network access during execution (default: isolated) |
+| `--network` | Allow network access during execution (default: enforced isolation) |
 | `--policy <PATH>` | Policy file path |
 | `--sign-receipt <METHOD>` | Sign the receipt with the specified method: `minisign`, `cosign`, `enterprisekey`, `tpm` |
 
@@ -362,6 +362,29 @@ includes the captured child stderr so the actual root cause is visible
 stderr: "bash: !DOCTYPE: event not found")`), distinguishing "I fed bash
 junk" from "kernel denied the user namespace" from "Landlock blocked the
 interpreter path". See #612 for the bug report and Fix B details.
+
+### Network isolation
+
+Execution denies the child all network access by default, and the denial is
+**enforced** rather than declared: on Linux the child — mediated shell script
+or native binary — is started inside an empty network namespace
+(`unshare --user --map-current-user --net`). The child gets no interface other
+than a down loopback, so its `connect(2)` fails inside the sandbox instead of
+reaching the host
+([#842](https://github.com/arbsec/arbitraitor/issues/842)). `--network` is the
+explicit opt-out and the only way to give the child a usable interface.
+
+The control is a prerequisite, not best-effort hardening, and both paths fail
+closed when it cannot be installed:
+
+- A native run whose plan denies network access probes the wrapper **before**
+  approval is requested and before the binary is released. A host without the
+  `unshare` helper, or with unprivileged user namespaces disabled by the kernel
+  or an LSM, is refused with exit `30` (`BlockedByPolicy`) and a message naming
+  the missing control (spec §27.7).
+- If the wrapper cannot create the namespace at dispatch — helper removed after
+  the probe, namespace creation refused — the run fails and the binary is never
+  executed. No path runs it with an interface after an isolated plan.
 
 ### Execution time limit
 

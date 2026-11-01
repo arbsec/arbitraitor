@@ -54,6 +54,9 @@ Allow native binary execution. Requires `--native` gate enabled in policy. Witho
 arbitraitor run ./bin/tool --native
 ```
 
+Native runs are network-isolated by default, exactly like mediated script
+runs; see the `--network` flag below for the enforcement guarantee.
+
 ### `--interactive`
 
 Force the interactive approval prompt even if `--non-interactive` is set globally.
@@ -89,7 +92,22 @@ arbitraitor run install.sh --env HOME=/tmp/home --env USER=test
 
 ### `--network`
 
-Allow network access during execution. By default, mediated execution denies all network access.
+Allow network access during execution. By default, mediated execution denies
+all network access and **enforces** the denial: on Linux the child — a
+mediated script or a native binary — is started inside an empty network
+namespace (`unshare --user --map-current-user --net`), so it has no interface
+through which to reach the host
+([#842](https://github.com/arbsec/arbitraitor/issues/842)).
+
+For a native run the host is checked *before* approval: if the `unshare`
+helper is not installed, or unprivileged user namespaces are disabled by the
+kernel or an LSM, `run` refuses before the approval prompt and before anything
+is spawned, and exits `30` (Blocked by policy). A wrapper that cannot create
+the namespace later on exits non-zero without executing the binary. There is
+no unconfined fallback.
+
+`--network` is the explicit opt-out, and the only way to give the child a
+usable interface.
 
 ### `--fs-grant <PATH>`
 

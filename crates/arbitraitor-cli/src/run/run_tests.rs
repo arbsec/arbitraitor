@@ -617,6 +617,7 @@ fn fake_approval_info(sha256: &Sha256Digest, exit_status: Option<i32>) -> Approv
 struct FakeServices {
     artifact: InspectedArtifact,
     preflight_failure: Option<RunFailure>,
+    refuse_isolated_native_network: bool,
     approval_requested: bool,
     approval_context: Option<PlanContext>,
     executed: bool,
@@ -632,6 +633,7 @@ impl FakeServices {
         Self {
             artifact,
             preflight_failure: None,
+            refuse_isolated_native_network: false,
             approval_requested: false,
             approval_context: None,
             executed: false,
@@ -649,11 +651,26 @@ impl FakeServices {
 }
 
 impl RunServices for FakeServices {
-    fn preflight(&self, _mode: ExecutionMode) -> std::result::Result<(), RunFailure> {
-        match &self.preflight_failure {
-            Some(failure) => Err(failure.clone()),
-            None => Ok(()),
+    fn preflight(
+        &self,
+        mode: ExecutionMode,
+        network_isolated: bool,
+    ) -> std::result::Result<(), RunFailure> {
+        if let Some(failure) = &self.preflight_failure {
+            return Err(failure.clone());
         }
+        // Mirrors `DefaultRunServices`: a native execution whose plan denies
+        // network is refused when the backend cannot install the control.
+        if self.refuse_isolated_native_network && mode == ExecutionMode::Native && network_isolated
+        {
+            return Err(RunFailure::Blocked(
+                arbitraitor_exec::ExecError::NetworkIsolationUnavailable {
+                    reason: "fake host cannot create a network namespace".to_owned(),
+                }
+                .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn prepare<'a>(
@@ -698,6 +715,76 @@ impl RunServices for FakeServices {
         self.receipt_approval = approval.cloned();
         Ok(path)
     }
+}
+
+/// `run` must tell the backend whether the plan denies network, so a native
+/// run under the mediated default (`network_allowed() == false`) is refused
+/// before approval and dispatch when the host cannot install the
+/// network-namespace wrapper (issue #842). `--network` lowers assurance
+/// explicitly and must reach the backend as an unisolated plan.
+#[tokio::test]
+async fn run_refuses_unisolatable_native_network_before_approval_and_dispatch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a native artifact and a backend that cannot isolate the network.
+    let isolated_command = command(true, false);
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Pass, true));
+    services.refuse_isolated_native_network = true;
+    let mut output = Vec::new();
+
+    // When: the plan denies network (no `--network`).
+    let code = run_with_services(
+        &isolated_command,
+        &Config::default(),
+        &mut services,
+        &mut output,
+    )
+    .await?;
+
+    // Then: the run is blocked by policy before approval or dispatch.
+    assert_eq!(code, ExitCode::BlockedByPolicy.as_i32());
+    assert!(
+        !services.approval_requested,
+        "no approval for a refused run"
+    );
+    assert!(!services.executed, "no child may be dispatched");
+    assert!(
+        services.written_receipt.is_none(),
+        "no receipt for a refusal"
+    );
+    let text = String::from_utf8(output)?;
+    assert!(text.contains("blocked by policy"), "refusal text: {text}");
+    assert!(
+        text.contains("network isolation"),
+        "refusal must name the missing control: {text}",
+    );
+
+    // When: the operator explicitly lowers assurance with `--network`.
+    let mut permissive_command = command(true, false);
+    permissive_command.compatibility.network = true;
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Pass, true));
+    services.refuse_isolated_native_network = true;
+    let mut output = Vec::new();
+
+    let code = run_with_services(
+        &permissive_command,
+        &Config::default(),
+        &mut services,
+        &mut output,
+    )
+    .await?;
+
+    // Then: the plan is not network-denied, so preflight passes and the run
+    // reaches dispatch — which is the opt-down the refusal names.
+    assert_eq!(code, EXIT_SUCCESS);
+    assert!(services.executed);
+    let options = services
+        .execution_options
+        .ok_or("execution options were not captured")?;
+    assert!(
+        options.network_allowed,
+        "--network must reach the execution backend"
+    );
+    Ok(())
 }
 
 /// `run` must refuse a mode the backend reports as unenforceable before it

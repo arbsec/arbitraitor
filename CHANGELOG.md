@@ -289,6 +289,25 @@ caps pending record files at
 
 ### Fixed
 
+- **Native execution now enforces the network denial its plan declares**
+  (#842) — `arbitraitor run --native` built a plan with
+  `network_allowed: false` and then spawned the binary with no network control
+  at all: the child kept every host interface, so an "isolated" native run had
+  full egress and the plan's claim was false. The binary is now re-executed
+  through the same `unshare --user --map-current-user --net` wrapper mediated
+  script execution has used since #754, so a `connect(2)` issued inside the
+  sandboxed binary fails instead of reaching the host. `NativeExecution`
+  defaults to denial, and `--network` — already the documented opt-out — is the
+  only way to give the child an interface. Because the wrapper `exec`s the
+  binary in the same process (no `--fork`), the pid, process group, stdio
+  pipes, `pre_exec` resource limits, `no_new_privs`, descriptor closure and the
+  Landlock domain still apply, and the reported exit status is still the
+  binary's own. Fail-closed in both directions: `run` probes the wrapper
+  **before** requesting approval and exits `30` (`BlockedByPolicy`) when the
+  host cannot install the control (helper not installed, unprivileged user
+  namespaces disabled by the kernel or an LSM), and a wrapper that cannot
+  create the namespace exits non-zero without ever `exec`ing the binary. There
+  is no fallback path that executes it unconfined.
 - **Mediated execution now checks the effective UID portably and fails closed
   on non-Linux hosts** (#839) — the executor's root check parsed
   `/proc/self/status`, which does not exist on macOS, so every `execute` and

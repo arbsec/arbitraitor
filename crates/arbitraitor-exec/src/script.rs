@@ -27,11 +27,18 @@ use tracing::debug;
 
 use crate::{ExecError, ExecutionContext, ExecutionContextBuilder, ExecutionPolicy};
 
+/// Absolute path of the util-linux `unshare` helper.
+///
+/// Shared with [`crate::native`]: both mediated paths isolate the child's
+/// network with the same wrapper and must fail closed when it is absent.
 #[cfg(target_os = "linux")]
-const UNSHARE_PATH: &str = "/usr/bin/unshare";
+pub(crate) const UNSHARE_PATH: &str = "/usr/bin/unshare";
 
+/// Arguments that create a user namespace with an identity mapping and an
+/// empty network namespace before executing the wrapped program (`--`
+/// terminates option parsing). Shared with [`crate::native`].
 #[cfg(target_os = "linux")]
-const UNSHARE_NETWORK_ARGS: [&str; 4] = ["--user", "--map-current-user", "--net", "--"];
+pub(crate) const UNSHARE_NETWORK_ARGS: [&str; 4] = ["--user", "--map-current-user", "--net", "--"];
 
 /// procfs files `unshare --map-current-user` writes to establish the
 /// identity mapping for the new user namespace (#754).
@@ -42,7 +49,7 @@ const UNSHARE_NETWORK_ARGS: [&str; 4] = ["--user", "--map-current-user", "--net"
 /// profile is unprivileged, so this always applies), and `uid_map`/`gid_map`
 /// receive the single-line own-identity mapping.
 #[cfg(target_os = "linux")]
-const UNSHARE_ID_MAP_FILES: [&str; 3] = [
+pub(crate) const UNSHARE_ID_MAP_FILES: [&str; 3] = [
     "/proc/self/uid_map",
     "/proc/self/setgroups",
     "/proc/self/gid_map",
@@ -551,7 +558,7 @@ fn landlock_rules_for_script_execution(
 /// per-file, write-only, and kernel-checked; see [`proc_map_write_rule`] for
 /// the non-leverageability argument.
 #[cfg(target_os = "linux")]
-fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
+pub(crate) fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
     UNSHARE_ID_MAP_FILES
         .iter()
         .map(|path| proc_map_write_rule(PathBuf::from(path)))
@@ -559,7 +566,7 @@ fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
+pub(crate) fn unshare_wrapper_proc_rules() -> Vec<PathRule> {
     Vec::new()
 }
 
