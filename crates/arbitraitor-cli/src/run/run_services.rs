@@ -534,7 +534,7 @@ mod platform_tests {
     /// host cannot enforce, and the refusal names every unavailable control.
     #[test]
     fn default_services_refuse_mediated_script_mode() {
-        let failure = DefaultRunServices.preflight(ExecutionMode::Script);
+        let failure = DefaultRunServices.preflight(ExecutionMode::Script, true);
         assert!(
             matches!(&failure, Err(RunFailure::Blocked(_))),
             "script mode must be refused as a policy block; got {failure:?}",
@@ -559,6 +559,10 @@ mod platform_tests {
     /// still be admitted for dispatch.
     #[test]
     fn default_services_admit_native_mode() {
-        assert!(DefaultRunServices.preflight(ExecutionMode::Native).is_ok());
+        assert!(
+            DefaultRunServices
+                .preflight(ExecutionMode::Native, false)
+                .is_ok()
+        );
     }
 }
