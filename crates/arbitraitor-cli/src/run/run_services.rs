@@ -41,13 +41,34 @@ use super::{
 pub(super) struct DefaultRunServices;
 
 impl RunServices for DefaultRunServices {
-    fn preflight(&self, mode: ExecutionMode) -> std::result::Result<(), RunFailure> {
-        if mode != ExecutionMode::Script {
-            return Ok(());
-        }
-        match mediated_execution_refusal() {
-            Some(error) => Err(map_exec_failure(&error)),
-            None => Ok(()),
+    fn preflight(
+        &self,
+        mode: ExecutionMode,
+        network_isolated: bool,
+    ) -> std::result::Result<(), RunFailure> {
+        match mode {
+            ExecutionMode::Script => match mediated_execution_refusal() {
+                Some(error) => Err(map_exec_failure(&error)),
+                None => Ok(()),
+            },
+            // A mediated native execution declares `network_allowed: false`
+            // (spec §3.11, §9 invariant 17). Before an approval is requested or
+            // the binary is released, prove the host can install that control
+            // (issue #842).
+            ExecutionMode::Native if network_isolated => {
+                #[cfg(target_os = "linux")]
+                match arbitraitor_exec::native_network_isolation_refusal() {
+                    Some(error) => Err(map_exec_failure(&error)),
+                    None => Ok(()),
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    // The non-Linux native path is already refused at dispatch
+                    // with "native execution is only wired on linux hosts".
+                    Ok(())
+                }
+            }
+            ExecutionMode::Native => Ok(()),
         }
     }
 
@@ -125,7 +146,7 @@ impl RunServices for DefaultRunServices {
                     .map(execution_output)
                     .map_err(|error| map_exec_failure(&error))
             }
-            ExecutionMode::Native => execute_native_artifact(artifact),
+            ExecutionMode::Native => execute_native_artifact(artifact, options),
         }
     }
 
@@ -157,14 +178,15 @@ impl RunServices for DefaultRunServices {
 /// by the wall-clock resource fence rather than by the child's own behavior.
 /// An unavailable mediated control maps to `RunFailure::Blocked` (exit code
 /// 30, "blocked by policy"): the run was refused before dispatch because
-/// policy requires a control the host cannot enforce (spec §27.7, issue #839).
-/// All other errors map to the generic execution failure.
+/// policy requires a control the host cannot enforce (spec §27.7, issues #839
+/// and #842). All other errors map to the generic execution failure.
 fn map_exec_failure(error: &ExecError) -> RunFailure {
     match error {
         ExecError::WallClockExpired { .. } | ExecError::WallClockKillFailed { .. } => {
             RunFailure::AnalysisIncomplete(error.to_string())
         }
-        ExecError::MediatedContainmentUnavailable => RunFailure::Blocked(error.to_string()),
+        ExecError::MediatedContainmentUnavailable
+        | ExecError::NetworkIsolationUnavailable { .. } => RunFailure::Blocked(error.to_string()),
         _ => RunFailure::Execution(error.to_string()),
     }
 }
@@ -391,12 +413,17 @@ fn execution_output(result: ExecutionResult) -> ExecutionOutput {
 #[cfg(target_os = "linux")]
 fn execute_native_artifact(
     artifact: &InspectedArtifact,
+    options: &RunExecutionOptions,
 ) -> std::result::Result<ExecutionOutput, RunFailure> {
     let _gate = NativeExecutionGate::new();
     let path = native_release_path(&artifact.sha256)?;
     release_native_via_safe_destination(artifact, &path)?;
     NativeExecution::new()
         .map_err(|error| RunFailure::Execution(error.to_string()))?
+        // The plan binds `network:isolated` unless the operator explicitly
+        // lowered assurance, so the execution must install exactly that
+        // control (issue #842).
+        .with_network_isolated(!options.network_allowed)
         .execute(&path)
         .map(execution_output)
         .map_err(|error| map_exec_failure(&error))
@@ -405,6 +432,7 @@ fn execute_native_artifact(
 #[cfg(not(target_os = "linux"))]
 fn execute_native_artifact(
     _artifact: &InspectedArtifact,
+    _options: &RunExecutionOptions,
 ) -> std::result::Result<ExecutionOutput, RunFailure> {
     Err(RunFailure::Execution(
         "native execution is only wired on linux hosts".to_owned(),

@@ -36,7 +36,10 @@ pub mod release;
 pub mod script;
 mod spawn;
 #[cfg(target_os = "linux")]
-pub use native::{NativeExecution, NativeExecutionGate, execute_native, require_native_approval};
+pub use native::{
+    NativeExecution, NativeExecutionGate, execute_native, native_network_isolation_refusal,
+    require_native_approval,
+};
 #[cfg(target_os = "linux")]
 pub use powershell::{PowerShellError, PowerShellExecution, PowerShellPolicy};
 #[cfg(target_os = "linux")]
@@ -74,6 +77,23 @@ pub enum ExecError {
          inherited-descriptor closure"
     )]
     MediatedContainmentUnavailable,
+    /// Native execution requested network denial the host cannot enforce.
+    ///
+    /// A mediated native execution declares `network_allowed: false`, and spec
+    /// §3.11 / §9 invariant 17 make network denial a requirement of the
+    /// `mediated` assurance level. The native path enforces it by re-executing
+    /// the binary inside `unshare --user --map-current-user --net`; when that
+    /// wrapper is missing or cannot create the namespaces, the binary is never
+    /// spawned, so an unconfined native run can never stand in for an isolated
+    /// one (issue #842).
+    #[error(
+        "native network isolation is unavailable: required control cannot be enforced: \
+         {reason}; refusing to execute the binary without it"
+    )]
+    NetworkIsolationUnavailable {
+        /// Why the network-namespace wrapper cannot be used.
+        reason: String,
+    },
     /// Trusted policy did not grant the execute capability.
     #[error("execute capability not granted by trusted policy")]
     ExecuteNotGranted,
