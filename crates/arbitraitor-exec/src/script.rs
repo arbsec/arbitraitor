@@ -48,6 +48,31 @@ const UNSHARE_ID_MAP_FILES: [&str; 3] = [
     "/proc/self/gid_map",
 ];
 
+/// Returns the typed refusal used when mediated script execution cannot
+/// enforce a control its assurance level requires, or `None` when the platform
+/// supports the full mediated profile.
+///
+/// Mediated execution is implemented only on Linux. On other platforms the
+/// network-isolation, filesystem-isolation, no-new-privileges/dumpable, and
+/// inherited-descriptor-closure adapters are silent no-ops, so a mediated run
+/// there would violate spec §3.11 and §9 invariant 17 with no lower rung to
+/// fall back to. Refusing is the fail-closed outcome required by spec §27.7
+/// (issue #839).
+///
+/// Callers that must avoid side effects before dispatch — an approval prompt,
+/// for example — may consult this before constructing [`ScriptExecution`].
+#[must_use]
+pub fn mediated_execution_refusal() -> Option<ExecError> {
+    #[cfg(target_os = "linux")]
+    {
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(ExecError::MediatedContainmentUnavailable)
+    }
+}
+
 /// Result of executing a script through the controlled interpreter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
@@ -86,6 +111,8 @@ impl ScriptExecution {
     /// # Errors
     ///
     /// Returns [`ExecError::RunningAsRoot`] when the calling process is root,
+    /// [`ExecError::MediatedContainmentUnavailable`] when the host cannot
+    /// enforce the mediated controls (any non-Linux platform, see issue #839),
     /// or another [`ExecError`] variant when policy validation fails.
     pub fn bash() -> Result<Self, ExecError> {
         Self::new(PathBuf::from("/bin/bash"), ["--noprofile", "--norc"])
@@ -97,13 +124,18 @@ impl ScriptExecution {
     ///
     /// # Errors
     ///
-    /// Returns [`ExecError`] when policy validation, environment construction,
-    /// or temporary directory creation fails.
+    /// Returns [`ExecError::MediatedContainmentUnavailable`] on a platform
+    /// that cannot enforce the mediated controls (any non-Linux platform, see
+    /// issue #839). Otherwise returns [`ExecError`] when policy validation,
+    /// environment construction, or temporary directory creation fails.
     pub fn new<I, S>(interpreter: PathBuf, interpreter_args: I) -> Result<Self, ExecError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        if let Some(error) = mediated_execution_refusal() {
+            return Err(error);
+        }
         let interpreter_args: Vec<String> = interpreter_args.into_iter().map(Into::into).collect();
         let plan = operation_plan(&interpreter, &interpreter_args);
         // The execute capability is the only capability required for script
@@ -1561,5 +1593,50 @@ mod tests {
             }
         }
         Ok(pids)
+    }
+}
+
+/// Non-Linux refusal tests (issue #839). These compile and run only off Linux,
+/// so macOS CI is the gate; the Linux development machine cannot exercise them.
+#[cfg(all(test, not(target_os = "linux")))]
+mod platform_tests {
+    use super::*;
+
+    /// Mediated script execution must be refused before any interpreter is
+    /// spawned, with a typed error that names every unavailable control.
+    #[test]
+    fn mediated_script_execution_is_refused_before_dispatch() {
+        let sentinel = std::env::temp_dir().join(format!(
+            "arbitraitor-mediated-spawn-sentinel-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sentinel);
+        let script = format!("touch {}", sentinel.display());
+
+        let error = ScriptExecution::new(PathBuf::from("/bin/sh"), ["-c", script.as_str()]).err();
+
+        assert!(
+            matches!(
+                error.as_ref(),
+                Some(ExecError::MediatedContainmentUnavailable)
+            ),
+            "expected MediatedContainmentUnavailable, got {error:?}",
+        );
+        let message = ExecError::MediatedContainmentUnavailable.to_string();
+        for control in [
+            "network isolation",
+            "filesystem isolation",
+            "no-privilege-elevation",
+            "inherited-descriptor closure",
+        ] {
+            assert!(
+                message.contains(control),
+                "refusal must name unavailable control {control:?}: {message}",
+            );
+        }
+        assert!(
+            !sentinel.exists(),
+            "no interpreter may be spawned for a refused mediated execution",
+        );
     }
 }

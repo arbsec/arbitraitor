@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
-use arbitraitor_exec::script::{ExecutionResult, ScriptExecution};
+use arbitraitor_exec::script::{ExecutionResult, ScriptExecution, mediated_execution_refusal};
 use arbitraitor_exec::{
     EnvAllowlist, ExecError, ExecutionPolicy, SandboxConfig, TempDirectoryPolicy,
 };
@@ -41,6 +41,16 @@ use super::{
 pub(super) struct DefaultRunServices;
 
 impl RunServices for DefaultRunServices {
+    fn preflight(&self, mode: ExecutionMode) -> std::result::Result<(), RunFailure> {
+        if mode != ExecutionMode::Script {
+            return Ok(());
+        }
+        match mediated_execution_refusal() {
+            Some(error) => Err(map_exec_failure(&error)),
+            None => Ok(()),
+        }
+    }
+
     fn prepare<'a>(
         &'a mut self,
         command: &'a RunCommand,
@@ -145,12 +155,16 @@ impl RunServices for DefaultRunServices {
 /// Deadline expiry maps to `RunFailure::AnalysisIncomplete` (exit code 34,
 /// "incomplete due to resource limit") because the mediated run was aborted
 /// by the wall-clock resource fence rather than by the child's own behavior.
+/// An unavailable mediated control maps to `RunFailure::Blocked` (exit code
+/// 30, "blocked by policy"): the run was refused before dispatch because
+/// policy requires a control the host cannot enforce (spec §27.7, issue #839).
 /// All other errors map to the generic execution failure.
 fn map_exec_failure(error: &ExecError) -> RunFailure {
     match error {
         ExecError::WallClockExpired { .. } | ExecError::WallClockKillFailed { .. } => {
             RunFailure::AnalysisIncomplete(error.to_string())
         }
+        ExecError::MediatedContainmentUnavailable => RunFailure::Blocked(error.to_string()),
         _ => RunFailure::Execution(error.to_string()),
     }
 }
@@ -177,13 +191,13 @@ fn script_execution(
         options.interpreter.clone(),
         options.interpreter_args.iter().map(String::as_str),
     )
-    .map_err(|error| RunFailure::Execution(error.to_string()))?
+    .map_err(|error| map_exec_failure(&error))?
     .with_environment_policy(
         policy,
         std::env::vars_os()
             .filter_map(|(name, value)| name.into_string().ok().map(|name| (name, value))),
     )
-    .map_err(|error| RunFailure::Execution(error.to_string()))?
+    .map_err(|error| map_exec_failure(&error))?
     .with_network_isolated(!options.network_allowed)
     .with_sandbox_config(sandbox_config(options.sandbox.as_deref())?);
     Ok(execution)
@@ -476,4 +490,47 @@ fn arbitraitor_home() -> std::result::Result<PathBuf, RunFailure> {
         .map(PathBuf::from)
         .map(|home| home.join(".arbitraitor"))
         .ok_or_else(|| RunFailure::Internal("HOME is not set".to_owned()))
+}
+
+/// Platform-gated tests for the real `run` backend (issue #839).
+///
+/// These compile and run only on non-Linux hosts, so they cannot be exercised
+/// on the Linux development machine; macOS CI is the gate.
+#[cfg(all(test, not(target_os = "linux")))]
+mod platform_tests {
+    use super::super::{ExecutionMode, RunFailure};
+    use super::{DefaultRunServices, RunServices};
+
+    /// The real backend must refuse mediated script execution up front, so
+    /// `run` never prompts for approval or releases an artifact for a mode the
+    /// host cannot enforce, and the refusal names every unavailable control.
+    #[test]
+    fn default_services_refuse_mediated_script_mode() {
+        let failure = DefaultRunServices.preflight(ExecutionMode::Script);
+        assert!(
+            matches!(&failure, Err(RunFailure::Blocked(_))),
+            "script mode must be refused as a policy block; got {failure:?}",
+        );
+        let Err(RunFailure::Blocked(message)) = failure else {
+            return;
+        };
+        for control in [
+            "network isolation",
+            "filesystem isolation",
+            "no-privilege-elevation",
+            "inherited-descriptor closure",
+        ] {
+            assert!(
+                message.contains(control),
+                "refusal must name unavailable control {control:?}: {message}",
+            );
+        }
+    }
+
+    /// Native execution does not depend on the mediated controls, so it must
+    /// still be admitted for dispatch.
+    #[test]
+    fn default_services_admit_native_mode() {
+        assert!(DefaultRunServices.preflight(ExecutionMode::Native).is_ok());
+    }
 }

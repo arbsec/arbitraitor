@@ -1553,6 +1553,16 @@ pub(crate) fn execute(command: &ExecuteCommand, config: &Config) -> Result<i32> 
         );
     }
 
+    // Refuse a host that cannot enforce the mediated controls before any
+    // dispatch: no child is spawned and the validated approval (read-only,
+    // nonce/expiry-bound) is not consumed for a run that can never happen
+    // (issue #839, spec §27.7). `run` applies the same gate through
+    // `RunFailure::Blocked`. Approval validation keeps precedence above, so a
+    // malformed or mismatched plan still exits 1 rather than 30.
+    if let Some(error) = arbitraitor_exec::script::mediated_execution_refusal() {
+        writeln!(std::io::stderr().lock(), "blocked by policy: {error}").into_diagnostic()?;
+        return Ok(ExitCode::BlockedByPolicy.as_i32());
+    }
     let execution = arbitraitor_exec::script::ScriptExecution::bash()
         .map_err(|e| miette::miette!("exec setup failed: {e}"))?
         .with_network_isolated(!command.network);
