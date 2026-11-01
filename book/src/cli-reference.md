@@ -380,8 +380,9 @@ default-group descendants; a script that deliberately calls
 observable malicious behavior, addressed by shell analysis rather than the
 deadline (ADR-0042). On expiry the child's exit status is replaced by the
 typed deadline error and partially captured stdout/stderr is discarded
-(fail-closed). The fence is enforced on every Unix platform; the
-CPU/memory/fd limits are Linux-only. Embedders can tighten, loosen, or
+(fail-closed). The fence is implemented on every Unix platform but mediated
+execution is currently supported only on Linux, so it is reachable only there;
+the CPU/memory/fd limits are Linux-only as well. Embedders can tighten, loosen, or
 disable the fence per execution via
 `arbitraitor_exec::ResourceLimits::wall_clock_secs` (ADR-0042).
 
@@ -1042,9 +1043,17 @@ missing/invalid/expired approval, plan mismatch, digest mismatch, and
 unsupported artifact types — exit `1`. See
 [Exit codes](#exit-codes) for the full table.
 
-Approved execution currently requires a Linux host. On other Unix platforms
-`execute` exits `1` with `exec setup failed: failed to determine current uid`
-pending [#839](https://github.com/arbsec/arbitraitor/issues/839).
+Mediated script execution currently requires a Linux host. On every other
+platform `execute` refuses **before dispatch** and exits `30`
+(`BlockedByPolicy`), naming the controls that cannot be enforced: network
+isolation, filesystem isolation, no-privilege-elevation, and
+inherited-descriptor closure. Running the artifact without those controls
+would be below the `mediated` floor (spec §3.11 and §9 invariant 17), so it
+fails closed instead (spec §27.7). No child is spawned and no receipt is
+written. A macOS user can still run `arbitraitor inspect` (and `approve`) to
+analyse static bytes; execution awaits the macOS adapter tracked by
+[#839](https://github.com/arbsec/arbitraitor/issues/839). `run` applies the
+same refusal before requesting approval, with the same exit code and message.
 
 ### Flags
 

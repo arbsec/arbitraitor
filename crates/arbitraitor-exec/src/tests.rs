@@ -287,7 +287,7 @@ fn root_detection_policy_can_block_context_creation() {
         .policy(policy)
         .source_environment([] as [(&str, &str); 0])
         .build();
-    if running_as_root().unwrap_or(false) {
+    if running_as_root() {
         assert!(matches!(result, Err(ExecError::RunningAsRoot)));
     }
 }

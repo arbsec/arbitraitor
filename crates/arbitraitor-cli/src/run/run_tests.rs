@@ -616,6 +616,7 @@ fn fake_approval_info(sha256: &Sha256Digest, exit_status: Option<i32>) -> Approv
 
 struct FakeServices {
     artifact: InspectedArtifact,
+    preflight_failure: Option<RunFailure>,
     approval_requested: bool,
     approval_context: Option<PlanContext>,
     executed: bool,
@@ -630,6 +631,7 @@ impl FakeServices {
     fn with_artifact(artifact: InspectedArtifact) -> Self {
         Self {
             artifact,
+            preflight_failure: None,
             approval_requested: false,
             approval_context: None,
             executed: false,
@@ -647,6 +649,13 @@ impl FakeServices {
 }
 
 impl RunServices for FakeServices {
+    fn preflight(&self, _mode: ExecutionMode) -> std::result::Result<(), RunFailure> {
+        match &self.preflight_failure {
+            Some(failure) => Err(failure.clone()),
+            None => Ok(()),
+        }
+    }
+
     fn prepare<'a>(
         &'a mut self,
         _command: &'a RunCommand,
@@ -689,4 +698,52 @@ impl RunServices for FakeServices {
         self.receipt_approval = approval.cloned();
         Ok(path)
     }
+}
+
+/// `run` must refuse a mode the backend reports as unenforceable before it
+/// requests an approval, releases the artifact, or writes a receipt (issue
+/// #839). The refusal is injected so the orchestrator contract is exercised on
+/// every host, not only where the real backend refuses.
+#[tokio::test]
+async fn run_refuses_unenforceable_mode_before_approval_and_dispatch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Given: a Prompt verdict, so approval would otherwise be requested.
+    let mut services = FakeServices::with_artifact(fake_artifact(Verdict::Prompt, false));
+    services.preflight_failure = Some(RunFailure::Blocked(
+        arbitraitor_exec::ExecError::MediatedContainmentUnavailable.to_string(),
+    ));
+    let command = command(false, false);
+    let mut output = Vec::new();
+
+    // When: the pipeline runs.
+    let code = run_with_services(&command, &Config::default(), &mut services, &mut output).await?;
+
+    // Then: it stops before approval, dispatch, or a receipt.
+    assert_eq!(code, ExitCode::BlockedByPolicy.as_i32());
+    assert!(
+        !services.approval_requested,
+        "no approval may be requested for a run that can never dispatch",
+    );
+    assert!(!services.executed, "no child may be dispatched");
+    assert!(
+        services.written_receipt.is_none(),
+        "no receipt may be written for a refused run",
+    );
+    let text = String::from_utf8(output)?;
+    assert!(
+        text.contains("blocked by policy"),
+        "refusal must be labelled as a policy block: {text}",
+    );
+    for control in [
+        "network isolation",
+        "filesystem isolation",
+        "no-privilege-elevation",
+        "inherited-descriptor closure",
+    ] {
+        assert!(
+            text.contains(control),
+            "refusal must name unavailable control {control:?}: {text}",
+        );
+    }
+    Ok(())
 }

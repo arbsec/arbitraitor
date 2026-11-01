@@ -289,6 +289,21 @@ caps pending record files at
 
 ### Fixed
 
+- **Mediated execution now checks the effective UID portably and fails closed
+  on non-Linux hosts** (#839) — the executor's root check parsed
+  `/proc/self/status`, which does not exist on macOS, so every `execute` and
+  `run <script>` exited `1` with `exec setup failed: failed to determine
+  current uid`. It now uses the same portable `geteuid`-based check as the CLI
+  entry guard, so Linux semantics are unchanged. Removing that accidental
+  refusal alone would have failed open: the non-Linux adapters for network
+  isolation, filesystem isolation, no-privilege-elevation, and inherited-
+  descriptor closure are silent no-ops, below the `mediated` floor in spec
+  §3.11 / §9 invariant 17. Mediated script execution is therefore refused on
+  non-Linux platforms **before dispatch** with exit `30` (`BlockedByPolicy`)
+  and a message naming every unavailable control; no child is spawned, no
+  approval is requested, and no receipt is written (spec §27.7). `execute` and
+  `run` agree on the code and message. The macOS adapter and the receipt's
+  effective-controls matrix remain tracked by #839.
 - **Mediated execution no longer applies a fixed default process-count limit**
   (#794) — `arbitraitor_exec::ResourceLimits::default()` set
   `process_count: Some(64)`, which a Linux host enforces as `RLIMIT_NPROC`
@@ -310,9 +325,9 @@ caps pending record files at
   after approval). The child's code remains visible on the printed
   `exit code:` line and on the receipt; it is no longer the process exit code.
   Approval validation failures keep their existing exit code. Approved
-  execution currently requires a Linux host: on other Unix platforms `execute`
-  exits `1` with `exec setup failed: failed to determine current uid` (tracked
-  as #839).
+  execution currently requires a Linux host: on other platforms `execute`
+  refuses before dispatch and exits `30` with the unavailable-control list
+  (see #839).
 - **url-discovery: template URLs inside a downloaded data document no longer
   reject the caller's static-URL fetch** (#751) — fetching a static, literal
   URL whose response is a data document full of template-shaped URI examples

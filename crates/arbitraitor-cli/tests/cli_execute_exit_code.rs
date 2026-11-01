@@ -16,17 +16,18 @@
 //!
 //! # macOS
 //!
-//! Three of these tests are skipped on non-Linux hosts. `running_as_root()`
-//! (`crates/arbitraitor-exec/src/lib.rs:1591`) reads `/proc/self/status`, which
-//! does not exist on macOS, so every approved execution fails with
-//! `exec setup failed: failed to determine current uid` before the child is
-//! spawned. That is a tracked product defect, not an unsupported platform —
-//! macOS `mediated` execution is promised by spec §3.11 (`docs/spec/spec.md:230`)
-//! and §27.4 (`docs/spec/spec.md:2352`). The affected tests are marked with
+//! Three of these tests are skipped on non-Linux hosts because mediated
+//! script execution is deliberately refused there until a macOS adapter can
+//! enforce the controls spec §3.11 (`docs/spec/spec.md:230`) makes defining
+//! properties of `mediated`: network isolation, filesystem isolation,
+//! no-privilege-elevation, and inherited-descriptor closure. The refusal
+//! happens before dispatch and exits `30` (`BlockedByPolicy`); see
+//! `approved_execution_is_refused_before_dispatch_on_non_linux` below. The
+//! affected tests are marked with
 //! `#[cfg_attr(not(target_os = "linux"), ignore = "...")]` so the skip is
 //! explicit rather than a silent pass (spec §43.8, `docs/spec/spec.md:6792`),
-//! and the file still type-checks on macOS. See issue #839 for the defect and
-//! its acceptance criteria.
+//! and the file still type-checks on macOS. See issue #839 for the adapter and
+//! the effective-controls matrix.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -217,7 +218,7 @@ fn assert_exit(output: &Output, expected: i32) {
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
-    ignore = "macOS: running_as_root() requires procfs — tracked product defect, see #839"
+    ignore = "macOS: mediated execution is deliberately refused until a macOS containment adapter exists, see #839"
 )]
 fn approved_execution_child_exit_zero_exits_zero() -> TestResult {
     let fixture = Fixture::new()?;
@@ -240,7 +241,7 @@ fn approved_execution_child_exit_zero_exits_zero() -> TestResult {
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
-    ignore = "macOS: running_as_root() requires procfs — tracked product defect, see #839"
+    ignore = "macOS: mediated execution is deliberately refused until a macOS containment adapter exists, see #839"
 )]
 fn approved_execution_child_exit_non_zero_exits_50() -> TestResult {
     let fixture = Fixture::new()?;
@@ -263,7 +264,7 @@ fn approved_execution_child_exit_non_zero_exits_50() -> TestResult {
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
-    ignore = "macOS: running_as_root() requires procfs — tracked product defect, see #839"
+    ignore = "macOS: mediated execution is deliberately refused until a macOS containment adapter exists, see #839"
 )]
 fn approved_execution_child_killed_by_signal_exits_50() -> TestResult {
     let fixture = Fixture::new()?;
@@ -294,6 +295,41 @@ fn approval_network_mismatch_keeps_validation_exit_code() -> TestResult {
             .contains("approval was issued for network_isolated"),
         "expected plan-mismatch diagnostic; got {:?}",
         String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(())
+}
+
+/// On a platform that cannot enforce the mediated controls, `execute` refuses
+/// before dispatch with exit `30` and names every unavailable control. The
+/// script would create `sentinel` if it ever ran, so its absence proves no
+/// child was spawned (issue #839).
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn approved_execution_is_refused_before_dispatch_on_non_linux() -> TestResult {
+    let fixture = Fixture::new()?;
+    let sentinel = fixture.root.path().join("child-spawned");
+    let script = format!("#!/bin/sh\ntouch {}\n", sentinel.display());
+    let sha256 = store_artifact(&fixture, script.as_bytes())?;
+    let approval = write_approval(&fixture, &sha256, false)?;
+
+    let output = run_execute(&fixture, &approval, &["--network"])?;
+
+    assert_exit(&output, ExitCode::BlockedByPolicy.as_i32());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for control in [
+        "network isolation",
+        "filesystem isolation",
+        "no-privilege-elevation",
+        "inherited-descriptor closure",
+    ] {
+        assert!(
+            stderr.contains(control),
+            "refusal must name unavailable control {control:?}; got {stderr:?}",
+        );
+    }
+    assert!(
+        !sentinel.exists(),
+        "no child may be spawned for a refused mediated execution",
     );
     Ok(())
 }

@@ -204,6 +204,17 @@ pub(super) enum RunFailure {
 }
 
 pub(super) trait RunServices {
+    /// Rejects the planned execution mode before an approval is requested, an
+    /// artifact is released, or a child is spawned.
+    ///
+    /// The default accepts every mode so test doubles and future backends need
+    /// not restate the platform rules. [`DefaultRunServices`] refuses mediated
+    /// script execution on a host that cannot enforce the controls `mediated`
+    /// requires (issue #839, spec §27.7).
+    fn preflight(&self, _mode: ExecutionMode) -> std::result::Result<(), RunFailure> {
+        Ok(())
+    }
+
     fn prepare<'a>(
         &'a mut self,
         command: &'a RunCommand,
@@ -262,6 +273,14 @@ async fn run_with_services(
         Ok(mode) => mode,
         Err(message) => return write_failure(writer, RunFailure::Blocked(message)),
     };
+    // Ask the backend whether it can honour the mode before an approval is
+    // requested or any child is spawned. `DefaultRunServices` refuses mediated
+    // script execution on a host that cannot enforce the controls `mediated`
+    // requires, and the refusal names every unavailable control (issue #839,
+    // spec §27.7).
+    if let Err(error) = services.preflight(mode) {
+        return write_failure(writer, error);
+    }
     let options = RunExecutionOptions::from_command(command);
     let network_isolated = !options.network_allowed;
     let plan = execution_plan(mode, network_isolated);

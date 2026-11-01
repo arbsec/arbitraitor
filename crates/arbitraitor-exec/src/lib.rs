@@ -59,6 +59,21 @@ pub enum ExecError {
     /// The current Arbitraitor process is running with elevated privileges.
     #[error("refusing to build execution context while running as root")]
     RunningAsRoot,
+    /// Mediated execution cannot enforce a control that its assurance level requires.
+    ///
+    /// Returned before any child is spawned when the host platform has no
+    /// implementation for one or more of the controls that spec §3.11 makes
+    /// defining properties of `mediated` (closed inherited descriptors, no
+    /// privilege elevation, and network denied by default; filesystem isolation
+    /// is required by §9 invariant 17). Only Linux implements all of them today,
+    /// so mediating execution elsewhere would silently drop controls and fail
+    /// open rather than enforce the lower rung (issue #839).
+    #[error(
+        "mediated execution is unavailable on this platform: required controls cannot be \
+         enforced: network isolation, filesystem isolation, no-privilege-elevation, \
+         inherited-descriptor closure"
+    )]
+    MediatedContainmentUnavailable,
     /// Trusted policy did not grant the execute capability.
     #[error("execute capability not granted by trusted policy")]
     ExecuteNotGranted,
@@ -118,6 +133,11 @@ pub enum ExecError {
         source: io::Error,
     },
     /// Root detection failed.
+    ///
+    /// Retained for API compatibility only: root detection now uses a portable
+    /// effective-UID lookup ([`arbitraitor_core::privilege::is_running_as_root`]),
+    /// so this variant is no longer constructed. It remains `pub` because
+    /// removing a public variant is a breaking change for consumers.
     #[error("failed to determine current uid")]
     RootDetection {
         /// Source I/O error.
@@ -1297,7 +1317,7 @@ impl ExecutionContextBuilder {
     /// elevation, environment, PATH, command resolution, or temporary
     /// directory checks fail.
     pub fn build(self) -> Result<ExecutionContext, ExecError> {
-        if self.policy.deny_running_as_root && running_as_root()? {
+        if self.policy.deny_running_as_root && running_as_root() {
             return Err(ExecError::RunningAsRoot);
         }
 
@@ -1599,25 +1619,91 @@ fn detect_privilege_elevation_str(value: &str) -> Result<(), ExecError> {
     }
 }
 
-fn running_as_root() -> Result<bool, ExecError> {
-    let status = fs::read_to_string("/proc/self/status")
-        .map_err(|source| ExecError::RootDetection { source })?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            let effective_uid =
-                rest.split_whitespace()
-                    .nth(1)
-                    .ok_or_else(|| ExecError::RootDetection {
-                        source: io::Error::new(io::ErrorKind::InvalidData, "missing effective uid"),
-                    })?;
-            return Ok(effective_uid == "0");
-        }
-    }
-    Err(ExecError::RootDetection {
-        source: io::Error::new(io::ErrorKind::InvalidData, "missing uid line"),
-    })
+/// Returns `true` when the process effective user ID is root.
+///
+/// Uses the portable effective-UID lookup in
+/// [`arbitraitor_core::privilege::is_running_as_root`] rather than parsing
+/// `/proc/self/status`, which does not exist on macOS. Linux semantics are
+/// unchanged: both read the effective UID.
+fn running_as_root() -> bool {
+    arbitraitor_core::privilege::is_running_as_root()
 }
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "tests.rs"]
 mod tests;
+
+/// Platform-portability tests for hosts without procfs (issue #839).
+///
+/// These compile and run only on non-Linux hosts, so they cannot be exercised
+/// on the Linux development machine; macOS CI is the gate.
+#[cfg(all(test, not(target_os = "linux")))]
+mod portability_tests {
+    use arbitraitor_model::ids::{ArtifactId, OperationId, Sha256Digest};
+    use arbitraitor_model::operation::{
+        CapabilityGrant, GrantedCapabilities, OperationPlan, OperationState, OperationType,
+    };
+
+    use super::*;
+
+    fn plan() -> OperationPlan {
+        OperationPlan {
+            operation_id: OperationId::new(),
+            artifact_id: ArtifactId(Sha256Digest::new([0x2a; 32])),
+            operation_type: OperationType::Execute,
+            interpreter: Some("/bin/sh".to_owned()),
+            arguments: vec!["-c".to_owned(), "true".to_owned()],
+            environment_allowlist: Vec::new(),
+            network_allowed: false,
+            sandbox_enabled: true,
+            expiry: None,
+            state: OperationState::Pending,
+            plugin_identity: None,
+            argv_digest: None,
+            policy_digest: None,
+        }
+    }
+
+    fn grants() -> GrantedCapabilities {
+        GrantedCapabilities::new(
+            CapabilityGrant(false),
+            CapabilityGrant(false),
+            CapabilityGrant(true),
+            CapabilityGrant(false),
+        )
+    }
+
+    /// The portable check must agree with the raw effective UID and must not
+    /// depend on `/proc/self/status`, which does not exist on macOS.
+    #[test]
+    fn root_check_matches_effective_uid_without_procfs() {
+        assert!(
+            !Path::new("/proc/self/status").exists(),
+            "this test is only meaningful on a host without procfs"
+        );
+        assert_eq!(
+            running_as_root(),
+            rustix::process::geteuid().as_raw() == 0,
+            "root detection must use the effective UID on non-Linux hosts",
+        );
+    }
+
+    /// Before #839 this failed on macOS with `ExecError::RootDetection` because
+    /// the context builder parsed `/proc/self/status`.
+    #[test]
+    fn default_policy_context_builds_without_procfs() {
+        let result = ExecutionContextBuilder::new(plan(), grants()).build();
+        if rustix::process::geteuid().as_raw() == 0 {
+            assert!(
+                matches!(result, Err(ExecError::RunningAsRoot)),
+                "default policy must still refuse root execution",
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "default-policy context must build on a non-root host: {:?}",
+                result.err(),
+            );
+        }
+    }
+}
