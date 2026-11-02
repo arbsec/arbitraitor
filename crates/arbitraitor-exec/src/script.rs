@@ -204,7 +204,10 @@ impl ScriptExecution {
             network_isolated: true,
             sandbox_config: arbitraitor_sandbox::SandboxConfig::default(),
             resource_limits: crate::ResourceLimits::default(),
+            #[cfg(target_os = "linux")]
             unshare_path: PathBuf::from(UNSHARE_PATH),
+            #[cfg(not(target_os = "linux"))]
+            unshare_path: PathBuf::new(),
         })
     }
 
@@ -1060,14 +1063,21 @@ mod tests {
     }
 
     fn network_namespace_supported() -> bool {
-        Path::new(UNSHARE_PATH).exists()
-            && StdCommand::new(UNSHARE_PATH)
-                .args(UNSHARE_NETWORK_ARGS)
-                .arg("/bin/sh")
-                .arg("-c")
-                .arg("true")
-                .status()
-                .is_ok_and(|status| status.success())
+        #[cfg(target_os = "linux")]
+        {
+            Path::new(UNSHARE_PATH).exists()
+                && StdCommand::new(UNSHARE_PATH)
+                    .args(UNSHARE_NETWORK_ARGS)
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg("true")
+                    .status()
+                    .is_ok_and(|status| status.success())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 
     fn landlock_enforced() -> bool {
