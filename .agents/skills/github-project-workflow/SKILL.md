@@ -11,6 +11,15 @@ compatibility: Requires gh CLI v2.94.0+ (issue types, sub-issues, dependencies),
 > minting tool (see project workflow policy) — agent sessions MUST prefix every call
 > with `GH_TOKEN="$(cargo run -q -p xtask -- mint-github-token)"`; bare `gh` defaults
 > to personal auth and is the labelled fallback only.
+>
+> **Installation-token hygiene**: App installation tokens expire after about 60 minutes.
+> Mint a fresh token for each operation or short command; never reuse one from an earlier
+> step. Use the one-shot form `GH_TOKEN="$(cargo run -q -p xtask -- mint-github-token)" gh ...`
+> where possible. Never write a token value to a file, commit it, echo it, or leave it in a
+> long-lived shell or log. If `gh` returns `401 Bad credentials`, first confirm the token was
+> minted for that command, then re-mint once and retry before concluding App auth is broken.
+> Do not assume every 401 means expiry; other causes include a revoked token or a removed
+> installation; permission problems can instead surface as 403 or 404.
 
 Manages the **issue lifecycle** half of spec-driven delivery: triage → decomposition → ready-queue → claim → block/unblock → reconcile. The sibling skill `github-pr-lifecycle` owns the PR half. This skill is **generic mechanism**; project-specific policy (P0/P1 auto-continuation scheduling, required reviewer domains, security-sensitive path policy) lives in `.agents/project/arbitraitor-workflow.md` and the project config file, never in these instructions.
 
