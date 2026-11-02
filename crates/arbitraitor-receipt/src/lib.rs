@@ -643,9 +643,12 @@ pub struct ReleaseInfo {
     /// approval (moved from top-level in v1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalInfo>,
-    /// Per-control effective-controls matrix (ADR-0007). Present only for
-    /// contained execution contexts; `None` for inspect/mediated (moved from
-    /// top-level in v1).
+    /// Per-control effective-controls matrix (ADR-0007). Present for a
+    /// contained execution context and for a mediated run whose executor
+    /// actually installed a control; `None` when no control could be
+    /// observed — for an inspect context, for a mediated run that was not
+    /// isolated, and for a mediated run whose target died from a signal
+    /// (moved from top-level in v1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_controls: Option<EffectiveControls>,
 }

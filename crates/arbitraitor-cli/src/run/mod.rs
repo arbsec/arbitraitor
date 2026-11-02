@@ -189,6 +189,14 @@ pub(super) struct ExecutionOutput {
     exit_code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    /// Whether the executor actually ran the child with network isolation
+    /// installed.
+    ///
+    /// Threaded from the executor that performed the run, never re-derived
+    /// from the CLI flags: the receipt's effective-controls matrix must
+    /// describe the run that happened, not the plan that was requested
+    /// (issue #827).
+    network_isolated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

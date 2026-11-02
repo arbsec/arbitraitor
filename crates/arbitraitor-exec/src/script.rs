@@ -80,6 +80,36 @@ pub fn mediated_execution_refusal() -> Option<ExecError> {
     }
 }
 
+/// Returns the typed refusal when mediated script execution cannot enforce
+/// network isolation because the `unshare` helper is absent, or `None` when
+/// the helper exists or network isolation was not requested.
+///
+/// This is deliberately a file-presence check, not a namespace probe: a
+/// probe would add another execution of the wrapper before the approved run,
+/// and the real run still fails closed on its own. It also does not claim an
+/// executable-bit check — `is_file()` says nothing about permission to exec.
+/// The check exists so a host without the helper is refused before approval
+/// with [`ExecError::NetworkIsolationUnavailable`] instead of discovering the
+/// refusal only after the run. It is a file-presence check rather than a
+/// namespace probe because the approved run itself classifies the wrapper's
+/// stderr and fails closed: a probe would execute the wrapper an extra time
+/// without adding any safety guarantee the real run does not already provide.
+#[must_use]
+pub fn script_network_isolation_refusal(network_isolated: bool) -> Option<ExecError> {
+    if !network_isolated {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !Path::new(UNSHARE_PATH).is_file() {
+            return Some(ExecError::NetworkIsolationUnavailable {
+                reason: format!("network-namespace wrapper {UNSHARE_PATH} is not installed"),
+            });
+        }
+    }
+    None
+}
+
 /// Result of executing a script through the controlled interpreter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
@@ -103,6 +133,13 @@ pub struct ScriptExecution {
     network_isolated: bool,
     sandbox_config: arbitraitor_sandbox::SandboxConfig,
     resource_limits: crate::ResourceLimits,
+    /// Absolute path of the util-linux `unshare` helper.
+    ///
+    /// A field rather than the bare constant so tests can exercise the
+    /// fail-closed path with a fake wrapper, without an environment override
+    /// that would double as an isolation bypass. Production code always uses
+    /// [`UNSHARE_PATH`].
+    unshare_path: PathBuf,
 }
 
 impl ScriptExecution {
@@ -167,6 +204,7 @@ impl ScriptExecution {
             network_isolated: true,
             sandbox_config: arbitraitor_sandbox::SandboxConfig::default(),
             resource_limits: crate::ResourceLimits::default(),
+            unshare_path: PathBuf::from(UNSHARE_PATH),
         })
     }
 
@@ -226,6 +264,17 @@ impl ScriptExecution {
     #[must_use]
     pub fn network_isolated(&self) -> bool {
         self.network_isolated
+    }
+
+    /// Overrides the `unshare` helper path used when network isolation is on.
+    ///
+    /// Only available under `cfg(test)` so production can never be redirected
+    /// away from the fixed system helper.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_unshare_path(mut self, path: PathBuf) -> Self {
+        self.unshare_path = path;
+        self
     }
 
     /// Sets the resource limits applied to the child process.
@@ -306,8 +355,14 @@ impl ScriptExecution {
     /// # Errors
     ///
     /// Returns [`ExecError::Spawn`] when the interpreter cannot be spawned,
-    /// [`ExecError::ScriptIo`] when piping the script bytes fails, or
-    /// [`ExecError::Wait`] when the interpreter output cannot be collected.
+    /// [`ExecError::ScriptIo`] when piping the script bytes fails,
+    /// [`ExecError::Wait`] when the interpreter output cannot be collected,
+    /// [`ExecError::NetworkIsolationUnavailable`] when the `unshare` wrapper
+    /// refused to create the network namespace,
+    /// [`ExecError::UnshareTargetExecFailed`] when the wrapper created the
+    /// namespace but could not execute the target, or a generic
+    /// [`ExecError::Spawn`] when the wrapper reported a failure that could
+    /// not be attributed to either cause (issue #827).
     pub fn execute(&self, script_bytes: &[u8]) -> Result<ExecutionResult, ExecError> {
         let mut command = self.build_command();
         debug!(
@@ -356,34 +411,58 @@ impl ScriptExecution {
                 // waiting for stdout/stderr EOF while the child waits for
                 // stdin EOF that never arrives = deadlock.
                 drop(stdin);
-                return resolve_stdin_write_failure(
+                let result = resolve_stdin_write_failure(
                     source,
                     "write-script-stdin",
                     &mut child,
                     self.output_limit(),
                     watchdog,
-                );
+                )?;
+                return self.classify_isolation(result);
             }
             if let Err(source) = stdin.flush() {
                 drop(stdin);
-                return resolve_stdin_write_failure(
+                let result = resolve_stdin_write_failure(
                     source,
                     "flush-script-stdin",
                     &mut child,
                     self.output_limit(),
                     watchdog,
-                );
+                )?;
+                return self.classify_isolation(result);
             }
         }
 
         let (exit_code, stdout, stderr) =
             crate::spawn::read_with_limit(&mut child, self.output_limit(), watchdog)?;
 
-        Ok(ExecutionResult {
+        self.classify_isolation(ExecutionResult {
             exit_code,
             stdout,
             stderr,
         })
+    }
+
+    /// Applies the network-isolation classification to a completed execution.
+    ///
+    /// A mediated run that requested network isolation is only allowed to
+    /// report a result when the `unshare` wrapper demonstrably created the
+    /// namespace and handed the target to the kernel. When the wrapper
+    /// refused, the run fails closed with a typed error instead of returning
+    /// a result the caller could mistake for an enforced control (issue
+    /// #827).
+    ///
+    /// A run that did *not* request isolation is never classified: the
+    /// wrapper is not involved, so `unshare: `-prefixed output on stderr is
+    /// the target's own text and says nothing about containment.
+    fn classify_isolation(&self, result: ExecutionResult) -> Result<ExecutionResult, ExecError> {
+        if !self.network_isolated {
+            return Ok(result);
+        }
+        match crate::isolation::classify(&result).into_exec_error() {
+            Some(error) => Err(error),
+            None => Ok(result),
+        }
     }
 
     fn build_command(&self) -> Command {
@@ -428,7 +507,7 @@ impl ScriptExecution {
             // while this crate forbids unsafe. The absolute helper path avoids
             // PATH lookup; failure to create the namespace prevents the script
             // from running, preserving fail-closed network denial.
-            let mut command = Command::new(UNSHARE_PATH);
+            let mut command = Command::new(&self.unshare_path);
             command.args(UNSHARE_NETWORK_ARGS);
             command.arg(self.environment.command());
             command.args(self.environment.arguments());

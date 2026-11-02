@@ -155,7 +155,13 @@ impl NativeExecution {
     ///
     /// Returns [`ExecError`] when the binary path is invalid, quarantine cannot
     /// be applied and verified, spawning fails, resource limits cannot be
-    /// applied, or output collection fails.
+    /// applied, output collection fails,
+    /// [`ExecError::NetworkIsolationUnavailable`] when the `unshare` wrapper
+    /// refused to create the network namespace,
+    /// [`ExecError::UnshareTargetExecFailed`] when the wrapper created the
+    /// namespace but could not execute the binary, or a generic
+    /// [`ExecError::Spawn`] when the wrapper reported a failure that could
+    /// not be attributed to either cause (issue #827).
     pub fn execute(&self, binary_path: &Path) -> Result<crate::ExecutionResult, ExecError> {
         if !binary_path.is_absolute() {
             return Err(ExecError::NativePathNotAbsolute {
@@ -223,11 +229,21 @@ impl NativeExecution {
             .unwrap_or(crate::spawn::DEFAULT_OUTPUT_LIMIT);
         let (exit_code, stdout, stderr) =
             crate::spawn::read_with_limit(&mut child, output_limit, watchdog)?;
-        Ok(crate::ExecutionResult {
+        let result = crate::ExecutionResult {
             exit_code,
             stdout,
             stderr,
-        })
+        };
+        if self.network_isolated {
+            // The wrapper is the only component that knows whether the
+            // namespace was created. A wrapper refusal must not be mistaken
+            // for a failing binary, so the outcome is classified before the
+            // result is handed back (issue #827).
+            if let Some(error) = crate::isolation::classify(&result).into_exec_error() {
+                return Err(error);
+            }
+        }
+        Ok(result)
     }
 
     fn with_args_checked(args: Vec<String>) -> Result<Self, ExecError> {
@@ -674,8 +690,27 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use arbitraitor_artifact::executable::{Architecture, Bitness, ExecutableFormat, Linking};
+    use arbitraitor_model::untrusted::{UNTRUSTED_END, UNTRUSTED_START};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    /// A temporary directory for a native execution test.
+    ///
+    /// Removes the directory and its contents on drop so assertion panics do
+    /// not leak temp dirs.
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn path(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// Probe configuration file, written by the parent into the mediated
     /// working directory and read by the re-executed probe from its cwd. The
@@ -1287,6 +1322,92 @@ mod tests {
             String::from_utf8_lossy(&result.stderr)
         );
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The wrapper is the only component that knows whether the namespace was
+    /// created. A wrapper that created the namespace but could not `exec` the
+    /// binary must be reported as a target-exec failure, not as a missing
+    /// control (issue #827).
+    #[test]
+    fn native_wrapper_target_exec_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root("net-target-exec")?;
+        if !xattrs_supported(&root)? {
+            skip_marker("host filesystem cannot hold the quarantine xattr; no execution possible");
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+        let guard = TempRoot(root);
+        let binary = copy_current_exe(guard.path())?;
+        // Stands in for `unshare` on a host where the kernel refuses the
+        // target: the namespace exists, the program does not start.
+        let refusing_wrapper = guard.path().join("unshare-that-cannot-exec");
+        fs::write(
+            &refusing_wrapper,
+            b"#!/bin/sh\necho 'unshare: failed to execute /nonexistent: No such file or directory' >&2\nexit 127\n",
+        )?;
+        fs::set_permissions(&refusing_wrapper, fs::Permissions::from_mode(0o700))?;
+        let mut execution = NativeExecution::new()?.with_network_isolated(true);
+        execution.unshare_path = refusing_wrapper;
+
+        let result = execution.with_args(probe_args()).execute(&binary);
+
+        assert!(
+            matches!(result, Err(ExecError::UnshareTargetExecFailed { .. })),
+            "a wrapper that cannot execute the target must be a typed target-exec failure: {result:?}"
+        );
+        Ok(())
+    }
+
+    /// Failure path (issue #827): a wrapper that prints a recognised
+    /// namespace-setup refusal must be reported as
+    /// [`ExecError::NetworkIsolationUnavailable`], and the wrapper's diagnostic
+    /// must be escaped and fenced by the shared ADR-0016 helper before it
+    /// becomes the reason.
+    #[test]
+    fn native_wrapper_setup_refusal_is_typed_and_escaped() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = temp_root("net-setup-refusal")?;
+        if !xattrs_supported(&root)? {
+            skip_marker("host filesystem cannot hold the quarantine xattr; no execution possible");
+            fs::remove_dir_all(root)?;
+            return Ok(());
+        }
+        let guard = TempRoot(root);
+        let binary = copy_current_exe(guard.path())?;
+        // Stands in for `unshare` on a host where namespace creation is refused:
+        // it prints a recognised setup-refusal diagnostic and exits non-zero.
+        let refusing_wrapper = guard.path().join("unshare-that-refuses-setup");
+        fs::write(
+            &refusing_wrapper,
+            b"#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted' >&2\nexit 1\n",
+        )?;
+        fs::set_permissions(&refusing_wrapper, fs::Permissions::from_mode(0o700))?;
+        let mut execution = NativeExecution::new()?.with_network_isolated(true);
+        execution.unshare_path = refusing_wrapper;
+
+        let result = execution.with_args(probe_args()).execute(&binary);
+
+        let reason = match result {
+            Err(ExecError::NetworkIsolationUnavailable { reason }) => reason,
+            other => {
+                return Err(format!("expected NetworkIsolationUnavailable, got {other:?}").into());
+            }
+        };
+        assert!(
+            reason.contains(UNTRUSTED_START) && reason.contains(UNTRUSTED_END),
+            "the reason must be fenced as untrusted data: {reason:?}"
+        );
+        assert_eq!(
+            reason.matches(UNTRUSTED_START).count(),
+            1,
+            "only one start marker may appear: {reason:?}"
+        );
+        assert_eq!(
+            reason.matches(UNTRUSTED_END).count(),
+            1,
+            "only one end marker may appear: {reason:?}"
+        );
         Ok(())
     }
 
