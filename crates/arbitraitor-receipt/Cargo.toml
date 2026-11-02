@@ -18,7 +18,7 @@ arbitraitor-model = { workspace = true }
 minisign = { workspace = true } # Receipt signing API; MIT, pure Rust, no network behavior, no native build.
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_json_canonicalizer = "0.3.2" # RFC 8785 JCS canonical receipt bytes for signatures.
+serde_json_canonicalizer = "0.4.0" # RFC 8785 JCS canonical receipt bytes for signatures.
 thiserror = { workspace = true }
 url = { workspace = true } # Standards-compliant URL parsing/redaction for receipt transport metadata.
 uuid = { workspace = true }
