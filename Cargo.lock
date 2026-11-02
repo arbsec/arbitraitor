@@ -657,7 +657,6 @@ dependencies = [
  "smallvec",
  "stable_deref_trait",
  "subtle",
- "syn 2.0.119",
  "syn 3.0.9",
  "time",
  "tinystr",
