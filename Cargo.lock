@@ -54,12 +54,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "allocator-api2"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
-
-[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -606,7 +600,7 @@ name = "arbitraitor-workspace-hack"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
- "allocator-api2 0.4.0",
+ "allocator-api2",
  "anstyle",
  "anyhow",
  "bitflags",
@@ -614,9 +608,11 @@ dependencies = [
  "bstr",
  "bumpalo",
  "cc",
- "cranelift-bitset 0.137.1",
+ "cranelift-bitset 0.135.8",
+ "cranelift-bitset 0.136.5",
  "crc32fast",
  "crossbeam-utils",
+ "digest 0.10.7",
  "digest 0.11.3",
  "errno",
  "flate2",
@@ -626,6 +622,7 @@ dependencies = [
  "futures-task",
  "futures-util",
  "getrandom 0.4.3",
+ "hashbrown 0.16.1",
  "hashbrown 0.17.1",
  "hyper",
  "hyper-util",
@@ -668,8 +665,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-core",
- "wasm-encoder 0.262.0",
- "wasmparser 0.262.0",
+ "wasm-encoder 0.258.3",
+ "wasmparser 0.258.3",
  "wasmtime-internal-core 48.0.8",
  "wasmtime-internal-core 49.0.5",
  "writeable",
@@ -948,7 +945,7 @@ version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 dependencies = [
- "allocator-api2 0.2.21",
+ "allocator-api2",
 ]
 
 [[package]]
@@ -1308,17 +1305,6 @@ dependencies = [
  "serde",
  "serde_derive",
  "wasmtime-internal-core 49.0.5",
-]
-
-[[package]]
-name = "cranelift-bitset"
-version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebb94b54db96b26e387bc8c698823d83d9254d551a6ed846a60cebf62ed7135"
-dependencies = [
- "serde",
- "serde_derive",
- "wasmtime-internal-core 50.0.1",
 ]
 
 [[package]]
@@ -3433,7 +3419,7 @@ version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85"
 dependencies = [
- "allocator-api2 0.2.21",
+ "allocator-api2",
  "bumpalo",
  "hashbrown 0.17.1",
  "log",
@@ -4835,10 +4821,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "974d643b125b272607e2fff8012ea14a8328acd7621e4bafa7afb32500052b1b"
 dependencies = [
  "bitflags",
- "hashbrown 0.17.1",
  "indexmap",
  "semver",
- "serde",
 ]
 
 [[package]]
@@ -5053,16 +5037,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "libm",
  "serde",
-]
-
-[[package]]
-name = "wasmtime-internal-core"
-version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e765a08b721bf2b2e5cbd3e9365a71b497d57fc5e8b2cf73ddf12d85d502d7fa"
-dependencies = [
- "hashbrown 0.17.1",
- "libm",
 ]
 
 [[package]]
