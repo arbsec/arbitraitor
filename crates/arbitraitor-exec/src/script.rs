@@ -133,6 +133,7 @@ pub struct ScriptExecution {
     network_isolated: bool,
     sandbox_config: arbitraitor_sandbox::SandboxConfig,
     resource_limits: crate::ResourceLimits,
+    #[cfg(target_os = "linux")]
     /// Absolute path of the util-linux `unshare` helper.
     ///
     /// A field rather than the bare constant so tests can exercise the
@@ -206,8 +207,6 @@ impl ScriptExecution {
             resource_limits: crate::ResourceLimits::default(),
             #[cfg(target_os = "linux")]
             unshare_path: PathBuf::from(UNSHARE_PATH),
-            #[cfg(not(target_os = "linux"))]
-            unshare_path: PathBuf::new(),
         })
     }
 
@@ -273,7 +272,7 @@ impl ScriptExecution {
     ///
     /// Only available under `cfg(test)` so production can never be redirected
     /// away from the fixed system helper.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     #[must_use]
     pub fn with_unshare_path(mut self, path: PathBuf) -> Self {
         self.unshare_path = path;
