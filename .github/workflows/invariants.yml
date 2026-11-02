@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
-      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037  # v2.87.32
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
         with:
           tool: cargo-nextest
       - name: Run invariant tests
