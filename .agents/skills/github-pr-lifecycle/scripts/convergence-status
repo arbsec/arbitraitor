@@ -347,10 +347,18 @@ evaluate_local_review() {
   # 4. The base advance must not touch files this PR changes. Disjoint paths are
   #    the residual-risk case: a semantic conflict on untouched files is not
   #    detectable by path intersection.
-  #    The comparison set is the PR's changed paths, OLD and NEW: a file the PR
-  #    moved FROM is a file this PR changes, even though `gh pr diff --name-only`
-  #    only lists the new path.
-  if ! advanced="$(git diff --name-only "$rec_base..$BASE_RESOLVED_REF")"; then
+  #    BOTH path lists are computed with `--no-renames`, because git's rename
+  #    detection (`diff.renames`, 50% similarity) reports a move by its NEW path
+  #    only. The PR-side list is the union of the API path list and
+  #    `git diff --no-renames --name-only <base>...<head>`: a file the PR moved
+  #    FROM is a file this PR changes, even though `gh pr diff --name-only`
+  #    lists only the new path. The base-side list is
+  #    `git diff --no-renames --name-only <recorded-base>..origin/<base>`: if the
+  #    BASE renamed `src/a.rs` to `src/c.rs`, the renamed list holds only
+  #    `src/c.rs`, and a PR that edits `src/a.rs` would look like it touches no
+  #    file the base advanced over — the review would be accepted although it
+  #    predates that base change.
+  if ! advanced="$(git diff --no-renames --name-only "$rec_base..$BASE_RESOLVED_REF")"; then
     echo "error: cannot diff $rec_base..origin/$BASE_REF_NAME" >&2
     exit "$ARB_ERR_UNRECOVERABLE"
   fi

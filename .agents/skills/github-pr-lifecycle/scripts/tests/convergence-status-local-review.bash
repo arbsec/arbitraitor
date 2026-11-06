@@ -1021,5 +1021,42 @@ run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "base advance over the old path of a move is detected" 5
 expect_json "base advance over the old path of a move status" '.local_review.status' "local_review_base_overlap"
 
+# ==============================================================================
+# 29. Regression: the base-advance path list must see the path a file moved
+#     FROM on the BASE side. Git's rename detection (`diff.renames`, 50%
+#     similarity) reports a move by its NEW path only, so a base that renamed
+#     `src/a.rs` to `src/c.rs` produced a list holding only `src/c.rs` -- and a
+#     PR that edits `src/a.rs` looked like it touched no file the base
+#     advanced over. The gate accepted a review that predates that base
+#     change. The base-side diff now uses `--no-renames` too.
+# ==============================================================================
+new_case
+# The renamed file must exist in the BASE, otherwise the base-side diff has
+# no old path to report.
+mkdir -p "$WORK/src"
+printf 'fn a() {}\n' > "$WORK/src/a.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base source"
+git -C "$WORK" push -q origin main
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
+BASE_OID="$(git -C "$WORK" rev-parse HEAD)"
+start_feature
+printf 'fn a() { /* pr change */ }\n' > "$WORK/src/a.rs"
+commit_work "modify the source"
+# The base advances by RENAMING that file. Rename detection is on (the
+# default), so the old path disappears from the list without --no-renames.
+git -C "$WORK" checkout -q main
+git -C "$WORK" mv src/a.rs src/c.rs
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base renames the source"
+git -C "$WORK" push -q origin main
+git -C "$WORK" checkout -q feature
+land_pr
+set_pr_view
+set_files "src/a.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "base rename over a path this PR changes is detected" 5
+expect_json "base rename over a path this PR changes status" '.local_review.status' "local_review_base_overlap"
+
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

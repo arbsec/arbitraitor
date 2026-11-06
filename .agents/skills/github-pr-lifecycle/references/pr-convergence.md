@@ -97,8 +97,8 @@ inherits the verdict. The record is accepted only when **all** of these hold:
    not the base tip at gate time.
 2. the recorded base is an ancestor of the freshly fetched base
    (`git fetch origin <baseRefName>`).
-3. `git diff --name-only <recorded-base>..origin/<base>` does not intersect the
-   PR's changed paths. The intersection set is the union of
+3. `git diff --no-renames --name-only <recorded-base>..origin/<base>` does not
+   intersect the PR's changed paths. The intersection set is the union of
    `gh pr diff --name-only` and `git diff --no-renames --name-only
    <base>...<head>` — the PR's changed paths, OLD and NEW (see "Rename
    fail-closed").
@@ -158,9 +158,12 @@ the `--no-renames` list keeps a deleted source visible, so a non-docs file that
 moved to a docs path cannot pass the allowlist and a moved file's old path
 cannot escape the overlap check, even when git's rename heuristics
 (`diff.renames`, the 50% similarity threshold) report the move as a delete plus
-an add. `git diff --name-status` reporting an `R*` line also enforces the
-review, as does a diff exceeding 50 files or an unavailable head object for the
-rename check.
+an add. The base side of the overlap check uses `--no-renames` for the same
+reason: a base that renamed `src/a.rs` to `src/c.rs` would otherwise list only
+`src/c.rs`, and a PR editing `src/a.rs` would look like it touched no file the
+base advanced over. `git diff --name-status` reporting an `R*` line also
+enforces the review, as does a diff exceeding 50 files or an unavailable head
+object for the rename check.
 
 If the union cannot be computed — the head object is not available locally, so
 the old path of a move is unknown — the gate blocks with
