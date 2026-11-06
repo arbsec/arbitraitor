@@ -357,7 +357,20 @@ evaluate_local_review() {
   # 3. Recorded base must still be an ancestor of the current base. Exit 1 from
   #    merge-base means "base advanced"; any other non-zero (128: missing or
   #    corrupt object) is an infrastructure error, not a base advance.
+  #
+  #    A record with NO base OID is a malformed record -- an evidence failure,
+  #    not an infrastructure failure. Every other record defect produces a
+  #    `local_review_*` reason and the blocked exit (5); exiting 1 here would
+  #    let automation read a hand-edited record as a transient error and
+  #    retry it. A base OID that is present but absent from the repository
+  #    stays exit 1: there the repository (a shallow clone, a missing object)
+  #    is the plausible cause, and that IS an infrastructure error.
   rec_base="$(local_review_field "$best" "base OID")"
+  if [ -z "$rec_base" ]; then
+    LR_STATUS="local_review_record_malformed"
+    echo "error: $best_name records no base OID (malformed review record)" >&2
+    return 1
+  fi
   if ! git rev-parse --verify --quiet "${rec_base}^{commit}" >/dev/null 2>&1; then
     echo "error: recorded base OID '${rec_base}' from $best_name is not present in this repository (infrastructure error, not a base advance)" >&2
     exit "$ARB_ERR_UNRECOVERABLE"

@@ -129,6 +129,7 @@ Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
 | `local_review_missing` | reviews dir absent/empty (records are gitignored — the gate may be running outside the review checkout) |
 | `local_review_stale_tree` | no record for the current head tree (re-run after the last push) |
 | `local_review_base_advanced` | recorded base is no longer an ancestor of the base |
+| `local_review_record_malformed` | the record carries no base OID — a malformed record is an evidence failure, not an infrastructure error |
 | `local_review_base_overlap` | the base advanced over a file this PR changes |
 | `local_review_head_object_unavailable` | the PR's changed paths (old and new) could not be computed — the head object is not available locally, so a moved file's old path is unknown |
 | `local_review_overlap_check_failed` | the base-overlap check could not be evaluated (a jq failure) — the gate cannot prove the base is compatible, so it blocks |

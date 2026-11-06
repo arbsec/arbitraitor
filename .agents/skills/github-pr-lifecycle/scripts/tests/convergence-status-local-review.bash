@@ -1199,5 +1199,49 @@ expect_exit "a failing overlap check blocks the PR" 5
 expect_json "a failing overlap check status" '.local_review.status' "local_review_overlap_check_failed"
 expect_err_contains "a failing overlap check is loud" "the base-overlap check failed to run"
 
+# ==============================================================================
+# 31. Regression: a record with NO base OID is a malformed record, not an
+#     infrastructure error. The gate used to exit ARB_ERR_UNRECOVERABLE (1)
+#     with the message "infrastructure error, not a base advance" -- so
+#     automation could read a hand-edited record as a transient failure and
+#     retry it, and the message blamed the infrastructure. Every other record
+#     defect produces a `local_review_*` reason and the blocked exit (5).
+# ==============================================================================
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+# Drop the base OID line from the RECORD only (the transcript keeps its own).
+sed -i '/^- base OID: /d' "$WORK/.arbitraitor/reviews/abc1234-20260101T000000Z.md"
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "a record with no base OID blocks" 5
+expect_json "a record with no base OID status" '.local_review.status' "local_review_record_malformed"
+expect_err_contains "a record with no base OID is loud" "records no base OID"
+
+# ==============================================================================
+# 32. A base OID that is PRESENT but absent from the repository stays exit 1:
+#     there the repository (a shallow clone, a missing object) is the plausible
+#     cause, and that IS an infrastructure error. This pins the distinction
+#     between the two cases.
+# ==============================================================================
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN 0 0 "$PR_TREE" \
+  "0000000000000000000000000000000000000000"
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "a base OID absent from the repository is unrecoverable" 1
+expect_err_contains "a base OID absent from the repository is loud" "not present in this repository"
+
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
