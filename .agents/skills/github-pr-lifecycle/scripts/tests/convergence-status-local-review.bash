@@ -966,6 +966,26 @@ expect_exit "unresolvable head tree blocks" 5
 expect_json "unresolvable head tree status" '.local_review.status' "local_review_head_unresolvable"
 expect_err_contains "unresolvable head tree is loud" "cannot resolve the tree of PR head"
 
+# 26b. The head TREE resolves (through the API), but the head OBJECT is
+#      neither local nor fetchable: the changed-path union cannot be
+#      computed, so the gate must block instead of reading it as "no
+#      overlap" and waiving the review.
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view_unresolvable
+GH_API_TREE="$PR_TREE"
+export GH_API_TREE
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "unavailable head object blocks" 5
+expect_json "unavailable head object status" '.local_review.status' "local_review_head_object_unavailable"
+expect_err_contains "unavailable head object is loud" "cannot compute the PR's changed paths"
+
 # ==============================================================================
 # 27. Regression: the transcript's own tree/base headers must agree with the
 #     record. The `raw sha256` digest covers only the `.raw.txt`; the
