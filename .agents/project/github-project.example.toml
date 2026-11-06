@@ -116,6 +116,12 @@ optional = ["Documentation", "qlty check", "CodeRabbit", "Agent Skills Shell Sui
 # Rust-only diff — a `required` entry needs a PATH_GATED row in
 # `scripts/pr-checks` first (arbsec/arbitraitor#862). pr-checks blocks on
 # any failing check, required or optional, so a red suite run still blocks.
+# This `optional` entry currently has NO behavioural effect: `optional` only
+# exempts a check that reports `skipping`, and this check either passes, fails,
+# or never reports at all — and a check that never reports can never be
+# `missing_required`, since that list is derived from `required`. It is listed
+# here as the intended end state. The real fix is #862: add the PATH_GATED row,
+# then move the name to `required`.
 
 # --- Merge + review policy -----------------------------------------------------
 [merge]
