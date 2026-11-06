@@ -9,14 +9,24 @@ name: Agent Skills
 # The job name is deliberately NOT `Agent Skills Tests`: that name stays with
 # `code.yml`, which keeps reporting it for Rust-scoped diffs. Two workflows
 # reporting the same check name would collide on a mixed Rust + `.agents` diff.
+#
+# The path filter is spelled out twice on purpose. A YAML anchor/alias pair
+# (`paths: &agents_paths` / `paths: *agents_paths`) is valid and GitHub Actions
+# accepts it, but actionlint cannot resolve the alias and reports
+#   "paths section must be sequence node but got alias node"
+# as a syntax error. The qlty linter runs actionlint over changed lines, so the
+# alias made this workflow the one check that qlty reported a blocking issue on.
+# See arbsec/arbitraitor#865 for the same pattern in the older workflows.
 on:
   push:
     branches: [main]
-    paths: &agents_paths
+    paths:
       - ".agents/**"
       - ".github/workflows/agents.yml"
   pull_request:
-    paths: *agents_paths
+    paths:
+      - ".agents/**"
+      - ".github/workflows/agents.yml"
 
 permissions:
   contents: read
