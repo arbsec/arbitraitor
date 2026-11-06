@@ -479,7 +479,8 @@ unset CR_FAIL CR_STDERR CR_USAGE_EXIT
 REPO_LONGP="$(make_repo)"
 export CR_FAIL=1 CR_STDERR="quota exhausted"
 export CR_USAGE_EXIT=1
-export CR_USAGE_STDERR="$(printf 'Q%.0s' {1..500})"
+CR_USAGE_STDERR="$(printf 'Q%.0s' {1..500})"
+export CR_USAGE_STDERR
 run "$REPO_LONGP" --pre-push --base origin/main
 expect_exit "overlong probe line keeps exit 1" 1
 LONGP_RAW="$(find "$REPO_LONGP/.arbitraitor/reviews" -name '*.raw.txt' | head -n 1)"
