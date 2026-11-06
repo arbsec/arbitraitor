@@ -391,7 +391,7 @@ else
     || die "$E_CLI" "cannot resolve base 'origin/$PR_BASE_REF' (and no local origin/$PR_BASE_REF)"
   BASE_REF="${RESOLVED%%$'\t'*}"
   BASE_OID="${RESOLVED##*$'\t'}"
-  if [ "$OPT_BASE" != "$DEFAULT_BASE" ]; then
+  if [ "$SAW_BASE" = "1" ]; then
     echo "warning: --base $OPT_BASE ignored in --pr mode; using the PR base origin/$PR_BASE_REF" >&2
   fi
 fi

@@ -267,11 +267,20 @@ write_raw() {
 }
 
 # 12. --pre-push is a mode, not a modifier: combining it with another mode is
-#     ambiguous and must be rejected instead of silently picking one.
-run "$REPO_RAW" --pre-push --from-raw ".arbitraitor/reviews/evil.raw.txt"
+#     ambiguous and must be rejected instead of silently picking one. A valid raw
+#     file is used so only the mode conflict can be the cause.
+write_raw "$REPO_RAW" "ccccccc-20260101T000000Z.raw.txt" 0
+RAW_OK=".arbitraitor/reviews/ccccccc-20260101T000000Z.raw.txt"
+run "$REPO_RAW" --pre-push --from-raw "$RAW_OK"
 expect_exit "--pre-push --from-raw exits 2" 2
 run "$REPO_RAW" --pre-push --pr 42
 expect_exit "--pre-push --pr exits 2" 2
+# Reverse argv order must be rejected too: whichever flag wins the mode race,
+# mixing a mode with --pre-push is a configuration error, never a silent pick.
+run "$REPO_RAW" --pr 42 --pre-push
+expect_exit "--pr --pre-push exits 2" 2
+run "$REPO_RAW" --from-raw "$RAW_OK" --pre-push
+expect_exit "--from-raw --pre-push exits 2" 2
 
 # 13. --from-raw happy path: the raw headers supply head/base OIDs, the CLI is
 #     never invoked, and an explicit --base is ignored with a warning.
@@ -324,8 +333,13 @@ PR_HEAD_OID="ffffffffffffffffffffffffffffffffffffffff"
 export PR_JSON="{\"headRefOid\":\"$PR_HEAD_OID\",\"headRefName\":\"feature\",\"baseRefName\":\"main\",\"mergeable\":\"MERGEABLE\"}"
 export PR_TREE="$PR_LOCAL_TREE"
 export CR_INVOKED="$ROOT/invoked.pr.ok"
-run "$REPO_PR_OK" --pr 42 --verdict CLEAN
+run "$REPO_PR_OK" --pr 42 --base main --verdict CLEAN
 expect_exit "PR mode tree match exits 0" 0
+if grep -q "ignored in --pr mode" <<<"$ERR"; then
+  ok "--pr warns when --base is explicitly supplied"
+else
+  bad "--pr warns when --base is explicitly supplied" "stderr: $ERR"
+fi
 PR_OK_REC="$(find "$REPO_PR_OK/.arbitraitor/reviews" -name '*.md' | head -n 1)"
 if [ -n "$PR_OK_REC" ] \
   && grep -qx -- "- head OID: $PR_LOCAL_HEAD" "$PR_OK_REC" \
@@ -341,9 +355,16 @@ fi
 # 16. --pr + explicit --repo is a read-only path: it must not need the local
 #     project config (which is gitignored and absent on a fresh checkout).
 REPO_PR_NOCFG="$(make_repo no-local-config)"
-export PR_TREE="$(git -C "$REPO_PR_NOCFG" rev-parse 'HEAD^{tree}')"
+PR_TREE="$(git -C "$REPO_PR_NOCFG" rev-parse 'HEAD^{tree}')"
+export PR_TREE
+export PR_JSON='{"headRefOid":"dddddddddddddddddddddddddddddddddddddddd","headRefName":"feature","baseRefName":"main","mergeable":"MERGEABLE"}'
 run "$REPO_PR_NOCFG" --pr 42 --repo arbsec/arbitraitor --verdict CLEAN
 expect_exit "--pr with --repo needs no local project config" 0
+if grep -q "ignored in --pr mode" <<<"$ERR"; then
+  bad "--pr without --base does not warn" "stderr: $ERR"
+else
+  ok "--pr without --base does not warn"
+fi
 
 # 17. --pr with a differing tree is a content change: exit 4.
 REPO_PR_DIFF="$(make_repo)"
