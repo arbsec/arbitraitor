@@ -160,7 +160,13 @@ load_local_review_inputs() {
 
   # Fetch the current base at GATE time. `baseRefOid` from `gh pr view` is the
   # base tip at the PR's last head update, not the base tip now — never use it.
-  git fetch --quiet origin -- "$BASE_REF_NAME" || {
+  # The refspec is explicit: `git fetch origin -- <base>` updates
+  # `refs/remotes/origin/<base>` only when the remote's configured fetch
+  # refspec covers that branch. In a single-branch or narrow-refspec clone the
+  # tracking ref stays stale (or missing), and a stale base lets the ancestor
+  # and overlap checks below pass against an old base tip.
+  git fetch --quiet origin \
+    "+refs/heads/$BASE_REF_NAME:refs/remotes/origin/$BASE_REF_NAME" || {
     echo "error: cannot fetch origin $BASE_REF_NAME; the convergence gate needs the current base" >&2
     exit "$ARB_ERR_UNRECOVERABLE"
   }
@@ -199,8 +205,18 @@ read_review_field() {
 # or an unavailable head object for the rename check.
 DOCS_ONLY_ERE='^(README[.]md|CHANGELOG[.]md|book/.*[.]md|docs/.*[.]md)$'
 docs_only_exempt() {
-  local status_out
-  if jq -e 'any(.[]; test("^docs/spec/"))' <<<"$CHANGED_FILES_JSON" >/dev/null 2>&1; then
+  local status_out local_paths_json all_paths_json
+  # Every path the PR touches, old AND new. `gh pr diff --name-only` lists
+  # only the NEW path of a move, and git's rename detection is heuristic
+  # (`diff.renames`, 50% similarity): a moved non-docs source can be reported
+  # as `D src/x.rs` + `A docs/x.md` with no `R` line at all. The `--no-renames`
+  # list keeps the deleted source visible, so it cannot slip into the
+  # docs-only exemption by moving to a docs path.
+  local_paths_json="$(git diff --no-renames --name-only "$BASE_RESOLVED_REF...$HEAD_SHA" 2>/dev/null \
+    | jq -R -s 'split("\n") | map(select(length > 0))')" || return 1
+  all_paths_json="$(printf '%s\n%s\n' "$CHANGED_FILES_JSON" "$local_paths_json" \
+    | jq -s 'add | unique')" || return 1
+  if jq -e 'any(.[]; test("^docs/spec/"))' <<<"$all_paths_json" >/dev/null 2>&1; then
     return 1
   fi
   if [ -z "$HEAD_TREE" ]; then
@@ -210,11 +226,11 @@ docs_only_exempt() {
   if printf '%s\n' "$status_out" | grep -q '^R'; then
     return 1
   fi
-  if [ "$(jq 'length' <<<"$CHANGED_FILES_JSON")" -gt 50 ]; then
+  if [ "$(jq 'length' <<<"$all_paths_json")" -gt 50 ]; then
     return 1
   fi
   if jq -e --arg re "$DOCS_ONLY_ERE" \
-      'map(select(test($re) | not)) | length > 0' <<<"$CHANGED_FILES_JSON" >/dev/null 2>&1; then
+      'map(select(test($re) | not)) | length > 0' <<<"$all_paths_json" >/dev/null 2>&1; then
     return 1
   fi
   return 0

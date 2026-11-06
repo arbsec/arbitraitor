@@ -669,7 +669,7 @@ else
   bad "merge-gate forwards --skip-local-review" "args: $(cat "$CONV_ARGS_FILE")"
 fi
 expect_err_contains "merge-gate prints the success-path note" \
-  "note: PR merged with: local_review_skipped"
+  "note: merge gate passed with waivers: local_review_skipped"
 
 # ==============================================================================
 # 21. Regression: an empty digest on EITHER side is a mismatch, never a match.
@@ -815,6 +815,72 @@ expect_json "skip valve status when the base fetch fails" '.local_review.status'
 run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "base fetch failure without a valve is unrecoverable" 1
 expect_err_contains "base fetch failure without a valve is loud" "cannot fetch origin main"
+
+# ==============================================================================
+# 24. Regression: the base is fetched with an EXPLICIT refspec. `git fetch
+#     origin -- <base>` updates refs/remotes/origin/<base> only when the remote's
+#     configured fetch refspec covers that branch; in a single-branch or
+#     narrow-refspec clone the tracking ref stays STALE, and the ancestor and
+#     overlap checks then run against an old base tip — the gate accepts a
+#     record whose base has advanced over a file this PR changes.
+# ==============================================================================
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+# The base advances over a file this PR changes.
+git -C "$WORK" checkout -q main
+mkdir -p "$WORK/src"
+printf 'fn f() { /* base */ }\n' > "$WORK/src/lib.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base advance over src/lib.rs"
+git -C "$WORK" push -q origin main
+git -C "$WORK" checkout -q feature
+# Narrow the fetch refspec: `git fetch origin -- main` can no longer update
+# refs/remotes/origin/main, so only an explicit refspec refreshes it.
+git -C "$WORK" config --replace-all remote.origin.fetch \
+  "+refs/heads/feature:refs/remotes/origin/feature"
+# `git push` opportunistically updates the tracking ref — reset it to the stale
+# base so the clone really looks like one that never refreshed it.
+git -C "$WORK" update-ref refs/remotes/origin/main "$BASE_OID"
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "stale base tracking ref is refreshed" 5
+expect_json "stale base tracking ref status" '.local_review.status' "local_review_base_overlap"
+
+# ==============================================================================
+# 25. Regression: a non-docs file moved to a docs path must not slip into the
+#     docs-only exemption. `gh pr diff --name-only` lists only the new path,
+#     and git's rename heuristics (diff.renames, 50% similarity) can report the
+#     move as a delete plus an add, so no `R*` line appears.
+# ==============================================================================
+new_case
+# The moved file must exist in the BASE, otherwise the diff against the base
+# shows only its final path and there is no hidden source to expose.
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base source"
+git -C "$WORK" push -q origin main
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
+BASE_OID="$(git -C "$WORK" rev-parse HEAD)"
+start_feature
+git -C "$WORK" config diff.renames false
+mkdir -p "$WORK/docs"
+git -C "$WORK" mv src/lib.rs docs/lib.md
+printf '# unrelated content\n' > "$WORK/docs/lib.md"
+commit_work "move the source into a docs path"
+land_pr
+set_pr_view
+set_files "docs/lib.md"   # the API reports only the new path
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "move into a docs path is enforced" 0
+expect_json "move into a docs path is not docs_only_exempt" '.local_review.status' "accepted"
 
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

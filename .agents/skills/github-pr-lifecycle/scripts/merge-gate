@@ -77,9 +77,12 @@ fi
 
 # A success with a non-empty reason list means something was explicitly skipped
 # or waived (e.g. local_review_skipped). Make it visible where a human looks.
+# The merge has NOT happened yet — this line runs before `gh pr merge` (and the
+# merge never runs at all with --dry-run), so it states the gate result, not a
+# completed merge.
 SUCCESS_REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons // [] | join(", ")')"
 if [ -n "$SUCCESS_REASONS" ]; then
-  echo "note: PR merged with: $SUCCESS_REASONS" >&2
+  echo "note: merge gate passed with waivers: $SUCCESS_REASONS" >&2
 fi
 
 # Use the head SHA the convergence check verified — NOT a fresh read. A commit

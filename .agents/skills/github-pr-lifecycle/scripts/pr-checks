@@ -94,6 +94,10 @@ FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'sp
 # its paths. KEEP IN SYNC with
 # .github/workflows/{code,markdown,invariants,security}.yml.
 # CodeQL Analysis has no entry: its workflow is unfiltered.
+# `Agent Skills Tests` is the code.yml job, and code.yml is Rust/Cargo-scoped,
+# so an `.agents`-only diff never reaches it. The skill shell suites still run
+# for that diff under .github/workflows/agents.yml (job `Agent Skills Shell
+# Suites`, filter `.agents/**`), whose job name is deliberately distinct.
 PATH_GATED='[
   {"name": "Invariant Property Tests",
    "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/invariants.yml"]},

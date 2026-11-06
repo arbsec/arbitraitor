@@ -140,14 +140,21 @@ Reviewers must re-run the review when the base advance is behaviorally relevant,
 even though the gate accepts it.
 
 **Rename fail-closed.** `gh pr diff --name-only` reports only the new path of a
-rename, so a renamed source could hide a non-docs file behind a docs path. The
-allowlist therefore fails closed (enforces the review) whenever
-`git diff --name-status` reports an `R*` line, when the diff exceeds 50 files, or
-when the head object is unavailable for the rename check.
+rename, so a renamed source could hide a non-docs file behind a docs path. Two
+guards apply, and both fail closed (enforce the review):
 
-**Docs-only exemption.** A diff is exempt only when every changed path matches
-`^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/` is an
-exclusion checked first: spec changes are always enforced. `pr-checks`' unanchored
+- the allowlist is checked against the union of `gh pr diff --name-only` and
+  `git diff --no-renames --name-only <base>...<head>`. The `--no-renames` list
+  keeps a deleted source visible, so a non-docs file that moved to a docs path
+  cannot pass the allowlist even when git's rename heuristics (`diff.renames`,
+  the 50% similarity threshold) report the move as a delete plus an add;
+- `git diff --name-status` reporting an `R*` line also enforces the review, as
+  does a diff exceeding 50 files or an unavailable head object for the rename
+  check.
+
+**Docs-only exemption.** A diff is exempt only when every changed path — old and
+new — matches `^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/`
+is an exclusion checked first: spec changes are always enforced. `pr-checks`' unanchored
 jq glob translation is deliberately not reused here (it would let
 `.agents/skills/x/README.md` match `README.md`).
 

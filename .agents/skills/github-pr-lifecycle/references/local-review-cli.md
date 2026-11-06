@@ -186,8 +186,9 @@ All OIDs come from `git rev-parse`, never from caller input. `--pr` mode adds
 The record is not advisory. `convergence-status` (and therefore `merge-gate`)
 accepts it as review evidence only when its tree matches the PR head tree, its
 recorded base is an ancestor of the freshly fetched base with no path overlap,
-the raw transcript still hashes to `raw sha256`, `cli exit` is `0`, the recorded
-argv is `review --agent --base origin/<base>`, and `verdict` is `CLEAN`. A
+the raw transcript still hashes to `raw sha256`, its `# exit:` header is `0`,
+its `# command:` ends with `review --agent --base origin/<base>` (a bare
+`<base>` is also accepted), and `verdict` is `CLEAN`. A
 missing, stale, or tampered record blocks with a `local_review_*` reason; the full
 acceptance rule and the reason list live in
 [`pr-convergence.md`](pr-convergence.md#local-review-evidence). Because the verdict
@@ -196,10 +197,13 @@ resistance.
 
 ## Verdict derivation (never guess)
 
-`coderabbit review --agent` emits **NDJSON** — one JSON object per line. Observed record
-types on v0.9.0 are `review_context` (emitted first) and `error`. A *successful* review's
-finding/count record was **not** observed (stage 0 failed auth), so the script does not
-infer anything from a successful stdout.
+`coderabbit review --agent` emits **NDJSON** — one JSON object per line. The
+record types observed on **v0.9.0** are `review_context` (emitted first) and
+`error`; that version's successful path was never reached (stage 0 failed
+auth), so the script infers nothing from a successful stdout **on that
+version**. A later successful run on **v0.9.2** showed further record types —
+see "Observed on v0.9.2 (successful run)" below. The rule is version-independent:
+the script never infers a verdict from the transcript.
 
 The verdict is therefore accepted only from an explicit `--verdict CLEAN|FINDINGS`
 supplied by the agent/operator. Without it the record carries `verdict: UNKNOWN`, the raw
