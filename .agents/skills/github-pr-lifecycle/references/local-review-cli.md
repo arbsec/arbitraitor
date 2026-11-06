@@ -181,6 +181,19 @@ hand-written. Minimum fields:
 All OIDs come from `git rev-parse`, never from caller input. `--pr` mode adds
 `- pr head OID:` / `- pr tree OID:`.
 
+## Enforcement
+
+The record is not advisory. `convergence-status` (and therefore `merge-gate`)
+accepts it as review evidence only when its tree matches the PR head tree, its
+recorded base is an ancestor of the freshly fetched base with no path overlap,
+the raw transcript still hashes to `raw sha256`, `cli exit` is `0`, the recorded
+argv is `review --agent --base origin/<base>`, and `verdict` is `CLEAN`. A
+missing, stale, or tampered record blocks with a `local_review_*` reason; the full
+acceptance rule and the reason list live in
+[`pr-convergence.md`](pr-convergence.md#local-review-evidence). Because the verdict
+is agent-attested, this is a tamper-evident attestation checkpoint, not forgery
+resistance.
+
 ## Verdict derivation (never guess)
 
 `coderabbit review --agent` emits **NDJSON** — one JSON object per line. Observed record
@@ -221,6 +234,32 @@ authorized step, not a retry loop.
 
 The raw transcript stays at `.arbitraitor/reviews/<short-head>-<timestamp>.raw.txt`; a
 failed CLI run writes no `.md` record (exit `1` before verdict derivation).
+
+### Observed on v0.9.2 (successful run)
+
+A later run against `coderabbit` v0.9.2 completed successfully (CLI exit `0`). Its stdout
+carried four distinct `type` values:
+
+| `type` | Shape |
+|---|---|
+| `review_context` | `reviewType`, `currentBranch`, `baseBranch`, `workingDirectory`, `expectedDuration` |
+| `heartbeat` | `status` (`"reviewing"`) — repeated while the review runs |
+| `finding` | `severity`, `fileName`, `title`, `comment`, `startLine`, `endLine`, `suggestions`, `codegenInstructions` |
+| `complete` | `status` (`"review_completed"`), `findings` (count), `outcome`, `reviewedFiles`, `message` |
+
+Two consequences for this contract:
+
+- **A clean verdict is still not machine-detectable from the stdout alone.** The `complete`
+  record carries a `findings` count, but a non-zero count is not a verdict (a review may
+  legitimately contain findings the agent judges non-blocking), and a zero count is not
+  observed as a distinct machine-readable "CLEAN" token. The verdict therefore stays an
+  explicit `--verdict` attestation. The `complete` record's `findings` count is a useful
+  cross-check for the human reading the raw transcript — it is not an input to any parser.
+- **A successful run's stdout is no longer unknown.** The v0.9.0 note above stands for that
+  version, where the successful path was never reached.
+
+The raw transcript for a successful run has the same header shape as a failed one, plus a
+`# auth probe:` line carrying the `coderabbit usage` output.
 
 ## Exit codes
 

@@ -312,7 +312,11 @@ enforces):
 4. one full adversarial-review generation against the current HEAD finds no new noteworthy
    findings;
 5. required documentation is updated;
-6. the managed PR-checklist items are checked based on evidence.
+6. the managed PR-checklist items are checked based on evidence;
+7. the local CodeRabbit review record matches the current head tree and passes
+   `convergence-status`'s acceptance rule (`local_review.status == "accepted"`), or the
+   diff is docs-only, disabled by `[review].local_review_required = false`, or explicitly
+   skipped with `--skip-local-review` — every waiver is recorded in `reasons`.
 
 ## Forbidden administrative shortcuts
 

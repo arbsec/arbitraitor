@@ -144,6 +144,8 @@ stop_when_no_blocking_findings = true
 # Hard ceiling: hitting it produces blocked/needs-human, never silent approval.
 hard_loop_ceiling            = 5
 escalation_reviewers         = ["@mekwall"]
+# Local CodeRabbit review evidence (convergence-status / merge-gate).
+# local_review_required = true  # default when absent; false = emergency valve (loud)
 
 [docs]
 public_behavior_doc_required  = true

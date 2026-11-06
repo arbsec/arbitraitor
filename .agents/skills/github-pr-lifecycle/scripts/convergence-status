@@ -2,6 +2,15 @@
 # convergence-status: compute whether a PR has converged (mergeable) by combining
 # pr-checks + review-threads + reconcile-checklist + review-generation state.
 # Exits 0 only when all four are true.
+#
+# The review-generation half is enforced from the local CodeRabbit evidence that
+# `pr-review-local` writes into `.arbitraitor/reviews/` (in-repo, gitignored):
+# a record is accepted only when its tree OID equals the PR head tree, its base
+# is an ancestor of the current base, the base has not advanced over files the
+# PR changes, the raw transcript still hashes to the recorded sha256, the CLI
+# exited 0, the recorded argv matches the CodeRabbit review invocation, and the
+# verdict is CLEAN. The verdict is agent-attested (`--verdict`), so this is an
+# attestation checkpoint with tamper-evidence, not forgery resistance.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -14,6 +23,27 @@ if [ "$OPT_HELP" = true ]; then
   exit "$ARB_OK"
 fi
 
+# --- Flag scan: --skip-local-review is local to this script -------------------
+# Scan EVERY position (before or after the PR number): `--skip-local-review 123`
+# and `123 --skip-local-review` must both work, and the flag must never be
+# mistaken for the PR positional. ARB_SKIP_LOCAL_REVIEW=1 is the env equivalent.
+OPT_SKIP_LOCAL_REVIEW=false
+_POSITIONAL_ARGS=()
+for _arg in "${ARB_LIB_EXTRA_ARGS[@]}"; do
+  case "$_arg" in
+    --skip-local-review) OPT_SKIP_LOCAL_REVIEW=true ;;
+    *)                   _POSITIONAL_ARGS+=("$_arg") ;;
+  esac
+done
+ARB_LIB_EXTRA_ARGS=("${_POSITIONAL_ARGS[@]}")
+if [ "${ARB_SKIP_LOCAL_REVIEW:-0}" = "1" ]; then
+  OPT_SKIP_LOCAL_REVIEW=true
+fi
+
+if [ "${#ARB_LIB_EXTRA_ARGS[@]}" -gt 1 ]; then
+  echo "error: unexpected arguments: ${ARB_LIB_EXTRA_ARGS[*]}" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
 PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
 if [ -z "$PR" ]; then
   echo "error: PR number required" >&2
@@ -49,26 +79,333 @@ ALL_CHECKED="$(echo "$CHECKLIST_JSON" | jq -r '.all_checked')"
 UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
 
 # 4. Review generation: has a generation run against the current HEAD?
-#    This script is a FIRST-PASS PROXY. It checks reviewDecision from gh pr view,
-#    but real convergence requires session-persisted evidence: which review generation
-#    ran, against which HEAD SHA, what findings it produced, and whether all blocking
-#    findings are resolved. That tracking cannot be automated by a stateless script
-#    alone — it requires the pr-lifecycle skill to persist generation state across
-#    invocations (e.g. in ~/.cache/arbitraitor/review-state/, never inside the repo).
-#
-#    Until that persistence exists, this script CANNOT prove convergence on its own.
-#    It checks the AVAILABLE signals (checks, threads, checklist, reviewDecision) and
-#    reports them honestly. A human or the skill's session context must confirm the
-#    review-generation evidence before merging.
-#
-#    See references/pr-convergence.md for the full convergence rule.
-PR_STATE_JSON="$(arb_lib_gh pr view "$PR" --repo "$REPO" --json reviewDecision,headRefOid,isDraft)" || {
+#    The local CodeRabbit evidence is written by `pr-review-local` to
+#    `.arbitraitor/reviews/` and verified here (see "Local review evidence" in
+#    references/pr-convergence.md). `reviewDecision` remains a coarse signal.
+PR_STATE_JSON="$(arb_lib_gh pr view "$PR" --repo "$REPO" \
+  --json reviewDecision,headRefOid,isDraft,baseRefName,headRefName)" || {
   echo "error: failed to read PR state" >&2
   exit "$ARB_ERR_UNRECOVERABLE"
 }
 REVIEW_DECISION="$(echo "$PR_STATE_JSON" | jq -r '.reviewDecision')"
 IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
 HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
+BASE_REF_NAME="$(echo "$PR_STATE_JSON" | jq -r '.baseRefName')"
+HEAD_REF_NAME="$(echo "$PR_STATE_JSON" | jq -r '.headRefName')"
+if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ]; then
+  echo "error: gh did not return a headRefOid for PR $PR" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+fi
+if [ -z "$BASE_REF_NAME" ] || [ "$BASE_REF_NAME" = "null" ]; then
+  echo "error: gh did not return a baseRefName for PR $PR" >&2
+  exit "$ARB_ERR_UNRECOVERABLE"
+fi
+
+# --- Local review evidence: inputs --------------------------------------------
+REVIEW_DIR_REL=".arbitraitor/reviews"
+TOP="$(git rev-parse --show-toplevel)"
+REVIEW_DIR="$TOP/$REVIEW_DIR_REL"
+
+# The evidence inputs. Empty until load_local_review_inputs runs: only the
+# enforcement path needs them, and the emergency valves must not depend on
+# inputs that can fail on their own (see the valve branches below).
+CHANGED_FILES_JSON=""
+BASE_RESOLVED_REF=""
+HEAD_TREE=""
+
+# `return`, never `exit`: this runs inside a command substitution, so `exit`
+# would end only the subshell and leave an empty digest behind — which the
+# tamper check would then compare against an empty recorded digest.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "error: no sha256 tool found (sha256sum or shasum)" >&2
+    return "$ARB_ERR_UNRECOVERABLE"
+  fi
+}
+
+# Resolve the tree of the PR head. This is the critical step after
+# `xtask push-branch`: the landed commit object does not exist locally, so a
+# bare `rev-parse` hard-fails. Ladder: local object -> fetch the head branch ->
+# GitHub API. Empty output means the tree is unresolvable.
+resolve_head_tree() {
+  local tree="" ref="${HEAD_REF_NAME:-}"
+  tree="$(git rev-parse --verify --quiet "${HEAD_SHA}^{tree}" 2>/dev/null || true)"
+  if [ -z "$tree" ] && [ -n "$ref" ] && [ "$ref" != "null" ]; then
+    git fetch --quiet origin -- "$ref" >/dev/null 2>&1 || true
+    tree="$(git rev-parse --verify --quiet "${HEAD_SHA}^{tree}" 2>/dev/null || true)"
+  fi
+  if [ -z "$tree" ]; then
+    tree="$(arb_lib_gh api "repos/$REPO/git/commits/$HEAD_SHA" --jq '.tree.sha' 2>/dev/null || true)"
+  fi
+  printf '%s' "$tree"
+}
+
+# Load the evidence inputs. Called ONLY when local review is actually enforced,
+# so that `--skip-local-review` and `[review].local_review_required = false`
+# keep working when these inputs are unavailable (a PR too large for
+# `gh pr diff`, no network for the base fetch, an unreadable diff). A valve
+# that depends on the inputs it is meant to waive is not a valve.
+load_local_review_inputs() {
+  # The changed-path list is also the allowlist input and the base-overlap set.
+  # Fail loudly: an unreadable diff must never look like "no changed paths".
+  CHANGED_FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only \
+    | jq -R -s 'split("\n") | map(select(length > 0))')" || {
+    echo "error: failed to read the PR diff (gh pr diff $PR)" >&2
+    exit "$ARB_ERR_UNRECOVERABLE"
+  }
+
+  # Fetch the current base at GATE time. `baseRefOid` from `gh pr view` is the
+  # base tip at the PR's last head update, not the base tip now — never use it.
+  git fetch --quiet origin -- "$BASE_REF_NAME" || {
+    echo "error: cannot fetch origin $BASE_REF_NAME; the convergence gate needs the current base" >&2
+    exit "$ARB_ERR_UNRECOVERABLE"
+  }
+  BASE_RESOLVED_REF="refs/remotes/origin/$BASE_REF_NAME"
+  git rev-parse --verify --quiet "$BASE_RESOLVED_REF^{commit}" >/dev/null || {
+    echo "error: origin/$BASE_REF_NAME is not resolvable after fetch" >&2
+    exit "$ARB_ERR_UNRECOVERABLE"
+  }
+
+  HEAD_TREE="$(resolve_head_tree)"
+}
+
+# --- Config: [review].local_review_required (mirrors pr-checks' field parse) ---
+# Absent or unparseable -> required (fail closed). `false` is the loud emergency
+# valve. Scalar parse only; lists are not part of this field's contract.
+read_review_field() {
+  awk -v field="$1" '
+    /^[[:space:]]*\[review\][[:space:]]*$/ { insec = 1; next }
+    /^[[:space:]]*\[/ { insec = 0 }
+    insec && $0 ~ "^[[:space:]]*" field "[[:space:]]*=" {
+      line = $0
+      sub(/^[^=]*=[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      gsub(/[[:space:]"]/, "", line)
+      print line
+      exit
+    }
+  ' "$ARB_PROJECT_CONFIG"
+}
+
+# --- Docs-only allowlist -------------------------------------------------------
+# A docs-only PR needs no adversarial code review. Exclusion FIRST: a spec change
+# is enforced even though it is a `.md` file. Then every changed path must match
+# the anchored ERE below. Fail closed (return 1 = enforce) on: a rename (gh pr
+# diff reports only the new path, hiding the deleted source), more than 50 files,
+# or an unavailable head object for the rename check.
+DOCS_ONLY_ERE='^(README[.]md|CHANGELOG[.]md|book/.*[.]md|docs/.*[.]md)$'
+docs_only_exempt() {
+  local status_out
+  if jq -e 'any(.[]; test("^docs/spec/"))' <<<"$CHANGED_FILES_JSON" >/dev/null 2>&1; then
+    return 1
+  fi
+  if [ -z "$HEAD_TREE" ]; then
+    return 1
+  fi
+  status_out="$(git diff --name-status "$BASE_RESOLVED_REF...$HEAD_SHA" 2>/dev/null)" || return 1
+  if printf '%s\n' "$status_out" | grep -q '^R'; then
+    return 1
+  fi
+  if [ "$(jq 'length' <<<"$CHANGED_FILES_JSON")" -gt 50 ]; then
+    return 1
+  fi
+  if jq -e --arg re "$DOCS_ONLY_ERE" \
+      'map(select(test($re) | not)) | length > 0' <<<"$CHANGED_FILES_JSON" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# --- Record parsing ------------------------------------------------------------
+local_review_field() { # local_review_field <record-file> <label-without-colon>
+  awk -v label="$2" '
+    index($0, "- " label ":") == 1 {
+      value = substr($0, length(label) + 4)
+      sub(/^ /, "", value)
+      print value
+      exit
+    }
+  ' "$1"
+}
+
+LR_STATUS=""
+LR_RECORD_FILE=""
+LR_RECORD_TREE=""
+LR_RECORD_BASE=""
+LR_HASH_VERIFIED=false
+LOCAL_REVIEW_REASON=""
+
+evaluate_local_review() {
+  local records=() rec best="" best_name="" best_ts="" name ts tree verdict
+  local rec_base advanced raw_name raw_path rec_hash actual_hash raw_exit raw_command
+
+  if [ ! -d "$REVIEW_DIR" ]; then
+    LR_STATUS="local_review_missing"
+    echo "error: no local review records in $REVIEW_DIR_REL/ (the directory is gitignored; run pr-review-local in the review checkout, or pass --skip-local-review to override)" >&2
+    return 1
+  fi
+  shopt -s nullglob
+  records=("$REVIEW_DIR"/*.md)
+  shopt -u nullglob
+  if [ "${#records[@]}" -eq 0 ]; then
+    LR_STATUS="local_review_missing"
+    echo "error: no local review records in $REVIEW_DIR_REL/ (the directory is gitignored; run pr-review-local in the review checkout, or pass --skip-local-review to override)" >&2
+    return 1
+  fi
+
+  if [ -z "$HEAD_TREE" ]; then
+    LR_STATUS="local_review_head_unresolvable"
+    echo "error: cannot resolve the tree of PR head $HEAD_SHA (local object missing, fetch of origin/${HEAD_REF_NAME:-<none>} failed, and the API lookup failed); refusing to merge without review evidence" >&2
+    return 1
+  fi
+
+  # Select the newest record whose tree OID equals the resolved head tree. The
+  # filename is <short-head>-<YYYYMMDDTHHMMSSZ>.md: sort on the timestamp
+  # component only (a short-head prefix would dominate a whole-name sort).
+  for rec in "${records[@]}"; do
+    tree="$(local_review_field "$rec" "tree OID")"
+    [ "$tree" = "$HEAD_TREE" ] || continue
+    name="$(basename "$rec")"
+    ts="${name##*-}"
+    ts="${ts%.md}"
+    if [ -z "$best" ] || [[ "$ts" > "$best_ts" ]] \
+      || { [ "$ts" = "$best_ts" ] && [[ "$name" > "$best_name" ]]; }; then
+      best="$rec"; best_name="$name"; best_ts="$ts"
+    fi
+  done
+  if [ -z "$best" ]; then
+    LR_STATUS="local_review_stale_tree"
+    echo "error: no local review record matches the PR head tree $HEAD_TREE (re-run pr-review-local after the last push)" >&2
+    return 1
+  fi
+  LR_RECORD_FILE="$best_name"
+  LR_RECORD_TREE="$HEAD_TREE"
+
+  # 3. Recorded base must still be an ancestor of the current base. Exit 1 from
+  #    merge-base means "base advanced"; any other non-zero (128: missing or
+  #    corrupt object) is an infrastructure error, not a base advance.
+  rec_base="$(local_review_field "$best" "base OID")"
+  if ! git rev-parse --verify --quiet "${rec_base}^{commit}" >/dev/null 2>&1; then
+    echo "error: recorded base OID '${rec_base}' from $best_name is not present in this repository (infrastructure error, not a base advance)" >&2
+    exit "$ARB_ERR_UNRECOVERABLE"
+  fi
+  LR_RECORD_BASE="$rec_base"
+  local anc_rc=0
+  git merge-base --is-ancestor "$rec_base" "$BASE_RESOLVED_REF" || anc_rc=$?
+  case "$anc_rc" in
+    0) ;;
+    1) LR_STATUS="local_review_base_advanced"
+       echo "error: the base advanced since the review (recorded $rec_base is not an ancestor of origin/$BASE_REF_NAME); re-run pr-review-local" >&2
+       return 1 ;;
+    *) echo "error: cannot compare recorded base $rec_base with origin/$BASE_REF_NAME (git merge-base exit $anc_rc)" >&2
+       exit "$ARB_ERR_UNRECOVERABLE" ;;
+  esac
+
+  # 4. The base advance must not touch files this PR changes. Disjoint paths are
+  #    the residual-risk case: a semantic conflict on untouched files is not
+  #    detectable by path intersection.
+  if ! advanced="$(git diff --name-only "$rec_base..$BASE_RESOLVED_REF")"; then
+    echo "error: cannot diff $rec_base..origin/$BASE_REF_NAME" >&2
+    exit "$ARB_ERR_UNRECOVERABLE"
+  fi
+  if [ -n "$advanced" ] \
+    && printf '%s\n' "$advanced" | jq -R -s -e --argjson changed "$CHANGED_FILES_JSON" \
+      'split("\n") | map(select(length > 0))
+       | map(select(. as $p | any($changed[]; . == $p))) | length > 0' >/dev/null 2>&1; then
+    LR_STATUS="local_review_base_overlap"
+    echo "error: the base advanced over files this PR changes; re-run pr-review-local against the new base" >&2
+    return 1
+  fi
+
+  # 5. Raw transcript present, resolved inside the reviews directory only.
+  raw_name="$(local_review_field "$best" "raw file")"
+  if [ -z "$raw_name" ]; then
+    LR_STATUS="local_review_raw_missing"
+    echo "error: $best_name records no raw transcript file" >&2
+    return 1
+  fi
+  raw_path="$REVIEW_DIR/$(basename "$raw_name")"
+  if [ ! -f "$raw_path" ]; then
+    LR_STATUS="local_review_raw_missing"
+    echo "error: raw review transcript is missing: $REVIEW_DIR_REL/$(basename "$raw_name")" >&2
+    return 1
+  fi
+
+  # 6. Tamper-evidence: the transcript must still hash to the recorded digest.
+  #    An empty digest on EITHER side is a mismatch, never a match: a record
+  #    without a `raw sha256` line and an unavailable digest tool would both
+  #    yield the empty string, and `"" != ""` is false — a fail-open.
+  rec_hash="$(local_review_field "$best" "raw sha256")"
+  actual_hash="$(sha256_of "$raw_path")"
+  if [ -z "$rec_hash" ] || [ -z "$actual_hash" ] || [ "$rec_hash" != "$actual_hash" ]; then
+    LR_STATUS="local_review_hash_mismatch"
+    echo "error: raw transcript sha256 mismatch for $REVIEW_DIR_REL/$(basename "$raw_name") (record '${rec_hash:-<empty>}', actual '${actual_hash:-<empty>}')" >&2
+    return 1
+  fi
+  LR_HASH_VERIFIED=true
+
+  # 7. The CLI must have exited 0.
+  raw_exit="$(awk -F': ' '/^# exit:/{print $2; exit}' "$raw_path")"
+  case "$raw_exit" in
+    ""|*[!0-9]*)
+      LR_STATUS="local_review_cli_exit_nonzero"
+      echo "error: raw transcript has no numeric '# exit:' header (got '${raw_exit}')" >&2
+      return 1 ;;
+    *)
+      if [ "$raw_exit" -ne 0 ]; then
+        LR_STATUS="local_review_cli_exit_nonzero"
+        echo "error: the reviewed CLI run exited $raw_exit; a failed run is not review evidence" >&2
+        return 1
+      fi ;;
+  esac
+
+  # 8. The recorded argv must be the CodeRabbit review invocation. The binary
+  #    path is deliberately ignored (coderabbit vs an absolute path vs a stub).
+  #    `pr-review-local` records the resolved ref it passed to the CLI, which in
+  #    --pre-push mode is `origin/<base>`; a bare `<base>` is accepted too.
+  raw_command="$(awk '/^# command:/{sub(/^# command:[[:space:]]*/, ""); print; exit}' "$raw_path")"
+  case "$raw_command" in
+    *" review --agent --base origin/$BASE_REF_NAME"|*" review --agent --base $BASE_REF_NAME") ;;
+    *)
+      LR_STATUS="local_review_command_mismatch"
+      echo "error: raw transcript command '${raw_command}' is not 'review --agent --base origin/$BASE_REF_NAME'" >&2
+      return 1 ;;
+  esac
+
+  # 9. Agent-attested verdict must be CLEAN. FINDINGS/UNKNOWN (or anything else)
+  #    blocks. This checks attestation, not that the CLI emitted CLEAN.
+  verdict="$(local_review_field "$best" "verdict")"
+  if [ "$verdict" != "CLEAN" ]; then
+    LR_STATUS="local_review_verdict_not_clean"
+    echo "error: local review verdict is '${verdict:-<missing>}', not CLEAN" >&2
+    return 1
+  fi
+
+  LR_STATUS="accepted"
+  return 0
+}
+
+if [ "$OPT_SKIP_LOCAL_REVIEW" = true ]; then
+  LR_STATUS="skipped"
+  echo "WARNING: local CodeRabbit review skipped" >&2
+elif [ "$(read_review_field local_review_required)" = "false" ]; then
+  LR_STATUS="disabled_by_config"
+  echo "note: local review disabled by [review].local_review_required = false (emergency valve)" >&2
+else
+  # The evidence inputs are loaded only now: the two valves above must work
+  # even when `gh pr diff`, the base fetch, or the head-tree lookup fails.
+  load_local_review_inputs
+  if docs_only_exempt; then
+    LR_STATUS="docs_only_exempt"
+    echo "note: docs-only diff (spec changes excluded); local CodeRabbit review not required" >&2
+  else
+    evaluate_local_review || LOCAL_REVIEW_REASON="$LR_STATUS"
+  fi
+fi
 
 # Compute verdict.
 REASONS=""
@@ -80,10 +417,21 @@ REASONS=""
 [ "$REVIEW_DECISION" = "REVIEW_REQUIRED" ] && REASONS="${REASONS}review_required, "
 [ "$REVIEW_DECISION" = "CHANGES_REQUESTED" ] && REASONS="${REASONS}changes_requested, "
 [ "$IS_DRAFT" = "true" ] && REASONS="${REASONS}is_draft, "
+[ -n "$LOCAL_REVIEW_REASON" ] && REASONS="${REASONS}${LOCAL_REVIEW_REASON}, "
 REASONS="${REASONS%, }"
 
 MERGEABLE="true"
 [ -n "$REASONS" ] && MERGEABLE="false"
+
+# The waiver markers are appended AFTER mergeable is computed: a waiver is
+# loud and recorded, but it must never flip the verdict on its own. EVERY
+# waiver gets a marker — `merge-gate` prints only `reasons` on the success
+# path, so a waiver missing here would leave no visible trace in its output.
+case "$LR_STATUS" in
+  skipped)            REASONS="${REASONS}${REASONS:+, }local_review_skipped" ;;
+  disabled_by_config) REASONS="${REASONS}${REASONS:+, }local_review_disabled_by_config" ;;
+  docs_only_exempt)   REASONS="${REASONS}${REASONS:+, }local_review_docs_only_exempt" ;;
+esac
 
 if [ "$OPT_JSON" = true ]; then
   jq -n \
@@ -95,6 +443,11 @@ if [ "$OPT_JSON" = true ]; then
     --arg unchecked "$UNCHECKED_COUNT" \
     --arg review_decision "$REVIEW_DECISION" \
     --arg is_draft "$IS_DRAFT" \
+    --arg lr_status "$LR_STATUS" \
+    --arg lr_record "$LR_RECORD_FILE" \
+    --arg lr_tree "$LR_RECORD_TREE" \
+    --arg lr_base "$LR_RECORD_BASE" \
+    --argjson lr_hash "$LR_HASH_VERIFIED" \
     '{
       mergeable: ($mergeable == "true"),
       reasons: ($reasons | split(", ") | map(select(length > 0))),
@@ -103,14 +456,23 @@ if [ "$OPT_JSON" = true ]; then
       unresolved_actionable_threads: ($unresolved | tonumber),
       unchecked_checklist_items: ($unchecked | tonumber),
       review_decision: $review_decision,
-      is_draft: ($is_draft == "true")
+      is_draft: ($is_draft == "true"),
+      local_review: {
+        status: $lr_status,
+        record_file: $lr_record,
+        record_tree_oid: $lr_tree,
+        record_base_oid: $lr_base,
+        raw_sha256_verified: $lr_hash
+      }
     }'
 else
   if [ "$MERGEABLE" = "true" ]; then
     echo "CONVERGED: PR #$PR is mergeable at HEAD $HEAD_SHA."
+    echo "  Local review: $LR_STATUS"
   else
     echo "NOT CONVERGED: PR #$PR is blocked."
     echo "  Reasons: $REASONS"
+    echo "  Local review: $LR_STATUS"
   fi
 fi
 

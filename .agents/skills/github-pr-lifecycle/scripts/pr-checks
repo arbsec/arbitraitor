@@ -91,14 +91,34 @@ FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'sp
 # --- Path-gated required checks ------------------------------------------------
 # Mirror of the `on.pull_request.paths` filters in the workflow files: a
 # path-gated check legitimately never reports when the diff matches none of
-# its paths. KEEP IN SYNC with .github/workflows/{invariants,security}.yml.
+# its paths. KEEP IN SYNC with
+# .github/workflows/{code,markdown,invariants,security}.yml.
+# CodeQL Analysis has no entry: its workflow is unfiltered.
 PATH_GATED='[
   {"name": "Invariant Property Tests",
    "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/invariants.yml"]},
   {"name": "Dependency Policy",
    "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]},
   {"name": "Advisory Check",
-   "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]}
+   "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]},
+  {"name": "Check & Lint",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Workspace Hack (ubuntu-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Workspace Hack (macos-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Test (ubuntu-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Test (macos-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Agent Skills Tests",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Markdown Lint",
+   "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]},
+  {"name": "Book Build",
+   "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]},
+  {"name": "Docs Consistency",
+   "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]}
 ]'
 
 # Is a required check exempt because its workflow is path-gated and no diff

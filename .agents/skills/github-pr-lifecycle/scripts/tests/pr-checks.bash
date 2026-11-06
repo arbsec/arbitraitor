@@ -118,7 +118,7 @@ run_case ".mise.toml diff leaves only Invariants missing" "$SEC_YML_FIXTURE" ".m
 
 # 5. A required check absent from the rollup with no path coverage -> gate fails
 NO_AST_FIXTURE="$(printf '%s' "$ALL_PASS" | jq 'del(.[12])')"
-run_case "absent required check fails the gate" "$NO_AST_FIXTURE" "README.md" \
+run_case "absent required check fails the gate" "$NO_AST_FIXTURE" "crates/arbitraitor-core/src/lib.rs" \
   '{"all_passed":false,"any_failing":false,"any_pending":false,"missing_required":["Agent Skills Tests"]}'
 
 # 6. A failing check -> any_failing + all_passed false
@@ -165,6 +165,42 @@ if [ "$got_code" -eq 1 ]; then
 else
   fail=$((fail + 1)); echo "FAIL hard gh failure: expected exit 1, got $got_code" >&2
 fi
+
+# 10. code.yml path-gate mirror (arbsec/arbitraitor PR B). The workflow is
+#     Rust/Cargo-scoped, so an `.agents`-only diff legitimately never reports its
+#     six checks. A `wit/**`, `.config/hakari.toml`, or `Cargo.lock` diff DOES
+#     reach the workflow, so the checks are not exempt and their absence blocks.
+NO_CODE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Check & Lint"
+  or .name == "Workspace Hack (ubuntu-latest)"
+  or .name == "Workspace Hack (macos-latest)"
+  or .name == "Test (ubuntu-latest)"
+  or .name == "Test (macos-latest)"
+  or .name == "Agent Skills Tests") | not)]')"
+CODE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
+ "missing_required":["Check & Lint","Workspace Hack (ubuntu-latest)",
+ "Workspace Hack (macos-latest)","Test (ubuntu-latest)","Test (macos-latest)",
+ "Agent Skills Tests"]}'
+run_case ".agents-only diff exempts the six code.yml checks" "$NO_CODE_FIXTURE" \
+  ".agents/skills/x/SKILL.md" "$FULL_JSON"
+run_case "wit/** diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  "wit/arbitraitor.wit" "$CODE_MISSING"
+run_case ".config/hakari.toml diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  ".config/hakari.toml" "$CODE_MISSING"
+run_case "Cargo.lock diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  "Cargo.lock" "$CODE_MISSING"
+
+# 11. markdown.yml path-gate mirror. A `**/*.md` diff reaches the workflow, so
+#     the three checks are NOT exempt (their absence fails closed). A Rust-only
+#     diff never reaches markdown.yml, so its three checks are exempt.
+NO_MD_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Markdown Lint"
+  or .name == "Book Build"
+  or .name == "Docs Consistency") | not)]')"
+MD_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
+ "missing_required":["Markdown Lint","Book Build","Docs Consistency"]}'
+run_case "docs/*.md diff keeps the markdown three required" "$NO_MD_FIXTURE" "docs/guide.md" \
+  "$MD_MISSING"
+run_case "rust-only diff exempts the markdown three" "$NO_MD_FIXTURE" \
+  "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
 
 echo "pr-checks fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -82,3 +82,101 @@ The script combines:
 The script also blocks when the review-thread page is truncated (`has_next_page: true`) — an undercounted thread list is not evidence of resolution.
 
 The script exits `0` only when all of these are true. Exit `5` (`ARB_ERR_BLOCKED`) means the loop limit was hit — `blocked`/`needs-human`, not mergeable.
+
+## Local review evidence
+
+`pr-review-local` writes the review record and raw transcript into
+`.arbitraitor/reviews/` (in-repo, gitignored). `convergence-status` verifies that
+evidence against the PR head before it reports `mergeable: true`; `merge-gate`
+inherits the verdict. The record is accepted only when **all** of these hold:
+
+1. a record's `tree OID` equals the resolved PR head tree. The head tree is
+   resolved with the same ladder as `pr-review-local`: local object → fetch the
+   PR head branch → `gh api repos/<repo>/git/commits/<sha> --jq .tree.sha`.
+   `baseRefOid` is never used: it is the base tip at the PR's last head update,
+   not the base tip at gate time.
+2. the recorded base is an ancestor of the freshly fetched base
+   (`git fetch origin <baseRefName>`).
+3. `git diff --name-only <recorded-base>..origin/<base>` does not intersect the
+   PR's changed paths.
+4. the recorded raw transcript exists (basename only, inside the reviews dir).
+5. its sha256 still equals the recorded `raw sha256`. An empty digest on
+   **either** side is a mismatch, never a match: a record with no
+   `raw sha256` line and an unavailable digest tool both yield the empty
+   string, and `"" != ""` is false — a fail-open.
+6. its `# exit:` header is `0`.
+7. its `# command:` ends with `review --agent --base origin/<base>` (a bare
+   `<base>` is tolerated; the binary path is not compared).
+8. the record's `- verdict:` is `CLEAN`.
+
+Selection: among records whose `tree OID` equals the head tree, the newest by the
+timestamp component of the filename (`<short-head>-<YYYYMMDDTHHMMSSZ>.md`) wins;
+a timestamp tie is broken by the lexically greatest filename. Sorting on the whole
+filename would let the short-head prefix dominate.
+
+Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
+
+| Reason | Meaning |
+|---|---|
+| `local_review_missing` | reviews dir absent/empty (records are gitignored — the gate may be running outside the review checkout) |
+| `local_review_stale_tree` | no record for the current head tree (re-run after the last push) |
+| `local_review_base_advanced` | recorded base is no longer an ancestor of the base |
+| `local_review_base_overlap` | the base advanced over a file this PR changes |
+| `local_review_raw_missing` | the indexed transcript is gone |
+| `local_review_hash_mismatch` | the transcript changed after it was recorded |
+| `local_review_cli_exit_nonzero` | the reviewed CLI run failed |
+| `local_review_command_mismatch` | the recorded argv is not the CodeRabbit review invocation |
+| `local_review_verdict_not_clean` | the attestation is FINDINGS/UNKNOWN |
+| `local_review_head_unresolvable` | the head tree could not be resolved by any ladder step |
+
+`local_review_head_unresolvable` is a blocked verdict, not a crash: after
+`xtask push-branch` the landed commit object is never local, so the fetch/API
+steps are required for every merge.
+
+**Residual risk (ancestor + disjoint).** The overlap check is path-based. If the
+base advanced only over files this PR does not touch, the record is still
+accepted — a semantic conflict on disjoint files is not detectable this way.
+Reviewers must re-run the review when the base advance is behaviorally relevant,
+even though the gate accepts it.
+
+**Rename fail-closed.** `gh pr diff --name-only` reports only the new path of a
+rename, so a renamed source could hide a non-docs file behind a docs path. The
+allowlist therefore fails closed (enforces the review) whenever
+`git diff --name-status` reports an `R*` line, when the diff exceeds 50 files, or
+when the head object is unavailable for the rename check.
+
+**Docs-only exemption.** A diff is exempt only when every changed path matches
+`^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/` is an
+exclusion checked first: spec changes are always enforced. `pr-checks`' unanchored
+jq glob translation is deliberately not reused here (it would let
+`.agents/skills/x/README.md` match `README.md`).
+
+**What this gate proves, and what it does not.** It proves that a transcript
+indexed by a matching record existed at review time, that the tree it reviewed is
+the tree being merged, that the base is compatible, and that the transcript has
+not changed since it was indexed. It does **not** prove the review was run by a
+fresh context, that no findings were suppressed, or that the CLI really produced
+a clean run: the verdict is agent-attested (`--verdict`) because the `--agent`
+stdout schema has no verified machine-readable verdict. This is an attestation
+checkpoint with tamper-evidence — tampering with an existing record is caught,
+forging a self-consistent record is not. Treat the raw transcript as evidence to
+inspect during review, not as a signature.
+
+**Emergency valve.** `[review].local_review_required = false` disables enforcement
+with a loud `disabled_by_config` status. `--skip-local-review` (or
+`ARB_SKIP_LOCAL_REVIEW=1`) reports `skipped`. Both are recorded in `reasons`
+as `local_review_disabled_by_config` and `local_review_skipped`, and a
+docs-only diff is recorded as `local_review_docs_only_exempt` — **every**
+waiver gets a `reasons` marker, because `merge-gate` prints only `reasons` on
+the success path and a waiver missing there would leave no visible trace in
+its output. The markers are appended **after** `mergeable` is computed, so a
+waiver is visible without turning a blocked PR into a mergeable one. Neither
+valve is a normal path — both are recorded so a reviewer can see exactly what
+was waived.
+
+**The valves do not depend on the evidence they waive.** The diff, the base
+fetch, and the head-tree lookup are loaded only when local review is actually
+enforced. A PR too large for `gh pr diff`, an offline base fetch, or an
+unreadable diff must not make `--skip-local-review` or
+`local_review_required = false` unusable — a valve that fails open against
+the inputs it is meant to waive is not a valve.

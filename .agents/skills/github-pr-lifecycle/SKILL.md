@@ -120,7 +120,18 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   Reaching a configured loop/cost/time limit produces a `blocked` or
                   `needs-human` state (arbitraitor-workflow.md "PR convergence requirements") — NEVER silent approval.
                   Use `convergence-status` to compute the verdict from checks + threads
-                  + checklist.
+                  + checklist. It also enforces the local review evidence: only a
+                  `.arbitraitor/reviews/` record whose tree equals the PR head tree,
+                  whose base is an ancestor of the current base with no path overlap,
+                  whose raw transcript still matches its sha256, and whose verdict is
+                  CLEAN is accepted. A missing/stale/tampered record blocks with a
+                  `local_review_*` reason. `--skip-local-review` (or
+                  `ARB_SKIP_LOCAL_REVIEW=1`) records a loud `local_review_skipped`
+                  reason and never flips the verdict; `[review].local_review_required
+                  = false` is the emergency valve. Every waiver — skip, config
+                  valve, docs-only — is recorded in `reasons`, and both valves
+                  work even when the review evidence inputs (diff, base fetch)
+                  are unavailable.
 
 7. DOCS           Run `classify-docs-impact` against the diff. If any public-behavior
                   surface is touched (CLI, config, env vars, public APIs, daemon
