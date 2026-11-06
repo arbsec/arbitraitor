@@ -106,10 +106,16 @@ required = [
   "CodeQL Analysis",
   "Agent Skills Tests",
 ]
-optional = ["Documentation", "qlty check", "CodeRabbit"]   # qlty = external quality gate (qlty.sh)
+optional = ["Documentation", "qlty check", "CodeRabbit", "Agent Skills Shell Suites"]
+# qlty = external quality gate (qlty.sh).
 # CodeRabbit: the GitHub App check auto-skips in this repo; the local CLI
 # (`scripts/pr-review-local`) is the review mechanism. pr-checks exempts only
 # `bucket == "skipping"`, so a *failing* CodeRabbit run still blocks.
+# Agent Skills Shell Suites: path-gated to `.agents/**` by
+# `.github/workflows/agents.yml`, so it legitimately never reports on a
+# Rust-only diff — a `required` entry needs a PATH_GATED row in
+# `scripts/pr-checks` first (tracked as follow-up work). pr-checks blocks on
+# any failing check, required or optional, so a red suite run still blocks.
 
 # --- Merge + review policy -----------------------------------------------------
 [merge]

@@ -1,0 +1,68 @@
+name: Agent Skills
+
+# Path-filtered home for the agent-skill shell gate.
+#
+# `code.yml` is Rust/Cargo-scoped, so a diff that only touches `.agents/**`
+# never reaches the `Agent Skills Tests` job it owns and the skill shell suites
+# never execute (arbsec/arbitraitor#859). This workflow covers that hole.
+#
+# The job name is deliberately NOT `Agent Skills Tests`: that name stays with
+# `code.yml`, which keeps reporting it for Rust-scoped diffs. Two workflows
+# reporting the same check name would collide on a mixed Rust + `.agents` diff.
+on:
+  push:
+    branches: [main]
+    paths: &agents_paths
+      - ".agents/**"
+      - ".github/workflows/agents.yml"
+  pull_request:
+    paths: *agents_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-skill-suites:
+    name: Agent Skills Shell Suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntax-check agent skill scripts
+        shell: bash
+        run: |
+          # `bash -n a b` parses only `a`, so each file is checked on its own.
+          failed=0
+          while IFS= read -r script; do
+            if ! bash -n "$script"; then
+              printf 'syntax error: %s\n' "$script" >&2
+              failed=1
+            fi
+          done < <(
+            # Every shell file under .agents/ — *.sh and *.bash, any depth.
+            find .agents -type f \( -name '*.sh' -o -name '*.bash' \) -print
+            # Every extensionless script under .agents/skills/*/scripts/. The
+            # executable-bit filter used in code.yml misses the scripts git
+            # tracks as 100644 (commit-identity, pr-review-local).
+            find .agents/skills -type f -path '*/scripts/*' ! -name '*.*' -print
+          )
+          exit "$failed"
+      - name: Run agent skill test suites
+        shell: bash
+        run: |
+          status=0
+          for suite in .agents/skills/*/scripts/tests/*.bash; do
+            if output="$(bash "$suite" 2>&1)"; then rc=0; else rc=$?; fi
+            passes="$(printf '%s\n' "$output" | grep -c '^PASS ' || true)"
+            fails="$(printf '%s\n' "$output" | grep -c '^FAIL ' || true)"
+            printf '%s\n' "$output"
+            printf '%s: %s passed, %s failed (exit %s)\n' "$suite" "$passes" "$fails" "$rc"
+            if [ "$rc" -ne 0 ] || [ "$fails" -ne 0 ]; then status=1; fi
+          done
+          exit "$status"
