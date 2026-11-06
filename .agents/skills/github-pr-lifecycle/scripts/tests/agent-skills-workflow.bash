@@ -13,7 +13,9 @@
 #      diff must never produce two checks under one name;
 #   3. the syntax check runs `bash -n` once per file (`bash -n a b` parses
 #      only `a`, so the `find -exec bash -n {} +` form checks one file);
-#   4. the new check is registered in the project config.
+#   4. the new check is registered in the project config;
+#   5. the workflow uses no YAML anchor/alias (actionlint cannot parse an
+#      alias node and reports it as a syntax error).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +101,19 @@ if grep -q '"Agent Skills Tests"' "$EXAMPLE_TOML"; then
   ok "required check name stays in the project config"
 else
   bad "required check name stays in the project config" "not listed in github-project.example.toml"
+fi
+
+# 5. No YAML anchor/alias. actionlint cannot resolve an alias node and
+#    reports it as a syntax error ("paths section must be sequence node but
+#    got alias node"); qlty runs actionlint over the changed lines of a diff
+#    and reported that as a blocking issue on this workflow.
+# Comments are stripped first — the workflow explains the pattern in prose.
+workflow_yaml="$(grep -v -E '^[[:space:]]*#' "$AGENTS_WORKFLOW")"
+if printf '%s\n' "$workflow_yaml" | grep -q -E ':[[:space:]]*&[A-Za-z_]' ||
+   printf '%s\n' "$workflow_yaml" | grep -q -E ':[[:space:]]*\*[A-Za-z_]'; then
+  bad "workflow avoids YAML anchors and aliases" "actionlint cannot parse an alias node"
+else
+  ok "workflow avoids YAML anchors and aliases"
 fi
 
 echo "agent-skills-workflow fixtures: $pass passed, $fail failed"

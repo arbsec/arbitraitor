@@ -114,7 +114,7 @@ optional = ["Documentation", "qlty check", "CodeRabbit", "Agent Skills Shell Sui
 # Agent Skills Shell Suites: path-gated to `.agents/**` by
 # `.github/workflows/agents.yml`, so it legitimately never reports on a
 # Rust-only diff — a `required` entry needs a PATH_GATED row in
-# `scripts/pr-checks` first (tracked as follow-up work). pr-checks blocks on
+# `scripts/pr-checks` first (arbsec/arbitraitor#862). pr-checks blocks on
 # any failing check, required or optional, so a red suite run still blocks.
 
 # --- Merge + review policy -----------------------------------------------------
