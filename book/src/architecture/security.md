@@ -166,6 +166,55 @@ kernel-validated content (an unprivileged writer can only map its own
 identity to itself), so the grant cannot be leveraged into a
 privilege-escalation primitive (#754).
 
+### Mediated runs and the effective-controls matrix
+
+A mediated CLI run records the network-isolation control in the receipt's
+effective-controls matrix, with the wrapper as its mechanism label:
+
+```json
+"network_isolation": { "requested": true, "applied": "enforced", "proof": "unshare" }
+```
+
+Two properties keep the claim honest:
+
+- **The state comes from the executor, not the flags.** The receipt is built
+  from the isolation state the executor actually installed, so a receipt can
+  never describe a control the run did not have.
+- **An unobservable control is omitted, not asserted.** The matrix is left out
+  entirely when the run cannot show the control was in force — the wrapper
+  refused to create the namespace, the wrapper could not execute the target,
+  the wrapper failed in an unattributable way, or the target died from a
+  signal. In the first three cases the run fails closed and no receipt is
+  written at all; in the last case the receipt is written without the matrix,
+  because the run happened but its enforcement state was not observable.
+
+`proof` is a free-form mechanism label, not a typed attestation: it names the
+mechanism, and it cannot prove that the helper at `/usr/bin/unshare` was not
+itself substituted, nor that a wrapper failing silently was not mistaken for
+a failing target. The typed proof handshake that closes that gap is tracked in
+[#827](https://github.com/arbsec/arbitraitor/issues/827).
+
+Refusals write no receipt. The receipt is the audit record of a run that
+reached its target; a refused run never did. Persisting deny evidence for
+refusals is tracked separately in
+[#791](https://github.com/arbsec/arbitraitor/issues/791).
+
+The wrapper's stderr is attacker-controlled text that reaches operator output,
+agent transcripts, and logs. The exec layer escapes it through the shared
+ADR-0016 untrusted-presentation helper before it becomes an error reason, so
+the diagnostic carries no terminal control sequence and cannot forge the
+framework's own untrusted-data markers. The verdict is decided *before* the
+escaping — the wrapper's real prefixes and setup clauses are matched against
+the raw bytes — so the rendering of the excerpt can never change the outcome.
+
+The helper strips terminal control bytes and neutralises exact untrusted
+markers, but it does **not** visualise Unicode bidi or format characters
+(U+202A–U+202E, U+2066–U+2069, and other `Cf` code points). These characters
+may affect visual ordering in terminals or logs that render them, and they are
+left as an acknowledged residual risk of this sanitizer. ADR-0016 calls for
+full Unicode visualisation; closing that gap requires routing the diagnostic
+through the strict renderer rather than the control-byte sanitizer used here.
+
 ## macOS containment
 
 macOS `contained` assurance has two complementary paths:

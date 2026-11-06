@@ -29,6 +29,7 @@ use tracing::debug;
 
 pub use arbitraitor_sandbox::SandboxConfig;
 
+mod isolation;
 #[cfg(target_os = "linux")]
 pub mod native;
 pub mod powershell;
@@ -92,6 +93,32 @@ pub enum ExecError {
     )]
     NetworkIsolationUnavailable {
         /// Why the network-namespace wrapper cannot be used.
+        ///
+        /// When the reason comes from the wrapper's stderr it is untrusted
+        /// text: the exec layer escapes it through the shared ADR-0016
+        /// untrusted-presentation helper before it is stored.
+        reason: String,
+    },
+    /// The `unshare` wrapper executed but the target binary/interpreter could
+    /// not be exec'd.
+    ///
+    /// This is distinct from [`ExecError::NetworkIsolationUnavailable`]: the
+    /// namespace was created successfully, so the refusal was not a setup
+    /// failure, but `execve` of the target returned `ENOENT`, `EACCES`, or
+    /// another error before the target ever ran. The wrapper's stderr is
+    /// bounded and surfaced in the reason so callers can distinguish a missing
+    /// interpreter from a namespace refusal (issue #827).
+    ///
+    /// The reason is untrusted text: it comes from the wrapper or the target.
+    /// The exec layer escapes it through the shared ADR-0016
+    /// untrusted-presentation helper before it is stored, so it carries no
+    /// terminal control sequence and cannot forge the framework's own
+    /// untrusted-data markers.
+    #[error("unshare wrapper failed to execute target: {reason}")]
+    UnshareTargetExecFailed {
+        /// Bounded excerpt of the wrapper's stderr naming the exec failure.
+        ///
+        /// Escaped by the exec layer before it is stored.
         reason: String,
     },
     /// Trusted policy did not grant the execute capability.
@@ -912,6 +939,16 @@ pub struct EffectiveControl {
 /// Every field is `Option` so that non-contained contexts serialize compactly
 /// (all `None`) and contained contexts carry exactly one entry per mandatory
 /// control.
+///
+/// For mediated CLI runs that request network isolation, the
+/// `network_isolation` field is populated when the `unshare` wrapper
+/// successfully execs the target. The `proof` value `"unshare"` is an interim,
+/// free-form mechanism label, not a typed attestation; a stronger proof
+/// handshake is tracked in issue #827. When the wrapper refuses to create the
+/// namespace, or when the target dies from a signal (`exit_code == None`), the
+/// matrix is omitted entirely rather than claiming an enforcement state that
+/// could not be observed. All other controls remain `None` in this narrow
+/// slice.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EffectiveControls {
     /// Filesystem isolation (chroot, namespace, `AppContainer`, `Landlock`, ...).

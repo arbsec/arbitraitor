@@ -382,9 +382,87 @@ closed when it cannot be installed:
   `unshare` helper, or with unprivileged user namespaces disabled by the kernel
   or an LSM, is refused with exit `30` (`BlockedByPolicy`) and a message naming
   the missing control (spec §27.7).
+- A mediated script run whose plan denies network access checks that the
+  `unshare` helper is **installed** before approval is requested. The check is
+  a file-presence test only — it does not claim the helper is executable, and
+  it does not run a namespace probe. The actual run classifies the wrapper's
+  output and fails closed, so a probe would only execute the wrapper an extra
+  time without improving the safety guarantee.
 - If the wrapper cannot create the namespace at dispatch — helper removed after
   the probe, namespace creation refused — the run fails and the binary is never
   executed. No path runs it with an interface after an isolated plan.
+
+#### What the receipt records
+
+The receipt records what the run actually observed, not what the plan
+requested. A mediated run whose executor installed the wrapper records the
+control in the receipt's effective-controls matrix:
+
+```json
+"effective_controls": {
+  "filesystem_isolation": null,
+  "network_isolation": {
+    "requested": true,
+    "applied": "enforced",
+    "proof": "unshare"
+  },
+  "process_tree_control": null,
+  "privilege_suppression": null,
+  "syscall_filtering": null,
+  "resource_limits": null
+}
+```
+
+The matrix is built from the executor's own state — it is never re-derived
+from the CLI flags — and it is omitted entirely, rather than filled with a
+guess, whenever the run cannot show the control was in force:
+
+- The wrapper could not execute the target: the run fails closed as an
+  execution error (exit `50`) and **no receipt is written**. The namespace
+  existed and the program never started, so blaming the host's ability to
+  isolate the network would be a false diagnosis.
+- The wrapper could not create the namespace: the run fails closed as a policy
+  block (exit `30`, `BlockedByPolicy`) and **no receipt is written**.
+- The wrapper failed in a way that could not be attributed to either cause:
+  the run fails closed as an execution error (exit `50`) and no receipt is
+  written.
+- The target was killed by a signal: the receipt **is** written — the run
+  happened — but the matrix is omitted, because a signal death leaves no
+  observable enforcement state.
+- The run was not isolated (`--network` or `--sandbox none`): no matrix is
+  written, because the run made no isolation claim.
+
+A refusal writes no receipt. The receipt is the audit record of a run that
+reached its target, and a refused run never did. Persisting deny evidence for
+refusals is tracked separately in
+[#791](https://github.com/arbsec/arbitraitor/issues/791).
+
+`proof` is a free-form mechanism label, not a typed attestation. It names the
+mechanism the run was confined by; it does not prove that the helper at
+`/usr/bin/unshare` was not itself substituted, and a wrapper that fails
+silently (no diagnostic, non-zero exit) is indistinguishable from a failing
+target. A receipt consumer that needs a hard guarantee must treat the label as
+a claim. The typed proof handshake that closes this gap is tracked in
+[#827](https://github.com/arbsec/arbitraitor/issues/827).
+
+#### How the wrapper's diagnostic is presented
+
+The wrapper's stderr is attacker-controlled text: it reaches the operator's
+terminal, the agent transcript, and the logs. The exec layer escapes it
+through the shared ADR-0016 untrusted-presentation helper before it becomes an
+error reason, so the diagnostic carries no terminal control sequence (ANSI
+CSI/OSC, bell, delete) and cannot forge the framework's own untrusted-data
+markers — a target that prints a marker is neutralised, and the diagnostic is
+fenced as untrusted data.
+
+The verdict is decided **before** the escaping: the wrapper's real prefixes and
+setup clauses are matched against the raw bytes, so how the excerpt is
+rendered can never change the outcome. The helper strips terminal control
+bytes and neutralises exact untrusted markers, but it does not visualise
+Unicode bidi or format characters (U+202A–U+202E, U+2066–U+2069, and other
+`Cf` code points). Those characters may affect visual ordering in terminals
+that render them, and they remain an acknowledged residual risk of this
+sanitizer.
 
 ### Execution time limit
 

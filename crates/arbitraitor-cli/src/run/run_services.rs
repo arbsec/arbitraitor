@@ -10,9 +10,12 @@ use std::time::Duration;
 
 use arbitraitor_analysis::{AnalysisCoordinator, RetrievalInfo as AnalysisRetrievalInfo};
 use arbitraitor_core::config::Config;
-use arbitraitor_exec::script::{ExecutionResult, ScriptExecution, mediated_execution_refusal};
+use arbitraitor_exec::script::{
+    ExecutionResult, ScriptExecution, mediated_execution_refusal, script_network_isolation_refusal,
+};
 use arbitraitor_exec::{
-    EnvAllowlist, ExecError, ExecutionPolicy, SandboxConfig, TempDirectoryPolicy,
+    ControlStatus, EffectiveControl, EffectiveControls, EnvAllowlist, ExecError, ExecutionPolicy,
+    SandboxConfig, TempDirectoryPolicy,
 };
 #[cfg(target_os = "linux")]
 use arbitraitor_exec::{NativeExecution, NativeExecutionGate};
@@ -47,10 +50,22 @@ impl RunServices for DefaultRunServices {
         network_isolated: bool,
     ) -> std::result::Result<(), RunFailure> {
         match mode {
-            ExecutionMode::Script => match mediated_execution_refusal() {
-                Some(error) => Err(map_exec_failure(&error)),
-                None => Ok(()),
-            },
+            ExecutionMode::Script => {
+                if let Some(error) = mediated_execution_refusal() {
+                    return Err(map_exec_failure(&error));
+                }
+                // The mediated script path denies the network through the
+                // `unshare` wrapper. Refuse before an approval is requested
+                // or a child is spawned when the host does not even have the
+                // helper installed, so the refusal names the missing control
+                // instead of surfacing as a failed run (issue #827). The
+                // check is a file-presence test only: the native path keeps
+                // its stronger namespace probe.
+                if let Some(error) = script_network_isolation_refusal(network_isolated) {
+                    return Err(map_exec_failure(&error));
+                }
+                Ok(())
+            }
             // A mediated native execution declares `network_allowed: false`
             // (spec §3.11, §9 invariant 17). Before an approval is requested or
             // the binary is released, prove the host can install that control
@@ -141,9 +156,12 @@ impl RunServices for DefaultRunServices {
         match mode {
             ExecutionMode::Script => {
                 let execution = script_execution(options)?;
+                // Read the isolation state from the executor that will perform
+                // the run — never from the CLI flags (issue #827).
+                let network_isolated = execution.network_isolated();
                 execution
                     .execute(&artifact.bytes)
-                    .map(execution_output)
+                    .map(|result| execution_output(result, network_isolated))
                     .map_err(|error| map_exec_failure(&error))
             }
             ExecutionMode::Native => execute_native_artifact(artifact, options),
@@ -180,13 +198,30 @@ impl RunServices for DefaultRunServices {
 /// 30, "blocked by policy"): the run was refused before dispatch because
 /// policy requires a control the host cannot enforce (spec §27.7, issues #839
 /// and #842). All other errors map to the generic execution failure.
-fn map_exec_failure(error: &ExecError) -> RunFailure {
+///
+/// A wrapper refusal that could not be attributed to a specific cause
+/// arrives as [`ExecError::Spawn`] with the wrapper's own diagnostic as the
+/// source error. The source is rendered into the message so the operator sees
+/// what the wrapper actually said instead of a bare "failed to spawn" line
+/// (issue #827).
+///
+/// Trust boundary: the wrapper's diagnostic is untrusted text. The exec layer
+/// escapes it through the shared ADR-0016 untrusted-presentation helper
+/// (`arbitraitor_model::untrusted::sanitize_for_agent`) before it becomes an
+/// error reason, so it carries no terminal control sequence and cannot forge
+/// the framework's own untrusted-data markers. The CLI renders the message it
+/// receives as-is — escaping is the producer's responsibility, not the
+/// renderer's.
+pub(super) fn map_exec_failure(error: &ExecError) -> RunFailure {
     match error {
         ExecError::WallClockExpired { .. } | ExecError::WallClockKillFailed { .. } => {
             RunFailure::AnalysisIncomplete(error.to_string())
         }
         ExecError::MediatedContainmentUnavailable
         | ExecError::NetworkIsolationUnavailable { .. } => RunFailure::Blocked(error.to_string()),
+        ExecError::Spawn { source } | ExecError::Wait { source } => {
+            RunFailure::Execution(format!("{error}: {source}"))
+        }
         _ => RunFailure::Execution(error.to_string()),
     }
 }
@@ -402,12 +437,39 @@ pub(super) fn validate_cli_policy_override(
     Ok(())
 }
 
-fn execution_output(result: ExecutionResult) -> ExecutionOutput {
+fn execution_output(result: ExecutionResult, network_isolated: bool) -> ExecutionOutput {
     ExecutionOutput {
         exit_code: result.exit_code,
         stdout: result.stdout,
         stderr: result.stderr,
+        network_isolated,
     }
+}
+
+/// Builds the effective-controls matrix recorded on a run receipt.
+///
+/// The matrix is populated only when the executor actually installed network
+/// isolation *and* the target reported an exit status. A run that was killed
+/// by a signal has no observable enforcement state, so the matrix is omitted
+/// rather than claiming one; a run that was not isolated makes no isolation
+/// claim at all (issue #827).
+///
+/// The `proof` value `"unshare"` is an interim, free-form mechanism label,
+/// not a typed attestation. It names the mechanism the run was confined by;
+/// it does not prove the wrapper was not itself substituted. A typed proof
+/// handshake is tracked in issue #827.
+fn effective_controls_for(output: &ExecutionOutput) -> Option<EffectiveControls> {
+    if !output.network_isolated || output.exit_code.is_none() {
+        return None;
+    }
+    Some(EffectiveControls {
+        network_isolation: Some(EffectiveControl {
+            requested: true,
+            applied: ControlStatus::Enforced,
+            proof: Some("unshare".to_owned()),
+        }),
+        ..EffectiveControls::default()
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -418,14 +480,18 @@ fn execute_native_artifact(
     let _gate = NativeExecutionGate::new();
     let path = native_release_path(&artifact.sha256)?;
     release_native_via_safe_destination(artifact, &path)?;
-    NativeExecution::new()
+    let execution = NativeExecution::new()
         .map_err(|error| RunFailure::Execution(error.to_string()))?
         // The plan binds `network:isolated` unless the operator explicitly
         // lowered assurance, so the execution must install exactly that
         // control (issue #842).
-        .with_network_isolated(!options.network_allowed)
+        .with_network_isolated(!options.network_allowed);
+    // Read the isolation state from the executor that will perform the run —
+    // never from the CLI flags (issue #827).
+    let network_isolated = execution.network_isolated();
+    execution
         .execute(&path)
-        .map(execution_output)
+        .map(|result| execution_output(result, network_isolated))
         .map_err(|error| map_exec_failure(&error))
 }
 
@@ -499,7 +565,7 @@ pub(super) fn build_run_receipt(
         sha256_verified: true,
         timestamp: now,
         approval: None,
-        effective_controls: None,
+        effective_controls: effective_controls_for(output),
     });
     for detector in &artifact.detector_versions {
         builder = builder.detector_version(detector.clone());

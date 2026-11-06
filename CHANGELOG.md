@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mediated `run` receipts now record the network-isolation control
+  (issue #827): the receipt's effective-controls matrix gains a
+  `network_isolation` entry (`requested: true`, `applied: "enforced"`,
+  `proof: "unshare"`) for a mediated run whose executor actually installed
+  the `unshare --user --map-current-user --net` wrapper. The state is read
+  from the executor, never re-derived from the CLI flags, and the matrix is
+  omitted entirely when the run cannot show the control was in force — a
+  target killed by a signal, or a run that was not isolated (`--network`,
+  `--sandbox none`). `proof` is a free-form mechanism label, not a typed
+  attestation; it does not prove the helper at `/usr/bin/unshare` was not
+  itself substituted. The typed proof handshake is tracked in #827.
 - Ingress-envelope authentication (PR #807, receipt schema v3): relay
   deliveries authenticate through a shared credential before any payload
   processing. Receipts gain the `ingress` bucket (`IngressInfo`:
@@ -289,6 +300,46 @@ caps pending record files at
 
 ### Fixed
 
+- **`unshare` refusals are no longer mistaken for a failing target**
+  (issue #827) — the network-namespace wrapper reports a refusal the way any
+  failing program does (a diagnostic on stderr, a non-zero exit), so a
+  mediated run whose network was never denied was indistinguishable from a
+  target that simply failed. The wrapper's output is now classified before
+  the result is handed back:
+  - a wrapper that created the namespace but could not execute the target
+    fails with the new typed error
+    `arbitraitor_exec::ExecError::UnshareTargetExecFailed`;
+  - a wrapper that could not create the namespace fails with
+    `ExecError::NetworkIsolationUnavailable` (a policy block, exit 30);
+  - any other wrapper failure fails closed as an ordinary execution error
+    (exit 50) rather than claiming a cause the wrapper never stated.
+
+  In every refusal case the run writes **no receipt**, so a receipt can never
+  claim an enforced control for a run that never had one. A wrapper
+  diagnostic is matched on a 512-byte bound and only when the target produced
+  no stdout, so a target's own `unshare: `-prefixed output cannot be read as
+  a wrapper refusal without a downgrade. The mediated script path also
+  refuses before approval is requested when the `unshare` helper is not
+  installed — a file-presence check only, with no namespace probe and no
+  executable-bit claim; the native path keeps its existing namespace probe.
+  A spawn or output-collection failure now reports the underlying cause
+  instead of a bare "failed to spawn" line, so the wrapper's own diagnostic
+  reaches the operator.
+
+  The wrapper's diagnostic is attacker-controlled text that ends up in
+  operator output, agent transcripts, and logs. It is escaped at the exec
+  layer through the shared ADR-0016 untrusted-presentation helper
+  (`arbitraitor_model::untrusted::sanitize_for_agent`) before it becomes an
+  error reason: control bytes (ANSI CSI/OSC, bell, delete) are stripped and a
+  forged untrusted-data marker is neutralised, so the diagnostic can neither
+  drive the terminal nor pose as the framework's own fence. The verdict is
+  decided *before* the escaping — the wrapper's prefixes and setup clauses are
+  matched against the raw bytes — so rendering can never change the outcome.
+  Unicode bidi and format characters (U+202A–U+202E, U+2066–U+2069, and other
+  `Cf` code points) are not visualised by this sanitizer and may affect visual
+  ordering in terminals that render them; they remain an acknowledged residual
+  risk. ADR-0016 calls for full Unicode visualisation; closing that gap
+  requires routing the diagnostic through the strict renderer.
 - **Native execution now enforces the network denial its plan declares**
   (#842) — `arbitraitor run --native` built a plan with
   `network_allowed: false` and then spawned the binary with no network control
