@@ -131,6 +131,7 @@ Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
 | `local_review_base_advanced` | recorded base is no longer an ancestor of the base |
 | `local_review_base_overlap` | the base advanced over a file this PR changes |
 | `local_review_head_object_unavailable` | the PR's changed paths (old and new) could not be computed — the head object is not available locally, so a moved file's old path is unknown |
+| `local_review_overlap_check_failed` | the base-overlap check could not be evaluated (a jq failure) — the gate cannot prove the base is compatible, so it blocks |
 | `local_review_raw_missing` | the indexed transcript is gone |
 | `local_review_hash_mismatch` | the transcript changed after it was recorded |
 | `local_review_transcript_mismatch` | the transcript's `# tree OID:`/`# base OID:` headers disagree with the record |
@@ -169,6 +170,18 @@ If the union cannot be computed — the head object is not available locally, so
 the old path of a move is unknown — the gate blocks with
 `local_review_head_object_unavailable`. An uncomputed path list is never read as
 "no overlap" or "no non-docs path": both would waive the review.
+
+**A failed check is not a false check.** `jq -e` exits `1` for a false or null
+result and `>= 2` for a runtime or system error, and a bare
+`if jq -e ...; then` treats both as false. Every path-set check therefore goes
+through a helper that separates the two: a jq failure is a failure, not a
+"false". A jq error in the `docs/spec/` exclusion, in the allowlist check or in
+the file-count check means the diff is **not** docs-only — the review is
+enforced; a jq error in the base-overlap check blocks with
+`local_review_overlap_check_failed`. The path lists are passed to jq through
+stdin, not through `--argjson`: a single argv entry is capped at ~128 KB
+(`MAX_ARG_STRLEN`), so a long enough path list would make jq fail to start —
+and a jq failure must never be read as "no overlap".
 
 **Docs-only exemption.** A diff is exempt only when every changed path — old and
 new — matches `^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/`

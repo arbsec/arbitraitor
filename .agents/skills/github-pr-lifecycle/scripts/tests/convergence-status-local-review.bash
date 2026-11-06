@@ -79,6 +79,46 @@ esac
 STUB
 chmod +x "$ROOT/coderabbit"
 
+# --- jq stub: simulates a jq runtime error --------------------------------------
+# `jq -e` exits 1 for a false/null result and >= 2 for a runtime or system
+# error. The gate must not read the second as "false": that would turn a jq
+# failure into "no spec path", "no non-docs path", or "no overlap" — and each
+# of those waives the local review. The stub fails for ONE filter (exact match
+# on the last argument, or a substring) and delegates everything else to the
+# real jq.
+export JQ_REAL="$(command -v jq)"
+cat > "$ROOT/jq" <<'STUB'
+#!/usr/bin/env bash
+filter="${!#}"
+if [ -n "${JQ_FAIL_EXACT:-}" ] && [ "$filter" = "$JQ_FAIL_EXACT" ]; then
+  echo "jq: simulated runtime error" >&2
+  exit 2
+fi
+if [ -n "${JQ_FAIL_SUBSTR:-}" ] && [[ "$filter" == *"$JQ_FAIL_SUBSTR"* ]]; then
+  echo "jq: simulated runtime error" >&2
+  exit 2
+fi
+exec "${JQ_REAL:?}" "$@"
+STUB
+chmod +x "$ROOT/jq"
+
+# run_conv_with_jq_failure <name> <exact-filter|substr-filter> <args...>
+# Runs the gate with the jq stub on PATH and the given filter failing.
+run_conv_jq_fails() { # run_conv_jq_fails <exact|exact-or-substr> <match> <args...>
+  local mode="$1" match="$2"; shift 2
+  local saved_path="$PATH"
+  PATH="$ROOT:$PATH"
+  export JQ_FAIL_EXACT="" JQ_FAIL_SUBSTR=""
+  if [ "$mode" = "exact" ]; then export JQ_FAIL_EXACT="$match"; else export JQ_FAIL_SUBSTR="$match"; fi
+  GOT=0
+  ( cd "$WORK" && GH_BIN="$ROOT/gh" bash "$SCRIPTS/convergence-status" "$@" ) \
+    > "$ROOT/out" 2> "$ROOT/err" || GOT=$?
+  OUT="$(cat "$ROOT/out")"
+  ERR="$(cat "$ROOT/err")"
+  PATH="$saved_path"
+  export JQ_FAIL_EXACT="" JQ_FAIL_SUBSTR=""
+}
+
 GH_CHECKS="$ROOT/checks.json"
 printf '[]\n' > "$GH_CHECKS"
 export GH_CHECKS
@@ -1057,6 +1097,87 @@ write_review "abc1234-20260101T000000Z" CLEAN
 run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "base rename over a path this PR changes is detected" 5
 expect_json "base rename over a path this PR changes status" '.local_review.status' "local_review_base_overlap"
+
+# ==============================================================================
+# 30. Regression: a jq failure must never be read as "false".
+#     `jq -e` exits 1 for a false/null result and >= 2 for a runtime or system
+#     error. A bare `if jq -e ...; then` treats BOTH as false, so a jq failure
+#     read as "no spec path", "no non-docs path" or "no overlap" would WAIVE
+#     the local review. Every path-set check now fails closed.
+# ==============================================================================
+
+# 30a. The `docs/spec/` exclusion cannot be evaluated -> the diff is not
+#       exempt -> the review is enforced (before the fix: docs_only_exempt).
+new_case
+start_feature
+printf '# readme\n' > "$WORK/README.md"
+commit_work "docs only"
+land_pr
+set_pr_view
+set_files "README.md"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv_jq_fails exact 'any(.[]; test("^docs/spec/"))' 42 --repo arbsec/arbitraitor --json
+expect_exit "a failing docs/spec check does not block the PR" 0
+expect_json "a failing docs/spec check enforces the review" '.local_review.status' "accepted"
+
+# 30b. The allowlist check cannot be evaluated -> the diff is not exempt ->
+#       the review is enforced (before the fix: docs_only_exempt).
+new_case
+start_feature
+printf '# readme\n' > "$WORK/README.md"
+commit_work "docs only"
+land_pr
+set_pr_view
+set_files "README.md"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv_jq_fails exact 'map(select(test($re) | not)) | length > 0' 42 --repo arbsec/arbitraitor --json
+expect_exit "a failing allowlist check does not block the PR" 0
+expect_json "a failing allowlist check enforces the review" '.local_review.status' "accepted"
+
+# 30c. The changed-file count cannot be evaluated -> the 50-file limit cannot
+#       be applied -> the diff is not exempt -> the review is enforced
+#       (before the fix: docs_only_exempt).
+new_case
+start_feature
+printf '# readme\n' > "$WORK/README.md"
+commit_work "docs only"
+land_pr
+set_pr_view
+set_files "README.md"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv_jq_fails exact 'length' 42 --repo arbsec/arbitraitor --json
+expect_exit "a failing file-count check does not block the PR" 0
+expect_json "a failing file-count check enforces the review" '.local_review.status' "accepted"
+
+# 30d. The base-overlap check cannot be evaluated -> the gate cannot prove the
+#       base is compatible -> it BLOCKS (before the fix: accepted, because a
+#       jq failure read as "no overlap").
+new_case
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base source"
+git -C "$WORK" push -q origin main
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
+BASE_OID="$(git -C "$WORK" rev-parse HEAD)"
+start_feature
+printf 'fn f() { /* pr */ }\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+# The base advances over the file this PR changes.
+git -C "$WORK" checkout -q main
+printf 'fn f() { /* base */ }\n' > "$WORK/src/lib.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base advance"
+git -C "$WORK" push -q origin main
+git -C "$WORK" checkout -q feature
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv_jq_fails substr 'any($' 42 --repo arbsec/arbitraitor --json
+expect_exit "a failing overlap check blocks the PR" 5
+expect_json "a failing overlap check status" '.local_review.status' "local_review_overlap_check_failed"
+expect_err_contains "a failing overlap check is loud" "the base-overlap check failed to run"
 
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

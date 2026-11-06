@@ -17,6 +17,12 @@
 # the record's own fields are cross-checked against the transcript headers, so
 # a stale transcript cannot be relabelled by editing the record alone; a fully
 # forged transcript with a matching record is still not detectable.
+#
+# Every path-set check fails closed. `jq -e` exits 1 for a false result and
+# >= 2 for a runtime or system error, so a jq failure must never be read as
+# "false": that would turn a broken check into "no spec path", "no non-docs
+# path" or "no overlap", and each of those waives the local review. See
+# jq_bool below.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -214,6 +220,25 @@ read_review_field() {
 # or an unavailable head object for the rename check.
 DOCS_ONLY_ERE='^(README[.]md|CHANGELOG[.]md|book/.*[.]md|docs/.*[.]md)$'
 
+# jq_bool: run a jq predicate and print "true" or "false".
+#
+# `jq -e` exits 1 for a false/null result and >= 2 for a runtime or system
+# error. A bare `if jq -e ...; then` treats BOTH as "false", so a jq failure
+# (malformed input, a filter error, an argument too long for the ~128 KB
+# single-argv limit) would be read as "no spec path", "no non-docs path", or
+# "no overlap" — and each of those waives the local review. This helper
+# separates the two: exit 1 is a genuine "false", anything else is a failure
+# and returns non-zero so the caller fails closed.
+jq_bool() { # jq_bool [jq args...] < json
+  local out rc=0
+  out="$(jq -e "$@")" || rc=$?
+  case "$rc" in
+    0) printf '%s' "$out" ;;
+    1) printf 'false' ;;
+    *) return 1 ;;
+  esac
+}
+
 # The PR's changed paths, OLD and NEW, as a JSON array.
 #
 # `gh pr diff --name-only` lists only the NEW path of a move, and git's rename
@@ -235,10 +260,13 @@ all_changed_paths_json() {
 }
 
 docs_only_exempt() {
-  local status_out all_paths_json
+  local status_out all_paths_json spec_hit n_files non_docs
   # Every path the PR touches, old AND new — see all_changed_paths_json.
   all_paths_json="$(all_changed_paths_json)" || return 1
-  if jq -e 'any(.[]; test("^docs/spec/"))' <<<"$all_paths_json" >/dev/null 2>&1; then
+  # A jq failure is NOT "no spec path": it returns non-zero and the diff is
+  # enforced.
+  spec_hit="$(jq_bool 'any(.[]; test("^docs/spec/"))' <<<"$all_paths_json")" || return 1
+  if [ "$spec_hit" = "true" ]; then
     return 1
   fi
   if [ -z "$HEAD_TREE" ]; then
@@ -248,11 +276,13 @@ docs_only_exempt() {
   if printf '%s\n' "$status_out" | grep -q '^R'; then
     return 1
   fi
-  if [ "$(jq 'length' <<<"$all_paths_json")" -gt 50 ]; then
+  n_files="$(jq 'length' <<<"$all_paths_json")" || return 1
+  if [ "$n_files" -gt 50 ]; then
     return 1
   fi
-  if jq -e --arg re "$DOCS_ONLY_ERE" \
-      'map(select(test($re) | not)) | length > 0' <<<"$all_paths_json" >/dev/null 2>&1; then
+  non_docs="$(jq_bool --arg re "$DOCS_ONLY_ERE" \
+    'map(select(test($re) | not)) | length > 0' <<<"$all_paths_json")" || return 1
+  if [ "$non_docs" = "true" ]; then
     return 1
   fi
   return 0
@@ -367,13 +397,32 @@ evaluate_local_review() {
     echo "error: cannot compute the PR's changed paths (the head object $HEAD_SHA is not available locally); refusing to merge without review evidence" >&2
     return 1
   fi
-  if [ -n "$advanced" ] \
-    && printf '%s\n' "$advanced" | jq -R -s -e --argjson changed "$changed_paths_json" \
-      'split("\n") | map(select(length > 0))
-       | map(select(. as $p | any($changed[]; . == $p))) | length > 0' >/dev/null 2>&1; then
-    LR_STATUS="local_review_base_overlap"
-    echo "error: the base advanced over files this PR changes; re-run pr-review-local against the new base" >&2
-    return 1
+  if [ -n "$advanced" ]; then
+    # Both path lists go through stdin. `--argjson changed "$changed_paths_json"`
+    # puts the whole list into ONE argv entry, and a single argument is capped
+    # at ~128 KB (MAX_ARG_STRLEN): a long enough path list makes jq fail to
+    # start, and a jq failure must not read as "no overlap".
+    local advanced_json overlap
+    advanced_json="$(printf '%s\n' "$advanced" \
+      | jq -R -s 'split("\n") | map(select(length > 0))')" || {
+      LR_STATUS="local_review_overlap_check_failed"
+      echo "error: cannot parse the base's advanced path list; refusing to merge without review evidence" >&2
+      return 1
+    }
+    if ! overlap="$(printf '%s\n%s\n' "$advanced_json" "$changed_paths_json" \
+      | jq_bool -s '
+          (.[0] | map(select(length > 0))) as $adv
+          | (.[1] | map(select(length > 0))) as $ch
+          | [$adv[] | select(. as $p | any($ch[]; . == $p))] | length > 0')"; then
+      LR_STATUS="local_review_overlap_check_failed"
+      echo "error: the base-overlap check failed to run; refusing to merge without review evidence" >&2
+      return 1
+    fi
+    if [ "$overlap" = "true" ]; then
+      LR_STATUS="local_review_base_overlap"
+      echo "error: the base advanced over files this PR changes; re-run pr-review-local against the new base" >&2
+      return 1
+    fi
   fi
 
   # 5. Raw transcript present, resolved inside the reviews directory only.
