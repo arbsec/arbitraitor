@@ -18,10 +18,19 @@ bad() { fail=$((fail + 1)); echo "FAIL $1${2:+: $2}" >&2; }
 # --- coderabbit stub -----------------------------------------------------------
 # `--version` -> $CR_VERSION; `review ...` appends one line to $CR_INVOKED and
 # prints $CR_OUTPUT. $CR_FAIL makes the review exit 1 with $CR_STDERR.
+# `usage` is the auth probe: it prints $CR_USAGE_OUTPUT / $CR_USAGE_STDERR and
+# exits $CR_USAGE_EXIT (default 0). $CR_USAGE_UNSUPPORTED simulates a CLI that
+# has no `usage` subcommand (falls through to the unknown-command exit 2).
 cat > "$ROOT/coderabbit" <<'STUB'
 #!/usr/bin/env bash
 case "${1:-}" in
   --version) printf '%s\n' "${CR_VERSION:-0.9.0}" ;;
+  usage)
+    if [ -n "${CR_USAGE_UNSUPPORTED:-}" ]; then exit 2; fi
+    if [ -n "${CR_USAGE_OUTPUT:-}" ]; then printf '%s\n' "$CR_USAGE_OUTPUT"; fi
+    if [ -n "${CR_USAGE_STDERR:-}" ]; then printf '%s\n' "$CR_USAGE_STDERR" >&2; fi
+    exit "${CR_USAGE_EXIT:-0}"
+    ;;
   review)
     if [ -n "${CR_INVOKED:-}" ]; then printf '%s\n' "$*" >> "$CR_INVOKED"; fi
     if [ -n "${CR_FAIL:-}" ]; then
@@ -373,6 +382,95 @@ export PR_JSON="{\"headRefOid\":\"$DIFF_PR_HEAD\",\"headRefName\":\"feature\",\"
 export PR_TREE="1111111111111111111111111111111111111111"
 run "$REPO_PR_DIFF" --pr 42
 expect_exit "PR mode content change exits 4" 4
+
+# 18. Review failure + dead session: `usage` is the only probe that sees a 401,
+#     so its text is surfaced on stderr with a concrete operator action and kept
+#     in the raw header. The review failure still exits 1.
+REPO_AUTH="$(make_repo)"
+export CR_FAIL=1 CR_STDERR="Review failed: authentication rejected"
+export CR_USAGE_EXIT=1
+export CR_USAGE_STDERR="Error: 401 UNAUTHORIZED — CLI session expired or revoked. Sign in again."
+run "$REPO_AUTH" --pre-push --base origin/main
+expect_exit "dead session still exits 1 (review failure wins)" 1
+if grep -q '^auth probe: failed (exit 1): Error: 401 UNAUTHORIZED' <<<"$ERR"; then
+  ok "auth probe verdict labelled on stderr"
+else
+  bad "auth probe verdict labelled on stderr" "stderr: $ERR"
+fi
+if grep -q "auth probe hint:.*coderabbit auth login" <<<"$ERR"; then
+  ok "auth probe names the operator action (auth login / --api-key)"
+else
+  bad "auth probe names the operator action (auth login / --api-key)" "stderr: $ERR"
+fi
+AUTH_RAW="$(find "$REPO_AUTH/.arbitraitor/reviews" -name '*.raw.txt' | head -n 1)"
+if [ -n "$AUTH_RAW" ] && grep -q '^# auth probe: failed (exit 1): Error: 401 UNAUTHORIZED' "$AUTH_RAW"; then
+  ok "raw header preserves the auth probe result"
+else
+  bad "raw header preserves the auth probe result" "raw=$AUTH_RAW"
+fi
+unset CR_FAIL CR_STDERR CR_USAGE_EXIT CR_USAGE_STDERR
+
+# 18b. The latent seat/quota wording gets its own action (assign a seat or use an
+#      Agentic API key); it must not be reported as a stale login.
+REPO_SEAT="$(make_repo)"
+export CR_FAIL=1 CR_STDERR="Review failed: no seat"
+export CR_USAGE_EXIT=1
+export CR_USAGE_OUTPUT="You've used all 3 included reviews and this Git provider account isn't linked to an assigned seat."
+run "$REPO_SEAT" --pre-push --base origin/main
+expect_exit "seat/quota failure still exits 1" 1
+if grep -q "auth probe hint:.*assign a CodeRabbit seat" <<<"$ERR"; then
+  ok "seat/quota probe prints the seat/API-key hint"
+else
+  bad "seat/quota probe prints the seat/API-key hint" "stderr: $ERR"
+fi
+unset CR_FAIL CR_STDERR CR_USAGE_EXIT CR_USAGE_OUTPUT
+
+# 19. A probe that cannot run must not crash the failure path under
+#     `set -euo pipefail` and must not replace the review's exit code; the
+#     failure is labelled either way.
+REPO_NOPROBE="$(make_repo)"
+export CR_FAIL=1 CR_STDERR="quota exhausted"
+export CR_USAGE_UNSUPPORTED=1
+run "$REPO_NOPROBE" --pre-push --base origin/main
+expect_exit "unsupported usage subcommand keeps exit 1" 1
+if grep -q '^auth probe: failed (exit 2): <no output>' <<<"$ERR"; then
+  ok "unsupported usage subcommand is labelled, not fatal"
+else
+  bad "unsupported usage subcommand is labelled, not fatal" "stderr: $ERR"
+fi
+unset CR_USAGE_UNSUPPORTED
+
+REPO_EMPTYPROBE="$(make_repo)"
+export CR_USAGE_EXIT=1
+run "$REPO_EMPTYPROBE" --pre-push --base origin/main
+expect_exit "silent probe failure keeps exit 1" 1
+if grep -q '^auth probe: failed (exit 1): <no output>' <<<"$ERR"; then
+  ok "silent probe failure is labelled <no output>"
+else
+  bad "silent probe failure is labelled <no output>" "stderr: $ERR"
+fi
+unset CR_FAIL CR_STDERR CR_USAGE_EXIT
+
+# 20. The probe is diagnostic-only: a failing `usage` after a SUCCESSFUL review
+#     must not fail the run (exit 0 stays 0, record still written), while the raw
+#     header records the probe outcome.
+REPO_OK_PROBE="$(make_repo)"
+export CR_USAGE_EXIT=1 CR_USAGE_STDERR="probe exploded"
+run "$REPO_OK_PROBE" --pre-push --base origin/main --verdict CLEAN
+expect_exit "failing auth probe does not gate a successful review" 0
+OKP_RAW="$(find "$REPO_OK_PROBE/.arbitraitor/reviews" -name '*.raw.txt' | head -n 1)"
+OKP_REC="$(find "$REPO_OK_PROBE/.arbitraitor/reviews" -name '*.md' | head -n 1)"
+if [ -n "$OKP_RAW" ] && grep -q '^# auth probe: failed (exit 1): probe exploded' "$OKP_RAW"; then
+  ok "successful review records the probe outcome in the raw header"
+else
+  bad "successful review records the probe outcome in the raw header" "raw=$OKP_RAW"
+fi
+if [ -n "$OKP_REC" ] && grep -qx -- "- verdict: CLEAN" "$OKP_REC"; then
+  ok "successful review still writes its record with a failing probe"
+else
+  bad "successful review still writes its record with a failing probe" "record=$OKP_REC"
+fi
+unset CR_USAGE_EXIT CR_USAGE_STDERR
 
 echo "pr-review-local fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

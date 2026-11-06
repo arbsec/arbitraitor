@@ -427,6 +427,58 @@ if ! version_ge "$CR_VER" "$MIN_CODERABBIT_VERSION"; then
   die "$E_CONFIG" "CodeRabbit CLI $CR_VER is older than $MIN_CODERABBIT_VERSION; upgrade it"
 fi
 
+# --- Auth probe (diagnostic only — never gates) --------------------------------
+# `coderabbit auth status` and `coderabbit doctor` are false negatives on a dead
+# session: both exit 0 and print "Signed in" (auth status swallows the seat
+# query's 401 into a log-only WARN; doctor only checks local metadata). Only
+# `coderabbit usage` reflects real auth state — it exits non-zero and carries the
+# server message. It talks to the cloud, so it is EVIDENCE ONLY: its exit status
+# is recorded and never propagated, and it can never fail a successful review.
+AUTH_PROBE_TIMEOUT_SECS=15
+AUTH_PROBE_STATUS=""
+AUTH_PROBE_DETAIL=""
+
+auth_probe() { # sets AUTH_PROBE_STATUS/AUTH_PROBE_DETAIL; always returns 0
+  local out="" rc=0 first=""
+  # Bound a hung seat query; when `timeout` is unavailable (macOS without
+  # coreutils) probe unbounded rather than skip the diagnosis.
+  if command -v timeout >/dev/null 2>&1; then
+    out="$(timeout "$AUTH_PROBE_TIMEOUT_SECS" "$CR_BIN" usage 2>&1)" || rc=$?
+  else
+    out="$("$CR_BIN" usage 2>&1)" || rc=$?
+  fi
+  first="$(printf '%s\n' "$out" | grep -m 1 -E '[^[:space:]]' || true)"
+  first="${first#"${first%%[![:space:]]*}"}"
+  first="${first%"${first##*[![:space:]]}"}"
+  [ -n "$first" ] || first="<no output>"
+  AUTH_PROBE_DETAIL="$first"
+  case "$rc" in
+    0)       AUTH_PROBE_STATUS="ok" ;;
+    124|137) AUTH_PROBE_STATUS="timed out after ${AUTH_PROBE_TIMEOUT_SECS}s" ;;
+    *)       AUTH_PROBE_STATUS="failed (exit $rc)" ;;
+  esac
+  return 0
+}
+
+auth_text_matches() { # auth_text_matches <ERE>; probe verdict + captured stderr
+  local re="$1"
+  printf '%s' "$AUTH_PROBE_STATUS: $AUTH_PROBE_DETAIL" | grep -qiE "$re" && return 0
+  if [ -s "$STDERR_FILE" ] && grep -qiE "$re" "$STDERR_FILE"; then return 0; fi
+  return 1
+}
+
+auth_probe_hint() { # prints one concrete operator action; always returns 0
+  if auth_text_matches 'not linked to an assigned seat|used all .* included reviews'; then
+    echo "auth probe hint: seat/quota failure, not a stale login — assign a CodeRabbit seat to the Git provider account, or use an Agentic API key (--api-key)" >&2
+  elif auth_text_matches 'session expired or revoked|sign in again|401|could not be authenticated'; then
+    # The last alternative is the observed v0.9.0 review-stderr wording; the
+    # server-side 401 text ("session expired or revoked ... Sign in again") is
+    # what `usage` prints for the same dead session.
+    echo "auth probe hint: the CLI session is dead — run 'coderabbit auth login' (or pass --api-key for a key-based run); 'auth status'/'doctor' report signed-in even then, so they are not a health check" >&2
+  fi
+  return 0
+}
+
 # --- Run the CLI, capturing stdout/stderr/exit verbatim ------------------------
 STDOUT_FILE="$(mktemp)"
 STDERR_FILE="$(mktemp)"
@@ -436,6 +488,10 @@ set +e
 "$CR_BIN" "${ARGS[@]}" >"$STDOUT_FILE" 2>"$STDERR_FILE"
 CLI_EXIT=$?
 set -e
+
+# Probe after every invocation, before the evidence is written, so the header can
+# carry the cause. Recorded, never interpreted as a gate.
+auth_probe
 
 # Persist the raw evidence FIRST — before any interpretation.
 mkdir -p "$REVIEW_DIR"
@@ -450,6 +506,7 @@ RAW_FILE="$REVIEW_DIR/$STEM.raw.txt"
   echo "# base ref: $BASE_REF"
   echo "# base OID: $BASE_OID"
   echo "# exit: $CLI_EXIT"
+  echo "# auth probe: $AUTH_PROBE_STATUS: $AUTH_PROBE_DETAIL"
   echo "# --- stdout ---"
   cat "$STDOUT_FILE"
   echo "# --- stderr ---"
@@ -459,6 +516,8 @@ RAW_FILE="$REVIEW_DIR/$STEM.raw.txt"
 if [ "$CLI_EXIT" -ne 0 ]; then
   echo "error: '$CR_BIN ${ARGS[*]}' exited $CLI_EXIT" >&2
   if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
+  echo "auth probe: $AUTH_PROBE_STATUS: $AUTH_PROBE_DETAIL" >&2
+  auth_probe_hint
   echo "raw output: ${RAW_FILE#"$TOP"/}" >&2
   exit "$E_CLI"
 fi
