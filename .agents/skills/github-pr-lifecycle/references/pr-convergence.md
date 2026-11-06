@@ -198,6 +198,15 @@ waiver is visible without turning a blocked PR into a mergeable one. Neither
 valve is a normal path — both are recorded so a reviewer can see exactly what
 was waived.
 
+**When a valve may be used.** The two valves are for the case where the local
+review cannot run at all: the CLI is unavailable, the auth probe fails, or the
+review quota is exhausted. They are never a convenience, and a waiver is only
+legitimate when it is (a) approved by the operator and (b) explained in the PR
+description. The waiver marker in `reasons` is not the approval — it is the
+audit trail that makes the waiver visible to the reviewer. See
+`arbitraitor-workflow.md` "PR convergence requirements" item 7 and "Forbidden
+administrative shortcuts".
+
 **The valves do not depend on the evidence they waive.** The diff, the base
 fetch, and the head-tree lookup are loaded only when local review is actually
 enforced. A PR too large for `gh pr diff`, an offline base fetch, or an
