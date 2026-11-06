@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+# pr-review-local: run the LOCAL CodeRabbit CLI as the pre-push adversarial
+# review mechanism, persist the raw CLI output verbatim, and write a
+# script-generated record that a later gate (PR B) can verify.
+#
+# Why the local CLI: the GitHub App check (`CodeRabbit`) auto-skips in this
+# repo, and posting `@coderabbitai review` (or any bot review-trigger comment)
+# is forbidden — bot comment triggers are no-ops during plan pauses and burn
+# review quota. The local binary is the mechanism. If the CLI is missing the
+# task is BLOCKED/escalated; never fall back to a comment trigger.
+# Contract: references/local-review-cli.md (verified against v0.9.0).
+#
+# Modes:
+#   --pre-push (default when no --pr)
+#       No `gh` calls at all. Detached HEAD -> exit 2. Best-effort
+#       `git fetch origin <base>` (warn + continue on failure; the local
+#       `origin/<base>` is used). No resolvable base -> exit 1. A dirty
+#       TRACKED tree -> exit 4 (untracked files are deliberately ignored).
+#   --pr <N|URL>
+#       Resolve the PR head/base with `gh`, then compare TREE OIDs — never
+#       commit SHAs: `xtask push-branch` lands a new GitHub-signed commit with
+#       an identical tree but a different OID, so SHA equality is impossible.
+#       Tree mismatch -> exit 4. Conflicting PR -> exit 5.
+#   --from-raw <file>
+#       Re-derive a record from a previously captured raw file without
+#       spending review quota (useful after a verdict-parser fix). The raw
+#       file must live under .arbitraitor/reviews/ and its recorded head OID
+#       must equal the current `git rev-parse HEAD`.
+#
+# Exit codes (NOTE: codes 4 and 5 differ from the generic _lib.sh meanings —
+# these are the pr-review-local contract):
+#   0  ok (or --dry-run preview)
+#   1  CLI/network/quota failure (also: no resolvable base)
+#   2  config/state (missing CLI, bad version, detached HEAD, unknown flag,
+#      missing config, missing/foreign --from-raw file)
+#   4  dirty tracked tree, or PR tree mismatch
+#   5  PR is conflicting (not mergeable)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+E_OK=0
+E_CLI=1
+E_CONFIG=2
+E_TREE=4
+E_CONFLICT=5
+
+MIN_CODERABBIT_VERSION="0.9.0"
+DEFAULT_BASE="origin/main"
+REVIEW_DIR_REL=".arbitraitor/reviews"
+
+usage() {
+  cat <<'EOF'
+Usage: pr-review-local [--pre-push | --pr <N|URL>] [options]
+       pr-review-local --from-raw <file> [options]
+
+Run the LOCAL CodeRabbit CLI review (`coderabbit review --agent --base <base>`)
+and persist .arbitraitor/reviews/<short-head>-<timestamp>.raw.txt plus a
+script-generated .md record. Never posts a bot review-trigger comment.
+
+Modes:
+  --pre-push           Review the local worktree against the base (default).
+                       No gh calls. Requires a branch (not detached HEAD) and a
+                       clean TRACKED tree (exit 4). Untracked files are ignored.
+  --pr N|URL           Review the local worktree after proving its tree matches
+                       the PR head tree (tree OIDs, not commit SHAs). Tree
+                       mismatch -> exit 4; conflicting PR -> exit 5.
+  --from-raw FILE      Re-derive the record from a stored raw file (same HEAD).
+
+Options:
+  --base REF           Base ref to review against (default: origin/main).
+  --verdict CLEAN|FINDINGS
+                       Explicit agent-supplied verdict. Used only when the CLI
+                       output carries no machine-readable verdict.
+  --dry-run            Print the exact coderabbit argv; run nothing.
+  --json               Emit the machine-readable record summary on stdout.
+  -R, --repo OWNER/REPO
+                       Repository for --pr (default: project config / git remote).
+  -h, --help           Show this help and exit 0.
+
+Environment:
+  CODERABBIT_BIN       CodeRabbit binary (default: coderabbit). Must be >= 0.9.0.
+  GH_BIN               gh binary (default: gh); only used in --pr mode.
+
+Exit codes:
+  0 ok | 1 CLI/network/quota failure | 2 config/state | 4 dirty tree or tree
+  mismatch | 5 PR conflicts
+EOF
+}
+
+die() { local code="$1"; shift; echo "error: $*" >&2; exit "$code"; }
+
+version_ge() { # version_ge <have> <min>; exit 0 when have >= min
+  awk -v a="$1" -v b="$2" 'BEGIN{
+    n = split(a, x, "."); m = split(b, y, ".");
+    c = (n > m ? n : m);
+    for (i = 1; i <= c; i++) {
+      ai = (i <= n ? x[i] + 0 : 0);
+      bi = (i <= m ? y[i] + 0 : 0);
+      if (ai > bi) exit 0;
+      if (ai < bi) exit 1;
+    }
+    exit 0;
+  }'
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    die "$E_CONFIG" "no sha256 tool found (sha256sum or shasum)"
+  fi
+}
+
+# --- Argument parsing ----------------------------------------------------------
+arb_lib_parse_common "$@"
+
+MODE=""
+OPT_BASE="$DEFAULT_BASE"
+OPT_PR=""
+OPT_VERDICT=""
+OPT_FROM_RAW=""
+
+need_value() { # need_value <flag> <have-count>
+  [ "$2" -ge 2 ] || die "$E_CONFIG" "$1 requires a value"
+}
+
+i=0
+SAW_PRE_PUSH=0
+SAW_BASE=0
+while [ "$i" -lt "${#ARB_LIB_EXTRA_ARGS[@]}" ]; do
+  arg="${ARB_LIB_EXTRA_ARGS[$i]}"
+  case "$arg" in
+    --pre-push)
+      SAW_PRE_PUSH=1; MODE="pre-push"; i=$((i + 1)) ;;
+    --pr)
+      need_value --pr "$((${#ARB_LIB_EXTRA_ARGS[@]} - i))"
+      OPT_PR="${ARB_LIB_EXTRA_ARGS[$((i + 1))]}"; MODE="pr"; i=$((i + 2)) ;;
+    --pr=*)
+      OPT_PR="${arg#--pr=}"; MODE="pr"; i=$((i + 1)) ;;
+    --base)
+      need_value --base "$((${#ARB_LIB_EXTRA_ARGS[@]} - i))"
+      OPT_BASE="${ARB_LIB_EXTRA_ARGS[$((i + 1))]}"; SAW_BASE=1; i=$((i + 2)) ;;
+    --base=*)
+      OPT_BASE="${arg#--base=}"; SAW_BASE=1; i=$((i + 1)) ;;
+    --verdict)
+      need_value --verdict "$((${#ARB_LIB_EXTRA_ARGS[@]} - i))"
+      OPT_VERDICT="${ARB_LIB_EXTRA_ARGS[$((i + 1))]}"; i=$((i + 2)) ;;
+    --verdict=*)
+      OPT_VERDICT="${arg#--verdict=}"; i=$((i + 1)) ;;
+    --from-raw)
+      need_value --from-raw "$((${#ARB_LIB_EXTRA_ARGS[@]} - i))"
+      OPT_FROM_RAW="${ARB_LIB_EXTRA_ARGS[$((i + 1))]}"; MODE="from-raw"; i=$((i + 2)) ;;
+    --from-raw=*)
+      OPT_FROM_RAW="${arg#--from-raw=}"; MODE="from-raw"; i=$((i + 1)) ;;
+    *)
+      die "$E_CONFIG" "unknown argument: $arg (see --help)" ;;
+  esac
+done
+
+if [ "$OPT_HELP" = true ]; then
+  usage
+  exit "$E_OK"
+fi
+
+case "$MODE" in
+  pre-push|pr|from-raw) ;;
+  *) MODE="pre-push" ;;
+esac
+if [ "$MODE" = "pr" ] && [ -z "$OPT_PR" ]; then
+  die "$E_CONFIG" "--pr requires a PR number or URL"
+fi
+if [ "$SAW_PRE_PUSH" = "1" ] && [ "$MODE" != "pre-push" ]; then
+  die "$E_CONFIG" "--pre-push cannot be combined with $MODE mode"
+fi
+if [ -n "$OPT_PR" ] && [ "$MODE" != "pr" ]; then
+  die "$E_CONFIG" "--pr cannot be combined with $MODE mode"
+fi
+if [ -n "$OPT_VERDICT" ]; then
+  case "$OPT_VERDICT" in
+    CLEAN|FINDINGS) ;;
+    *) die "$E_CONFIG" "--verdict must be CLEAN or FINDINGS (got: $OPT_VERDICT)" ;;
+  esac
+fi
+# Values reach `git fetch`/`git rev-parse`/`gh` as argv; refuse option-like input.
+case "$OPT_BASE" in
+  ""|-*) die "$E_CONFIG" "--base must be a non-empty ref that does not start with '-' (got: $OPT_BASE)" ;;
+esac
+if [ -n "$OPT_PR" ] && ! printf '%s' "$OPT_PR" | grep -qE '^([0-9]+|https?://[^[:space:]]+)$'; then
+  die "$E_CONFIG" "--pr must be a PR number or an https URL (got: $OPT_PR)"
+fi
+if [ -n "$OPT_FROM_RAW" ] && [ "$MODE" != "from-raw" ]; then
+  die "$E_CONFIG" "--from-raw cannot be combined with $MODE mode"
+fi
+
+TOP="$(git rev-parse --show-toplevel 2>/dev/null)" \
+  || die "$E_CONFIG" "not inside a git repository; cannot run a local review"
+REVIEW_DIR="$TOP/$REVIEW_DIR_REL"
+
+# --- Verdict derivation --------------------------------------------------------
+# Never guess. `coderabbit review --agent` emits NDJSON (one object per line):
+# observed on v0.9.0 are `{"type":"review_context",...}` and, on failure,
+# `{"type":"error","errorType":...,"message":...,"recoverable":...}`. A
+# SUCCESSFUL review's finding/count record was NOT observed (stage 0 failed
+# auth), so nothing about a successful stdout is inferred. The verdict is
+# therefore only ever an explicit --verdict value; otherwise UNKNOWN — the raw
+# file stays the evidence and the record says so instead of inventing
+# "findings: 0". See references/local-review-cli.md, "Observed on v0.9.0".
+derive_verdict() { # derive_verdict <stdout-file> (file kept as evidence)
+  if [ -n "$OPT_VERDICT" ]; then
+    echo "$OPT_VERDICT"; return 0
+  fi
+  echo "UNKNOWN"
+}
+
+write_record() { # write_record <raw-file> <stem> <head> <tree> <base> <cli-exit> <verdict> [pr-head] [pr-tree]
+  local raw="$1" stem="$2" head="$3" tree="$4" base="$5" cli_exit="$6" verdict="$7"
+  local pr_head="${8:-}" pr_tree="${9:-}"
+  local record="$REVIEW_DIR/$stem.md"
+  local raw_name raw_sha generated
+  raw_name="$(basename "$raw")"
+  raw_sha="$(sha256_of "$raw")"
+  generated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  {
+    echo "# Local CodeRabbit review record"
+    echo
+    echo "Script-generated by \`.agents/skills/github-pr-lifecycle/scripts/pr-review-local\`."
+    echo "The raw CLI transcript is the evidence; this record only indexes it."
+    echo
+    echo "- verdict: $verdict"
+    echo "- head OID: $head"
+    echo "- tree OID: $tree"
+    echo "- base OID: $base"
+    echo "- cli exit: $cli_exit"
+    if [ -n "$pr_head" ]; then
+      echo "- pr head OID: $pr_head"
+      echo "- pr tree OID: $pr_tree"
+    fi
+    echo "- raw file: $raw_name"
+    echo "- raw sha256: $raw_sha"
+    echo "- generated: $generated"
+  } > "$record"
+  RECORD_FILE="$record"
+  RAW_FILE="$raw"
+  RAW_SHA256="$raw_sha"
+  VERDICT="$verdict"
+  GENERATED="$generated"
+}
+
+emit_json() {
+  [ "$OPT_JSON" = true ] || return 0
+  jq -n \
+    --arg verdict "$VERDICT" \
+    --arg head "$HEAD_OID" \
+    --arg tree "$TREE_OID" \
+    --arg base "$BASE_OID" \
+    --argjson cli_exit "${CLI_EXIT:-0}" \
+    --arg raw "$(basename "${RAW_FILE:-}")" \
+    --arg raw_sha256 "${RAW_SHA256:-}" \
+    --arg record "$(basename "${RECORD_FILE:-}")" \
+    '{verdict: $verdict, head: $head, tree: $tree, base: $base,
+      cli_exit: $cli_exit, raw_file: $raw, raw_sha256: $raw_sha256,
+      record_file: $record}'
+}
+
+# --- Base resolution -----------------------------------------------------------
+resolve_base() { # resolve_base <ref> [fetch] -> prints "<resolved-ref>\t<oid>"
+  local ref="$1" do_fetch="${2:-yes}" branch oid
+  branch="${ref#refs/remotes/}"
+  branch="${branch#origin/}"
+  if [ "$do_fetch" = "yes" ]; then
+    if ! git fetch --quiet origin -- "$branch" >/dev/null 2>&1; then
+      echo "warning: git fetch origin $branch failed (offline?); using the local origin/$branch" >&2
+    fi
+  fi
+  if oid="$(git rev-parse --verify --quiet "$ref^{commit}")"; then
+    printf '%s\t%s\n' "$ref" "$oid"; return 0
+  fi
+  if oid="$(git rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}")"; then
+    printf '%s\t%s\n' "refs/remotes/origin/$branch" "$oid"; return 0
+  fi
+  return 1
+}
+
+# --- --from-raw: re-derive a record only (no CLI, no quota) --------------------
+if [ "$MODE" = "from-raw" ]; then
+  case "$OPT_FROM_RAW" in
+    /*) RAW_IN="$OPT_FROM_RAW" ;;
+    *)  RAW_IN="$TOP/$OPT_FROM_RAW" ;;
+  esac
+  [ -f "$RAW_IN" ] || die "$E_CONFIG" "raw file not found: $OPT_FROM_RAW"
+  # Canonicalize before the containment check: a `../` segment must not escape
+  # .arbitraitor/reviews/ while still matching the string prefix.
+  RAW_DIR="$(cd "$(dirname "$RAW_IN")" 2>/dev/null && pwd -P)" \
+    || die "$E_CONFIG" "raw file directory not found: $OPT_FROM_RAW"
+  REVIEW_DIR_CANON="$(cd "$REVIEW_DIR" 2>/dev/null && pwd -P)" \
+    || die "$E_CONFIG" "review directory not found: $REVIEW_DIR_REL"
+  [ "$RAW_DIR" = "$REVIEW_DIR_CANON" ] \
+    || die "$E_CONFIG" "raw file must live directly under $REVIEW_DIR_REL/ (got: $OPT_FROM_RAW)"
+  RAW_IN="$RAW_DIR/$(basename "$RAW_IN")"
+  HEAD_OID="$(git rev-parse HEAD)"
+  TREE_OID="$(git rev-parse 'HEAD^{tree}')"
+  RAW_HEAD="$(awk -F': ' '/^# head OID:/{print $2; exit}' "$RAW_IN")"
+  [ -n "$RAW_HEAD" ] || die "$E_CONFIG" "raw file has no '# head OID:' header: $OPT_FROM_RAW"
+  [ "$RAW_HEAD" = "$HEAD_OID" ] || die "$E_CONFIG" \
+    "raw file was captured at head $RAW_HEAD, current HEAD is $HEAD_OID; re-run the review instead"
+  RAW_BASE_REF="$(awk -F': ' '/^# base ref:/{print $2; exit}' "$RAW_IN")"
+  RAW_BASE_OID="$(awk -F': ' '/^# base OID:/{print $2; exit}' "$RAW_IN")"
+  CLI_EXIT="$(awk -F': ' '/^# exit:/{print $2; exit}' "$RAW_IN")"
+  case "$CLI_EXIT" in
+    ""|*[!0-9]*) die "$E_CONFIG" "raw file has no numeric '# exit:' header: $OPT_FROM_RAW" ;;
+  esac
+  [ "$CLI_EXIT" -eq 0 ] || die "$E_CLI" "raw file records CLI exit $CLI_EXIT; cannot derive a verdict from a failed run"
+  RAW_STDOUT="$(mktemp)"
+  trap 'rm -f "$RAW_STDOUT"' EXIT
+  awk '/^# --- stdout ---$/{on=1; next} /^# --- stderr ---$/{on=0} on' "$RAW_IN" > "$RAW_STDOUT"
+  [ "$RAW_BASE_OID" != "" ] || die "$E_CONFIG" "raw file has no '# base OID:' header: $OPT_FROM_RAW"
+  [ "$RAW_BASE_REF" != "" ] || die "$E_CONFIG" "raw file has no '# base ref:' header: $OPT_FROM_RAW"
+  BASE_OID="$RAW_BASE_OID"
+  BASE_REF="$RAW_BASE_REF"
+  if [ "$SAW_BASE" = "1" ]; then
+    echo "warning: --base $OPT_BASE ignored in --from-raw mode; the record uses the raw file's base" >&2
+  fi
+  [ "$OPT_DRY_RUN" = true ] && die "$E_CONFIG" "--from-raw does not run anything; --dry-run is meaningless"
+  VERDICT="$(derive_verdict "$RAW_STDOUT")"
+  STEM="$(basename "$RAW_IN")"; STEM="${STEM%.raw.txt}"
+  write_record "$RAW_IN" "$STEM" "$HEAD_OID" "$TREE_OID" "$BASE_OID" "$CLI_EXIT" "$VERDICT"
+  echo "record:  ${RECORD_FILE#"$TOP"/}"
+  echo "verdict: $VERDICT"
+  emit_json
+  exit "$E_OK"
+fi
+
+# --- --pre-push state checks ---------------------------------------------------
+if [ "$MODE" = "pre-push" ]; then
+  if ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
+    die "$E_CONFIG" "detached HEAD: checkout the PR branch before a pre-push review"
+  fi
+  if [ "$OPT_DRY_RUN" = false ]; then
+    RESOLVED="$(resolve_base "$OPT_BASE" yes)" \
+      || die "$E_CLI" "cannot resolve base '$OPT_BASE' (and no origin/$OPT_BASE locally)"
+    BASE_REF="${RESOLVED%%$'\t'*}"
+    BASE_OID="${RESOLVED##*$'\t'}"
+  else
+    BASE_REF="$OPT_BASE"
+    BASE_OID=""
+  fi
+  HEAD_OID="$(git rev-parse HEAD)"
+  TREE_OID="$(git rev-parse 'HEAD^{tree}')"
+else
+  # --- --pr resolution: gh + tree equality ------------------------------------
+  # An explicit --repo makes this read-only path independent of the local project
+  # config; only resolve from config when the repo was not passed on the CLI.
+  if [ -z "$OPT_REPO" ]; then
+    arb_lib_load_project_config
+  fi
+  REPO="$(arb_lib_resolve_repo)"
+  arb_lib_require_gh_scope
+  PR_JSON="$(arb_lib_gh pr view "$OPT_PR" --repo "$REPO" \
+    --json headRefOid,headRefName,baseRefName,mergeable)" \
+    || die "$E_CLI" "gh pr view $OPT_PR failed"
+  PR_HEAD_OID="$(printf '%s' "$PR_JSON" | jq -r '.headRefOid // empty')"
+  PR_HEAD_REF="$(printf '%s' "$PR_JSON" | jq -r '.headRefName // empty')"
+  PR_BASE_REF="$(printf '%s' "$PR_JSON" | jq -r '.baseRefName // empty')"
+  PR_MERGEABLE="$(printf '%s' "$PR_JSON" | jq -r '.mergeable // empty')"
+  [ -n "$PR_HEAD_OID" ] || die "$E_CONFIG" "gh did not return a headRefOid for PR $OPT_PR"
+  [ -n "$PR_BASE_REF" ] || die "$E_CONFIG" "gh did not return a baseRefName for PR $OPT_PR"
+  case "$PR_MERGEABLE" in
+    CONFLICTING) die "$E_CONFLICT" "PR $OPT_PR is conflicting; resolve the merge conflicts first" ;;
+    UNKNOWN|"") die "$E_CONFIG" "GitHub has not computed mergeability for PR $OPT_PR yet; re-run shortly" ;;
+  esac
+  HEAD_OID="$(git rev-parse HEAD)"
+  TREE_OID="$(git rev-parse 'HEAD^{tree}')"
+  PR_TREE_OID="$(git rev-parse --verify --quiet "$PR_HEAD_OID^{tree}" || true)"
+  if [ -z "$PR_TREE_OID" ] && [ -n "$PR_HEAD_REF" ]; then
+    git fetch --quiet origin -- "$PR_HEAD_REF" >/dev/null 2>&1 || true
+    PR_TREE_OID="$(git rev-parse --verify --quiet "$PR_HEAD_OID^{tree}" || true)"
+  fi
+  if [ -z "$PR_TREE_OID" ]; then
+    # The object is not local; ask the API for the tree of the PR head commit.
+    PR_TREE_OID="$(arb_lib_gh api "repos/$REPO/git/commits/$PR_HEAD_OID" --jq '.tree.sha' 2>/dev/null || true)"
+  fi
+  [ -n "$PR_TREE_OID" ] || die "$E_CLI" "cannot resolve the tree of PR head $PR_HEAD_OID"
+  if [ "$TREE_OID" != "$PR_TREE_OID" ]; then
+    die "$E_TREE" "PR tree mismatch: local HEAD tree $TREE_OID != PR head tree $PR_TREE_OID (land the commit via xtask push-branch first)"
+  fi
+  RESOLVED="$(resolve_base "origin/$PR_BASE_REF" yes)" \
+    || die "$E_CLI" "cannot resolve base 'origin/$PR_BASE_REF' (and no local origin/$PR_BASE_REF)"
+  BASE_REF="${RESOLVED%%$'\t'*}"
+  BASE_OID="${RESOLVED##*$'\t'}"
+  if [ "$SAW_BASE" = "1" ]; then
+    echo "warning: --base $OPT_BASE ignored in --pr mode; using the PR base origin/$PR_BASE_REF" >&2
+  fi
+fi
+
+CLI_BASE="$BASE_REF"
+ARGS=(review --agent --base "$CLI_BASE")
+
+# --- Dry run: print the exact argv, run nothing --------------------------------
+if [ "$OPT_DRY_RUN" = true ]; then
+  CR_BIN="${CODERABBIT_BIN:-coderabbit}"
+  printf '[dry-run] '
+  printf '%q ' "$CR_BIN" "${ARGS[@]}"
+  printf '\n'
+  exit "$E_OK"
+fi
+
+# --- Dirty tracked tree (untracked files are deliberately ignored) -------------
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  die "$E_TREE" "dirty tracked tree: commit or stash tracked changes before reviewing (untracked files are ignored)"
+fi
+
+# --- CLI presence + version gate -----------------------------------------------
+CR_BIN="${CODERABBIT_BIN:-coderabbit}"
+if ! command -v "$CR_BIN" >/dev/null 2>&1; then
+  die "$E_CONFIG" "CodeRabbit CLI not found: '$CR_BIN' (set CODERABBIT_BIN). The task is BLOCKED — never fall back to a bot review-trigger comment."
+fi
+CR_VER_RAW="$("$CR_BIN" --version 2>/dev/null)" || die "$E_CONFIG" "'$CR_BIN --version' failed; cannot verify the >= $MIN_CODERABBIT_VERSION contract"
+CR_VER="$(printf '%s' "$CR_VER_RAW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+if [ -z "$CR_VER" ]; then
+  die "$E_CONFIG" "cannot parse a version from '$CR_BIN --version' output: ${CR_VER_RAW:-<empty>}"
+fi
+if ! version_ge "$CR_VER" "$MIN_CODERABBIT_VERSION"; then
+  die "$E_CONFIG" "CodeRabbit CLI $CR_VER is older than $MIN_CODERABBIT_VERSION; upgrade it"
+fi
+
+# --- Run the CLI, capturing stdout/stderr/exit verbatim ------------------------
+STDOUT_FILE="$(mktemp)"
+STDERR_FILE="$(mktemp)"
+trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE"' EXIT
+
+set +e
+"$CR_BIN" "${ARGS[@]}" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+CLI_EXIT=$?
+set -e
+
+# Persist the raw evidence FIRST — before any interpretation.
+mkdir -p "$REVIEW_DIR"
+SHORT_HEAD="$(git rev-parse --short HEAD)"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+STEM="$SHORT_HEAD-$TS"
+RAW_FILE="$REVIEW_DIR/$STEM.raw.txt"
+{
+  echo "# command: $CR_BIN ${ARGS[*]}"
+  echo "# head OID: $HEAD_OID"
+  echo "# tree OID: $TREE_OID"
+  echo "# base ref: $BASE_REF"
+  echo "# base OID: $BASE_OID"
+  echo "# exit: $CLI_EXIT"
+  echo "# --- stdout ---"
+  cat "$STDOUT_FILE"
+  echo "# --- stderr ---"
+  cat "$STDERR_FILE"
+} > "$RAW_FILE"
+
+if [ "$CLI_EXIT" -ne 0 ]; then
+  echo "error: '$CR_BIN ${ARGS[*]}' exited $CLI_EXIT" >&2
+  if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
+  echo "raw output: ${RAW_FILE#"$TOP"/}" >&2
+  exit "$E_CLI"
+fi
+
+VERDICT="$(derive_verdict "$STDOUT_FILE")"
+write_record "$RAW_FILE" "$STEM" "$HEAD_OID" "$TREE_OID" "$BASE_OID" "$CLI_EXIT" "$VERDICT" \
+  "${PR_HEAD_OID:-}" "${PR_TREE_OID:-}"
+
+echo "verdict: $VERDICT"
+echo "head:    $HEAD_OID"
+echo "tree:    $TREE_OID"
+echo "base:    $BASE_OID"
+echo "raw:     ${RAW_FILE#"$TOP"/}"
+echo "record:  ${RECORD_FILE#"$TOP"/}"
+if [ "$VERDICT" = "UNKNOWN" ]; then
+  echo "warning: no machine-readable verdict in the CLI output; the record says UNKNOWN (pass --verdict CLEAN|FINDINGS with evidence)" >&2
+fi
+emit_json
+exit "$E_OK"

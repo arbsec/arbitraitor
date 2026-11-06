@@ -88,7 +88,8 @@ ALL_PASS='[
  {"name":"CodeQL Analysis","state":"SUCCESS","bucket":"pass","link":"","startedAt":null,"completedAt":null},
  {"name":"Agent Skills Tests","state":"SUCCESS","bucket":"pass","link":"","startedAt":null,"completedAt":null},
  {"name":"Documentation","state":"SKIPPED","bucket":"skipping","workflow":"Code","link":"","startedAt":null,"completedAt":null},
- {"name":"qlty check","state":"SUCCESS","bucket":"pass","workflow":"qlty","link":"","startedAt":null,"completedAt":null}
+ {"name":"qlty check","state":"SUCCESS","bucket":"pass","workflow":"qlty","link":"","startedAt":null,"completedAt":null},
+ {"name":"CodeRabbit","state":"SKIPPED","bucket":"skipping","workflow":"CodeRabbit","link":"","startedAt":null,"completedAt":null}
 ]'
 FULL_JSON='{"all_passed":true,"any_failing":false,"any_pending":false,"missing_required":[]}'
 
@@ -133,6 +134,16 @@ run_case "pending checks report via JSON" "$PENDING_FIXTURE" "AGENTS.md" \
 # 8. Empty rollup -> all_passed false (a missing check is a failure, not a pass)
 run_case "empty rollup fails closed" "[]" "AGENTS.md" \
   '{"all_passed":false,"any_failing":false,"any_pending":false,"missing_required":[]}'
+
+# 8b. CodeRabbit: the App check auto-skips; the local CLI is the mechanism.
+#     A skipping CodeRabbit (listed in [checks].optional) is exempt.
+run_case "CodeRabbit skipped is exempt" "$ALL_PASS" "README.md" "$FULL_JSON"
+
+# 8c. ...but a CodeRabbit run that actually FAILED still blocks. The exemption
+#     requires bucket == "skipping" — a failure is never a pass.
+CODERABBIT_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[] |= (if .name == "CodeRabbit" then .bucket = "fail" | .state = "FAILURE" else . end)')"
+run_case "CodeRabbit failed still blocks" "$CODERABBIT_FAIL_FIXTURE" "README.md" \
+  '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
 
 # 9. Hard gh failure (empty output, non-8 exit) -> exit 1
 printf '' > "$FIXTURE"
