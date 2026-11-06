@@ -441,9 +441,10 @@ AUTH_PROBE_DETAIL=""
 auth_probe() { # sets AUTH_PROBE_STATUS/AUTH_PROBE_DETAIL; always returns 0
   local out="" rc=0 first=""
   # Bound a hung seat query; when `timeout` is unavailable (macOS without
-  # coreutils) probe unbounded rather than skip the diagnosis.
+  # coreutils) probe unbounded rather than skip the diagnosis. `-k 2` follows the
+  # SIGTERM with SIGKILL, so a CLI that ignores SIGTERM cannot escape the bound.
   if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout "$AUTH_PROBE_TIMEOUT_SECS" "$CR_BIN" usage 2>&1)" || rc=$?
+    out="$(timeout -k 2 "$AUTH_PROBE_TIMEOUT_SECS" "$CR_BIN" usage 2>&1)" || rc=$?
   else
     out="$("$CR_BIN" usage 2>&1)" || rc=$?
   fi
@@ -451,6 +452,9 @@ auth_probe() { # sets AUTH_PROBE_STATUS/AUTH_PROBE_DETAIL; always returns 0
   first="${first#"${first%%[![:space:]]*}"}"
   first="${first%"${first##*[![:space:]]}"}"
   [ -n "$first" ] || first="<no output>"
+  # Cap before the line reaches the raw header or stderr: one hostile or buggy
+  # CLI must not bloat the evidence file.
+  first="${first:0:200}"
   AUTH_PROBE_DETAIL="$first"
   case "$rc" in
     0)       AUTH_PROBE_STATUS="ok" ;;
@@ -470,10 +474,14 @@ auth_text_matches() { # auth_text_matches <ERE>; probe verdict + captured stderr
 auth_probe_hint() { # prints one concrete operator action; always returns 0
   if auth_text_matches 'not linked to an assigned seat|used all .* included reviews'; then
     echo "auth probe hint: seat/quota failure, not a stale login — assign a CodeRabbit seat to the Git provider account, or use an Agentic API key (--api-key)" >&2
-  elif auth_text_matches 'session expired or revoked|sign in again|401|could not be authenticated'; then
-    # The last alternative is the observed v0.9.0 review-stderr wording; the
-    # server-side 401 text ("session expired or revoked ... Sign in again") is
-    # what `usage` prints for the same dead session.
+  elif auth_text_matches 'session expired or revoked|sign in again|could not be authenticated|401.*(unauthor|session|sign in)'; then
+    # The first three alternatives are the observed wordings: v0.9.0 review
+    # stderr ("could not be authenticated") and the server-side 401 text
+    # ("session expired or revoked ... Sign in again") that `usage` prints for
+    # the same dead session. A bare `401` is deliberately NOT matched: an
+    # unrelated 401 — or those digits inside a larger number — must not send the
+    # operator to `auth login`. The 401 alternative therefore requires an auth
+    # word on the same line.
     echo "auth probe hint: the CLI session is dead — run 'coderabbit auth login' (or pass --api-key for a key-based run); 'auth status'/'doctor' report signed-in even then, so they are not a health check" >&2
   fi
   return 0

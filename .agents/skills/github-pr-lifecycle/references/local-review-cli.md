@@ -73,10 +73,16 @@ Rules learned the hard way:
   reachability. Neither may be used as an auth health check.
 - `coderabbit usage` is the only cheap probe that reflects real auth state (`usage` exits
   `1` with the server message). It is **diagnostic-only**: `pr-review-local` runs it after
-  every review invocation (bounded by `timeout 15`), records the result in the raw file's
-  `# auth probe:` header, and — when the review itself failed — prints the verdict plus a
-  concrete operator hint on stderr. A probe failure must never gate: a successful review
-  stays exit `0`, and a failed probe never replaces the review's own exit code.
+  every review invocation, records the result in the raw file's `# auth probe:` header, and
+  — when the review itself failed — prints the verdict plus a concrete operator hint on
+  stderr. A probe failure must never gate: a successful review stays exit `0`, and a failed
+  probe never replaces the review's own exit code.
+  The probe is bounded by `timeout -k 2 15` (15 s `SIGTERM`, then `SIGKILL` after 2 s) when
+  `timeout` is on `PATH`. Without `timeout` — macOS without coreutils, the same condition
+  the script already tolerates elsewhere — the probe runs **unbounded** rather than being
+  skipped, so a hung seat query can stall the diagnostic path (never the review's exit
+  code, which is already captured). The first line of probe output is capped at 200
+  characters before it reaches the header or stderr.
 - The CLI serializes these errors as `{}` in its structured output, destroying the server
   message; only the free-text stderr/human line survives.
 - Auto-update stalled at `0.9.0` (a `0.9.2` update is pending). The runtime gate stays

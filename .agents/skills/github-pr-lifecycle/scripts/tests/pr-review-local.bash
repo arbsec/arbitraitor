@@ -425,6 +425,26 @@ else
 fi
 unset CR_FAIL CR_STDERR CR_USAGE_EXIT CR_USAGE_OUTPUT
 
+# 18c. A 401 that carries no auth meaning (a proxy/upstream status code, here with
+#      the digits inside a larger number too) must not send the operator to
+#      `auth login`: the matcher requires an auth word on the same line.
+REPO_401="$(make_repo)"
+export CR_FAIL=1 CR_STDERR="upstream 401 in 4012 ms"
+export CR_USAGE_EXIT=1 CR_USAGE_STDERR="Error: upstream proxy returned 401 in 4101 ms"
+run "$REPO_401" --pre-push --base origin/main
+expect_exit "non-auth 401 still exits 1" 1
+if grep -q '^auth probe: failed (exit 1): Error: upstream proxy returned 401' <<<"$ERR"; then
+  ok "non-auth 401 is still reported as the probe verdict"
+else
+  bad "non-auth 401 is still reported as the probe verdict" "stderr: $ERR"
+fi
+if grep -q "auth probe hint:" <<<"$ERR"; then
+  bad "non-auth 401 prints no auth hint" "stderr: $ERR"
+else
+  ok "non-auth 401 prints no auth hint"
+fi
+unset CR_FAIL CR_STDERR CR_USAGE_EXIT CR_USAGE_STDERR
+
 # 19. A probe that cannot run must not crash the failure path under
 #     `set -euo pipefail` and must not replace the review's exit code; the
 #     failure is labelled either way.
@@ -440,7 +460,10 @@ else
 fi
 unset CR_USAGE_UNSUPPORTED
 
+# 19b. Silent probe failure is labelled rather than dropped. Self-contained: this
+#      case sets every variable it depends on, so case 19 cannot make it vacuous.
 REPO_EMPTYPROBE="$(make_repo)"
+export CR_FAIL=1 CR_STDERR="quota exhausted"
 export CR_USAGE_EXIT=1
 run "$REPO_EMPTYPROBE" --pre-push --base origin/main
 expect_exit "silent probe failure keeps exit 1" 1
@@ -450,6 +473,25 @@ else
   bad "silent probe failure is labelled <no output>" "stderr: $ERR"
 fi
 unset CR_FAIL CR_STDERR CR_USAGE_EXIT
+
+# 19c. One overlong probe line is capped before it reaches the raw header, so a
+#      buggy or hostile CLI cannot bloat the evidence file.
+REPO_LONGP="$(make_repo)"
+export CR_FAIL=1 CR_STDERR="quota exhausted"
+export CR_USAGE_EXIT=1
+export CR_USAGE_STDERR="$(printf 'Q%.0s' {1..500})"
+run "$REPO_LONGP" --pre-push --base origin/main
+expect_exit "overlong probe line keeps exit 1" 1
+LONGP_RAW="$(find "$REPO_LONGP/.arbitraitor/reviews" -name '*.raw.txt' | head -n 1)"
+LONGP_HEADER="$(grep -m 1 '^# auth probe:' "$LONGP_RAW" || true)"
+LONGP_QS="$(grep -o 'Q' <<<"$LONGP_HEADER" | wc -l | tr -d ' ')"
+if [ -n "$LONGP_HEADER" ] && [ "$LONGP_QS" -eq 200 ]; then
+  ok "overlong probe line is capped at 200 chars in the raw header"
+else
+  bad "overlong probe line is capped at 200 chars in the raw header" \
+    "Q-count=$LONGP_QS: $LONGP_HEADER"
+fi
+unset CR_FAIL CR_STDERR CR_USAGE_EXIT CR_USAGE_STDERR
 
 # 20. The probe is diagnostic-only: a failing `usage` after a SUCCESSFUL review
 #     must not fail the run (exit 0 stays 0, record still written), while the raw
