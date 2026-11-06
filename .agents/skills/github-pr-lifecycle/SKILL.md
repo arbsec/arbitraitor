@@ -122,11 +122,13 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   Use `convergence-status` to compute the verdict from checks + threads
                   + checklist. It also enforces the local review evidence: only a
                   `.arbitraitor/reviews/` record for the PR head tree with a CLEAN
-                  verdict is accepted. A missing/stale/tampered record blocks with a
-                  `local_review_*` reason. Waivers (`--skip-local-review`,
-                  `ARB_SKIP_LOCAL_REVIEW=1`, `[review].local_review_required = false`,
-                  docs-only) are always recorded in `reasons`, and the valves work even
-                  when the review evidence inputs are unavailable. The exact acceptance
+                  verdict is accepted. A missing record, a stale one, an edited
+                  transcript, or a record relabelled away from its transcript
+                  blocks with a `local_review_*` reason. Waivers
+                  (`--skip-local-review`, `ARB_SKIP_LOCAL_REVIEW=1`,
+                  `[review].local_review_required = false`, docs-only) are always
+                  recorded in `reasons`, and the valves work even when the review
+                  evidence inputs are unavailable. The exact acceptance
                   rule lives in
                   [`references/pr-convergence.md`](references/pr-convergence.md#local-review-evidence).
 

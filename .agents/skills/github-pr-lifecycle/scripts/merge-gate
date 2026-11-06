@@ -19,13 +19,16 @@ fi
 # mistaken for the PR positional. ARB_SKIP_LOCAL_REVIEW=1 is the env equivalent.
 OPT_SKIP_LOCAL_REVIEW=false
 _POSITIONAL_ARGS=()
-for _arg in "${ARB_LIB_EXTRA_ARGS[@]}"; do
+# The `${arr[@]+"${arr[@]}"}` form: on bash < 4.4 (macOS ships 3.2), an empty
+# array expanded under `set -u` aborts with "unbound variable" — which would
+# mask the real error ("PR number required") with a confusing abort.
+for _arg in ${ARB_LIB_EXTRA_ARGS[@]+"${ARB_LIB_EXTRA_ARGS[@]}"}; do
   case "$_arg" in
     --skip-local-review) OPT_SKIP_LOCAL_REVIEW=true ;;
     *)                   _POSITIONAL_ARGS+=("$_arg") ;;
   esac
 done
-ARB_LIB_EXTRA_ARGS=("${_POSITIONAL_ARGS[@]}")
+ARB_LIB_EXTRA_ARGS=(${_POSITIONAL_ARGS[@]+"${_POSITIONAL_ARGS[@]}"})
 if [ "${ARB_SKIP_LOCAL_REVIEW:-0}" = "1" ]; then
   OPT_SKIP_LOCAL_REVIEW=true
 fi

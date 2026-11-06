@@ -145,6 +145,14 @@ CODERABBIT_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[] |= (if .name == "Co
 run_case "CodeRabbit failed still blocks" "$CODERABBIT_FAIL_FIXTURE" "README.md" \
   '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
 
+# 8d. `Agent Skills Shell Suites` is listed in [checks].optional, but that
+#     does NOT make a failing suite pass. `optional` only exempts a check that
+#     reports the skipped state; `all_passed` requires every reported check to
+#     be a pass or exempt, so a failing suite blocks the gate.
+AGENT_SUITES_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '. + [{"name":"Agent Skills Shell Suites","state":"FAILURE","bucket":"fail","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
+run_case "failing Agent Skills Shell Suites blocks the gate" "$AGENT_SUITES_FAIL_FIXTURE" ".agents/skills/github-pr-lifecycle/SKILL.md" \
+  '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
+
 # 9. Hard gh failure (empty output, non-8 exit) -> exit 1
 printf '' > "$FIXTURE"
 if (cd "$REPO" && GH_BIN="$STUB/gh" bash -c "GH_BIN='$STUB/gh' FAKE_EXIT=1 true") 2>/dev/null; then :; fi

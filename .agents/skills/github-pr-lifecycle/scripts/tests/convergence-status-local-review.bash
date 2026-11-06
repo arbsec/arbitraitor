@@ -149,6 +149,17 @@ set_pr_view() {
   export GH_PR_VIEW
 }
 
+# A head whose branch cannot be fetched and whose API lookup returns nothing:
+# the tree ladder finds no tree, so the gate must refuse to merge.
+set_pr_view_unresolvable() {
+  GH_PR_VIEW="$ROOT/pr-view.json"
+  printf '{"reviewDecision":"","headRefOid":"%s","isDraft":false,"baseRefName":"main","headRefName":"no-such-head-branch"}\n' \
+    "$PR_HEAD" > "$GH_PR_VIEW"
+  export GH_PR_VIEW
+  GH_API_TREE=""
+  export GH_API_TREE
+}
+
 set_files() {
   GH_FILES="$(printf '%s\n' "$@")"
   export GH_FILES
@@ -499,29 +510,42 @@ expect_json "docs-only status" '.local_review.status' "docs_only_exempt"
 expect_json "docs-only is mergeable" '.mergeable' "true"
 expect_err_contains "docs-only note" "docs-only diff"
 
+# One fixture per path. The case commits ONLY that path, so a negative case
+# fails for the stated reason. A shared fixture that also carries a non-docs
+# file (e.g. src/lib.rs) makes every iteration fail for that other reason,
+# and the loop would then prove nothing about the path under test.
+docs_only_case() { # docs_only_case <path> <docs_only_exempt|accepted>
+  local path="$1" want="$2"
+  new_case
+  start_feature
+  mkdir -p "$WORK/$(dirname "$path")"
+  printf '# fixture\n' > "$WORK/$path"
+  commit_work "add $path"
+  land_pr
+  set_pr_view
+  set_files "$path"
+  write_review "abc1234-20260101T000000Z" CLEAN
+  run_conv 42 --repo arbsec/arbitraitor --json
+  expect_exit "docs-only case $path exits 0" 0
+  expect_json "docs-only case $path status" '.local_review.status' "$want"
+}
+
+# Allowlist members: exempt on their own.
+docs_only_case "README.md" "docs_only_exempt"
+docs_only_case "CHANGELOG.md" "docs_only_exempt"
+docs_only_case "book/x.md" "docs_only_exempt"
+docs_only_case "docs/guide.md" "docs_only_exempt"
+
 # Negatives: every one must go through enforcement (accepted record), never
 # docs_only_exempt. Anchoring matters: `README.md` must not match a nested
-# README, and `book/**` must not match a non-markdown book asset.
-new_case
-start_feature
-mkdir -p "$WORK/src"
-printf 'fn f() {}\n' > "$WORK/src/lib.rs"
-commit_work "feature change"
-land_pr
-set_pr_view
-write_review "abc1234-20260101T000000Z" CLEAN
-for path in \
-  ".agents/skills/x/README.md" \
-  "mybook/x.rs" \
-  "book/mermaid.min.js" \
-  "docs/spec/spec.md" \
-  "AGENTS.md" \
-  ".github/workflows/code.yml"; do
-  set_files "$path"
-  run_conv 42 --repo arbsec/arbitraitor --json
-  expect_exit "non-docs path $path is enforced (accepted record)" 0
-  expect_json "non-docs path $path status" '.local_review.status' "accepted"
-done
+# README, `book/**` must not match a non-markdown book asset, and the
+# `docs/spec/` exclusion is checked before the allowlist.
+docs_only_case ".agents/skills/x/README.md" "accepted"
+docs_only_case "mybook/x.rs" "accepted"
+docs_only_case "book/mermaid.min.js" "accepted"
+docs_only_case "docs/spec/spec.md" "accepted"
+docs_only_case "AGENTS.md" "accepted"
+docs_only_case ".github/workflows/code.yml" "accepted"
 
 # ==============================================================================
 # 14. Rename -> fail closed (gh pr diff reports only the new path).
@@ -881,6 +905,84 @@ write_review "abc1234-20260101T000000Z" CLEAN
 run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "move into a docs path is enforced" 0
 expect_json "move into a docs path is not docs_only_exempt" '.local_review.status' "accepted"
+
+# ==============================================================================
+# 26. Regression: the head tree must be resolvable. The reason
+#     `local_review_head_unresolvable` is documented but was untested: a
+#     head branch that cannot be fetched and an API lookup that returns
+#     nothing must BLOCK, never fall through to "no record".
+# ==============================================================================
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view_unresolvable
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "unresolvable head tree blocks" 5
+expect_json "unresolvable head tree status" '.local_review.status' "local_review_head_unresolvable"
+expect_err_contains "unresolvable head tree is loud" "cannot resolve the tree of PR head"
+
+# ==============================================================================
+# 27. Regression: the transcript's own tree/base headers must agree with the
+#     record. The `raw sha256` digest covers only the `.raw.txt`; the
+#     record's `tree OID`, `base OID` and `verdict` live in the un-hashed
+#     `.md` file. A stale transcript could therefore be relabelled as
+#     current by editing the record alone — the digest would still match.
+# ==============================================================================
+relabel_record_as_current() { # relabel_record_as_current <record> <tree> <base>
+  local rec="$1" tree="$2" base="$3" sha raw
+  raw="$WORK/.arbitraitor/reviews/$(basename "${rec%.md}").raw.txt"
+  sha="$(sha256_of "$raw")"
+  awk -v tree="$tree" -v base="$base" -v sha="$sha" '
+    /^- tree OID:/   { print "- tree OID: " tree;   next }
+    /^- base OID:/   { print "- base OID: " base;   next }
+    /^- raw sha256:/ { print "- raw sha256: " sha; next }
+    { print }
+  ' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+}
+
+# 27a. The record is relabelled with the current tree; the transcript still
+#      carries the stale tree.
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+STALE_TREE="$(git -C "$WORK" rev-parse 'main^{tree}')"
+write_review "abc1234-20260101T000000Z" CLEAN 0 0 "$STALE_TREE" "$BASE_OID"
+relabel_record_as_current \
+  "$WORK/.arbitraitor/reviews/abc1234-20260101T000000Z.md" "$PR_TREE" "$BASE_OID"
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "relabelled transcript tree blocks" 5
+expect_json "relabelled transcript tree status" '.local_review.status' "local_review_transcript_mismatch"
+expect_json "relabelled transcript tree is not hash-verified" '.local_review.raw_sha256_verified' "true"
+expect_err_contains "relabelled transcript tree is loud" "does not match the record's tree OID"
+
+# 27b. Same, for the base: the record claims the current base, the transcript
+#      was taken against a different one.
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+STALE_BASE="$(git -C "$WORK" rev-parse 'main^{tree}')"
+write_review "abc1234-20260101T000000Z" CLEAN 0 0 "$PR_TREE" "$STALE_BASE"
+relabel_record_as_current \
+  "$WORK/.arbitraitor/reviews/abc1234-20260101T000000Z.md" "$PR_TREE" "$BASE_OID"
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "relabelled transcript base blocks" 5
+expect_json "relabelled transcript base status" '.local_review.status' "local_review_transcript_mismatch"
+expect_err_contains "relabelled transcript base is loud" "does not match the record's base OID"
 
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

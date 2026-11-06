@@ -7,10 +7,16 @@
 # `pr-review-local` writes into `.arbitraitor/reviews/` (in-repo, gitignored):
 # a record is accepted only when its tree OID equals the PR head tree, its base
 # is an ancestor of the current base, the base has not advanced over files the
-# PR changes, the raw transcript still hashes to the recorded sha256, the CLI
-# exited 0, the recorded argv matches the CodeRabbit review invocation, and the
-# verdict is CLEAN. The verdict is agent-attested (`--verdict`), so this is an
-# attestation checkpoint with tamper-evidence, not forgery resistance.
+# PR changes, the raw transcript still hashes to the recorded sha256, the
+# transcript's own `# tree OID:`/`# base OID:` headers agree with the record,
+# the CLI exited 0, the recorded argv matches the CodeRabbit review
+# invocation, and the verdict is CLEAN.
+#
+# The verdict is agent-attested (`--verdict`), so this is an attestation
+# checkpoint, NOT forgery resistance. The digest covers the raw transcript and
+# the record's own fields are cross-checked against the transcript headers, so
+# a stale transcript cannot be relabelled by editing the record alone; a fully
+# forged transcript with a matching record is still not detectable.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
@@ -29,13 +35,16 @@ fi
 # mistaken for the PR positional. ARB_SKIP_LOCAL_REVIEW=1 is the env equivalent.
 OPT_SKIP_LOCAL_REVIEW=false
 _POSITIONAL_ARGS=()
-for _arg in "${ARB_LIB_EXTRA_ARGS[@]}"; do
+# The `${arr[@]+"${arr[@]}"}` form: on bash < 4.4 (macOS ships 3.2), an empty
+# array expanded under `set -u` aborts with "unbound variable" — which would
+# mask the real error ("PR number required") with a confusing abort.
+for _arg in ${ARB_LIB_EXTRA_ARGS[@]+"${ARB_LIB_EXTRA_ARGS[@]}"}; do
   case "$_arg" in
     --skip-local-review) OPT_SKIP_LOCAL_REVIEW=true ;;
     *)                   _POSITIONAL_ARGS+=("$_arg") ;;
   esac
 done
-ARB_LIB_EXTRA_ARGS=("${_POSITIONAL_ARGS[@]}")
+ARB_LIB_EXTRA_ARGS=(${_POSITIONAL_ARGS[@]+"${_POSITIONAL_ARGS[@]}"})
 if [ "${ARB_SKIP_LOCAL_REVIEW:-0}" = "1" ]; then
   OPT_SKIP_LOCAL_REVIEW=true
 fi
@@ -258,6 +267,7 @@ LOCAL_REVIEW_REASON=""
 evaluate_local_review() {
   local records=() rec best="" best_name="" best_ts="" name ts tree verdict
   local rec_base advanced raw_name raw_path rec_hash actual_hash raw_exit raw_command
+  local raw_tree raw_base
 
   if [ ! -d "$REVIEW_DIR" ]; then
     LR_STATUS="local_review_missing"
@@ -364,7 +374,26 @@ evaluate_local_review() {
   fi
   LR_HASH_VERIFIED=true
 
-  # 7. The CLI must have exited 0.
+  # 7. The transcript's own tree/base headers must AGREE with the record. The
+  #    digest above covers only the `.raw.txt`; the record's `tree OID`,
+  #    `base OID` and `verdict` fields live in the un-hashed `.md` file, so a
+  #    stale transcript could be relabelled as current by editing the record
+  #    alone. `pr-review-local` writes the reviewed tree and base into the
+  #    transcript header, so the two must agree.
+  raw_tree="$(awk -F': ' '/^# tree OID:/{print $2; exit}' "$raw_path")"
+  raw_base="$(awk -F': ' '/^# base OID:/{print $2; exit}' "$raw_path")"
+  if [ -z "$raw_tree" ] || [ "$raw_tree" != "$LR_RECORD_TREE" ]; then
+    LR_STATUS="local_review_transcript_mismatch"
+    echo "error: raw transcript '# tree OID:' (${raw_tree:-<missing>}) does not match the record's tree OID ($LR_RECORD_TREE)" >&2
+    return 1
+  fi
+  if [ -z "$raw_base" ] || [ "$raw_base" != "$LR_RECORD_BASE" ]; then
+    LR_STATUS="local_review_transcript_mismatch"
+    echo "error: raw transcript '# base OID:' (${raw_base:-<missing>}) does not match the record's base OID ($LR_RECORD_BASE)" >&2
+    return 1
+  fi
+
+  # 8. The CLI must have exited 0.
   raw_exit="$(awk -F': ' '/^# exit:/{print $2; exit}' "$raw_path")"
   case "$raw_exit" in
     ""|*[!0-9]*)
@@ -379,7 +408,7 @@ evaluate_local_review() {
       fi ;;
   esac
 
-  # 8. The recorded argv must be the CodeRabbit review invocation. The binary
+  # 9. The recorded argv must be the CodeRabbit review invocation. The binary
   #    path is deliberately ignored (coderabbit vs an absolute path vs a stub).
   #    `pr-review-local` records the resolved ref it passed to the CLI, which in
   #    --pre-push mode is `origin/<base>`; a bare `<base>` is accepted too.
@@ -392,7 +421,7 @@ evaluate_local_review() {
       return 1 ;;
   esac
 
-  # 9. Agent-attested verdict must be CLEAN. FINDINGS/UNKNOWN (or anything else)
+  # 10. Agent-attested verdict must be CLEAN. FINDINGS/UNKNOWN (or anything else)
   #    blocks. This checks attestation, not that the CLI emitted CLEAN.
   verdict="$(local_review_field "$best" "verdict")"
   if [ "$verdict" != "CLEAN" ]; then

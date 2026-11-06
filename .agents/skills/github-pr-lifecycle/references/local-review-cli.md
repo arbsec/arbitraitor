@@ -188,12 +188,15 @@ accepts it as review evidence only when its tree matches the PR head tree, its
 recorded base is an ancestor of the freshly fetched base with no path overlap,
 the raw transcript still hashes to `raw sha256`, its `# exit:` header is `0`,
 its `# command:` ends with `review --agent --base origin/<base>` (a bare
-`<base>` is also accepted), and `verdict` is `CLEAN`. A
+`<base>` is also accepted), its `# tree OID:`/`# base OID:` headers agree with
+the record's own fields, and `verdict` is `CLEAN`. A
 missing, stale, or tampered record blocks with a `local_review_*` reason; the full
 acceptance rule and the reason list live in
 [`pr-convergence.md`](pr-convergence.md#local-review-evidence). Because the verdict
 is agent-attested, this is a tamper-evident attestation checkpoint, not forgery
-resistance.
+resistance: the digest covers the transcript and the record's fields are
+cross-checked against the transcript headers, but a transcript forged from
+scratch with a matching record is not detectable.
 
 ## Verdict derivation (never guess)
 

@@ -107,7 +107,12 @@ inherits the verdict. The record is accepted only when **all** of these hold:
 6. its `# exit:` header is `0`.
 7. its `# command:` ends with `review --agent --base origin/<base>` (a bare
    `<base>` is tolerated; the binary path is not compared).
-8. the record's `- verdict:` is `CLEAN`.
+8. the transcript's own `# tree OID:` and `# base OID:` headers equal the
+   record's `tree OID` and `base OID`. The digest in step 5 covers only the
+   `.raw.txt`; the record's fields live in the un-hashed `.md` file, so without
+   this cross-check a stale transcript could be relabelled as current by
+   editing the record alone.
+9. the record's `- verdict:` is `CLEAN`.
 
 Selection: among records whose `tree OID` equals the head tree, the newest by the
 timestamp component of the filename (`<short-head>-<YYYYMMDDTHHMMSSZ>.md`) wins;
@@ -124,6 +129,7 @@ Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
 | `local_review_base_overlap` | the base advanced over a file this PR changes |
 | `local_review_raw_missing` | the indexed transcript is gone |
 | `local_review_hash_mismatch` | the transcript changed after it was recorded |
+| `local_review_transcript_mismatch` | the transcript's `# tree OID:`/`# base OID:` headers disagree with the record |
 | `local_review_cli_exit_nonzero` | the reviewed CLI run failed |
 | `local_review_command_mismatch` | the recorded argv is not the CodeRabbit review invocation |
 | `local_review_verdict_not_clean` | the attestation is FINDINGS/UNKNOWN |
@@ -165,8 +171,10 @@ not changed since it was indexed. It does **not** prove the review was run by a
 fresh context, that no findings were suppressed, or that the CLI really produced
 a clean run: the verdict is agent-attested (`--verdict`) because the `--agent`
 stdout schema has no verified machine-readable verdict. This is an attestation
-checkpoint with tamper-evidence — tampering with an existing record is caught,
-forging a self-consistent record is not. Treat the raw transcript as evidence to
+checkpoint with tamper-evidence for the **transcript**: editing the transcript
+breaks the digest, and relabelling a stale transcript as current by editing the
+record breaks the header cross-check. A transcript forged from scratch, with a
+matching record, is not detectable. Treat the raw transcript as evidence to
 inspect during review, not as a signature.
 
 **Emergency valve.** `[review].local_review_required = false` disables enforcement
