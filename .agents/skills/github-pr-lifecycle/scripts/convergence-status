@@ -213,18 +213,31 @@ read_review_field() {
 # diff reports only the new path, hiding the deleted source), more than 50 files,
 # or an unavailable head object for the rename check.
 DOCS_ONLY_ERE='^(README[.]md|CHANGELOG[.]md|book/.*[.]md|docs/.*[.]md)$'
-docs_only_exempt() {
-  local status_out local_paths_json all_paths_json
-  # Every path the PR touches, old AND new. `gh pr diff --name-only` lists
-  # only the NEW path of a move, and git's rename detection is heuristic
-  # (`diff.renames`, 50% similarity): a moved non-docs source can be reported
-  # as `D src/x.rs` + `A docs/x.md` with no `R` line at all. The `--no-renames`
-  # list keeps the deleted source visible, so it cannot slip into the
-  # docs-only exemption by moving to a docs path.
-  local_paths_json="$(git diff --no-renames --name-only "$BASE_RESOLVED_REF...$HEAD_SHA" 2>/dev/null \
+
+# The PR's changed paths, OLD and NEW, as a JSON array.
+#
+# `gh pr diff --name-only` lists only the NEW path of a move, and git's rename
+# detection is heuristic (`diff.renames`, 50% similarity): a moved file can be
+# reported as `D src/a.rs` + `A src/b.rs` with no `R` line at all. The local
+# `--no-renames` list keeps the path a file moved FROM visible, so both the
+# docs-only allowlist and the base-overlap check see the whole move.
+#
+# Returns 1 when the list cannot be computed — the head object is not available
+# locally, so the old path of a move is unknown. An uncomputed list must never
+# be read as "no overlap" or "no non-docs path": both would waive the review.
+all_changed_paths_json() {
+  local raw local_paths_json
+  raw="$(git diff --no-renames --name-only "$BASE_RESOLVED_REF...$HEAD_SHA" 2>/dev/null)" || return 1
+  local_paths_json="$(printf '%s\n' "$raw" \
     | jq -R -s 'split("\n") | map(select(length > 0))')" || return 1
-  all_paths_json="$(printf '%s\n%s\n' "$CHANGED_FILES_JSON" "$local_paths_json" \
-    | jq -s 'add | unique')" || return 1
+  printf '%s\n%s\n' "$CHANGED_FILES_JSON" "$local_paths_json" \
+    | jq -s 'add | unique' || return 1
+}
+
+docs_only_exempt() {
+  local status_out all_paths_json
+  # Every path the PR touches, old AND new — see all_changed_paths_json.
+  all_paths_json="$(all_changed_paths_json)" || return 1
   if jq -e 'any(.[]; test("^docs/spec/"))' <<<"$all_paths_json" >/dev/null 2>&1; then
     return 1
   fi
@@ -267,7 +280,7 @@ LOCAL_REVIEW_REASON=""
 evaluate_local_review() {
   local records=() rec best="" best_name="" best_ts="" name ts tree verdict
   local rec_base advanced raw_name raw_path rec_hash actual_hash raw_exit raw_command
-  local raw_tree raw_base
+  local raw_tree raw_base changed_paths_json
 
   if [ ! -d "$REVIEW_DIR" ]; then
     LR_STATUS="local_review_missing"
@@ -334,12 +347,20 @@ evaluate_local_review() {
   # 4. The base advance must not touch files this PR changes. Disjoint paths are
   #    the residual-risk case: a semantic conflict on untouched files is not
   #    detectable by path intersection.
+  #    The comparison set is the PR's changed paths, OLD and NEW: a file the PR
+  #    moved FROM is a file this PR changes, even though `gh pr diff --name-only`
+  #    only lists the new path.
   if ! advanced="$(git diff --name-only "$rec_base..$BASE_RESOLVED_REF")"; then
     echo "error: cannot diff $rec_base..origin/$BASE_REF_NAME" >&2
     exit "$ARB_ERR_UNRECOVERABLE"
   fi
+  if ! changed_paths_json="$(all_changed_paths_json)"; then
+    LR_STATUS="local_review_head_object_unavailable"
+    echo "error: cannot compute the PR's changed paths (the head object $HEAD_SHA is not available locally); refusing to merge without review evidence" >&2
+    return 1
+  fi
   if [ -n "$advanced" ] \
-    && printf '%s\n' "$advanced" | jq -R -s -e --argjson changed "$CHANGED_FILES_JSON" \
+    && printf '%s\n' "$advanced" | jq -R -s -e --argjson changed "$changed_paths_json" \
       'split("\n") | map(select(length > 0))
        | map(select(. as $p | any($changed[]; . == $p))) | length > 0' >/dev/null 2>&1; then
     LR_STATUS="local_review_base_overlap"

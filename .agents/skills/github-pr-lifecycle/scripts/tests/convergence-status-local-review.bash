@@ -962,7 +962,7 @@ relabel_record_as_current \
 run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "relabelled transcript tree blocks" 5
 expect_json "relabelled transcript tree status" '.local_review.status' "local_review_transcript_mismatch"
-expect_json "relabelled transcript tree is not hash-verified" '.local_review.raw_sha256_verified' "true"
+expect_json "relabelled transcript tree passes the digest check (the header cross-check blocks)" '.local_review.raw_sha256_verified' "true"
 expect_err_contains "relabelled transcript tree is loud" "does not match the record's tree OID"
 
 # 27b. Same, for the base: the record claims the current base, the transcript
@@ -983,6 +983,43 @@ run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "relabelled transcript base blocks" 5
 expect_json "relabelled transcript base status" '.local_review.status' "local_review_transcript_mismatch"
 expect_err_contains "relabelled transcript base is loud" "does not match the record's base OID"
+
+# ==============================================================================
+# 28. Regression: the base-overlap check must see the path a file moved FROM.
+#     `gh pr diff --name-only` lists only the NEW path of a move, so a base
+#     advance over the OLD path looked like an advance over an untouched file
+#     and the gate accepted a review that predates that base change. The
+#     comparison set is now the union of the API path list and the local
+#     `--no-renames` list.
+# ==============================================================================
+new_case
+# The moved file must exist in the BASE, otherwise the diff against the base
+# shows only its final path and there is no hidden source to expose.
+mkdir -p "$WORK/src"
+printf 'fn a() {}\n' > "$WORK/src/a.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base source"
+git -C "$WORK" push -q origin main
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
+BASE_OID="$(git -C "$WORK" rev-parse HEAD)"
+start_feature
+git -C "$WORK" config diff.renames false
+git -C "$WORK" mv src/a.rs src/b.rs
+commit_work "rename the source"
+# The base advances over the file the PR moved FROM.
+git -C "$WORK" checkout -q main
+printf 'fn a() { /* base */ }\n' > "$WORK/src/a.rs"
+git -C "$WORK" add -A
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "base advance over the old path"
+git -C "$WORK" push -q origin main
+git -C "$WORK" checkout -q feature
+land_pr
+set_pr_view
+set_files "src/b.rs"   # the API reports only the new path
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "base advance over the old path of a move is detected" 5
+expect_json "base advance over the old path of a move status" '.local_review.status' "local_review_base_overlap"
 
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

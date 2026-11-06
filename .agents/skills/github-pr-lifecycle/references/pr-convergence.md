@@ -98,7 +98,10 @@ inherits the verdict. The record is accepted only when **all** of these hold:
 2. the recorded base is an ancestor of the freshly fetched base
    (`git fetch origin <baseRefName>`).
 3. `git diff --name-only <recorded-base>..origin/<base>` does not intersect the
-   PR's changed paths.
+   PR's changed paths. The intersection set is the union of
+   `gh pr diff --name-only` and `git diff --no-renames --name-only
+   <base>...<head>` — the PR's changed paths, OLD and NEW (see "Rename
+   fail-closed").
 4. the recorded raw transcript exists (basename only, inside the reviews dir).
 5. its sha256 still equals the recorded `raw sha256`. An empty digest on
    **either** side is a mismatch, never a match: a record with no
@@ -127,6 +130,7 @@ Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
 | `local_review_stale_tree` | no record for the current head tree (re-run after the last push) |
 | `local_review_base_advanced` | recorded base is no longer an ancestor of the base |
 | `local_review_base_overlap` | the base advanced over a file this PR changes |
+| `local_review_head_object_unavailable` | the PR's changed paths (old and new) could not be computed — the head object is not available locally, so a moved file's old path is unknown |
 | `local_review_raw_missing` | the indexed transcript is gone |
 | `local_review_hash_mismatch` | the transcript changed after it was recorded |
 | `local_review_transcript_mismatch` | the transcript's `# tree OID:`/`# base OID:` headers disagree with the record |
@@ -146,17 +150,22 @@ Reviewers must re-run the review when the base advance is behaviorally relevant,
 even though the gate accepts it.
 
 **Rename fail-closed.** `gh pr diff --name-only` reports only the new path of a
-rename, so a renamed source could hide a non-docs file behind a docs path. Two
-guards apply, and both fail closed (enforce the review):
+rename, so a renamed source could hide a non-docs file behind a docs path — and
+a base advance over the file a PR moved FROM could look like an advance over an
+untouched file. Both checks therefore use the same union of
+`gh pr diff --name-only` and `git diff --no-renames --name-only <base>...<head>`:
+the `--no-renames` list keeps a deleted source visible, so a non-docs file that
+moved to a docs path cannot pass the allowlist and a moved file's old path
+cannot escape the overlap check, even when git's rename heuristics
+(`diff.renames`, the 50% similarity threshold) report the move as a delete plus
+an add. `git diff --name-status` reporting an `R*` line also enforces the
+review, as does a diff exceeding 50 files or an unavailable head object for the
+rename check.
 
-- the allowlist is checked against the union of `gh pr diff --name-only` and
-  `git diff --no-renames --name-only <base>...<head>`. The `--no-renames` list
-  keeps a deleted source visible, so a non-docs file that moved to a docs path
-  cannot pass the allowlist even when git's rename heuristics (`diff.renames`,
-  the 50% similarity threshold) report the move as a delete plus an add;
-- `git diff --name-status` reporting an `R*` line also enforces the review, as
-  does a diff exceeding 50 files or an unavailable head object for the rename
-  check.
+If the union cannot be computed — the head object is not available locally, so
+the old path of a move is unknown — the gate blocks with
+`local_review_head_object_unavailable`. An uncomputed path list is never read as
+"no overlap" or "no non-docs path": both would waive the review.
 
 **Docs-only exemption.** A diff is exempt only when every changed path — old and
 new — matches `^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/`
