@@ -830,7 +830,9 @@ mkdir -p "$ROOT/emptybin"
 cat > "$ROOT/emptybin/sha256sum" <<'STUB'
 #!/usr/bin/env bash
 # A digest tool that produces no output at all.
-cat >/dev/null
+# It must NOT read stdin: `cat` would consume the test runner's stdin and
+# block on a terminal until the developer presses Ctrl-D (CI does not hang,
+# because its stdin is not a terminal).
 exit 0
 STUB
 chmod +x "$ROOT/emptybin/sha256sum"

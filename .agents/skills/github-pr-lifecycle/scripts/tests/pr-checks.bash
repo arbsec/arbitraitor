@@ -41,6 +41,8 @@ git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 
 FIXTURE="$STUB/raw.json"
 pass=0; fail=0
+ok() { pass=$((pass + 1)); echo "PASS $1"; }
+bad() { fail=$((fail + 1)); echo "FAIL $1${2:+: $2}" >&2; }
 run_case() {
   local name="$1" fixture="$2" files="$3" expect="$4"
   printf '%s' "$fixture" > "$FIXTURE"
@@ -229,6 +231,130 @@ run_case "a Rust-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIX
   "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
 run_case "a docs-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
   "docs/guide.md" "$FULL_JSON"
+
+# 13. The PATH_GATED table mirrors the workflows it claims to mirror.
+#
+#     A row that OMITS a trigger path of its workflow is unsafe: a diff that
+#     touches only that path starts the workflow, and until the run is queued
+#     the check is not reported -- while a row that does not match the diff
+#     exempts the check. The gate could then pass before CI reported.
+#     An extra path in a row is the opposite error: the check is required for
+#     a diff that never triggers the workflow, so it can never be satisfied
+#     and the gate blocks forever. The row must therefore list the workflow's
+#     trigger paths exactly.
+#
+#     The rows are read out of the script under test, so this test cannot
+#     drift from it.
+REPO_ROOT="$(cd "$HERE/../../../../.." && pwd)"
+WORKFLOWS_DIR="$REPO_ROOT/.github/workflows"
+
+# The table: a single-quoted JSON array in the script.
+path_gated_json() {
+  awk '/^PATH_GATED=/{f=1} f{print} /^\]/{f=0}' "$PR_CHECKS" \
+    | tr -d "'" | sed '1s/^PATH_GATED=//'
+}
+
+# The trigger paths of a workflow: every entry of every `paths:` list in the
+# file. The workflows declare the list once and alias it (`&code_paths` /
+# `*code_paths`), and agents.yml declares it twice; the union is the same set.
+workflow_paths() {
+  awk '
+    /^[[:space:]]*paths:/ { f = 1; next }
+    f && /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      print line
+      next
+    }
+    f && /^[[:space:]]*$/ { next }
+    f { f = 0 }
+  ' "$1" | tr -d "\"'" | sort -u
+}
+
+# The job names of a workflow (exactly four spaces of indentation -- the
+# workflow-level `name:` has none and a step-level `name:` has more).
+workflow_job_names() {
+  awk '/^    name:[[:space:]]*/ {
+    line = $0
+    sub(/^    name:[[:space:]]*/, "", line)
+    print line
+  }' "$1" | tr -d "\"'"
+}
+
+# A check name reduced to the part before the matrix suffix: the YAML job is
+# named `Test (${{ matrix.os }})` and reports as `Test (ubuntu-latest)`.
+check_base() {
+  printf '%s' "${1%% (*}"
+}
+
+# The required checks, read out of the project config.
+required_checks() {
+  awk '
+    /^required[[:space:]]*=[[:space:]]*\[/ { f = 1; next }
+    f && /\]/ { exit }
+    f {
+      line = $0
+      gsub(/[",]/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (length) print line
+    }
+  ' "$EXAMPLE_TOML"
+}
+
+GATED="$(path_gated_json)"
+REQUIRED="$(required_checks)"
+
+for wf in "$WORKFLOWS_DIR"/*.yml; do
+  base="$(basename "$wf" .yml)"
+  marker=".github/workflows/$base.yml"
+  paths="$(workflow_paths "$wf")"
+  if [ -z "$paths" ]; then
+    continue   # unfiltered workflow: every check of it always reports
+  fi
+
+  # A `paths-ignore` filter would make the trigger set the complement of the
+  # list, and the row could not mirror it.
+  if grep -q 'paths-ignore' "$wf"; then
+    bad "workflow $base has no paths-ignore filter" "paths-ignore changes the trigger set"
+  else
+    ok "workflow $base has no paths-ignore filter"
+  fi
+
+  rows="$(printf '%s' "$GATED" | jq -c --arg m "$marker" '[.[] | select(.paths | index($m))]')"
+
+  # Does this workflow own a REQUIRED check? If it does and no row names it,
+  # its checks are never exempt -- and a required check that never reports
+  # blocks the gate forever.
+  owns_required=false
+  while IFS= read -r job; do
+    [ -n "$job" ] || continue
+    while IFS= read -r req; do
+      [ -n "$req" ] || continue
+      if [ "$(check_base "$job")" = "$(check_base "$req")" ]; then
+        owns_required=true
+      fi
+    done <<< "$REQUIRED"
+  done <<< "$(workflow_job_names "$wf")"
+
+  if [ "$owns_required" = true ] && [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
+    bad "workflow $base is named by a PATH_GATED row" "it owns a required check but no row names it"
+    continue
+  fi
+  if [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
+    continue
+  fi
+
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    omitting="$(printf '%s' "$rows" | jq --arg p "$p" '[.[] | select(.paths | index($p) | not)] | length')"
+    if [ "$omitting" -eq 0 ]; then
+      ok "PATH_GATED rows for $base cover '$p'"
+    else
+      bad "PATH_GATED rows for $base cover '$p'" \
+        "$omitting of $(printf '%s' "$rows" | jq 'length') rows omit it"
+    fi
+  done <<< "$paths"
+done
 
 echo "pr-checks fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
