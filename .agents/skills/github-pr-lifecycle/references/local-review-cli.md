@@ -152,9 +152,10 @@ Observed captured output (NDJSON on stdout, exit `1`):
 {"type":"error","errorType":"review","message":"Review failed: Your CodeRabbit session or Git provider access could not be authenticated. Run `coderabbit auth login`, then retry the review.\nPrevious local review has no stored findings.","recoverable":false,"details":{}}
 ```
 
-and the same message on stderr. `coderabbit auth status` still showed the account and the
-`arbsec` organization, so a stale `~/.coderabbit/auth.json` session (not a missing
-login) produced this. The remedy is the interactive browser OAuth flow
+and the same message on stderr. `coderabbit auth status` and `coderabbit doctor` both
+reported the account and the `arbsec` organization as signed in, so the cause is
+unconfirmed — `auth status`/`doctor` report signed-in while the review call rejected
+authentication. The remedy is the interactive browser OAuth flow
 (`coderabbit auth login`), after which the review must be re-run — a re-run is a real
 (quota-using) review, so it is a separate authorized step, not a retry loop.
 

@@ -57,12 +57,14 @@ chmod +x "$ROOT/gh"
 
 # --- fixture repositories ------------------------------------------------------
 # One repo per scenario so detached/dirty state cannot leak between cases.
-make_repo() {
+make_repo() { # make_repo [no-local-config]
   local dir
   dir="$(mktemp -d "$ROOT/repo.XXXXXX")"
   git -C "$dir" init -q
   mkdir -p "$dir/.agents/project"
-  cp "$EXAMPLE_TOML" "$dir/.agents/project/github-project.local.toml"
+  if [ "${1:-}" != "no-local-config" ]; then
+    cp "$EXAMPLE_TOML" "$dir/.agents/project/github-project.local.toml"
+  fi
   printf 'hello\n' > "$dir/file.txt"
   git -C "$dir" add -A
   git -C "$dir" -c user.email=t@t -c user.name=t commit -q -m init
@@ -213,6 +215,12 @@ if [ -n "$(find "$REPO_FAIL/.arbitraitor/reviews" -name '*.raw.txt' 2>/dev/null)
 else
   bad "raw evidence persisted on CLI failure"
 fi
+if [ -z "$(find "$REPO_FAIL/.arbitraitor/reviews" -name '*.md' 2>/dev/null)" ]; then
+  ok "CLI failure writes no .md record (raw only)"
+else
+  bad "CLI failure writes no .md record (raw only)" \
+    "records: $(find "$REPO_FAIL/.arbitraitor/reviews" -name '*.md' 2>/dev/null)"
+fi
 unset CR_FAIL CR_STDERR
 
 # 10. --dry-run prints the argv and never invokes the CLI.
@@ -240,6 +248,110 @@ mkdir -p "$REPO_RAW/.arbitraitor/reviews"
 } > "$REPO_RAW/evil.raw.txt"
 run "$REPO_RAW" --from-raw ".arbitraitor/reviews/../../evil.raw.txt"
 expect_exit "--from-raw path traversal exits 2" 2
+
+# write_raw <repo> <file-name> <cli-exit> -> a well-formed raw transcript at HEAD
+write_raw() {
+  local dir="$1" name="$2" code="$3"
+  mkdir -p "$dir/.arbitraitor/reviews"
+  {
+    echo "# command: coderabbit review --agent --base origin/main"
+    echo "# head OID: $(git -C "$dir" rev-parse HEAD)"
+    echo "# tree OID: $(git -C "$dir" rev-parse 'HEAD^{tree}')"
+    echo "# base ref: origin/main"
+    echo "# base OID: $(git -C "$dir" rev-parse 'origin/main^{commit}')"
+    echo "# exit: $code"
+    echo "# --- stdout ---"
+    echo '{"findings": []}'
+    echo "# --- stderr ---"
+  } > "$dir/.arbitraitor/reviews/$name"
+}
+
+# 12. --pre-push is a mode, not a modifier: combining it with another mode is
+#     ambiguous and must be rejected instead of silently picking one.
+run "$REPO_RAW" --pre-push --from-raw ".arbitraitor/reviews/evil.raw.txt"
+expect_exit "--pre-push --from-raw exits 2" 2
+run "$REPO_RAW" --pre-push --pr 42
+expect_exit "--pre-push --pr exits 2" 2
+
+# 13. --from-raw happy path: the raw headers supply head/base OIDs, the CLI is
+#     never invoked, and an explicit --base is ignored with a warning.
+REPO_FROMRAW="$(make_repo)"
+write_raw "$REPO_FROMRAW" "aaaaaaa-20260101T000000Z.raw.txt" 0
+FROMRAW_BASE="$(git -C "$REPO_FROMRAW" rev-parse 'origin/main^{commit}')"
+export CR_INVOKED="$ROOT/invoked.fromraw"
+run "$REPO_FROMRAW" --from-raw ".arbitraitor/reviews/aaaaaaa-20260101T000000Z.raw.txt" \
+  --base origin/main
+expect_exit "--from-raw healthy raw exits 0" 0
+if grep -q "ignored in --from-raw mode" <<<"$ERR"; then
+  ok "--from-raw warns when --base is ignored"
+else
+  bad "--from-raw warns when --base is ignored" "stderr: $ERR"
+fi
+FROMRAW_REC="$REPO_FROMRAW/.arbitraitor/reviews/aaaaaaa-20260101T000000Z.md"
+if [ -f "$FROMRAW_REC" ] \
+  && grep -qx -- "- base OID: $FROMRAW_BASE" "$FROMRAW_REC" \
+  && grep -qx -- "- cli exit: 0" "$FROMRAW_REC" \
+  && grep -qx -- "- verdict: UNKNOWN" "$FROMRAW_REC"; then
+  ok "--from-raw writes a record from the raw file's headers"
+else
+  bad "--from-raw writes a record from the raw file's headers" "record=$FROMRAW_REC"
+fi
+if [ ! -s "$CR_INVOKED" ]; then
+  ok "--from-raw never invokes the CLI"
+else
+  bad "--from-raw never invokes the CLI" "invocations: $(cat "$CR_INVOKED")"
+fi
+
+# 14. --from-raw must refuse a raw transcript from a failed run (exit != 0).
+REPO_FROMRAW_FAIL="$(make_repo)"
+write_raw "$REPO_FROMRAW_FAIL" "bbbbbbb-20260101T000000Z.raw.txt" 1
+run "$REPO_FROMRAW_FAIL" --from-raw ".arbitraitor/reviews/bbbbbbb-20260101T000000Z.raw.txt"
+expect_exit "--from-raw failed run exits 1" 1
+if [ -z "$(find "$REPO_FROMRAW_FAIL/.arbitraitor/reviews" -name '*.md' 2>/dev/null)" ]; then
+  ok "--from-raw failed run writes no .md record"
+else
+  bad "--from-raw failed run writes no .md record" \
+    "records: $(find "$REPO_FROMRAW_FAIL/.arbitraitor/reviews" -name '*.md' 2>/dev/null)"
+fi
+
+# 15. --pr tree match: identical tree under a different commit SHA (what a
+#     pre-commit-tree / push-branch landing looks like) is accepted and the record
+#     keeps both the local and PR OIDs apart.
+REPO_PR_OK="$(make_repo)"
+PR_LOCAL_HEAD="$(git -C "$REPO_PR_OK" rev-parse HEAD)"
+PR_LOCAL_TREE="$(git -C "$REPO_PR_OK" rev-parse 'HEAD^{tree}')"
+PR_HEAD_OID="ffffffffffffffffffffffffffffffffffffffff"
+export PR_JSON="{\"headRefOid\":\"$PR_HEAD_OID\",\"headRefName\":\"feature\",\"baseRefName\":\"main\",\"mergeable\":\"MERGEABLE\"}"
+export PR_TREE="$PR_LOCAL_TREE"
+export CR_INVOKED="$ROOT/invoked.pr.ok"
+run "$REPO_PR_OK" --pr 42 --verdict CLEAN
+expect_exit "PR mode tree match exits 0" 0
+PR_OK_REC="$(find "$REPO_PR_OK/.arbitraitor/reviews" -name '*.md' | head -n 1)"
+if [ -n "$PR_OK_REC" ] \
+  && grep -qx -- "- head OID: $PR_LOCAL_HEAD" "$PR_OK_REC" \
+  && grep -qx -- "- tree OID: $PR_LOCAL_TREE" "$PR_OK_REC" \
+  && grep -qx -- "- pr head OID: $PR_HEAD_OID" "$PR_OK_REC" \
+  && grep -qx -- "- pr tree OID: $PR_LOCAL_TREE" "$PR_OK_REC" \
+  && grep -qx -- "- verdict: CLEAN" "$PR_OK_REC"; then
+  ok "PR mode record keeps local and PR head/tree OIDs distinct"
+else
+  bad "PR mode record keeps local and PR head/tree OIDs distinct" "record=$PR_OK_REC"
+fi
+
+# 16. --pr + explicit --repo is a read-only path: it must not need the local
+#     project config (which is gitignored and absent on a fresh checkout).
+REPO_PR_NOCFG="$(make_repo no-local-config)"
+export PR_TREE="$(git -C "$REPO_PR_NOCFG" rev-parse 'HEAD^{tree}')"
+run "$REPO_PR_NOCFG" --pr 42 --repo arbsec/arbitraitor --verdict CLEAN
+expect_exit "--pr with --repo needs no local project config" 0
+
+# 17. --pr with a differing tree is a content change: exit 4.
+REPO_PR_DIFF="$(make_repo)"
+DIFF_PR_HEAD="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+export PR_JSON="{\"headRefOid\":\"$DIFF_PR_HEAD\",\"headRefName\":\"feature\",\"baseRefName\":\"main\",\"mergeable\":\"MERGEABLE\"}"
+export PR_TREE="1111111111111111111111111111111111111111"
+run "$REPO_PR_DIFF" --pr 42
+expect_exit "PR mode content change exits 4" 4
 
 echo "pr-review-local fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
