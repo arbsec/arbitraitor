@@ -122,25 +122,31 @@ timestamp component of the filename (`<short-head>-<YYYYMMDDTHHMMSSZ>.md`) wins;
 a timestamp tie is broken by the lexically greatest filename. Sorting on the whole
 filename would let the short-head prefix dominate.
 
-Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
+Blocking reasons, in evaluation order — the first one that applies wins, and all
+of them make the verdict `mergeable: false`:
 
 | Reason | Meaning |
 |---|---|
 | `local_review_missing` | reviews dir absent/empty (records are gitignored — the gate may be running outside the review checkout) |
+| `local_review_head_unresolvable` | the head tree could not be resolved by any ladder step |
 | `local_review_stale_tree` | no record for the current head tree (re-run after the last push) |
-| `local_review_base_advanced` | recorded base is no longer an ancestor of the base |
 | `local_review_record_malformed` | the record carries no base OID — a malformed record is an evidence failure, not an infrastructure error |
-| `local_review_base_overlap` | the base advanced over a file this PR changes |
+| `local_review_base_advanced` | recorded base is no longer an ancestor of the base |
 | `local_review_head_object_unavailable` | the PR's changed paths (old and new) could not be computed — the head object is not available locally, so a moved file's old path is unknown |
 | `local_review_overlap_check_failed` | the base-overlap check could not be evaluated (a jq failure) — the gate cannot prove the base is compatible, so it blocks |
+| `local_review_base_overlap` | the base advanced over a file this PR changes |
 | `local_review_raw_missing` | the indexed transcript is gone |
 | `local_review_hash_mismatch` | the transcript changed after it was recorded |
 | `local_review_transcript_mismatch` | the transcript's `# tree OID:`/`# base OID:` headers disagree with the record |
 | `local_review_cli_exit_nonzero` | the reviewed CLI run failed |
 | `local_review_command_mismatch` | the recorded argv is not the CodeRabbit review invocation |
 | `local_review_verdict_not_clean` | the attestation is FINDINGS/UNKNOWN |
-| `local_review_head_unresolvable` | the head tree could not be resolved by any ladder step |
 | `local_review_evaluation_failed` | the evaluation failed without naming a reason — a defensive fallback so an unnamed failure can never leave the verdict mergeable |
+
+The order above is the order `evaluate_local_review` checks them in; a reader
+debugging a blocked PR gets the same precedence the code applies.
+`local_review_evaluation_failed` is last because it is the fallback for a
+failure that named no reason at all.
 
 `local_review_head_unresolvable` is a blocked verdict, not a crash: after
 `xtask push-branch` the landed commit object is never local, so the fetch/API

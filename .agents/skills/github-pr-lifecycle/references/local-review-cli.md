@@ -194,9 +194,11 @@ missing, stale, or tampered record blocks with a `local_review_*` reason; the fu
 acceptance rule and the reason list live in
 [`pr-convergence.md`](pr-convergence.md#local-review-evidence). Because the verdict
 is agent-attested, this is a tamper-evident attestation checkpoint, not forgery
-resistance: the digest covers the transcript and the record's fields are
-cross-checked against the transcript headers, but a transcript forged from
-scratch with a matching record is not detectable.
+resistance: the digest covers the transcript, and the record's `tree OID` and
+`base OID` are cross-checked against the transcript headers. The record's
+`verdict` is not cross-checked against anything, so editing it in the `.md`
+file is not detectable. A transcript forged from scratch with a matching
+record is also not detectable.
 
 ## Verdict derivation (never guess)
 
