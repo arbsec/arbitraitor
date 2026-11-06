@@ -194,16 +194,20 @@ docs-only diff is recorded as `local_review_docs_only_exempt` — **every**
 waiver gets a `reasons` marker, because `merge-gate` prints only `reasons` on
 the success path and a waiver missing there would leave no visible trace in
 its output. The markers are appended **after** `mergeable` is computed, so a
-waiver is visible without turning a blocked PR into a mergeable one. Neither
-valve is a normal path — both are recorded so a reviewer can see exactly what
+waiver is visible without turning a blocked PR into a mergeable one. None of the
+valves is a normal path — each is recorded so a reviewer can see exactly what
 was waived.
 
-**When a valve may be used.** The two valves are for the case where the local
+**When a valve may be used.** The three waiver inputs — `--skip-local-review`,
+`ARB_SKIP_LOCAL_REVIEW=1`, and `[review].local_review_required = false` — are
+for the case where the local
 review cannot run at all: the CLI is unavailable, the auth probe fails, or the
 review quota is exhausted. They are never a convenience, and a waiver is only
 legitimate when it is (a) approved by the operator and (b) explained in the PR
 description. The waiver marker in `reasons` is not the approval — it is the
-audit trail that makes the waiver visible to the reviewer. See
+audit trail that makes the waiver visible to the reviewer. The env var is also
+the easiest to trigger by accident: never export `ARB_SKIP_LOCAL_REVIEW` in a
+long-lived shell, set it only for a single command. See
 `arbitraitor-workflow.md` "PR convergence requirements" item 7 and "Forbidden
 administrative shortcuts".
 
