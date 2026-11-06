@@ -78,11 +78,10 @@ Rules learned the hard way:
   stderr. A probe failure must never gate: a successful review stays exit `0`, and a failed
   probe never replaces the review's own exit code.
   The probe is bounded by `timeout -k 2 15` (15 s `SIGTERM`, then `SIGKILL` after 2 s) when
-  `timeout` is on `PATH`. Without `timeout` — macOS without coreutils, the same condition
-  the script already tolerates elsewhere — the probe runs **unbounded** rather than being
-  skipped, so a hung seat query can stall the diagnostic path (never the review's exit
-  code, which is already captured). The first line of probe output is capped at 200
-  characters before it reaches the header or stderr.
+  `timeout` is on `PATH`. Without `timeout` — e.g. macOS without coreutils — the probe runs
+  **unbounded** rather than being skipped, so a hung seat query can stall the diagnostic
+  path (never the review's exit code, which is already captured). The first line of probe
+  output is capped at 200 characters before it reaches the header or stderr.
 - The CLI serializes these errors as `{}` in its structured output, destroying the server
   message; only the free-text stderr/human line survives.
 - Auto-update stalled at `0.9.0` (a `0.9.2` update is pending). The runtime gate stays
