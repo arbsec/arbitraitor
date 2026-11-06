@@ -241,7 +241,13 @@ run_case "a docs-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIX
 #     An extra path in a row is the opposite error: the check is required for
 #     a diff that never triggers the workflow, so it can never be satisfied
 #     and the gate blocks forever. The row must therefore list the workflow's
-#     trigger paths exactly.
+#     trigger paths exactly -- in BOTH directions.
+#
+#     The ownership rule is per JOB, not per workflow: the exemption is looked
+#     up by check NAME, so a row that names the workflow does not exempt the
+#     other required jobs of that workflow. A required job with no row of its
+#     own is never exempt, and it blocks every diff that does not trigger the
+#     workflow -- forever.
 #
 #     The rows are read out of the script under test, so this test cannot
 #     drift from it.
@@ -321,6 +327,7 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
   fi
 
   rows="$(printf '%s' "$GATED" | jq -c --arg m "$marker" '[.[] | select(.paths | index($m))]')"
+  jobs="$(workflow_job_names "$wf")"
 
   # Does this workflow own a REQUIRED check? If it does and no row names it,
   # its checks are never exempt -- and a required check that never reports
@@ -334,16 +341,41 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
         owns_required=true
       fi
     done <<< "$REQUIRED"
-  done <<< "$(workflow_job_names "$wf")"
+  done <<< "$jobs"
 
   if [ "$owns_required" = true ] && [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
     bad "workflow $base is named by a PATH_GATED row" "it owns a required check but no row names it"
-    continue
   fi
+
+  # Per JOB, not per workflow: the exemption is looked up by check NAME, so a
+  # row that names the workflow does not exempt the OTHER required jobs of
+  # that workflow. Every required job of a path-filtered workflow needs its
+  # OWN row -- a second required job without one is never exempt and blocks
+  # every diff that does not trigger the workflow, forever.
+  while IFS= read -r req; do
+    [ -n "$req" ] || continue
+    owned=false
+    while IFS= read -r job; do
+      [ -n "$job" ] || continue
+      if [ "$(check_base "$job")" = "$(check_base "$req")" ]; then
+        owned=true
+      fi
+    done <<< "$jobs"
+    [ "$owned" = true ] || continue
+    if printf '%s' "$rows" | jq -e --arg n "$req" 'any(.[]; .name == $n)' >/dev/null; then
+      ok "PATH_GATED has a row for the required check '$req' ($base.yml)"
+    else
+      bad "PATH_GATED has a row for the required check '$req' ($base.yml)" \
+        "no row names it, so the check is never exempt"
+    fi
+  done <<< "$REQUIRED"
+
   if [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
     continue
   fi
 
+  # Forward direction: every trigger path of the workflow is covered by every
+  # row that names it.
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     omitting="$(printf '%s' "$rows" | jq --arg p "$p" '[.[] | select(.paths | index($p) | not)] | length')"
@@ -355,6 +387,40 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
     fi
   done <<< "$paths"
 done
+
+# Reverse direction, per row: every path in the row is a trigger path of the
+# workflow the row names, and the row names EXACTLY ONE workflow. An extra
+# path makes the check required for a diff that never starts the workflow, so
+# the check never reports and the gate blocks forever. A row that names no
+# workflow is never matched to one, and a row that names two is checked
+# against the wrong trigger set.
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  name="$(printf '%s' "$row" | jq -r '.name')"
+  markers="$(printf '%s' "$row" | jq -r '.paths[] | select(test("^\\.github/workflows/[^/]+\\.yml$"))')"
+  nmarkers="$(printf '%s\n' "$markers" | grep -c . || true)"
+  if [ "$nmarkers" -ne 1 ]; then
+    bad "PATH_GATED row '$name' names exactly one workflow" \
+      "it names $nmarkers workflow markers"
+    continue
+  fi
+  wf="$WORKFLOWS_DIR/$(basename "$markers")"
+  if [ ! -f "$wf" ]; then
+    bad "PATH_GATED row '$name' names an existing workflow" \
+      "$markers does not exist"
+    continue
+  fi
+  wfpaths="$(workflow_paths "$wf")"
+  while IFS= read -r rp; do
+    [ -n "$rp" ] || continue
+    if printf '%s\n' "$wfpaths" | grep -qxF -- "$rp"; then
+      ok "PATH_GATED row '$name' lists only trigger paths ('$rp')"
+    else
+      bad "PATH_GATED row '$name' lists only trigger paths ('$rp')" \
+        "'$rp' is not a trigger path of $(basename "$wf")"
+    fi
+  done <<< "$(printf '%s' "$row" | jq -r '.paths[]' | sort -u)"
+done <<< "$(printf '%s' "$GATED" | jq -c '.[]')"
 
 echo "pr-checks fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
