@@ -33,6 +33,62 @@ Check the version before blaming a review result:
 coderabbit --version   # must be >= 0.9.0
 ```
 
+### Auth failure modes (observed)
+
+Two distinct failures look alike at the review call. Probe with `coderabbit usage` — never
+with `auth status`/`doctor` (see the false-negative rule below).
+
+**Dead session** (the browser OAuth session expired or was revoked — a login minted on
+2026-10-07 was still on disk and never refreshed). The server answers `401 UNAUTHORIZED`
+and `usage` exits `1` with:
+
+```text
+Error: 401 UNAUTHORIZED — CLI session expired or revoked. Sign in again.
+```
+
+The review call itself only reports:
+
+```text
+Your CodeRabbit session or Git provider access could not be authenticated. Run `coderabbit auth login`, then retry the review.
+```
+
+Action: `coderabbit auth login` (interactive browser OAuth), or pass `--api-key` for a
+key-based run.
+
+**Seat/quota** (latent — it resurfaces after a successful re-login, because the account is
+authenticated but not entitled):
+
+```text
+You've used all 3 included reviews ... this Git provider account isn't linked to an assigned seat
+```
+
+Action: assign a CodeRabbit seat to the Git provider account, or use an Agentic API key
+(`--api-key`). Never pass `--use-credits`.
+
+Rules learned the hard way:
+
+- `coderabbit auth status` and `coderabbit doctor` are **false negatives** — both exit `0`
+  and print "Signed in" on a dead session. `auth status` swallows the seat-query `401` into
+  a log-only WARN, and `doctor` only checks local metadata presence plus unauthenticated
+  reachability. Neither may be used as an auth health check.
+- `coderabbit usage` is the only cheap probe that reflects real auth state (`usage` exits
+  `1` with the server message). It is **diagnostic-only**: `pr-review-local` runs it after
+  every review invocation, records the result in the raw file's `# auth probe:` header, and
+  — when the review itself failed — prints the verdict plus a concrete operator hint on
+  stderr. A probe failure must never gate: a successful review stays exit `0`, and a failed
+  probe never replaces the review's own exit code.
+  The probe is bounded by `timeout -k 2 15` (15 s `SIGTERM`, then `SIGKILL` after 2 s) when
+  `timeout` is on `PATH`. Without `timeout` — e.g. macOS without coreutils — the probe runs
+  **unbounded** rather than being skipped, so a hung seat query can stall the diagnostic
+  path (never the review's exit code, which is already captured). The first line of probe
+  output is capped at 200 characters before it reaches the header or stderr.
+- The CLI serializes these errors as `{}` in its structured output, destroying the server
+  message; only the free-text stderr/human line survives.
+- Auto-update stalled at `0.9.0` (a `0.9.2` update is pending). The runtime gate stays
+  `>= 0.9.0`; do not assume a newer binary is installed.
+- A dead session leaves the task **BLOCKED/escalated**. Never fall back to
+  `@coderabbitai review` or any other bot review-trigger comment.
+
 ## Review flags (v0.9.0, from `coderabbit review --help`)
 
 Real flags:
@@ -54,8 +110,10 @@ Footguns — flags that **do not exist** in 0.9.0:
 
 Quota and cloud behaviour:
 
-- `coderabbit usage` (or `review --usage`) talks to the cloud and can fail transiently. It
-  **must not gate** anything: the script never calls it.
+- `coderabbit usage` (or `review --usage`) talks to the cloud and can fail transiently. The
+  script runs it only as a **diagnostic auth probe** after each review invocation and records
+  the result in the raw evidence; it **must not gate** anything — a probe failure never
+  changes the review's exit code (see "Auth failure modes").
 - `--use-credits` spends money when included reviews are exhausted. Never use it in
   automation.
 
@@ -93,14 +151,15 @@ present, else via `gh api repos/<repo>/git/commits/<oid> --jq .tree.sha`).
 ### CLI output capture
 
 stdout, stderr, and the CLI exit code are captured verbatim. A non-zero CLI exit surfaces
-stderr and exits `1`. Raw evidence is always written **first**:
+stderr plus the bounded `coderabbit usage` auth probe (verdict and, when it matches a known
+failure, the operator action) and exits `1`. Raw evidence is always written **first**:
 
 ```text
 .arbitraitor/reviews/<short-head>-<timestamp>.raw.txt
 ```
 
 with header lines `# command:`, `# head OID:`, `# tree OID:`, `# base ref:`, `# base OID:`,
-`# exit:`, then `# --- stdout ---` and `# --- stderr ---` sections.
+`# exit:`, `# auth probe:`, then `# --- stdout ---` and `# --- stderr ---` sections.
 
 ## Record format
 
@@ -153,11 +212,12 @@ Observed captured output (NDJSON on stdout, exit `1`):
 ```
 
 and the same message on stderr. `coderabbit auth status` and `coderabbit doctor` both
-reported the account and the `arbsec` organization as signed in, so the cause is
-unconfirmed — `auth status`/`doctor` report signed-in while the review call rejected
-authentication. The remedy is the interactive browser OAuth flow
-(`coderabbit auth login`), after which the review must be re-run — a re-run is a real
-(quota-using) review, so it is a separate authorized step, not a retry loop.
+reported the account and the `arbsec` organization as signed in — they are false negatives.
+The cause was later confirmed with `coderabbit usage` as a dead session
+(`401 UNAUTHORIZED`, "CLI session expired or revoked"); see "Auth failure modes (observed)".
+The remedy is the interactive browser OAuth flow (`coderabbit auth login`), after which the
+review must be re-run — a re-run is a real (quota-using) review, so it is a separate
+authorized step, not a retry loop.
 
 The raw transcript stays at `.arbitraitor/reviews/<short-head>-<timestamp>.raw.txt`; a
 failed CLI run writes no `.md` record (exit `1` before verdict derivation).
