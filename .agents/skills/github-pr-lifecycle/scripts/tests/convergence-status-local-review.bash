@@ -20,6 +20,27 @@ EXAMPLE_TOML="$(cd "$HERE/../../../../project" && pwd)/github-project.example.to
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
 
+# --- hermetic git ---------------------------------------------------------------
+# The fixtures build real commits, so they must not inherit the operator's git
+# configuration. This repository's workflow expects operators to have SSH
+# commit signing configured: with `commit.gpgsign=true` in the global config,
+# every fixture `git commit` tries to sign and can fail or block on a key
+# prompt. Other global settings change the fixtures too — `diff.renames`
+# decides whether a move is reported as `R` or as a delete plus an add, and
+# cases 14, 25, 28 and 29 depend on rename detection being ON.
+#
+# `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` need git 2.32; the git floor for
+# this repository is higher (the base fetch uses `git rev-parse --verify` and
+# the CI images ship git 2.4x). `GIT_CONFIG_COUNT` would be the 2.31 fallback,
+# but it cannot blank the global config, only override single keys.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+# Be explicit about the one global setting the fixtures rely on, instead of
+# inheriting it from a default: rename detection ON.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=diff.renames
+export GIT_CONFIG_VALUE_0=true
+
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); echo "PASS $1"; }
 bad() { fail=$((fail + 1)); echo "FAIL $1${2:+: $2}" >&2; }
@@ -1217,7 +1238,9 @@ set_pr_view
 set_files "src/lib.rs"
 write_review "abc1234-20260101T000000Z" CLEAN
 # Drop the base OID line from the RECORD only (the transcript keeps its own).
-sed -i '/^- base OID: /d' "$WORK/.arbitraitor/reviews/abc1234-20260101T000000Z.md"
+# Portable form: BSD sed (macOS) reads `-i '<expr>'` as a backup suffix.
+REC="$WORK/.arbitraitor/reviews/abc1234-20260101T000000Z.md"
+grep -v '^- base OID: ' "$REC" > "$REC.tmp" && mv "$REC.tmp" "$REC"
 run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "a record with no base OID blocks" 5
 expect_json "a record with no base OID status" '.local_review.status' "local_review_record_malformed"
