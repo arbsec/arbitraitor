@@ -140,6 +140,7 @@ Blocking reasons (first failure wins; all make the verdict `mergeable: false`):
 | `local_review_command_mismatch` | the recorded argv is not the CodeRabbit review invocation |
 | `local_review_verdict_not_clean` | the attestation is FINDINGS/UNKNOWN |
 | `local_review_head_unresolvable` | the head tree could not be resolved by any ladder step |
+| `local_review_evaluation_failed` | the evaluation failed without naming a reason — a defensive fallback so an unnamed failure can never leave the verdict mergeable |
 
 `local_review_head_unresolvable` is a blocked verdict, not a crash: after
 `xtask push-branch` the landed commit object is never local, so the fetch/API

@@ -64,6 +64,33 @@ printf '%s\n' '{"all_checked":true,"unchecked":[]}'
 STUB
 chmod +x "$SCRIPTS/pr-checks" "$SCRIPTS/review-threads" "$SCRIPTS/reconcile-checklist"
 
+# --- mutant of the gate script -------------------------------------------------
+# `evaluate_local_review` sets LR_STATUS on every blocking path, and the
+# caller falls back to `local_review_evaluation_failed` when a path forgets.
+# The mutant removes one such assignment, so the fallback is the only thing
+# that keeps an unnamed failure from leaving the verdict mergeable.
+MUTANT_SCRIPTS="$ROOT/scripts-mutant"
+build_mutant() {
+  mkdir -p "$MUTANT_SCRIPTS"
+  cp -p "$SCRIPTS/pr-checks" "$SCRIPTS/review-threads" "$SCRIPTS/reconcile-checklist" \
+    "$MUTANT_SCRIPTS/"
+  cp -p "$SCRIPTS_REAL/_lib.sh" "$MUTANT_SCRIPTS/_lib.sh"
+  awk '
+    $0 == "  if [ ! -d \"$REVIEW_DIR\" ]; then" { marker = 1; print; next }
+    marker && $0 == "    LR_STATUS=\"local_review_missing\"" { marker = 0; next }
+    { print }
+  ' "$SCRIPTS_REAL/convergence-status" > "$MUTANT_SCRIPTS/convergence-status"
+  chmod +x "$MUTANT_SCRIPTS/convergence-status"
+  if grep -q 'LR_STATUS="local_review_missing"' "$MUTANT_SCRIPTS/convergence-status"; then
+    if [ "$(grep -c 'LR_STATUS="local_review_missing"' \
+      "$MUTANT_SCRIPTS/convergence-status")" -eq 1 ]; then
+      return 0
+    fi
+  fi
+  echo "mutant: the mutation did not apply" >&2
+  return 1
+}
+
 # --- gh stub -------------------------------------------------------------------
 cat > "$ROOT/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -269,6 +296,15 @@ write_review() {
 run_conv() {
   GOT=0
   ( cd "$WORK" && GH_BIN="$ROOT/gh" bash "$SCRIPTS/convergence-status" "$@" ) \
+    > "$ROOT/out" 2> "$ROOT/err" || GOT=$?
+  OUT="$(cat "$ROOT/out")"
+  ERR="$(cat "$ROOT/err")"
+}
+
+# run_conv_mutant <args...>; same, but against the mutated gate script.
+run_conv_mutant() {
+  GOT=0
+  ( cd "$WORK" && GH_BIN="$ROOT/gh" bash "$MUTANT_SCRIPTS/convergence-status" "$@" ) \
     > "$ROOT/out" 2> "$ROOT/err" || GOT=$?
   OUT="$(cat "$ROOT/out")"
   ERR="$(cat "$ROOT/err")"
@@ -1265,6 +1301,38 @@ write_review "abc1234-20260101T000000Z" CLEAN 0 0 "$PR_TREE" \
 run_conv 42 --repo arbsec/arbitraitor --json
 expect_exit "a base OID absent from the repository is unrecoverable" 1
 expect_err_contains "a base OID absent from the repository is loud" "not present in this repository"
+
+# ==============================================================================
+# 33. Regression: a failure that names no reason must still block. The caller
+#     used to read `evaluate_local_review || LOCAL_REVIEW_REASON="$LR_STATUS"`,
+#     which fails OPEN if a return path forgets to set LR_STATUS: the reason
+#     stays empty, no entry is added to REASONS, and MERGEABLE stays true.
+#     Every current path sets LR_STATUS, but the safety of this gate depends
+#     on every FUTURE edit keeping that property -- so the caller now falls
+#     back to `local_review_evaluation_failed` (docs/conventions.md, security
+#     invariant 6: "Fail closed").
+#
+#     The mutation removes ONE LR_STATUS assignment from the gate, so the
+#     fallback is the only thing that can keep the verdict blocked.
+# ==============================================================================
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr
+set_pr_view
+set_files "src/lib.rs"
+# No review record at all: the reviews directory does not exist, so the gate
+# takes the "no local review records" branch.
+build_mutant
+run_conv_mutant 42 --repo arbsec/arbitraitor --json
+expect_exit "an unnamed evaluation failure blocks" 5
+expect_json "an unnamed evaluation failure status" '.local_review.status' \
+  "local_review_evaluation_failed"
+expect_reason "an unnamed evaluation failure is a reason" \
+  "local_review_evaluation_failed"
+expect_json "an unnamed evaluation failure is not mergeable" '.mergeable' "false"
 
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

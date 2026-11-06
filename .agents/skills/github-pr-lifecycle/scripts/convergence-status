@@ -539,7 +539,18 @@ else
     LR_STATUS="docs_only_exempt"
     echo "note: docs-only diff (spec changes excluded); local CodeRabbit review not required" >&2
   else
-    evaluate_local_review || LOCAL_REVIEW_REASON="$LR_STATUS"
+    # A failure must always carry a reason. `evaluate_local_review` returns 1
+    # on every blocking path and sets LR_STATUS on each of them, but the
+    # safety of this gate depends on every FUTURE edit keeping that property:
+    # an empty reason would add no entry to REASONS and MERGEABLE would stay
+    # true. Fail closed with an explicit fallback
+    # (docs/conventions.md, security invariant 6: "Fail closed: When
+    # enforcement is mandatory, inability to complete a required check blocks
+    # release.").
+    if ! evaluate_local_review; then
+      LR_STATUS="${LR_STATUS:-local_review_evaluation_failed}"
+      LOCAL_REVIEW_REASON="$LR_STATUS"
+    fi
   fi
 fi
 
