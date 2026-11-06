@@ -53,6 +53,24 @@ This installs the correct versions of Rust, lefthook, cocogitto, and all other t
    rumdl check .
    ```
 
+   Changes under `.agents/**` also run the agent-skill shell gate in CI
+   (`.github/workflows/agents.yml`):
+
+   ```bash
+   failed=0
+   # One `bash -n` per file — `bash -n a b` parses only `a`.
+   while IFS= read -r script; do
+     bash -n "$script" || failed=1
+   done < <(
+     find .agents -type f \( -name '*.sh' -o -name '*.bash' \) -print
+     find .agents/skills -type f -path '*/scripts/*' ! -name '*.*' -print
+   )
+   for suite in .agents/skills/*/scripts/tests/*.bash; do
+     bash "$suite" || failed=1
+   done
+   [ "$failed" -eq 0 ]
+   ```
+
 5. **Open a PR** with a Conventional Commits title, security impact assessment, and linked issue. The PR template's `arb:*` checklist markers are verified by the [pr-lifecycle skill](.agents/skills/github-pr-lifecycle/SKILL.md) based on evidence — check them only when the underlying fact holds.
 
 6. **Clean up** after merge:
