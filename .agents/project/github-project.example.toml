@@ -105,23 +105,21 @@ required = [
   "Advisory Check",
   "CodeQL Analysis",
   "Agent Skills Tests",
+  "Agent Skills Shell Suites",
 ]
-optional = ["Documentation", "qlty check", "CodeRabbit", "Agent Skills Shell Suites"]
+optional = ["Documentation", "qlty check", "CodeRabbit"]
 # qlty = external quality gate (qlty.sh).
 # CodeRabbit: the GitHub App check auto-skips in this repo; the local CLI
 # (`scripts/pr-review-local`) is the review mechanism. pr-checks exempts only
 # `bucket == "skipping"`, so a *failing* CodeRabbit run still blocks.
-# Agent Skills Shell Suites: path-gated to `.agents/**` by
-# `.github/workflows/agents.yml`, so it legitimately never reports on a
-# Rust-only diff — a `required` entry needs a PATH_GATED row in
-# `scripts/pr-checks` first (arbsec/arbitraitor#862). pr-checks blocks on
-# any failing check, required or optional, so a red suite run still blocks.
-# This `optional` entry currently has NO behavioural effect: `optional` only
-# exempts a check that reports `skipping`, and this check either passes, fails,
-# or never reports at all — and a check that never reports can never be
-# `missing_required`, since that list is derived from `required`. It is listed
-# here as the intended end state. The real fix is #862: add the PATH_GATED row,
-# then move the name to `required`.
+# Agent Skills Shell Suites: the agents.yml job, path-gated to `.agents/**`
+# and `.github/workflows/agents.yml`. It is `required` and has a PATH_GATED row
+# in `scripts/pr-checks`, so it is required exactly for the diffs that trigger
+# agents.yml and exempt for every other diff (arbsec/arbitraitor#862). Without
+# the row a required check is never exempt, and without `required` a check that
+# never reports can never be `missing_required` — that list is derived from
+# `required` alone, so an `.agents/**` diff whose suites never ran would pass
+# the gate.
 
 # --- Merge + review policy -----------------------------------------------------
 [merge]

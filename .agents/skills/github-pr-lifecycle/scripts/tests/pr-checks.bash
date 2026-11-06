@@ -145,10 +145,9 @@ CODERABBIT_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[] |= (if .name == "Co
 run_case "CodeRabbit failed still blocks" "$CODERABBIT_FAIL_FIXTURE" "README.md" \
   '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
 
-# 8d. `Agent Skills Shell Suites` is listed in [checks].optional, but that
-#     does NOT make a failing suite pass. `optional` only exempts a check that
-#     reports the skipped state; `all_passed` requires every reported check to
-#     be a pass or exempt, so a failing suite blocks the gate.
+# 8d. `Agent Skills Shell Suites` is `required`, and a FAILING suite still
+#     blocks the gate: `all_passed` requires every reported check to be a pass
+#     or exempt, so a red suite run is never a pass.
 AGENT_SUITES_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '. + [{"name":"Agent Skills Shell Suites","state":"FAILURE","bucket":"fail","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
 run_case "failing Agent Skills Shell Suites blocks the gate" "$AGENT_SUITES_FAIL_FIXTURE" ".agents/skills/github-pr-lifecycle/SKILL.md" \
   '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
@@ -183,7 +182,8 @@ NO_CODE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Check 
   or .name == "Workspace Hack (macos-latest)"
   or .name == "Test (ubuntu-latest)"
   or .name == "Test (macos-latest)"
-  or .name == "Agent Skills Tests") | not)]')"
+  or .name == "Agent Skills Tests") | not)]
+  + [{"name":"Agent Skills Shell Suites","state":"SUCCESS","bucket":"pass","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
 CODE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
  "missing_required":["Check & Lint","Workspace Hack (ubuntu-latest)",
  "Workspace Hack (macos-latest)","Test (ubuntu-latest)","Test (macos-latest)",
@@ -209,6 +209,26 @@ run_case "docs/*.md diff keeps the markdown three required" "$NO_MD_FIXTURE" "do
   "$MD_MISSING"
 run_case "rust-only diff exempts the markdown three" "$NO_MD_FIXTURE" \
   "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
+
+# 12. agents.yml path-gate mirror (arbsec/arbitraitor#862). `Agent Skills Shell
+#     Suites` is `required` and has a PATH_GATED row, so it is required exactly
+#     for the diffs that trigger agents.yml (`.agents/**`,
+#     `.github/workflows/agents.yml`) and exempt for every other diff. The
+#     suite that never reports is the dangerous case: `missing_required` is
+#     derived from `required` alone, so a check listed only in `optional` can
+#     never be missing, and an `.agents/**` diff whose suites never ran would
+#     pass the gate.
+NO_SUITE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select(.name != "Agent Skills Shell Suites")]')"
+SUITE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
+ "missing_required":["Agent Skills Shell Suites"]}'
+run_case ".agents/** diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  ".agents/skills/github-pr-lifecycle/SKILL.md" "$SUITE_MISSING"
+run_case "agents.yml diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  ".github/workflows/agents.yml" "$SUITE_MISSING"
+run_case "a Rust-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
+run_case "a docs-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  "docs/guide.md" "$FULL_JSON"
 
 echo "pr-checks fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
