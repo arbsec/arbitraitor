@@ -106,7 +106,10 @@ required = [
   "CodeQL Analysis",
   "Agent Skills Tests",
 ]
-optional = ["Documentation", "qlty check"]   # qlty = external quality gate (qlty.sh)
+optional = ["Documentation", "qlty check", "CodeRabbit"]   # qlty = external quality gate (qlty.sh)
+# CodeRabbit: the GitHub App check auto-skips in this repo; the local CLI
+# (`scripts/pr-review-local`) is the review mechanism. pr-checks exempts only
+# `bucket == "skipping"`, so a *failing* CodeRabbit run still blocks.
 
 # --- Merge + review policy -----------------------------------------------------
 [merge]

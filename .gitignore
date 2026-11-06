@@ -41,4 +41,6 @@ book/src/adr/
 # Arbitraitor runtime artifacts (config.toml can be project-local)
 .arbitraitor/cas/
 .arbitraitor/receipts/
+.arbitraitor/reviews/
 .arbitraitor/intel.json
+.agents/project/github-project.local.toml
