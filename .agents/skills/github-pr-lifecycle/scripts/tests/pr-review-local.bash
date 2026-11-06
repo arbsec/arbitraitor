@@ -225,5 +225,21 @@ else
   bad "--dry-run prints argv without invoking the CLI" "out: $OUT"
 fi
 
+# 11. --from-raw must not accept a path that escapes .arbitraitor/reviews/
+#     (a `..` segment resolves outside while still matching the string prefix).
+REPO_RAW="$(make_repo)"
+mkdir -p "$REPO_RAW/.arbitraitor/reviews"
+{
+  echo "# head OID: $(git -C "$REPO_RAW" rev-parse HEAD)"
+  echo "# base ref: origin/main"
+  echo "# base OID: $(git -C "$REPO_RAW" rev-parse 'origin/main^{commit}')"
+  echo "# exit: 0"
+  echo "# --- stdout ---"
+  echo '{"verdict":"CLEAN"}'
+  echo "# --- stderr ---"
+} > "$REPO_RAW/evil.raw.txt"
+run "$REPO_RAW" --from-raw ".arbitraitor/reviews/../../evil.raw.txt"
+expect_exit "--from-raw path traversal exits 2" 2
+
 echo "pr-review-local fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

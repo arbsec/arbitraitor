@@ -291,10 +291,15 @@ if [ "$MODE" = "from-raw" ]; then
     *)  RAW_IN="$TOP/$OPT_FROM_RAW" ;;
   esac
   [ -f "$RAW_IN" ] || die "$E_CONFIG" "raw file not found: $OPT_FROM_RAW"
-  case "$RAW_IN" in
-    "$REVIEW_DIR"/*) ;;
-    *) die "$E_CONFIG" "raw file must live under $REVIEW_DIR_REL/ (got: $OPT_FROM_RAW)" ;;
-  esac
+  # Canonicalize before the containment check: a `../` segment must not escape
+  # .arbitraitor/reviews/ while still matching the string prefix.
+  RAW_DIR="$(cd "$(dirname "$RAW_IN")" 2>/dev/null && pwd -P)" \
+    || die "$E_CONFIG" "raw file directory not found: $OPT_FROM_RAW"
+  REVIEW_DIR_CANON="$(cd "$REVIEW_DIR" 2>/dev/null && pwd -P)" \
+    || die "$E_CONFIG" "review directory not found: $REVIEW_DIR_REL"
+  [ "$RAW_DIR" = "$REVIEW_DIR_CANON" ] \
+    || die "$E_CONFIG" "raw file must live directly under $REVIEW_DIR_REL/ (got: $OPT_FROM_RAW)"
+  RAW_IN="$RAW_DIR/$(basename "$RAW_IN")"
   HEAD_OID="$(git rev-parse HEAD)"
   TREE_OID="$(git rev-parse 'HEAD^{tree}')"
   RAW_HEAD="$(awk -F': ' '/^# head OID:/{print $2; exit}' "$RAW_IN")"
