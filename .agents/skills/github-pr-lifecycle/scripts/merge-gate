@@ -11,9 +11,42 @@ arb_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
   arb_lib_print_help "merge-gate" "Check if a PR is safe to squash-merge. Exits 0=mergeable. Never uses --admin."
+  echo "  --skip-local-review   Emergency valve: waive the local review (loud; see references/pr-convergence.md)"
   exit "$ARB_OK"
 fi
 
+# --- Flag scan: --skip-local-review is forwarded to convergence-status --------
+# Scan every position (before or after the PR number) so the flag is never
+# mistaken for the PR positional. ARB_SKIP_LOCAL_REVIEW=1 is the env equivalent.
+OPT_SKIP_LOCAL_REVIEW=false
+_SKIP_LOCAL_REVIEW_SEEN=false
+_POSITIONAL_ARGS=()
+# The `${arr[@]+"${arr[@]}"}` form: on bash < 4.4 (macOS ships 3.2), an empty
+# array expanded under `set -u` aborts with "unbound variable" — which would
+# mask the real error ("PR number required") with a confusing abort.
+for _arg in ${ARB_LIB_EXTRA_ARGS[@]+"${ARB_LIB_EXTRA_ARGS[@]}"}; do
+  case "$_arg" in
+    --skip-local-review)
+      # A repeated valve flag is a caller bug, not a stronger waiver: accepting
+      # it silently hides a generated command line that appended the flag twice.
+      if [ "$_SKIP_LOCAL_REVIEW_SEEN" = true ]; then
+        echo "error: --skip-local-review given twice" >&2
+        exit "$ARB_ERR_CONFIG"
+      fi
+      _SKIP_LOCAL_REVIEW_SEEN=true
+      OPT_SKIP_LOCAL_REVIEW=true ;;
+    *)                   _POSITIONAL_ARGS+=("$_arg") ;;
+  esac
+done
+ARB_LIB_EXTRA_ARGS=(${_POSITIONAL_ARGS[@]+"${_POSITIONAL_ARGS[@]}"})
+if [ "${ARB_SKIP_LOCAL_REVIEW:-0}" = "1" ]; then
+  OPT_SKIP_LOCAL_REVIEW=true
+fi
+
+if [ "${#ARB_LIB_EXTRA_ARGS[@]}" -gt 1 ]; then
+  echo "error: unexpected arguments: ${ARB_LIB_EXTRA_ARGS[*]}" >&2
+  exit "$ARB_ERR_CONFIG"
+fi
 PR="${ARB_LIB_EXTRA_ARGS[0]:-}"
 if [ -z "$PR" ]; then
   echo "error: PR number required" >&2
@@ -25,14 +58,18 @@ arb_lib_load_project_config
 REPO="$(arb_lib_resolve_repo)"
 
 # Run convergence-status first (once; stderr captured for diagnostics).
-# NOTE: convergence-status is a first-pass proxy — it checks available GitHub
-# signals but cannot prove review-generation evidence on its own. The caller
-# (the pr-lifecycle skill's session) must confirm a full review generation ran
-# against the current HEAD and found no new noteworthy findings.
+# NOTE: convergence-status enforces the local-review evidence and the available
+# GitHub signals, but it is still a proxy for a full fresh-context adversarial
+# generation. The caller (the pr-lifecycle skill's session) must confirm that
+# generation found no new noteworthy findings.
 CONV_ERR_FILE="$(mktemp)"
 CONVERGENCE=""
 CONV_EXIT=0
-CONVERGENCE="$("$SCRIPT_DIR/convergence-status" "$PR" --repo "$REPO" --json 2>"$CONV_ERR_FILE")" || CONV_EXIT=$?
+CONV_ARGS=("$PR" --repo "$REPO" --json)
+if [ "$OPT_SKIP_LOCAL_REVIEW" = true ]; then
+  CONV_ARGS+=(--skip-local-review)
+fi
+CONVERGENCE="$("$SCRIPT_DIR/convergence-status" "${CONV_ARGS[@]}" 2>"$CONV_ERR_FILE")" || CONV_EXIT=$?
 if ! echo "$CONVERGENCE" | jq -e . >/dev/null 2>&1; then
   # convergence-status hard-failed (no usable JSON) — surface the sub-check's
   # name and stderr instead of reporting an empty reason list.
@@ -49,6 +86,16 @@ if [ "$(echo "$CONVERGENCE" | jq -r '.mergeable')" != "true" ]; then
     echo "[dry-run] Would NOT merge: convergence check failed." >&2
   fi
   exit "$ARB_ERR_BLOCKED"
+fi
+
+# A success with a non-empty reason list means something was explicitly skipped
+# or waived (e.g. local_review_skipped). Make it visible where a human looks.
+# The merge has NOT happened yet — this line runs before `gh pr merge` (and the
+# merge never runs at all with --dry-run), so it states the gate result, not a
+# completed merge.
+SUCCESS_REASONS="$(echo "$CONVERGENCE" | jq -r '.reasons // [] | join(", ")')"
+if [ -n "$SUCCESS_REASONS" ]; then
+  echo "note: merge gate passed with waivers: $SUCCESS_REASONS" >&2
 fi
 
 # Use the head SHA the convergence check verified — NOT a fresh read. A commit

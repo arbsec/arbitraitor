@@ -41,6 +41,8 @@ git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 
 FIXTURE="$STUB/raw.json"
 pass=0; fail=0
+ok() { pass=$((pass + 1)); echo "PASS $1"; }
+bad() { fail=$((fail + 1)); echo "FAIL $1${2:+: $2}" >&2; }
 run_case() {
   local name="$1" fixture="$2" files="$3" expect="$4"
   printf '%s' "$fixture" > "$FIXTURE"
@@ -118,7 +120,7 @@ run_case ".mise.toml diff leaves only Invariants missing" "$SEC_YML_FIXTURE" ".m
 
 # 5. A required check absent from the rollup with no path coverage -> gate fails
 NO_AST_FIXTURE="$(printf '%s' "$ALL_PASS" | jq 'del(.[12])')"
-run_case "absent required check fails the gate" "$NO_AST_FIXTURE" "README.md" \
+run_case "absent required check fails the gate" "$NO_AST_FIXTURE" "crates/arbitraitor-core/src/lib.rs" \
   '{"all_passed":false,"any_failing":false,"any_pending":false,"missing_required":["Agent Skills Tests"]}'
 
 # 6. A failing check -> any_failing + all_passed false
@@ -145,6 +147,13 @@ CODERABBIT_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[] |= (if .name == "Co
 run_case "CodeRabbit failed still blocks" "$CODERABBIT_FAIL_FIXTURE" "README.md" \
   '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
 
+# 8d. `Agent Skills Shell Suites` is `required`, and a FAILING suite still
+#     blocks the gate: `all_passed` requires every reported check to be a pass
+#     or exempt, so a red suite run is never a pass.
+AGENT_SUITES_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '. + [{"name":"Agent Skills Shell Suites","state":"FAILURE","bucket":"fail","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
+run_case "failing Agent Skills Shell Suites blocks the gate" "$AGENT_SUITES_FAIL_FIXTURE" ".agents/skills/github-pr-lifecycle/SKILL.md" \
+  '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
+
 # 9. Hard gh failure (empty output, non-8 exit) -> exit 1
 printf '' > "$FIXTURE"
 if (cd "$REPO" && GH_BIN="$STUB/gh" bash -c "GH_BIN='$STUB/gh' FAKE_EXIT=1 true") 2>/dev/null; then :; fi
@@ -165,6 +174,277 @@ if [ "$got_code" -eq 1 ]; then
 else
   fail=$((fail + 1)); echo "FAIL hard gh failure: expected exit 1, got $got_code" >&2
 fi
+
+# 10. code.yml path-gate mirror (arbsec/arbitraitor PR B). The workflow is
+#     Rust/Cargo-scoped, so an `.agents`-only diff legitimately never reports its
+#     six checks. A `wit/**`, `.config/hakari.toml`, or `Cargo.lock` diff DOES
+#     reach the workflow, so the checks are not exempt and their absence blocks.
+NO_CODE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Check & Lint"
+  or .name == "Workspace Hack (ubuntu-latest)"
+  or .name == "Workspace Hack (macos-latest)"
+  or .name == "Test (ubuntu-latest)"
+  or .name == "Test (macos-latest)"
+  or .name == "Agent Skills Tests") | not)]
+  + [{"name":"Agent Skills Shell Suites","state":"SUCCESS","bucket":"pass","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
+CODE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
+ "missing_required":["Check & Lint","Workspace Hack (ubuntu-latest)",
+ "Workspace Hack (macos-latest)","Test (ubuntu-latest)","Test (macos-latest)",
+ "Agent Skills Tests"]}'
+run_case ".agents-only diff exempts the six code.yml checks" "$NO_CODE_FIXTURE" \
+  ".agents/skills/x/SKILL.md" "$FULL_JSON"
+run_case "wit/** diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  "wit/arbitraitor.wit" "$CODE_MISSING"
+run_case ".config/hakari.toml diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  ".config/hakari.toml" "$CODE_MISSING"
+run_case "Cargo.lock diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  "Cargo.lock" "$CODE_MISSING"
+# A root file is the sharpest case for the `**/` glob: GitHub Actions matches
+# `**/Cargo.toml` against the root `Cargo.toml`, so the workflow RUNS for that
+# diff and the code.yml checks are not exempt. If the glob translation turned
+# `**/` into a pattern that REQUIRES a directory separator, a root `Cargo.toml`
+# diff would exempt the six code.yml checks -- and the gate could pass before
+# CI reported them. The translation is `(.*/)?`: zero or more directories.
+run_case "root Cargo.toml does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  "Cargo.toml" "$CODE_MISSING"
+# The opposite error: a pattern with NO `**/` prefix is ROOT-only in GitHub
+# Actions. `Cargo.lock` does not match `fuzz/Cargo.lock`, so code.yml does not
+# run for that diff and its six checks ARE exempt. An unanchored translation
+# would match the nested file, require the checks that never report, and block
+# the gate forever with `missing_required`.
+run_case "a nested fuzz/Cargo.lock exempts the code.yml checks" "$NO_CODE_FIXTURE" \
+  "fuzz/Cargo.lock" "$FULL_JSON"
+
+# 11. markdown.yml path-gate mirror. A `**/*.md` diff reaches the workflow, so
+#     the three checks are NOT exempt (their absence fails closed). A Rust-only
+#     diff never reaches markdown.yml, so its three checks are exempt.
+NO_MD_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Markdown Lint"
+  or .name == "Book Build"
+  or .name == "Docs Consistency") | not)]')"
+MD_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
+ "missing_required":["Markdown Lint","Book Build","Docs Consistency"]}'
+run_case "docs/*.md diff keeps the markdown three required" "$NO_MD_FIXTURE" "docs/guide.md" \
+  "$MD_MISSING"
+# The root `README.md` is the same glob question as the root `Cargo.toml`:
+# `**/*.md` matches it in GitHub Actions, so markdown.yml RUNS and the three
+# checks are not exempt.
+run_case "root README.md keeps the markdown three required" "$NO_MD_FIXTURE" "README.md" \
+  "$MD_MISSING"
+# Root-only again: `lefthook.yml` does not match `tools/lefthook.yml`, so
+# markdown.yml does not run and the three checks are exempt.
+run_case "a nested tools/lefthook.yml exempts the markdown three" "$NO_MD_FIXTURE" \
+  "tools/lefthook.yml" "$FULL_JSON"
+run_case "rust-only diff exempts the markdown three" "$NO_MD_FIXTURE" \
+  "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
+
+# 12. agents.yml path-gate mirror (arbsec/arbitraitor#862). `Agent Skills Shell
+#     Suites` is `required` and has a PATH_GATED row, so it is required exactly
+#     for the diffs that trigger agents.yml (`.agents/**`,
+#     `.github/workflows/agents.yml`) and exempt for every other diff. The
+#     suite that never reports is the dangerous case: `missing_required` is
+#     derived from `required` alone, so a check listed only in `optional` can
+#     never be missing, and an `.agents/**` diff whose suites never ran would
+#     pass the gate.
+NO_SUITE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select(.name != "Agent Skills Shell Suites")]')"
+SUITE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
+ "missing_required":["Agent Skills Shell Suites"]}'
+run_case ".agents/** diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  ".agents/skills/github-pr-lifecycle/SKILL.md" "$SUITE_MISSING"
+run_case "agents.yml diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  ".github/workflows/agents.yml" "$SUITE_MISSING"
+run_case "a Rust-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
+run_case "a docs-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  "docs/guide.md" "$FULL_JSON"
+
+# 13. The PATH_GATED table mirrors the workflows it claims to mirror.
+#
+#     A row that OMITS a trigger path of its workflow is unsafe: a diff that
+#     touches only that path starts the workflow, and until the run is queued
+#     the check is not reported -- while a row that does not match the diff
+#     exempts the check. The gate could then pass before CI reported.
+#     An extra path in a row is the opposite error: the check is required for
+#     a diff that never triggers the workflow, so it can never be satisfied
+#     and the gate blocks forever. The row must therefore list the workflow's
+#     trigger paths exactly -- in BOTH directions.
+#
+#     The ownership rule is per JOB, not per workflow: the exemption is looked
+#     up by check NAME, so a row that names the workflow does not exempt the
+#     other required jobs of that workflow. A required job with no row of its
+#     own is never exempt, and it blocks every diff that does not trigger the
+#     workflow -- forever.
+#
+#     The rows are read out of the script under test, so this test cannot
+#     drift from it.
+REPO_ROOT="$(cd "$HERE/../../../../.." && pwd)"
+WORKFLOWS_DIR="$REPO_ROOT/.github/workflows"
+
+# The table: a single-quoted JSON array in the script.
+path_gated_json() {
+  awk '/^PATH_GATED=/{f=1} f{print} /^\]/{f=0}' "$PR_CHECKS" \
+    | tr -d "'" | sed '1s/^PATH_GATED=//'
+}
+
+# The trigger paths of a workflow: every entry of every `paths:` list in the
+# file. The workflows declare the list once and alias it (`&code_paths` /
+# `*code_paths`), and agents.yml declares it twice; the union is the same set.
+workflow_paths() {
+  awk '
+    /^[[:space:]]*paths:/ { f = 1; next }
+    f && /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      print line
+      next
+    }
+    f && /^[[:space:]]*$/ { next }
+    f { f = 0 }
+  ' "$1" | tr -d "\"'" | sort -u
+}
+
+# The job names of a workflow (exactly four spaces of indentation -- the
+# workflow-level `name:` has none and a step-level `name:` has more).
+workflow_job_names() {
+  awk '/^    name:[[:space:]]*/ {
+    line = $0
+    sub(/^    name:[[:space:]]*/, "", line)
+    print line
+  }' "$1" | tr -d "\"'"
+}
+
+# A check name reduced to the part before the matrix suffix: the YAML job is
+# named `Test (${{ matrix.os }})` and reports as `Test (ubuntu-latest)`.
+check_base() {
+  printf '%s' "${1%% (*}"
+}
+
+# The required checks, read out of the project config.
+required_checks() {
+  awk '
+    /^required[[:space:]]*=[[:space:]]*\[/ { f = 1; next }
+    f && /\]/ { exit }
+    f {
+      line = $0
+      gsub(/[",]/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (length) print line
+    }
+  ' "$EXAMPLE_TOML"
+}
+
+GATED="$(path_gated_json)"
+REQUIRED="$(required_checks)"
+
+for wf in "$WORKFLOWS_DIR"/*.yml; do
+  base="$(basename "$wf" .yml)"
+  marker=".github/workflows/$base.yml"
+  paths="$(workflow_paths "$wf")"
+  if [ -z "$paths" ]; then
+    continue   # unfiltered workflow: every check of it always reports
+  fi
+
+  # A `paths-ignore` filter would make the trigger set the complement of the
+  # list, and the row could not mirror it.
+  if grep -q 'paths-ignore' "$wf"; then
+    bad "workflow $base has no paths-ignore filter" "paths-ignore changes the trigger set"
+  else
+    ok "workflow $base has no paths-ignore filter"
+  fi
+
+  rows="$(printf '%s' "$GATED" | jq -c --arg m "$marker" '[.[] | select(.paths | index($m))]')"
+  jobs="$(workflow_job_names "$wf")"
+
+  # Does this workflow own a REQUIRED check? If it does and no row names it,
+  # its checks are never exempt -- and a required check that never reports
+  # blocks the gate forever.
+  owns_required=false
+  while IFS= read -r job; do
+    [ -n "$job" ] || continue
+    while IFS= read -r req; do
+      [ -n "$req" ] || continue
+      if [ "$(check_base "$job")" = "$(check_base "$req")" ]; then
+        owns_required=true
+      fi
+    done <<< "$REQUIRED"
+  done <<< "$jobs"
+
+  if [ "$owns_required" = true ] && [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
+    bad "workflow $base is named by a PATH_GATED row" "it owns a required check but no row names it"
+  fi
+
+  # Per JOB, not per workflow: the exemption is looked up by check NAME, so a
+  # row that names the workflow does not exempt the OTHER required jobs of
+  # that workflow. Every required job of a path-filtered workflow needs its
+  # OWN row -- a second required job without one is never exempt and blocks
+  # every diff that does not trigger the workflow, forever.
+  while IFS= read -r req; do
+    [ -n "$req" ] || continue
+    owned=false
+    while IFS= read -r job; do
+      [ -n "$job" ] || continue
+      if [ "$(check_base "$job")" = "$(check_base "$req")" ]; then
+        owned=true
+      fi
+    done <<< "$jobs"
+    [ "$owned" = true ] || continue
+    if printf '%s' "$rows" | jq -e --arg n "$req" 'any(.[]; .name == $n)' >/dev/null; then
+      ok "PATH_GATED has a row for the required check '$req' ($base.yml)"
+    else
+      bad "PATH_GATED has a row for the required check '$req' ($base.yml)" \
+        "no row names it, so the check is never exempt"
+    fi
+  done <<< "$REQUIRED"
+
+  if [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
+    continue
+  fi
+
+  # Forward direction: every trigger path of the workflow is covered by every
+  # row that names it.
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    omitting="$(printf '%s' "$rows" | jq --arg p "$p" '[.[] | select(.paths | index($p) | not)] | length')"
+    if [ "$omitting" -eq 0 ]; then
+      ok "PATH_GATED rows for $base cover '$p'"
+    else
+      bad "PATH_GATED rows for $base cover '$p'" \
+        "$omitting of $(printf '%s' "$rows" | jq 'length') rows omit it"
+    fi
+  done <<< "$paths"
+done
+
+# Reverse direction, per row: every path in the row is a trigger path of the
+# workflow the row names, and the row names EXACTLY ONE workflow. An extra
+# path makes the check required for a diff that never starts the workflow, so
+# the check never reports and the gate blocks forever. A row that names no
+# workflow is never matched to one, and a row that names two is checked
+# against the wrong trigger set.
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  name="$(printf '%s' "$row" | jq -r '.name')"
+  markers="$(printf '%s' "$row" | jq -r '.paths[] | select(test("^\\.github/workflows/[^/]+\\.yml$"))')"
+  nmarkers="$(printf '%s\n' "$markers" | grep -c . || true)"
+  if [ "$nmarkers" -ne 1 ]; then
+    bad "PATH_GATED row '$name' names exactly one workflow" \
+      "it names $nmarkers workflow markers"
+    continue
+  fi
+  wf="$WORKFLOWS_DIR/$(basename "$markers")"
+  if [ ! -f "$wf" ]; then
+    bad "PATH_GATED row '$name' names an existing workflow" \
+      "$markers does not exist"
+    continue
+  fi
+  wfpaths="$(workflow_paths "$wf")"
+  while IFS= read -r rp; do
+    [ -n "$rp" ] || continue
+    if printf '%s\n' "$wfpaths" | grep -qxF -- "$rp"; then
+      ok "PATH_GATED row '$name' lists only trigger paths ('$rp')"
+    else
+      bad "PATH_GATED row '$name' lists only trigger paths ('$rp')" \
+        "'$rp' is not a trigger path of $(basename "$wf")"
+    fi
+  done <<< "$(printf '%s' "$row" | jq -r '.paths[]' | sort -u)"
+done <<< "$(printf '%s' "$GATED" | jq -c '.[]')"
 
 echo "pr-checks fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

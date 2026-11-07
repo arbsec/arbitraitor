@@ -91,18 +91,69 @@ FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'sp
 # --- Path-gated required checks ------------------------------------------------
 # Mirror of the `on.pull_request.paths` filters in the workflow files: a
 # path-gated check legitimately never reports when the diff matches none of
-# its paths. KEEP IN SYNC with .github/workflows/{invariants,security}.yml.
+# its paths. KEEP IN SYNC with
+# .github/workflows/{code,markdown,invariants,security,agents}.yml.
+# CodeQL Analysis has no entry: its workflow is unfiltered.
+# `Agent Skills Tests` is the code.yml job, and code.yml is Rust/Cargo-scoped,
+# so an `.agents`-only diff never reaches it. The skill shell suites still run
+# for that diff under .github/workflows/agents.yml (job `Agent Skills Shell
+# Suites`, filter `.agents/**`), whose job name is deliberately distinct.
+# `Agent Skills Shell Suites` has its own row: it is the agents.yml job, and
+# a required check with no row is never exempt — so an `.agents/**` diff whose
+# suites never reported would pass the gate. With the row, the suites are
+# required exactly for the diffs that trigger agents.yml, and exempt for every
+# other diff.
 PATH_GATED='[
   {"name": "Invariant Property Tests",
    "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/invariants.yml"]},
   {"name": "Dependency Policy",
    "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]},
   {"name": "Advisory Check",
-   "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]}
+   "paths": ["**/Cargo.toml", "Cargo.lock", "deny.toml", ".mise.toml", ".github/workflows/security.yml"]},
+  {"name": "Check & Lint",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Workspace Hack (ubuntu-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Workspace Hack (macos-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Test (ubuntu-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Test (macos-latest)",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Agent Skills Tests",
+   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
+  {"name": "Agent Skills Shell Suites",
+   "paths": [".agents/**", ".github/workflows/agents.yml"]},
+  {"name": "Markdown Lint",
+   "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]},
+  {"name": "Book Build",
+   "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]},
+  {"name": "Docs Consistency",
+   "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]}
 ]'
 
 # Is a required check exempt because its workflow is path-gated and no diff
 # file matches any of its paths? (No path-gate entry → not exempt.)
+#
+# The glob translation MIRRORS GitHub Actions' `paths:` semantics, so it is
+# anchored at both ends:
+#
+#   `**/`  -> `(.*/)?`   zero or more directories (matches a root file too)
+#   `**`   -> `.*`       everything, including `/` (a trailing `dir/**`)
+#   `*`    -> `[^/]*`    anything but `/`
+#   `.`    -> `\.`
+#
+# Each form gets its own placeholder, because the single-`*` pass would
+# otherwise rewrite the `*` that `**` expands to.
+#
+# Anchoring is required for the patterns with no `**/` prefix -- `Cargo.lock`,
+# `.mise.toml`, `deny.toml`, `rumdl.toml`, `lefthook.yml` are ROOT-only in
+# GitHub Actions. An unanchored regex would make `fuzz/Cargo.lock` match
+# `Cargo.lock`, so the code.yml checks would be required for a diff that never
+# starts the workflow, the checks would never report, and the gate would block
+# forever with `missing_required` (fail-closed, but unrecoverable without
+# editing the table). The `(.*/)?` form keeps `**/Cargo.toml` matching BOTH
+# `Cargo.toml` and `fuzz/Cargo.toml`, as GitHub does.
 path_gate_exempt() {
   local chk="$1"
   jq -rn --arg c "$chk" --argjson gated "$PATH_GATED" --argjson files "$FILES_JSON" '
@@ -112,8 +163,8 @@ path_gate_exempt() {
         ([$gated[]
             | select(.name == $c)
             | .paths[] as $p
-            | select(any($files[]; test($p | gsub("\\."; "\u0001") | gsub("\\*\\*/"; "\u0002") | gsub("\\*"; "[^/]*") | gsub("\u0002"; "(^|.*/)") | gsub("\u0001"; "\\."))
-            ))]
+            | select(any($files[]; test("^" + ($p | gsub("\\."; "\u0001") | gsub("\\*\\*/"; "\u0002") | gsub("\\*\\*"; "\u0003") | gsub("\\*"; "[^/]*") | gsub("\u0002"; "(.*/)?") | gsub("\u0003"; ".*") | gsub("\u0001"; "\\.")) + "$"))
+            )]
           | length) == 0
       end'
 }
