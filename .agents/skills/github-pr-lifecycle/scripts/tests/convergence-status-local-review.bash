@@ -353,6 +353,15 @@ expect_err_contains() { # expect_err_contains <name> <text>
   fi
 }
 
+# A negative check on the same captured stderr: some strings must NOT appear.
+expect_err_not_contains() { # expect_err_not_contains <name> <text>
+  if grep -qF -- "$2" <<<"$ERR"; then
+    bad "$1" "stderr offers '$2': $ERR"
+  else
+    ok "$1"
+  fi
+}
+
 # ==============================================================================
 # 1. Accepted record: tree match, ancestor base, no overlap, hash+exit+command
 #    verify, CLEAN verdict. The head object is NOT local before the run.
@@ -403,6 +412,14 @@ expect_exit "missing records exit 5 (blocked), not 1" 5
 expect_json "missing records status" '.local_review.status' "local_review_missing"
 expect_reason "missing records reason" "local_review_missing"
 expect_err_contains "missing records names the dir" ".arbitraitor/reviews"
+# The stderr reaches agents, who act on it. Project policy forbids the waiver
+# without operator approval and a PR-description reason, and a missing record is
+# normally fixed by running pr-review-local -- so the message must not present
+# `--skip-local-review` as the remedy. It may only name the conditions.
+expect_err_contains "missing records names the real remedy" "run pr-review-local"
+expect_err_contains "missing records bounds the waiver" "emergency valve only"
+expect_err_not_contains "missing records does not offer the waiver as an override" \
+  "pass --skip-local-review to override"
 
 # ==============================================================================
 # 3. No tree-matching record -> local_review_stale_tree.

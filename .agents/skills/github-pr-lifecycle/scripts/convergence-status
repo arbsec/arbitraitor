@@ -334,7 +334,7 @@ evaluate_local_review() {
 
   if [ ! -d "$REVIEW_DIR" ]; then
     LR_STATUS="local_review_missing"
-    echo "error: no local review records in $REVIEW_DIR_REL/ (the directory is gitignored; run pr-review-local in the review checkout, or pass --skip-local-review to override)" >&2
+    echo "error: no local review records in $REVIEW_DIR_REL/ (the directory is gitignored; run pr-review-local in the review checkout. --skip-local-review is an emergency valve only: operator approval and a reason recorded in the PR description are required)" >&2
     return 1
   fi
   shopt -s nullglob
@@ -342,7 +342,7 @@ evaluate_local_review() {
   shopt -u nullglob
   if [ "${#records[@]}" -eq 0 ]; then
     LR_STATUS="local_review_missing"
-    echo "error: no local review records in $REVIEW_DIR_REL/ (the directory is gitignored; run pr-review-local in the review checkout, or pass --skip-local-review to override)" >&2
+    echo "error: no local review records in $REVIEW_DIR_REL/ (the directory is gitignored; run pr-review-local in the review checkout. --skip-local-review is an emergency valve only: operator approval and a reason recorded in the PR description are required)" >&2
     return 1
   fi
 
