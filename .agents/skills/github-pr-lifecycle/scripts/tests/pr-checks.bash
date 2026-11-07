@@ -198,6 +198,14 @@ run_case ".config/hakari.toml diff does not exempt the code.yml checks" "$NO_COD
   ".config/hakari.toml" "$CODE_MISSING"
 run_case "Cargo.lock diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
   "Cargo.lock" "$CODE_MISSING"
+# A root file is the sharpest case for the `**/` glob: GitHub Actions matches
+# `**/Cargo.toml` against the root `Cargo.toml`, so the workflow RUNS for that
+# diff and the code.yml checks are not exempt. If the glob translation turned
+# `**/` into a pattern that REQUIRES a directory separator, a root `Cargo.toml`
+# diff would exempt the six code.yml checks -- and the gate could pass before
+# CI reported them. The translation is `(^|.*/)`: zero or more directories.
+run_case "root Cargo.toml does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
+  "Cargo.toml" "$CODE_MISSING"
 
 # 11. markdown.yml path-gate mirror. A `**/*.md` diff reaches the workflow, so
 #     the three checks are NOT exempt (their absence fails closed). A Rust-only
@@ -208,6 +216,11 @@ NO_MD_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Markdown
 MD_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
  "missing_required":["Markdown Lint","Book Build","Docs Consistency"]}'
 run_case "docs/*.md diff keeps the markdown three required" "$NO_MD_FIXTURE" "docs/guide.md" \
+  "$MD_MISSING"
+# The root `README.md` is the same glob question as the root `Cargo.toml`:
+# `**/*.md` matches it in GitHub Actions, so markdown.yml RUNS and the three
+# checks are not exempt.
+run_case "root README.md keeps the markdown three required" "$NO_MD_FIXTURE" "README.md" \
   "$MD_MISSING"
 run_case "rust-only diff exempts the markdown three" "$NO_MD_FIXTURE" \
   "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"

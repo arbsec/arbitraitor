@@ -84,8 +84,9 @@ Rules learned the hard way:
   output is capped at 200 characters before it reaches the header or stderr.
 - The CLI serializes these errors as `{}` in its structured output, destroying the server
   message; only the free-text stderr/human line survives.
-- Auto-update stalled at `0.9.0` (a `0.9.2` update is pending). The runtime gate stays
-  `>= 0.9.0`; do not assume a newer binary is installed.
+- v0.9.2 has been observed in a successful run (see "Observed on v0.9.2 (successful
+  run)"). The runtime gate stays `>= 0.9.0`; do not assume a newer binary is installed
+  everywhere.
 - A dead session leaves the task **BLOCKED/escalated**. Never fall back to
   `@coderabbitai review` or any other bot review-trigger comment.
 
