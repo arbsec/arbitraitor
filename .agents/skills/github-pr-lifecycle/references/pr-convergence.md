@@ -201,9 +201,11 @@ and a jq failure must never be read as "no overlap".
 
 **Docs-only exemption.** A diff is exempt only when every changed path — old and
 new — matches `^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/`
-is an exclusion checked first: spec changes are always enforced. `pr-checks`' unanchored
-jq glob translation is deliberately not reused here (it would let
-`.agents/skills/x/README.md` match `README.md`).
+is an exclusion checked first: spec changes are always enforced. The exemption
+does not reuse `pr-checks`' jq glob translation: the allowed set must be a single
+hand-written ERE that can be audited at a glance, while that table exists to
+mirror the workflows' `paths:` filters. Both are anchored, so a nested
+`.agents/skills/x/README.md` matches neither.
 
 **What this gate proves, and what it does not.** It proves that a transcript
 indexed by a matching record existed at review time, that the tree it reviewed is

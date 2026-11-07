@@ -134,6 +134,26 @@ PATH_GATED='[
 
 # Is a required check exempt because its workflow is path-gated and no diff
 # file matches any of its paths? (No path-gate entry → not exempt.)
+#
+# The glob translation MIRRORS GitHub Actions' `paths:` semantics, so it is
+# anchored at both ends:
+#
+#   `**/`  -> `(.*/)?`   zero or more directories (matches a root file too)
+#   `**`   -> `.*`       everything, including `/` (a trailing `dir/**`)
+#   `*`    -> `[^/]*`    anything but `/`
+#   `.`    -> `\.`
+#
+# Each form gets its own placeholder, because the single-`*` pass would
+# otherwise rewrite the `*` that `**` expands to.
+#
+# Anchoring is required for the patterns with no `**/` prefix -- `Cargo.lock`,
+# `.mise.toml`, `deny.toml`, `rumdl.toml`, `lefthook.yml` are ROOT-only in
+# GitHub Actions. An unanchored regex would make `fuzz/Cargo.lock` match
+# `Cargo.lock`, so the code.yml checks would be required for a diff that never
+# starts the workflow, the checks would never report, and the gate would block
+# forever with `missing_required` (fail-closed, but unrecoverable without
+# editing the table). The `(.*/)?` form keeps `**/Cargo.toml` matching BOTH
+# `Cargo.toml` and `fuzz/Cargo.toml`, as GitHub does.
 path_gate_exempt() {
   local chk="$1"
   jq -rn --arg c "$chk" --argjson gated "$PATH_GATED" --argjson files "$FILES_JSON" '
@@ -143,8 +163,8 @@ path_gate_exempt() {
         ([$gated[]
             | select(.name == $c)
             | .paths[] as $p
-            | select(any($files[]; test($p | gsub("\\."; "\u0001") | gsub("\\*\\*/"; "\u0002") | gsub("\\*"; "[^/]*") | gsub("\u0002"; "(^|.*/)") | gsub("\u0001"; "\\."))
-            ))]
+            | select(any($files[]; test("^" + ($p | gsub("\\."; "\u0001") | gsub("\\*\\*/"; "\u0002") | gsub("\\*\\*"; "\u0003") | gsub("\\*"; "[^/]*") | gsub("\u0002"; "(.*/)?") | gsub("\u0003"; ".*") | gsub("\u0001"; "\\.")) + "$"))
+            )]
           | length) == 0
       end'
 }
