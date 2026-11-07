@@ -139,7 +139,10 @@ chmod +x "$ROOT/coderabbit"
 # of those waives the local review. The stub fails for ONE filter (exact match
 # on the last argument, or a substring) and delegates everything else to the
 # real jq.
-export JQ_REAL="$(command -v jq)"
+# Intentional masking: a missing `jq` surfaces per-assertion through
+# `${JQ_REAL:?}` instead of aborting the whole suite at this export.
+JQ_REAL="$(command -v jq)" || true
+export JQ_REAL
 cat > "$ROOT/jq" <<'STUB'
 #!/usr/bin/env bash
 filter="${!#}"
@@ -346,7 +349,7 @@ expect_reason() { # expect_reason <name> <reason>
 }
 
 expect_err_contains() { # expect_err_contains <name> <text>
-  if grep -q "$2" <<<"$ERR"; then
+  if grep -q -- "$2" <<<"$ERR"; then
     ok "$1"
   else
     bad "$1" "stderr lacks '$2': $ERR"
@@ -678,6 +681,81 @@ docs_only_case "docs/spec/spec.md" "accepted"
 docs_only_case "AGENTS.md" "accepted"
 docs_only_case ".github/workflows/code.yml" "accepted"
 
+# 13b. The allowlist is a NAME check; the head tree must also show a REGULAR
+#      FILE (mode 100644) at every changed path. A symlink, a gitlink, or an
+#      executable bit at a docs path carries a payload the docs allowlist must
+#      not exempt from adversarial review. Each fixture below is enforced and
+#      accepted through a real CLEAN record.
+docs_only_type_case() { # docs_only_type_case <name> <path> <make-change-fn>
+  local name="$1" path="$2" make="$3"
+  new_case
+  start_feature
+  mkdir -p "$WORK/$(dirname "$path")"
+  "$make" "$path"
+  land_pr
+  set_pr_view
+  set_files "$path"
+  write_review "abc1234-20260101T000000Z" CLEAN
+  run_conv 42 --repo arbsec/arbitraitor --json
+  expect_exit "$name exits 0" 0
+  expect_json "$name is enforced, not exempt" '.local_review.status' "accepted"
+}
+
+# Each maker stages its own entry and commits, because `git add -A` would
+# re-read a gitlink path as a deletion and a mode change from the worktree.
+fixture_commit() {
+  git -C "$WORK" -c user.email=t@t -c user.name=t commit -q -m "$1"
+}
+make_symlink() {
+  ln -s ../scripts/run.sh "$WORK/$1"
+  git -C "$WORK" add -A
+  fixture_commit "add $1"
+}
+make_gitlink() {
+  git -C "$WORK" update-index --add --cacheinfo "160000,$BASE_OID,$1"
+  fixture_commit "add $1"
+}
+make_executable() {
+  printf '# guide\n' > "$WORK/$1"
+  chmod +x "$WORK/$1"
+  git -C "$WORK" add -A
+  fixture_commit "add $1"
+}
+
+# A 120000 symlink at an allowlisted path (`docs/evil.md -> ../scripts/run.sh`).
+docs_only_type_case "docs-only symlink at an allowlisted path" "docs/evil.md" make_symlink
+expect_err_contains "symlink enforcement names the mode" "mode 120000"
+# A 160000 gitlink at an allowlisted path (a real gitlink entry, no submodule).
+docs_only_type_case "docs-only gitlink at an allowlisted path" "docs/vendor.md" make_gitlink
+expect_err_contains "gitlink enforcement names the mode" "mode 160000"
+# A 100755 executable at an allowlisted path.
+docs_only_type_case "docs-only mode change at an allowlisted path" "docs/guide.md" make_executable
+expect_err_contains "mode-change enforcement names the mode" "mode 100755"
+# Positive control: a plain 100644 content change is still exempt.
+new_case
+start_feature
+printf '# guide\n' > "$WORK/docs/guide.md"
+commit_work "docs only"
+land_pr
+set_pr_view
+set_files "docs/guide.md"
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "regular 100644 docs change exits 0" 0
+expect_json "regular 100644 docs change is exempt" '.local_review.status' "docs_only_exempt"
+# The type check runs only for would-be exemptions: an allowlist-negative path
+# is enforced regardless of mode (here, a symlink).
+new_case
+start_feature
+ln -s docs/old.md "$WORK/AGENTS.md"
+commit_work "symlink at a non-allowlisted path"
+land_pr
+set_pr_view
+set_files "AGENTS.md"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "non-allowlisted symlink exits 0" 0
+expect_json "non-allowlisted symlink is enforced by the name check" '.local_review.status' "accepted"
+
 # ==============================================================================
 # 14. Rename -> fail closed (gh pr diff reports only the new path).
 # ==============================================================================
@@ -755,6 +833,12 @@ expect_reason "env skip records the skip" "local_review_skipped"
 run_conv 42 43 --repo arbsec/arbitraitor --json
 expect_exit "two positionals exit 2" 2
 
+# 17b. The valve flag twice is a caller bug, not a stronger waiver: reject it
+#      with the config exit code instead of silently accepting both.
+run_conv 42 --skip-local-review --skip-local-review --repo arbsec/arbitraitor --json
+expect_exit "--skip-local-review twice exits 2" 2
+expect_err_contains "--skip-local-review twice is named" "--skip-local-review given twice"
+
 # ==============================================================================
 # 18. [review].local_review_required = false -> disabled_by_config (loud).
 # ==============================================================================
@@ -824,6 +908,56 @@ else
   bad "merge-gate forwards --skip-local-review" "args: $(cat "$CONV_ARGS_FILE")"
 fi
 expect_err_contains "merge-gate prints the success-path note" \
+  "note: merge gate passed with waivers: local_review_skipped"
+
+# The other argv order: the flag BEFORE the PR number must forward identically.
+CONV_ARGS_FILE="$ROOT/conv-args-before"
+GOT=0
+: > "$CONV_ARGS_FILE"
+( cd "$WORK" && GH_BIN="$ROOT/gh" CONV_ARGS_FILE="$CONV_ARGS_FILE" \
+    bash "$MERGE_SCRIPTS/merge-gate" --skip-local-review 42 --repo arbsec/arbitraitor --dry-run ) \
+  > "$ROOT/out" 2> "$ROOT/err" || GOT=$?
+OUT="$(cat "$ROOT/out")"; ERR="$(cat "$ROOT/err")"
+expect_exit "merge-gate with the flag before the PR exits 0" 0
+if grep -q -- "--skip-local-review" "$CONV_ARGS_FILE"; then
+  ok "merge-gate forwards the flag from the leading position"
+else
+  bad "merge-gate forwards the flag from the leading position" "args: $(cat "$CONV_ARGS_FILE")"
+fi
+
+# A repeated flag is rejected with the config exit code, not accepted twice.
+GOT=0
+( cd "$WORK" && GH_BIN="$ROOT/gh" bash "$MERGE_SCRIPTS/merge-gate" \
+    42 --repo arbsec/arbitraitor --dry-run --skip-local-review --skip-local-review ) \
+  > "$ROOT/out" 2> "$ROOT/err" || GOT=$?
+OUT="$(cat "$ROOT/out")"; ERR="$(cat "$ROOT/err")"
+expect_exit "merge-gate rejects --skip-local-review twice" 2
+expect_err_contains "merge-gate names the duplicate flag" "--skip-local-review given twice"
+unset CONV_ARGS_FILE
+
+# ==============================================================================
+# 20b. The ENV equivalent reaches merge-gate too, with no argv flag: the
+#      forwarded args and the success-path waiver note must match case 20.
+#      Self-contained: its own args file, and both variables are unset after,
+#      so a leaked export from an earlier case cannot make this pass.
+# ==============================================================================
+CONV_ARGS_FILE="$ROOT/conv-args-env"
+ENV_ARGS_FILE="$CONV_ARGS_FILE"
+export CONV_ARGS_FILE
+: > "$CONV_ARGS_FILE"
+GOT=0
+( cd "$WORK" && GH_BIN="$ROOT/gh" ARB_SKIP_LOCAL_REVIEW=1 \
+    bash "$MERGE_SCRIPTS/merge-gate" 42 --repo arbsec/arbitraitor --dry-run ) \
+  > "$ROOT/out" 2> "$ROOT/err" || GOT=$?
+OUT="$(cat "$ROOT/out")"; ERR="$(cat "$ROOT/err")"
+unset CONV_ARGS_FILE
+expect_exit "merge-gate with the env skip exits 0" 0
+if grep -q -- "--skip-local-review" "$ENV_ARGS_FILE"; then
+  ok "merge-gate forwards the env skip as --skip-local-review"
+else
+  bad "merge-gate forwards the env skip as --skip-local-review" "args: $(cat "$ENV_ARGS_FILE")"
+fi
+expect_err_contains "merge-gate prints the env-skip waiver note" \
   "note: merge gate passed with waivers: local_review_skipped"
 
 # ==============================================================================
@@ -1241,7 +1375,7 @@ land_pr
 set_pr_view
 set_files "README.md"
 write_review "abc1234-20260101T000000Z" CLEAN
-run_conv_jq_fails exact 'map(select(test($re) | not)) | length > 0' 42 --repo arbsec/arbitraitor --json
+run_conv_jq_fails exact "map(select(test(\$re) | not)) | length > 0" 42 --repo arbsec/arbitraitor --json
 expect_exit "a failing allowlist check does not block the PR" 0
 expect_json "a failing allowlist check enforces the review" '.local_review.status' "accepted"
 

@@ -11,6 +11,7 @@ arb_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
   arb_lib_print_help "merge-gate" "Check if a PR is safe to squash-merge. Exits 0=mergeable. Never uses --admin."
+  echo "  --skip-local-review   Emergency valve: waive the local review (loud; see references/pr-convergence.md)"
   exit "$ARB_OK"
 fi
 
@@ -18,13 +19,22 @@ fi
 # Scan every position (before or after the PR number) so the flag is never
 # mistaken for the PR positional. ARB_SKIP_LOCAL_REVIEW=1 is the env equivalent.
 OPT_SKIP_LOCAL_REVIEW=false
+_SKIP_LOCAL_REVIEW_SEEN=false
 _POSITIONAL_ARGS=()
 # The `${arr[@]+"${arr[@]}"}` form: on bash < 4.4 (macOS ships 3.2), an empty
 # array expanded under `set -u` aborts with "unbound variable" — which would
 # mask the real error ("PR number required") with a confusing abort.
 for _arg in ${ARB_LIB_EXTRA_ARGS[@]+"${ARB_LIB_EXTRA_ARGS[@]}"}; do
   case "$_arg" in
-    --skip-local-review) OPT_SKIP_LOCAL_REVIEW=true ;;
+    --skip-local-review)
+      # A repeated valve flag is a caller bug, not a stronger waiver: accepting
+      # it silently hides a generated command line that appended the flag twice.
+      if [ "$_SKIP_LOCAL_REVIEW_SEEN" = true ]; then
+        echo "error: --skip-local-review given twice" >&2
+        exit "$ARB_ERR_CONFIG"
+      fi
+      _SKIP_LOCAL_REVIEW_SEEN=true
+      OPT_SKIP_LOCAL_REVIEW=true ;;
     *)                   _POSITIONAL_ARGS+=("$_arg") ;;
   esac
 done

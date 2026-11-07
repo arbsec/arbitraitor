@@ -32,6 +32,7 @@ arb_lib_parse_common "$@"
 
 if [ "$OPT_HELP" = true ]; then
   arb_lib_print_help "convergence-status" "Compute PR convergence (mergeable?) by combining checks + threads + checklist + review state. Exit 0=mergeable, 5=blocked."
+  echo "  --skip-local-review   Emergency valve: waive the local review (loud; see references/pr-convergence.md)"
   exit "$ARB_OK"
 fi
 
@@ -40,13 +41,22 @@ fi
 # and `123 --skip-local-review` must both work, and the flag must never be
 # mistaken for the PR positional. ARB_SKIP_LOCAL_REVIEW=1 is the env equivalent.
 OPT_SKIP_LOCAL_REVIEW=false
+_SKIP_LOCAL_REVIEW_SEEN=false
 _POSITIONAL_ARGS=()
 # The `${arr[@]+"${arr[@]}"}` form: on bash < 4.4 (macOS ships 3.2), an empty
 # array expanded under `set -u` aborts with "unbound variable" — which would
 # mask the real error ("PR number required") with a confusing abort.
 for _arg in ${ARB_LIB_EXTRA_ARGS[@]+"${ARB_LIB_EXTRA_ARGS[@]}"}; do
   case "$_arg" in
-    --skip-local-review) OPT_SKIP_LOCAL_REVIEW=true ;;
+    --skip-local-review)
+      # A repeated valve flag is a caller bug, not a stronger waiver: accepting
+      # it silently hides a generated command line that appended the flag twice.
+      if [ "$_SKIP_LOCAL_REVIEW_SEEN" = true ]; then
+        echo "error: --skip-local-review given twice" >&2
+        exit "$ARB_ERR_CONFIG"
+      fi
+      _SKIP_LOCAL_REVIEW_SEEN=true
+      OPT_SKIP_LOCAL_REVIEW=true ;;
     *)                   _POSITIONAL_ARGS+=("$_arg") ;;
   esac
 done
@@ -235,9 +245,16 @@ read_review_field() {
 # --- Docs-only allowlist -------------------------------------------------------
 # A docs-only PR needs no adversarial code review. Exclusion FIRST: a spec change
 # is enforced even though it is a `.md` file. Then every changed path must match
-# the anchored ERE below. Fail closed (return 1 = enforce) on: a rename (gh pr
-# diff reports only the new path, hiding the deleted source), more than 50 files,
-# or an unavailable head object for the rename check.
+# the anchored ERE below, and finally every changed path must be a REGULAR FILE
+# (mode 100644) in the head tree, so a symlink, gitlink or executable bit at an
+# allowlisted path is enforced. Fail closed (return 1 = enforce) on: a rename
+# (gh pr diff reports only the new path, hiding the deleted source), more than
+# 50 files, an unavailable head object for the rename check, or a path the head
+# tree cannot resolve to a regular file.
+#
+# Still NOT proven: the CONTENT of a mode-100644 `docs/x.md` is arbitrary — it
+# can be a script or an executable payload. This is a name+type check, not a
+# content check.
 DOCS_ONLY_ERE='^(README[.]md|CHANGELOG[.]md|book/.*[.]md|docs/.*[.]md)$'
 
 # jq_bool: run a jq predicate and print "true" or "false".
@@ -281,6 +298,8 @@ all_changed_paths_json() {
 
 docs_only_exempt() {
   local status_out all_paths_json spec_hit n_files non_docs
+  local ls_file ls_rc=0 entry mode bad_mode="" bad_path="" n_entries=0 n_paths=0
+  local -a ls_paths=()
   # Every path the PR touches, old AND new — see all_changed_paths_json.
   all_paths_json="$(all_changed_paths_json)" || return 1
   # A jq failure is NOT "no spec path": it returns non-zero and the diff is
@@ -303,6 +322,55 @@ docs_only_exempt() {
   non_docs="$(jq_bool --arg re "$DOCS_ONLY_ERE" \
     'map(select(test($re) | not)) | length > 0' <<<"$all_paths_json")" || return 1
   if [ "$non_docs" = "true" ]; then
+    return 1
+  fi
+
+  # The allowlist above is a NAME check only. Resolve every changed path in the
+  # head tree and require mode exactly 100644: `120000` is a symlink, `160000` a
+  # gitlink, `100755` an executable file — none of them is documentation, and
+  # exempting one would skip the adversarial review of a payload that merely
+  # sits behind a docs name. `git ls-tree -z` output is NUL-separated
+  # (`<mode> <type> <oid>\t<path>`), so a path with a newline cannot forge a
+  # second entry. The paths are array-quoted, never word-split; the <=50-file
+  # cap above keeps argv safe. A path with NO entry (an unresolvable head object,
+  # a sparse tree) fails closed via the entry-count comparison.
+  while IFS= read -r _p; do
+    ls_paths+=("$_p")
+  done < <(jq -r '.[]' <<<"$all_paths_json")
+  n_paths="${#ls_paths[@]}"
+  # A missing or unparsable enumeration (jq failure, a path split by a newline)
+  # must not shrink the set: compare with the already-validated file count.
+  if [ "$n_paths" -ne "$n_files" ]; then
+    echo "note: cannot enumerate the $n_files changed paths; enforcing local review" >&2
+    return 1
+  fi
+  if [ "$n_paths" -eq 0 ]; then
+    return 0
+  fi
+  # A temp file, not a variable: bash strips NUL bytes from command
+  # substitution, which would silently merge entries.
+  ls_file="$(mktemp)" || return 1
+  git ls-tree -z "$HEAD_TREE" -- ${ls_paths[@]+"${ls_paths[@]}"} > "$ls_file" 2>/dev/null || ls_rc=$?
+  if [ "$ls_rc" -ne 0 ]; then
+    rm -f "$ls_file"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    n_entries=$((n_entries + 1))
+    mode="${entry%% *}"
+    if [ "$mode" != "100644" ]; then
+      bad_path="${entry#*$'\t'}"
+      bad_mode="$mode"
+      break
+    fi
+  done < "$ls_file"
+  rm -f "$ls_file"
+  if [ -n "$bad_mode" ]; then
+    echo "note: $bad_path in the PR head tree has mode $bad_mode, not a regular file (100644); enforcing local review" >&2
+    return 1
+  fi
+  if [ "$n_entries" -ne "$n_paths" ]; then
+    echo "note: the PR head tree resolves only $n_entries of $n_paths changed paths; enforcing local review" >&2
     return 1
   fi
   return 0

@@ -200,12 +200,21 @@ stdin, not through `--argjson`: a single argv entry is capped at ~128 KB
 and a jq failure must never be read as "no overlap".
 
 **Docs-only exemption.** A diff is exempt only when every changed path — old and
-new — matches `^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`. `^docs/spec/`
-is an exclusion checked first: spec changes are always enforced. The exemption
-does not reuse `pr-checks`' jq glob translation: the allowed set must be a single
-hand-written ERE that can be audited at a glance, while that table exists to
-mirror the workflows' `paths:` filters. Both are anchored, so a nested
-`.agents/skills/x/README.md` matches neither.
+new — matches `^(README\.md|CHANGELOG\.md|book/.*\.md|docs/.*\.md)$`, and every
+changed path resolves to a **regular file** (mode exactly `100644`) in the PR head
+tree. `^docs/spec/` is an exclusion checked first: spec changes are always
+enforced. The exemption does not reuse `pr-checks`' jq glob translation: the
+allowed set must be a single hand-written ERE that can be audited at a glance,
+while that table exists to mirror the workflows' `paths:` filters. Both are
+anchored, so a nested `.agents/skills/x/README.md` matches neither.
+
+The type check is what stops a docs *name* from standing in for a docs *change*:
+a `120000` symlink (for example `docs/evil.md -> ../scripts/run.sh`), a `160000`
+gitlink, a `100755` executable, or any other mode at an allowlisted path is
+enforced, as is a path the head tree cannot resolve (an unresolvable head object
+or a sparse tree). This is a **name and type check, not a content check**: the
+bytes of a mode-`100644` `docs/x.md` are arbitrary and could be a script, so the
+exemption still trades adversarial review for a path-and-mode heuristic.
 
 **What this gate proves, and what it does not.** It proves that a transcript
 indexed by a matching record existed at review time, that the tree it reviewed is
