@@ -127,8 +127,9 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
                   blocks with a `local_review_*` reason. Waivers
                   (`--skip-local-review`, `ARB_SKIP_LOCAL_REVIEW=1`,
                   `[review].local_review_required = false`, docs-only) are always
-                  recorded in `reasons`, and the valves work even when the review
-                  evidence inputs are unavailable. The exact acceptance
+                  recorded in `reasons`. The skip and config valves work even when
+                  the review evidence inputs are unavailable; the docs-only
+                  exemption needs them. The exact acceptance
                   rule lives in
                   [`references/pr-convergence.md`](references/pr-convergence.md#local-review-evidence).
 

@@ -91,10 +91,18 @@ evidence against the PR head before it reports `mergeable: true`; `merge-gate`
 inherits the verdict. The record is accepted only when **all** of these hold:
 
 1. a record's `tree OID` equals the resolved PR head tree. The head tree is
-   resolved with the same ladder as `pr-review-local`: local object → fetch the
-   PR head branch → `gh api repos/<repo>/git/commits/<sha> --jq .tree.sha`.
+   resolved with the same ladder as `pr-review-local`: local object → fetch
+   `refs/pull/<N>/head` → fetch the PR head branch → `gh api
+   repos/<repo>/git/commits/<sha> --jq .tree.sha`.
    `baseRefOid` is never used: it is the base tip at the PR's last head update,
    not the base tip at gate time.
+   The pull ref comes first because it is the only ref that works for **every**
+   PR: GitHub publishes every PR head — same-repo and fork alike — as
+   `refs/pull/<N>/head` on the base repository, while a fork PR's head branch
+   lives on the fork and cannot be fetched from `origin`. Without the pull ref
+   the API still returns the tree but the head *object* stays missing, every
+   `git diff <base>...<head>` fails, and the PR blocks with
+   `local_review_head_object_unavailable`.
 2. the recorded base is an ancestor of the freshly fetched base
    (`git fetch origin <baseRefName>`).
 3. `git diff --no-renames --name-only <recorded-base>..origin/<base>` does not

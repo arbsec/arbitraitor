@@ -98,7 +98,7 @@ UNCHECKED_COUNT="$(echo "$CHECKLIST_JSON" | jq -r '.unchecked | length')"
 #    `.arbitraitor/reviews/` and verified here (see "Local review evidence" in
 #    references/pr-convergence.md). `reviewDecision` remains a coarse signal.
 PR_STATE_JSON="$(arb_lib_gh pr view "$PR" --repo "$REPO" \
-  --json reviewDecision,headRefOid,isDraft,baseRefName,headRefName)" || {
+  --json reviewDecision,headRefOid,isDraft,baseRefName,headRefName,number)" || {
   echo "error: failed to read PR state" >&2
   exit "$ARB_ERR_UNRECOVERABLE"
 }
@@ -107,6 +107,15 @@ IS_DRAFT="$(echo "$PR_STATE_JSON" | jq -r '.isDraft')"
 HEAD_SHA="$(echo "$PR_STATE_JSON" | jq -r '.headRefOid')"
 BASE_REF_NAME="$(echo "$PR_STATE_JSON" | jq -r '.baseRefName')"
 HEAD_REF_NAME="$(echo "$PR_STATE_JSON" | jq -r '.headRefName')"
+# The PR number, for the `refs/pull/<N>/head` ref. `PR` itself may be a URL
+# or a branch name, so it cannot be used as a ref name directly. Anything
+# that is not a bare number is ignored: the pull-ref fetch is an extra
+# resolution step, not a check, so skipping it only falls back to the
+# branch fetch below.
+PR_NUMBER="$(echo "$PR_STATE_JSON" | jq -r '.number // empty' | tr -d '[:space:]')"
+case "$PR_NUMBER" in
+  ''|*[!0-9]*) PR_NUMBER="" ;;
+esac
 if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ]; then
   echo "error: gh did not return a headRefOid for PR $PR" >&2
   exit "$ARB_ERR_UNRECOVERABLE"
@@ -144,11 +153,22 @@ sha256_of() {
 
 # Resolve the tree of the PR head. This is the critical step after
 # `xtask push-branch`: the landed commit object does not exist locally, so a
-# bare `rev-parse` hard-fails. Ladder: local object -> fetch the head branch ->
-# GitHub API. Empty output means the tree is unresolvable.
+# bare `rev-parse` hard-fails. Ladder: local object -> fetch the PR head ref
+# (`refs/pull/<N>/head`) -> fetch the head branch -> GitHub API. Empty output
+# means the tree is unresolvable.
 resolve_head_tree() {
   local tree="" ref="${HEAD_REF_NAME:-}"
   tree="$(git rev-parse --verify --quiet "${HEAD_SHA}^{tree}" 2>/dev/null || true)"
+  # GitHub publishes EVERY PR head -- same-repo and fork alike -- as
+  # `refs/pull/<N>/head` on the BASE repository. For a fork PR the head
+  # branch lives on the fork, so `origin -- <branch>` cannot deliver the head
+  # object; this ref can. Without it the API still returns a tree, but the
+  # head OBJECT stays missing, every `git diff <base>...<head>` fails, and
+  # the PR blocks with `local_review_head_object_unavailable`.
+  if [ -z "$tree" ] && [ -n "$PR_NUMBER" ]; then
+    git fetch --quiet origin -- "refs/pull/$PR_NUMBER/head" >/dev/null 2>&1 || true
+    tree="$(git rev-parse --verify --quiet "${HEAD_SHA}^{tree}" 2>/dev/null || true)"
+  fi
   if [ -z "$tree" ] && [ -n "$ref" ] && [ "$ref" != "null" ]; then
     git fetch --quiet origin -- "$ref" >/dev/null 2>&1 || true
     tree="$(git rev-parse --verify --quiet "${HEAD_SHA}^{tree}" 2>/dev/null || true)"

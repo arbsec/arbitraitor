@@ -235,9 +235,21 @@ land_pr() {
   PR_TREE="$(git -C "$LAND" rev-parse 'HEAD^{tree}')"
 }
 
+# land_pr_fork: the shape of a PR from a FORK. The head branch lives on the
+# fork, so the base repository carries the head commit ONLY as
+# `refs/pull/<N>/head` -- GitHub publishes every PR head there, same-repo
+# and fork alike. The head branch is removed from the base repository, so
+# the head-branch fetch cannot deliver the object either. Sets PR_HEAD and
+# PR_TREE.
+land_pr_fork() {
+  land_pr
+  git -C "$ORIGIN" update-ref refs/pull/42/head "$PR_HEAD"
+  git -C "$ORIGIN" update-ref -d refs/heads/feature
+}
+
 set_pr_view() {
   GH_PR_VIEW="$ROOT/pr-view.json"
-  printf '{"reviewDecision":"","headRefOid":"%s","isDraft":false,"baseRefName":"main","headRefName":"feature"}\n' \
+  printf '{"number":42,"reviewDecision":"","headRefOid":"%s","isDraft":false,"baseRefName":"main","headRefName":"feature"}\n' \
     "$PR_HEAD" > "$GH_PR_VIEW"
   export GH_PR_VIEW
 }
@@ -246,7 +258,7 @@ set_pr_view() {
 # the tree ladder finds no tree, so the gate must refuse to merge.
 set_pr_view_unresolvable() {
   GH_PR_VIEW="$ROOT/pr-view.json"
-  printf '{"reviewDecision":"","headRefOid":"%s","isDraft":false,"baseRefName":"main","headRefName":"no-such-head-branch"}\n' \
+  printf '{"number":42,"reviewDecision":"","headRefOid":"%s","isDraft":false,"baseRefName":"main","headRefName":"no-such-head-branch"}\n' \
     "$PR_HEAD" > "$GH_PR_VIEW"
   export GH_PR_VIEW
   GH_API_TREE=""
@@ -1338,6 +1350,36 @@ expect_json "an unnamed evaluation failure status" '.local_review.status' \
 expect_reason "an unnamed evaluation failure is a reason" \
   "local_review_evaluation_failed"
 expect_json "an unnamed evaluation failure is not mergeable" '.mergeable' "false"
+
+# ==============================================================================
+# 34. Regression: a PR from a FORK must not block. The head branch of a fork
+#     PR lives on the fork, so `origin -- <head branch>` cannot deliver the
+#     head object; only `refs/pull/<N>/head` -- which GitHub publishes for
+#     EVERY PR head on the BASE repository -- can. The API still answers with
+#     the tree, so the tree resolved while the head OBJECT stayed missing:
+#     every `git diff <base>...<head>` then failed and the PR blocked with
+#     `local_review_head_object_unavailable`. The only way out was
+#     `--skip-local-review`, a valve reserved for emergencies.
+#
+#     The fixture removes the head branch from the base repository and
+#     publishes the head only as `refs/pull/42/head`.
+# ==============================================================================
+new_case
+start_feature
+mkdir -p "$WORK/src"
+printf 'fn f() {}\n' > "$WORK/src/lib.rs"
+commit_work "feature change"
+land_pr_fork
+# GitHub knows the tree of a fork head even when the object is not local.
+GH_API_TREE="$PR_TREE"
+export GH_API_TREE
+set_pr_view
+set_files "src/lib.rs"
+write_review "abc1234-20260101T000000Z" CLEAN
+run_conv 42 --repo arbsec/arbitraitor --json
+expect_exit "a fork PR with a pull-ref head is accepted" 0
+expect_json "a fork PR with a pull-ref head status" '.local_review.status' "accepted"
+expect_json "a fork PR with a pull-ref head is mergeable" '.mergeable' "true"
 
 echo "convergence-status local-review fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
