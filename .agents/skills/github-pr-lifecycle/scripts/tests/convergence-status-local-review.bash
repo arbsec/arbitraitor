@@ -29,6 +29,11 @@ trap 'rm -rf "$ROOT"' EXIT
 # decides whether a move is reported as `R` or as a delete plus an add, and
 # cases 14, 25, 28 and 29 depend on rename detection being ON.
 #
+# `GIT_CONFIG_*` entries are applied AFTER every config file, so a
+# `git config diff.renames false` written into the fixture repo config has
+# no effect — only an explicit `git -c` overrides them. Rename detection is
+# therefore ON in every fixture, which is what those cases need.
+#
 # `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` need git 2.32; the git floor for
 # this repository is higher (the base fetch uses `git rev-parse --verify` and
 # the CI images ship git 2.4x). `GIT_CONFIG_COUNT` would be the 2.31 fallback,
@@ -992,7 +997,6 @@ git -C "$WORK" push -q origin main
 git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
 BASE_OID="$(git -C "$WORK" rev-parse HEAD)"
 start_feature
-git -C "$WORK" config diff.renames false
 mkdir -p "$WORK/docs"
 git -C "$WORK" mv src/lib.rs docs/lib.md
 printf '# unrelated content\n' > "$WORK/docs/lib.md"
@@ -1122,7 +1126,6 @@ git -C "$WORK" push -q origin main
 git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
 BASE_OID="$(git -C "$WORK" rev-parse HEAD)"
 start_feature
-git -C "$WORK" config diff.renames false
 git -C "$WORK" mv src/a.rs src/b.rs
 commit_work "rename the source"
 # The base advances over the file the PR moved FROM.

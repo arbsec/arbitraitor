@@ -196,6 +196,18 @@ caps pending record files at
 
 ### Changed
 
+- **The PR convergence gate now enforces the local CodeRabbit review record**
+  (PR #867): `convergence-status` (and therefore `merge-gate`) accepts a
+  record from `.arbitraitor/reviews/` only when its tree equals the PR head
+  tree, its recorded base is an ancestor of the base fetched at gate time
+  with no path overlap, the indexed transcript still hashes to the recorded
+  digest, and the attestation says `CLEAN`. A missing, stale, or tampered
+  record blocks with a `local_review_*` reason. The verdict stays an agent
+  attestation — the `--agent` NDJSON output carries no machine-readable
+  CLEAN token — so this is a tamper-evident checkpoint, not forgery
+  resistance. Emergency valve: `local_review_required = false` in the
+  `[review]` table of `.agents/project/github-project.local.toml`, or
+  `--skip-local-review`.
 - **CLI, MCP, and daemon now route through `arbitraitor-engine`**
   (ADR-0038): the three divergent pipeline compositions are unified, which
   closes silent coverage holes and changes observable behavior on every

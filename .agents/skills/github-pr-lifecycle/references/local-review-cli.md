@@ -151,8 +151,10 @@ present, else via `gh api repos/<repo>/git/commits/<oid> --jq .tree.sha`).
 ### CLI output capture
 
 stdout, stderr, and the CLI exit code are captured verbatim. A non-zero CLI exit surfaces
-stderr plus the bounded `coderabbit usage` auth probe (verdict and, when it matches a known
-failure, the operator action) and exits `1`. Raw evidence is always written **first**:
+stderr plus the bounded `coderabbit usage` auth probe **on stderr** (verdict and, when it
+matches a known failure, the operator action) and exits `1`. The probe is also recorded in
+the transcript header of **every** run, successful or not. Raw evidence is always written
+**first**:
 
 ```text
 .arbitraitor/reviews/<short-head>-<timestamp>.raw.txt
@@ -267,8 +269,9 @@ Two consequences for this contract:
 - **A successful run's stdout is no longer unknown.** The v0.9.0 note above stands for that
   version, where the successful path was never reached.
 
-The raw transcript for a successful run has the same header shape as a failed one, plus a
-`# auth probe:` line carrying the `coderabbit usage` output.
+The raw transcript for a successful run has the same header shape as a failed one
+(see "CLI output capture"), including the `# auth probe:` line: the probe is
+written on every run, before the exit code is interpreted.
 
 ## Exit codes
 
