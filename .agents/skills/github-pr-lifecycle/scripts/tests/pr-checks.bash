@@ -285,8 +285,8 @@ path_gated_json() {
 }
 
 # The trigger paths of a workflow: every entry of every `paths:` list in the
-# file. The workflows declare the list once and alias it (`&code_paths` /
-# `*code_paths`), and agents.yml declares it twice; the union is the same set.
+# file. The workflows spell the list out under both `push` and `pull_request`
+# (actionlint cannot resolve an alias); the union of the two is the same set.
 workflow_paths() {
   awk '
     /^[[:space:]]*paths:/ { f = 1; next }

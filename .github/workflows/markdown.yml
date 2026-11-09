@@ -3,14 +3,19 @@ name: Markdown
 on:
   push:
     branches: [main]
-    paths: &md_paths
+    paths:
       - "**/*.md"
       - "rumdl.toml"
       - "lefthook.yml"
       - ".mise.toml"
       - ".github/workflows/markdown.yml"
   pull_request:
-    paths: *md_paths
+    paths:
+      - "**/*.md"
+      - "rumdl.toml"
+      - "lefthook.yml"
+      - ".mise.toml"
+      - ".github/workflows/markdown.yml"
 
 permissions:
   contents: read

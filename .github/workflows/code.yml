@@ -3,7 +3,7 @@ name: Code
 on:
   push:
     branches: [main]
-    paths: &code_paths
+    paths:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
@@ -13,7 +13,15 @@ on:
       - "**/*.wit"
       - ".config/hakari.toml"
   pull_request:
-    paths: *code_paths
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".mise.toml"
+      - ".github/workflows/code.yml"
+      - "wit/**"
+      - "**/*.wit"
+      - ".config/hakari.toml"
 
 permissions:
   contents: read
