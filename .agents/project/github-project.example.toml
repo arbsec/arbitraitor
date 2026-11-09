@@ -112,14 +112,14 @@ optional = ["Documentation", "qlty check", "CodeRabbit"]
 # CodeRabbit: the GitHub App check auto-skips in this repo; the local CLI
 # (`scripts/pr-review-local`) is the review mechanism. pr-checks exempts only
 # `bucket == "skipping"`, so a *failing* CodeRabbit run still blocks.
-# Agent Skills Shell Suites: the agents.yml job, path-gated to `.agents/**`
-# and `.github/workflows/agents.yml`. It is `required` and has a PATH_GATED row
-# in `scripts/pr-checks`, so it is required exactly for the diffs that trigger
-# agents.yml and exempt for every other diff (arbsec/arbitraitor#862). Without
-# the row a required check is never exempt, and without `required` a check that
-# never reports can never be `missing_required` — that list is derived from
-# `required` alone, so an `.agents/**` diff whose suites never ran would pass
-# the gate.
+# Agent Skills Shell Suites: the agents.yml job, path-gated to `.agents/**`,
+# `.github/workflows/agents.yml` and `.shellcheckrc`. It is `required` and has
+# a PATH_GATED row in `scripts/pr-checks`, so it is required exactly for the
+# diffs that trigger agents.yml and exempt for every other diff
+# (arbsec/arbitraitor#862). Without the row a required check is never exempt,
+# and without `required` a check that never reports can never be
+# `missing_required` — that list is derived from `required` alone, so an
+# `.agents/**` diff whose suites never ran would pass the gate.
 
 # --- Merge + review policy -----------------------------------------------------
 [merge]
