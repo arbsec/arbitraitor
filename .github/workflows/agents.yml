@@ -23,10 +23,12 @@ on:
     paths:
       - ".agents/**"
       - ".github/workflows/agents.yml"
+      - ".shellcheckrc"
   pull_request:
     paths:
       - ".agents/**"
       - ".github/workflows/agents.yml"
+      - ".shellcheckrc"
 
 permissions:
   contents: read
@@ -63,6 +65,59 @@ jobs:
             find .agents/skills -type f -path '*/scripts/*' ! -name '*.*' -print
           )
           exit "$failed"
+      # ShellCheck v0.11.0. The release is NOT immutable upstream
+      # (`immutable: false`) and publishes no `sha256sums.txt`; the pinned hash
+      # below is the Releases-API asset `digest` for
+      # shellcheck-v0.11.0.linux.x86_64.tar.xz, so this is trust-on-first-use
+      # with a pinned artifact hash — not a signature. A checksum-pinned
+      # tarball is used instead of a third-party action: no action SHA to
+      # trust, and the binary is verified before it runs.
+      - name: Install shellcheck
+        shell: bash
+        env:
+          # https://github.com/koalaman/shellcheck/releases/tag/v0.11.0
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          archive="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          # Download, verify and unpack under $RUNNER_TEMP so the checkout
+          # stays clean (the tarball and its extracted directory are
+          # discarded with the runner).
+          cd "$RUNNER_TEMP"
+          curl -fsSLo "$archive" --retry 3 --retry-all-errors \
+            --connect-timeout 10 --max-time 120 \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${archive}"
+          echo "$SHELLCHECK_SHA256  $archive" | sha256sum -c -
+          tar -xf "$archive"
+          mkdir -p bin
+          install -m 0755 "./shellcheck-${SHELLCHECK_VERSION}/shellcheck" "bin/shellcheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # `-S warning` on purpose: SC2155 (`export X="$(cmd)"` masking the exit
+      # status) is a *warning*, and it reached two PRs (#854, #857) before this
+      # gate existed. `-S error` would reproduce that hole.
+      - name: Shellcheck agent skill scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          # Every shell file under .agents/ (*.sh and *.bash, any depth) plus
+          # every extensionless script under .agents/skills/*/scripts/.
+          # `-type f` skips the `_lib.sh` symlink (the real file is linted once
+          # under github-project-workflow); do not add `-L` — it would select
+          # the symlink too and double-lint.
+          mapfile -t files < <(
+            {
+              find .agents -type f \( -name '*.sh' -o -name '*.bash' \) -print
+              find .agents/skills -type f -path '*/scripts/*' ! -name '*.*' -print
+            } | sort
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no shell files selected"
+            exit 1
+          fi
+          echo "linting ${#files[@]} files"
+          shellcheck -x -P SCRIPTDIR -S warning "${files[@]}"
       - name: Run agent skill test suites
         shell: bash
         run: |

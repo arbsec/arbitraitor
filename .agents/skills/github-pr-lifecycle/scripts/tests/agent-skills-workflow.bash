@@ -15,7 +15,14 @@
 #      only `a`, so the `find -exec bash -n {} +` form checks one file);
 #   4. the new check is registered in the project config;
 #   5. the workflow uses no YAML anchor/alias (actionlint cannot parse an
-#      alias node and reports it as a syntax error).
+#      alias node and reports it as a syntax error);
+#   6. shellcheck is pinned by version and a 64-hex digest, runs at
+#      `-S warning`, runs the same file-selection command as the syntax step,
+#      and asserts the selection is non-empty;
+#   7. `.shellcheckrc` is pinned byte-for-byte to its two lines and carries no
+#      `disable=` — the rc is a gate-weakening surface;
+#   8. `.shellcheckrc` is path-gated by BOTH triggers, so a diff touching only
+#      the rc runs the lint and this contract test.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +30,41 @@ ROOT="$(cd "$HERE/../../../../.." && pwd)"
 WORKFLOWS="$ROOT/.github/workflows"
 AGENTS_WORKFLOW="$WORKFLOWS/agents.yml"
 EXAMPLE_TOML="$ROOT/.agents/project/github-project.example.toml"
+SHELLCHECKRC="$ROOT/.shellcheckrc"
+
+# Print the body of a workflow step, given its `name:` value.
+step_body() {
+  awk -v want="$1" '
+    /^      - name: / { if (inside) exit; inside = ($0 == "      - name: " want); next }
+    inside { print }
+  ' "$AGENTS_WORKFLOW"
+}
+
+# Print one `paths:` list (`push` or `pull_request`), one entry per line.
+# Two boundaries matter and both are proven by mutation tests:
+#   - the TRIGGER block ends at a sibling key at the trigger's own indent, so
+#     a missing `paths:` under `push:` cannot make `trigger_paths push` walk
+#     into `pull_request:` and print its entries (which would satisfy the
+#     equality assertion vacuously);
+#   - the `paths:` list ends at the first line that is neither a list entry,
+#     a blank line, nor a comment.
+trigger_paths() {
+  awk -v want="$1" '
+    $0 == "  " want ":" { inblock = 1; next }
+    inblock && /^  [^ ]/ && $0 != "  " want ":" { inblock = 0; inpaths = 0; next }
+    inblock && /^ {4}paths:/ { inpaths = 1; next }
+    inpaths && /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      gsub(/"/, "", line)
+      print line
+      next
+    }
+    inpaths && /^[[:space:]]*$/ { next }
+    inpaths && /^[[:space:]]*#/ { next }
+    inpaths { exit }
+  ' "$AGENTS_WORKFLOW"
+}
 
 pass=0
 fail=0
@@ -114,6 +156,84 @@ if printf '%s\n' "$workflow_yaml" | grep -q -E ':[[:space:]]*&[A-Za-z_]' ||
   bad "workflow avoids YAML anchors and aliases" "actionlint cannot parse an alias node"
 else
   ok "workflow avoids YAML anchors and aliases"
+fi
+
+# 6. Shellcheck pin: version, 64-hex digest, severity, selection, non-empty guard.
+# The pin greps are scoped to the install step body: a bare grep over the whole
+# file would also match a comment or another step quoting the same text.
+if step_body 'Install shellcheck' | grep -q 'SHELLCHECK_VERSION: v0\.11\.0$'; then
+  ok "shellcheck version is pinned"
+else
+  bad "shellcheck version is pinned" "no 'SHELLCHECK_VERSION: v0.11.0'"
+fi
+
+if step_body 'Install shellcheck' | grep -q -E 'SHELLCHECK_SHA256: [0-9a-f]{64}$'; then
+  ok "shellcheck digest is a pinned 64-hex sha256"
+else
+  bad "shellcheck digest is a pinned 64-hex sha256" "no 64-hex SHELLCHECK_SHA256"
+fi
+
+# The severity assertion is scoped to the shellcheck STEP: a bare grep over
+# the workflow text would also match any other line that mentions both
+# `shellcheck` and `-S warning`, and would keep the test green if the real
+# invocation regressed to `-S error`.
+if step_body 'Shellcheck agent skill scripts' |
+   grep -q -E '^[[:space:]]*shellcheck .*-S warning'; then
+  ok "shellcheck runs at -S warning"
+else
+  bad "shellcheck runs at -S warning" "SC2155 is a warning; -S error would miss it"
+fi
+
+syntax_finds="$(step_body 'Syntax-check agent skill scripts' |
+  sed -n -E 's/^[[:space:]]*(find \.agents.*)$/\1/p' || true)"
+lint_finds="$(step_body 'Shellcheck agent skill scripts' |
+  sed -n -E 's/^[[:space:]]*(find \.agents.*)$/\1/p' || true)"
+if [ -n "$syntax_finds" ] && [ "$lint_finds" = "$syntax_finds" ]; then
+  ok "shellcheck selects the same files as the syntax check"
+else
+  bad "shellcheck selects the same files as the syntax check" \
+    "lint=[$lint_finds] syntax=[$syntax_finds]"
+fi
+
+if step_body 'Shellcheck agent skill scripts' |
+     grep -q -F 'if [ "${#files[@]}" -eq 0 ]; then' &&
+   step_body 'Shellcheck agent skill scripts' |
+     grep -q -F '::error::no shell files selected'; then
+  ok "shellcheck step fails on an empty file selection"
+else
+  bad "shellcheck step fails on an empty file selection" "no non-empty assertion"
+fi
+
+# 7. `.shellcheckrc` is a proven gate-weakening surface: pin it byte-for-byte.
+if [ -f "$SHELLCHECKRC" ] &&
+   printf '%s\n' 'source-path=SCRIPTDIR' 'external-sources=true' | cmp -s - "$SHELLCHECKRC"; then
+  ok ".shellcheckrc is pinned byte-for-byte"
+else
+  bad ".shellcheckrc is pinned byte-for-byte" "expected exactly source-path=SCRIPTDIR + external-sources=true"
+fi
+
+if [ -f "$SHELLCHECKRC" ] && grep -q 'disable=' "$SHELLCHECKRC"; then
+  bad ".shellcheckrc has no disable=" "the rc must not weaken the gate"
+else
+  ok ".shellcheckrc has no disable="
+fi
+
+# 8. `.shellcheckrc` is itself path-gated, so a change to it runs the lint and
+#    this contract test. Both triggers must carry it.
+for trigger in push pull_request; do
+  if trigger_paths "$trigger" | grep -qxF '.shellcheckrc'; then
+    ok "agents workflow triggers on .shellcheckrc ($trigger)"
+  else
+    bad "agents workflow triggers on .shellcheckrc ($trigger)" \
+      "the rc can weaken the gate; a diff touching only it must run the gate"
+  fi
+done
+
+if [ "$(trigger_paths push)" = "$(trigger_paths pull_request)" ]; then
+  ok "push and pull_request path filters are identical"
+else
+  bad "push and pull_request path filters are identical" \
+    "push=[$(trigger_paths push)] pull_request=[$(trigger_paths pull_request)]"
 fi
 
 echo "agent-skills-workflow fixtures: $pass passed, $fail failed"

@@ -239,7 +239,9 @@ run_case "rust-only diff exempts the markdown three" "$NO_MD_FIXTURE" \
 # 12. agents.yml path-gate mirror (arbsec/arbitraitor#862). `Agent Skills Shell
 #     Suites` is `required` and has a PATH_GATED row, so it is required exactly
 #     for the diffs that trigger agents.yml (`.agents/**`,
-#     `.github/workflows/agents.yml`) and exempt for every other diff. The
+#     `.github/workflows/agents.yml`, `.shellcheckrc`) and exempt for every
+#     other diff. `.shellcheckrc` is in the list because it can weaken the
+#     gate itself (a `disable=` there silences rules for every script). The
 #     suite that never reports is the dangerous case: `missing_required` is
 #     derived from `required` alone, so a check listed only in `optional` can
 #     never be missing, and an `.agents/**` diff whose suites never ran would
@@ -251,6 +253,8 @@ run_case ".agents/** diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIX
   ".agents/skills/github-pr-lifecycle/SKILL.md" "$SUITE_MISSING"
 run_case "agents.yml diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
   ".github/workflows/agents.yml" "$SUITE_MISSING"
+run_case ".shellcheckrc diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+  ".shellcheckrc" "$SUITE_MISSING"
 run_case "a Rust-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
   "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
 run_case "a docs-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \

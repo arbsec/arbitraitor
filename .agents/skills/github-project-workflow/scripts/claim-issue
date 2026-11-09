@@ -88,6 +88,8 @@ if [ "$OPT_DRY_RUN" = true ]; then
 fi
 
 # Assign via gh CLI.
+# passed by name to arb_lib_run_or_dry_run (nameref, invisible to shellcheck)
+# shellcheck disable=SC2034
 ARGS=(issue edit "$ISSUE" --repo "$REPO" --add-assignee "@me")
 arb_lib_run_or_dry_run ARGS gh
 

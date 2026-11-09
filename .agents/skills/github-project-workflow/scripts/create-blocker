@@ -66,6 +66,8 @@ BLOCKER_NUM="$(echo "$BLOCKER_URL" | grep -oE '[0-9]+$')"
 
 # Link via native blockedBy (same repo).
 if [ "$IS_CROSS_REPO" = false ]; then
+  # passed by name to arb_lib_run_or_dry_run (nameref, invisible to shellcheck)
+  # shellcheck disable=SC2034
   ARGS=(issue edit "$BLOCKED_ISSUE" --repo "$HOME_REPO" --add-blocked-by "$BLOCKER_NUM")
   arb_lib_run_or_dry_run ARGS gh
   echo "Linked blockedBy edge: $BLOCKED_ISSUE -> #$BLOCKER_NUM" >&2

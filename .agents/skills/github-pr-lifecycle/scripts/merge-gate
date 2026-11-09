@@ -111,6 +111,8 @@ fi
 
 # Perform the merge.
 echo "Merging PR #$PR (squash, HEAD=$HEAD_SHA)..." >&2
+# passed by name to arb_lib_run_or_dry_run (nameref, invisible to shellcheck)
+# shellcheck disable=SC2034
 ARGS=(pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA")
 arb_lib_run_or_dry_run ARGS gh
 

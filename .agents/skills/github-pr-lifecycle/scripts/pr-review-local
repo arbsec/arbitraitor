@@ -247,7 +247,6 @@ write_record() { # write_record <raw-file> <stem> <head> <tree> <base> <cli-exit
   RAW_FILE="$raw"
   RAW_SHA256="$raw_sha"
   VERDICT="$verdict"
-  GENERATED="$generated"
 }
 
 emit_json() {
