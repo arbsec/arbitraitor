@@ -101,6 +101,10 @@ FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'sp
 # deliberately distinct. `.shellcheckrc` is path-gated because a `disable=`
 # there silences rules for every script — and qlty's shellcheck plugin lists a
 # repo-root `.shellcheckrc` in its `config_files`, so it weakens both gates.
+# The two shellcheck gates have different severity floors: the workflow runs
+# `-S warning`, qlty runs shellcheck at its default (info included) on changed
+# lines, so qlty is the stricter of the two and an info-level finding can block
+# there while the workflow stays green.
 # `Agent Skills Shell Suites` has its own row: it is the agents.yml job, and
 # a required check with no row is never exempt — so an `.agents/**` or
 # `.shellcheckrc` diff whose suites never reported would pass the gate. With

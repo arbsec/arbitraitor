@@ -196,7 +196,7 @@ else
 fi
 
 if step_body 'Shellcheck agent skill scripts' |
-     grep -q -F 'if [ "${#files[@]}" -eq 0 ]; then' &&
+     grep -q -F "if [ \"\${#files[@]}\" -eq 0 ]; then" &&
    step_body 'Shellcheck agent skill scripts' |
      grep -q -F '::error::no shell files selected'; then
   ok "shellcheck step fails on an empty file selection"
