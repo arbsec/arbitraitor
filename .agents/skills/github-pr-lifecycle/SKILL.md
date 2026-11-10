@@ -159,7 +159,7 @@ Owns the **PR half** of spec-driven delivery: draft → CI → review → remedi
 ## Inputs
 
 - **PR identifier**: number, URL, branch, or JSON from stdin (for piping).
-- **Project config**: `.agents/project/github-project.local.toml` for review-loop limits, required reviewer domains, merge strategy. If absent, scripts exit `2`.
+- **Project config**: `.agents/project/github-project.local.toml` for review-loop limits, required reviewer domains, merge strategy. If absent, scripts exit `2`. It is gitignored, so `git pull` never updates it — after pulling a change to `[checks]` in `github-project.example.toml`, re-sync `[checks].required` by hand (see [`references/pr-convergence.md`](references/pr-convergence.md#project-config-drift)).
 - **`gh` auth**: requires GraphQL access (default `gh auth` scope is sufficient for read; mutations on review threads use the same scope). Agent-driven operations authenticate as the GitHub App service identity (see Safety conditions), not a personal account.
 
 ## Outputs

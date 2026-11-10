@@ -31,10 +31,14 @@ esac
 STUB
 chmod +x "$STUB/gh"
 
-# temp repo with a local project config (mutating/read scripts require it)
+# temp repo with a local project config (mutating/read scripts require it). The
+# committed example is placed too: every real checkout has both, and `pr-checks`
+# compares the local `[checks].required` against the example's.
 REPO="$(mktemp -d)"
-trap 'rm -rf "$STUB" "$REPO"' EXIT
+COMM_STUB="$(mktemp -d)"
+trap 'rm -rf "$STUB" "$REPO" "$COMM_STUB"' EXIT
 mkdir -p "$REPO/.agents/project"
+cp "$EXAMPLE_TOML" "$REPO/.agents/project/github-project.example.toml"
 cp "$EXAMPLE_TOML" "$REPO/.agents/project/github-project.local.toml"
 git -C "$REPO" init -q
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -966,6 +970,117 @@ while IFS= read -r row; do
     fi
   done <<< "$(printf '%s' "$row" | jq -r '.paths[]' | sort -u)"
 done <<< "$(printf '%s' "$GATED" | jq -c '.[]')"
+
+# 14. Local-vs-example config drift (arbsec/arbitraitor#868). The gate derives
+#     `missing_required` from the LOCAL config's `[checks].required` alone, and
+#     the local config is gitignored so `git pull` never updates it. A local
+#     config that predates a change to the example's required list cannot report
+#     the dropped check missing -- so a required check whose workflow produced NO
+#     rollup entry at all would pass the gate. The warning is stderr-only and
+#     inert: it must never reach stdout (the JSON verdict `merge-gate` consumes)
+#     nor the exit code. Only the narrowing direction warns; a local config that
+#     ADDS a required check is a local policy choice, not drift.
+LOCAL_TOML="$REPO/.agents/project/github-project.local.toml"
+printf '%s' "$ALL_PASS" > "$FIXTURE"
+drift_out="$STUB/drift.out"
+drift_err="$STUB/drift.err"
+drift_run() {
+  drift_rc=0
+  (cd "$REPO" && FAKE_FILES="AGENTS.md" GH_BIN="$STUB/gh" bash "$PR_CHECKS" 1 --json \
+    > "$drift_out" 2> "$drift_err") || drift_rc=$?
+}
+
+# 14a. Baseline: a byte copy of the example is not drift (no warning at all).
+cp "$EXAMPLE_TOML" "$LOCAL_TOML"
+drift_run
+cp "$drift_out" "$STUB/clean.json"
+if [ ! -s "$drift_err" ]; then
+  ok "identical local config emits no drift warning"
+else
+  bad "identical local config emits no drift warning" "stderr: $(<"$drift_err")"
+fi
+
+# 14b. The concrete instance: the local config predates `Agent Skills Shell
+#      Suites` being promoted to `required` (PR #867).
+grep -v '"Agent Skills Shell Suites",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
+drift_run
+if grep -q '^warning: .*drops required checks the example declares: Agent Skills Shell Suites$' "$drift_err"; then
+  ok "drift warns on stderr, naming the dropped required check"
+else
+  bad "drift warns on stderr, naming the dropped required check" "stderr: $(<"$drift_err")"
+fi
+# Inert: same exit code, and stdout byte-identical to the clean-config run --
+# the drifted run is on an AGENTS.md diff, for which the suites check is
+# path-gate exempt either way, so only the warning may differ.
+if [ "$drift_rc" -eq 0 ] && cmp -s "$STUB/clean.json" "$drift_out"; then
+  ok "drift is inert: exit 0 and --json byte-identical to the clean run"
+else
+  bad "drift is inert: exit 0 and --json byte-identical to the clean run" \
+    "exit $drift_rc; stdout: $(diff "$STUB/clean.json" "$drift_out" || true)"
+fi
+
+# 14c. Reverse direction: a local config that ADDS a required check is a local
+#      policy choice, not drift. The added check is enforced (reported missing),
+#      which proves the local `required` list really was in force -- so the
+#      absence of a warning is not an artifact of the local config being ignored.
+awk '{ print } /^  "Agent Skills Tests",$/ { print "  \"Extra Local Check\"," }' \
+  "$EXAMPLE_TOML" > "$LOCAL_TOML"
+drift_run
+if [ ! -s "$drift_err" ] &&
+   jq -e '.missing_required | index("Extra Local Check")' "$drift_out" >/dev/null; then
+  ok "a local config that adds a required check emits no drift warning"
+else
+  bad "a local config that adds a required check emits no drift warning" \
+    "exit $drift_rc; stderr: $(<"$drift_err")"
+fi
+
+# 14d. A FAILING `comm` must not abort the gate. `DRIFT="$(comm ...)"` takes
+#      comm's exit status, and `set -e` (pr-checks:6) would abort the run before
+#      any verdict is printed -- contradicting the "stderr only, and never fatal"
+#      contract the block documents. A broken comparison degrades to "no drift
+#      reported": exit 0, stdout unchanged, and no warning at all (rather than
+#      listing every example check as dropped).
+printf '#!/bin/sh\nexit 3\n' > "$COMM_STUB/comm"
+chmod +x "$COMM_STUB/comm"
+grep -v '"Agent Skills Shell Suites",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
+drift_run   # drifted, real comm: the warning this case must not lose stdout to
+cp "$drift_out" "$STUB/drift_warn.json"
+comm_rc=0
+(cd "$REPO" && PATH="$COMM_STUB:$PATH" FAKE_FILES="AGENTS.md" GH_BIN="$STUB/gh" \
+  bash "$PR_CHECKS" 1 --json > "$STUB/comm.out" 2> "$STUB/comm.err") || comm_rc=$?
+rm -rf "$COMM_STUB"
+if [ "$comm_rc" -eq 0 ] && cmp -s "$STUB/drift_warn.json" "$STUB/comm.out" &&
+   [ ! -s "$STUB/comm.err" ]; then
+  ok "a failing comm degrades to no drift warning instead of aborting the gate"
+else
+  bad "a failing comm degrades to no drift warning instead of aborting the gate" \
+    "exit $comm_rc; stderr: $(<"$STUB/comm.err")"
+fi
+
+# 14e. An EMPTY example `[checks].required` must skip the comparison. An empty
+#      list materialises to a single blank line, and `comm -23` would report
+#      that blank line as a dropped check -- a bogus warning naming nothing.
+#      The `[ -n "$example_required" ]` guard is what suppresses it: nothing is
+#      declared, so nothing can have drifted. The local config is drifted here
+#      (it also drops `Agent Skills Shell Suites`), so a non-empty example would
+#      warn; only the empty example list can keep the warning away.
+EXAMPLE_IN_REPO="$REPO/.agents/project/github-project.example.toml"
+cp "$EXAMPLE_IN_REPO" "$STUB/example.bak"
+awk '
+  /^required[[:space:]]*=[[:space:]]*\[$/ { print "required = []"; inreq = 1; next }
+  inreq && /^\]$/ { inreq = 0; next }
+  inreq { next }
+  { print }
+' "$EXAMPLE_TOML" > "$EXAMPLE_IN_REPO"
+grep -v '"Agent Skills Shell Suites",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
+drift_run
+cp "$STUB/example.bak" "$EXAMPLE_IN_REPO"
+if [ "$drift_rc" -eq 0 ] && [ ! -s "$drift_err" ] && cmp -s "$STUB/clean.json" "$drift_out"; then
+  ok "an empty example required list skips the drift comparison"
+else
+  bad "an empty example required list skips the drift comparison" \
+    "exit $drift_rc; stderr: $(<"$drift_err")"
+fi
 
 echo "pr-checks fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

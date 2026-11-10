@@ -76,6 +76,9 @@ EOF
 # committed example ONLY for field/option NAME discovery (node IDs are never taken
 # from config — they are resolved at runtime via GraphQL).
 # Exits 2 with an actionable message if neither exists.
+# Exports ARB_PROJECT_CONFIG (the config in use) and ARB_PROJECT_CONFIG_EXAMPLE
+# (the committed example's path, whether or not a local copy exists) so a script
+# can compare the two without hardcoding a second relative path.
 arb_lib_load_project_config() {
   local repo_root
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -102,6 +105,8 @@ arb_lib_load_project_config() {
     exit "$ARB_ERR_CONFIG"
   fi
   export ARB_PROJECT_CONFIG
+  ARB_PROJECT_CONFIG_EXAMPLE="$cfg_example"
+  export ARB_PROJECT_CONFIG_EXAMPLE
 }
 
 # --- gh wrapper: fail fast with context ----------------------------------------

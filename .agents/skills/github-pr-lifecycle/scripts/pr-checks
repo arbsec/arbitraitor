@@ -50,7 +50,8 @@ fi
 
 # --- Required / optional check lists from the project config -------------------
 read_checks_field() {
-  awk -v field="$1" '
+  local field="$1" file="${2:-$ARB_PROJECT_CONFIG}"
+  awk -v field="$field" '
     function emit(s,   i, n, part) {
       n = split(s, part, ",")
       for (i = 1; i <= n; i++) {
@@ -73,7 +74,7 @@ read_checks_field() {
       if (line ~ /\]/) { sub(/\].*$/, "", line); emit(line); exit }
       emit(line); multi = 1
     }
-  ' "$ARB_PROJECT_CONFIG"
+  ' "$file"
 }
 to_json_array() {
   jq -R . | jq -s .
@@ -83,6 +84,48 @@ OPTIONAL_JSON="$(read_checks_field optional | to_json_array)"
 if [ "$(echo "$REQUIRED_JSON" | jq 'length')" -eq 0 ]; then
   echo "error: [checks].required is empty or missing in $ARB_PROJECT_CONFIG — cannot enforce the required-check list" >&2
   exit "$ARB_ERR_CONFIG"
+fi
+
+# --- Local-vs-example config drift (arbsec/arbitraitor#868) --------------------
+# The gate enforces [checks].required from the gitignored local config, which no
+# `git pull` updates. A local config that predates a change to the example's
+# required list silently narrows the gate: `missing_required` is derived from
+# `required` alone, so an entry dropped from it can never be reported missing —
+# and a required check whose workflow produced NO rollup entry at all would pass.
+# Report only the direction that narrows the gate (example-required minus
+# local-required); a local config that ADDS a required check is a local policy
+# choice, not drift. stderr only, and never fatal: every consumer of stdout (the
+# JSON verdict, and therefore `merge-gate`) must be byte-identical with and
+# without drift. Failing on drift would resurrect the "blocked until hand-edited"
+# deadlock class that the PATH_GATED table exists to avoid (#862).
+if [ -n "${ARB_PROJECT_CONFIG_EXAMPLE:-}" ] &&
+   [ "$ARB_PROJECT_CONFIG" != "$ARB_PROJECT_CONFIG_EXAMPLE" ] &&
+   [ -f "$ARB_PROJECT_CONFIG_EXAMPLE" ]; then
+  # Materialise both lists before comparing: a failure inside `<(...)` cannot
+  # reach the `||` on the command substitution, so a broken `read_checks_field`,
+  # `jq` or `sort` would leave `comm` comparing partial input — reporting wrong
+  # drift or none, with no way to tell that apart from "no drift". With `set -e`
+  # + `pipefail` a failing stage fails the assignment, and the `||` turns that
+  # into "nothing to report": the degradation the "never fatal" contract above
+  # requires. `|| DRIFT=""` on the `comm` is load-bearing for the same reason at
+  # :6 — a failing `comm` must not abort the gate. An empty example `required`
+  # list skips the comparison instead of warning about an empty check name.
+  example_required="$(read_checks_field required "$ARB_PROJECT_CONFIG_EXAMPLE" | sort -u)" || example_required=""
+  local_required="$(printf '%s\n' "$REQUIRED_JSON" | jq -r '.[]' | sort -u)" || local_required=""
+  DRIFT=""
+  if [ -n "$example_required" ]; then
+    DRIFT="$(comm -23 \
+      <(printf '%s\n' "$example_required") \
+      <(printf '%s\n' "$local_required"))" || DRIFT=""
+  fi
+  if [ -n "$DRIFT" ]; then
+    printf 'warning: local project config %s drops required checks the example declares: %s\n' \
+      "$ARB_PROJECT_CONFIG" \
+      "$(printf '%s\n' "$DRIFT" | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')" >&2
+    printf '         re-sync [checks].required from %s (arbsec/arbitraitor#868) — a dropped\n' \
+      "$ARB_PROJECT_CONFIG_EXAMPLE" >&2
+    printf '         required check cannot be reported missing by this gate.\n' >&2
+  fi
 fi
 
 # --- PR diff paths (fail loudly — an unreadable diff must not become "no paths")

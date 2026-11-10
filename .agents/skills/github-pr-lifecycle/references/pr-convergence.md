@@ -83,6 +83,32 @@ The script also blocks when the review-thread page is truncated (`has_next_page:
 
 The script exits `0` only when all of these are true. Exit `5` (`ARB_ERR_BLOCKED`) means the loop limit was hit — `blocked`/`needs-human`, not mergeable.
 
+## Project config drift
+
+`pr-checks` enforces `[checks].required` from the gitignored
+`.agents/project/github-project.local.toml`, which no `git pull` updates. When the
+example gains a required check and the local copy is not re-synced, the gate
+narrows **silently**: `missing_required` is derived from the local `required`
+list alone, so an entry dropped from it can never be reported missing — and a
+required check whose workflow produced **no rollup entry at all** would pass.
+
+`pr-checks` therefore compares the two lists and warns on stderr when the local
+config drops a check the example declares. The warning is never fatal and inert
+to consumers: stdout and `--json` are byte-identical with and without drift, and
+the exit code is unchanged. Failing on drift would resurrect the "blocked until
+hand-edited" deadlock class the `PATH_GATED` table exists to avoid (#862).
+
+Only the example → local direction warns. A local config that **adds** a
+required check is local policy, not drift. When the comparison cannot be
+computed (`read_checks_field`, `jq`, `sort` or `comm` fails), the gate degrades
+to "no drift reported" rather than aborting or warning on every check; an empty
+example `required` list skips the comparison outright, since nothing is declared
+to drift from.
+
+Re-sync by hand after pulling a change to `[checks]` in
+`github-project.example.toml`: copy the new entries into `[checks].required` in
+the local file. (arbsec/arbitraitor#868)
+
 ## Local review evidence
 
 `pr-review-local` writes the review record and raw transcript into
