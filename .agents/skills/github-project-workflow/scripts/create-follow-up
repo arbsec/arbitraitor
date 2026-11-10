@@ -48,6 +48,8 @@ if [ "$OPT_DRY_RUN" = true ]; then
   exit "$ARB_OK"
 fi
 
+# passed by name to arb_lib_run_or_dry_run (nameref, invisible to shellcheck)
+# shellcheck disable=SC2034
 ARGS=(issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --type "Task")
 ISSUE_URL="$(arb_lib_run_or_dry_run ARGS gh)"
 echo "Created follow-up: $ISSUE_URL" >&2

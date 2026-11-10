@@ -40,6 +40,10 @@ arb_lib_parse_common() {
       *)               ARB_LIB_EXTRA_ARGS+=("$1"); shift ;;
     esac
   done
+  # OPT_HELP/OPT_JSON are out-params consumed by the caller after sourcing.
+  # This deliberate no-op read keeps them from looking dead to shellcheck;
+  # removing it reintroduces SC2034 at the case arms. Do not "clean it up".
+  : "$OPT_HELP" "$OPT_JSON"
 }
 
 # --- Help renderer -------------------------------------------------------------
@@ -58,12 +62,12 @@ Options:
   -R, --repo OWNER/REPO   Target repository (required; never inferred from cwd)
 
 Exit codes:
-  0  success (or dry-run preview)
-  1  unrecoverable error (network, auth, unexpected gh output)
-  2  config/state error (missing config, unknown field, not found)
-  3  policy violation (would violate the scheduling policy, would merge on red, etc.)
-  4  concurrent edit detected (resource updatedAt changed since read — retry)
-  5  blocked (review loop limit hit — produces blocked/needs-human, never silent approval)
+  $ARB_OK  success (or dry-run preview)
+  $ARB_ERR_UNRECOVERABLE  unrecoverable error (network, auth, unexpected gh output)
+  $ARB_ERR_CONFIG  config/state error (missing config, unknown field, not found)
+  $ARB_ERR_POLICY  policy violation (would violate the scheduling policy, would merge on red, etc.)
+  $ARB_ERR_CONCURRENT  concurrent edit detected (resource updatedAt changed since read — retry)
+  $ARB_ERR_BLOCKED  blocked (review loop limit hit — produces blocked/needs-human, never silent approval)
 EOF
 }
 

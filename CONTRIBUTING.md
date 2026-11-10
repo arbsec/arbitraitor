@@ -18,13 +18,18 @@ mise install
 
 This installs the correct versions of Rust, lefthook, cocogitto, and all other tools.
 
+The agent-skill shell gate also needs [ShellCheck](https://www.shellcheck.net/)
+**v0.11.0** — the version CI pins and installs. Rule sets change between
+releases, so a different version can report findings CI does not.
+
 ### Setup
 
 1. Fork and clone the repository.
 2. Run `mise install` to install pinned tool versions (Rust, lefthook, cocogitto, rumdl).
 3. Install CI tools: `cargo install cargo-nextest cargo-deny cargo-audit mdbook mdbook-mermaid --locked`
-4. Run `lefthook install` to set up git hooks.
-5. Run `cargo build` to verify the workspace compiles.
+4. Install ShellCheck v0.11.0 (`shellcheck --version` must print `version: 0.11.0`).
+5. Run `lefthook install` to set up git hooks.
+6. Run `cargo build` to verify the workspace compiles.
 
 ### Workflow
 
@@ -53,8 +58,8 @@ This installs the correct versions of Rust, lefthook, cocogitto, and all other t
    rumdl check .
    ```
 
-   Changes under `.agents/**` also run the agent-skill shell gate in CI
-   (`.github/workflows/agents.yml`):
+   Changes under `.agents/**`, or to `.shellcheckrc`, also run the agent-skill
+   shell gate in CI (`.github/workflows/agents.yml`):
 
    ```bash
    failed=0
@@ -69,6 +74,22 @@ This installs the correct versions of Rust, lefthook, cocogitto, and all other t
      bash "$suite" || failed=1
    done
    [ "$failed" -eq 0 ]
+
+   # Same file selection and severity as the CI shellcheck step.
+   # `-S warning` is required: SC2155 (masked `export X="$(cmd)"` status)
+   # is a warning, not an error.
+   # ShellCheck v0.11.0 — the version CI pins; other versions can report
+   # findings CI does not.
+   mapfile -t shell_files < <(
+     find .agents -type f \( -name '*.sh' -o -name '*.bash' \) -print
+     find .agents/skills -type f -path '*/scripts/*' ! -name '*.*' -print
+   )
+   # Empty selection: `shellcheck` with no files prints usage and exits
+   # non-zero, which would read as a lint hit instead of a regression. The
+   # workflow makes this fatal (`exit 1`); pasted interactively (no `set -e`)
+   # `false` only sets `$?`, so the `shellcheck` line below is what fails.
+   [ "${#shell_files[@]}" -gt 0 ] || { echo "no shell files selected" >&2; false; }
+   shellcheck -x -P SCRIPTDIR -S warning "${shell_files[@]}"
    ```
 
 5. **Open a PR** with a Conventional Commits title, security impact assessment, and linked issue. The PR template's `arb:*` checklist markers are verified by the [pr-lifecycle skill](.agents/skills/github-pr-lifecycle/SKILL.md) based on evidence — check them only when the underlying fact holds.

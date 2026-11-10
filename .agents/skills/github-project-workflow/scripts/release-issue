@@ -49,6 +49,8 @@ ARGS=(issue edit "$ISSUE" --repo "$REPO" --remove-assignee "@me")
 arb_lib_run_or_dry_run ARGS gh
 
 # Leave a comment explaining why.
+# passed by name to arb_lib_run_or_dry_run (nameref, invisible to shellcheck)
+# shellcheck disable=SC2034
 ARGS=(issue comment "$ISSUE" --repo "$REPO" --body "Released: $REASON")
 arb_lib_run_or_dry_run ARGS gh
 
