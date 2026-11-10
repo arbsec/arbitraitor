@@ -40,30 +40,34 @@ step_body() {
   ' "$AGENTS_WORKFLOW"
 }
 
-# Print one `paths:` list (`push` or `pull_request`), one entry per line.
-# Two boundaries matter and both are proven by mutation tests:
-#   - the TRIGGER block ends at a sibling key at the trigger's own indent, so
-#     a missing `paths:` under `push:` cannot make `trigger_paths push` walk
-#     into `pull_request:` and print its entries (which would satisfy the
-#     equality assertion vacuously);
+# The trigger paths of ONE trigger (`push` or `pull_request`): every entry of
+# that trigger's `paths:` list, one per line, normalised (quotes removed,
+# trailing inline comments stripped, sorted). The grammar lives in
+# tests/paths-grammar.awk and is shared with tests/pr-checks.bash, so there is
+# exactly one implementation of it and one suite can no longer pass where the
+# other fails. Three boundaries matter, and the grammar file documents each:
+#   - the TRIGGER block ends at ANY key at or above the trigger's indent,
+#     including column 0, so a missing `paths:` under `push:` cannot make
+#     `trigger_paths push` walk into `pull_request:` -- or into a top-level
+#     section such as `jobs:` -- and print that block's entries (a false PASS);
+#   - the trigger and `paths:` keys tolerate a trailing comment, so a
+#     commented key does not silently return an empty list;
 #   - the `paths:` list ends at the first line that is neither a list entry,
 #     a blank line, nor a comment.
+# Each was verified by manual mutation testing out of tree; the assertions
+# below exist to keep them true.
+TRIGGER_PATHS_AWK="$HERE/paths-grammar.awk"
+
 trigger_paths() {
-  awk -v want="$1" '
-    $0 == "  " want ":" { inblock = 1; next }
-    inblock && /^  [^ ]/ && $0 != "  " want ":" { inblock = 0; inpaths = 0; next }
-    inblock && /^ {4}paths:/ { inpaths = 1; next }
-    inpaths && /^[[:space:]]*-[[:space:]]*/ {
-      line = $0
-      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
-      gsub(/"/, "", line)
-      print line
-      next
-    }
-    inpaths && /^[[:space:]]*$/ { next }
-    inpaths && /^[[:space:]]*#/ { next }
-    inpaths { exit }
-  ' "$AGENTS_WORKFLOW"
+  awk -v want="$1" -v mode=paths -f "$TRIGGER_PATHS_AWK" "$AGENTS_WORKFLOW" | tr -d "\"'" | sort -u
+}
+
+# Does the trigger block carry a `paths:` key at all? Used to prove that a
+# present list never parses to empty after a parser regression. Same grammar,
+# `has` mode: it shares the block boundaries with trigger_paths by
+# construction instead of restating them.
+trigger_has_paths() {
+  awk -v want="$1" -v mode=has -f "$TRIGGER_PATHS_AWK" "$AGENTS_WORKFLOW"
 }
 
 pass=0
@@ -92,11 +96,30 @@ else
   exit 1
 fi
 
-if grep -q -E '^[[:space:]]*-[[:space:]]*"\.agents/\*\*"' "$AGENTS_WORKFLOW"; then
-  ok "agents workflow covers .agents/**"
-else
-  bad "agents workflow covers .agents/**" "no .agents/** path filter"
-fi
+# The filter must live inside each trigger's `paths:` list, not merely appear
+# somewhere in the file -- a comment or an unrelated key must not satisfy it.
+for trigger in push pull_request; do
+  if trigger_paths "$trigger" | grep -qxF '.agents/**'; then
+    ok "agents workflow covers .agents/** ($trigger)"
+  else
+    bad "agents workflow covers .agents/** ($trigger)" \
+      "no .agents/** in the $trigger paths list"
+  fi
+done
+
+# A `paths:` key that parses to an empty list is a parser regression, not a
+# workflow with no filter. Fail loudly so an empty list can never satisfy the
+# `push == pull_request` equality check as "" == "".
+for trigger in push pull_request; do
+  if [ -n "$(trigger_has_paths "$trigger")" ]; then
+    if [ -n "$(trigger_paths "$trigger")" ]; then
+      ok "agents workflow $trigger paths list is non-empty"
+    else
+      bad "agents workflow $trigger paths list is non-empty" \
+        "a paths: key is present but trigger_paths returned nothing"
+    fi
+  fi
+done
 
 if grep -q -E '^[[:space:]]*pull_request:' "$AGENTS_WORKFLOW"; then
   ok "agents workflow triggers on pull requests"

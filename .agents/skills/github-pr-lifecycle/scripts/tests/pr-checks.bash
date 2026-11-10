@@ -291,19 +291,206 @@ path_gated_json() {
 # The trigger paths of a workflow: every entry of every `paths:` list in the
 # file. The workflows spell the list out under both `push` and `pull_request`
 # (actionlint cannot resolve an alias); the union of the two is the same set.
+#
+# Deliberately NOT shared with tests/paths-grammar.awk. It is a different
+# grammar -- no trigger scoping, a list reopened per `paths:` key, the block
+# closed by falling back out rather than exiting -- and it is the independent
+# side of the `trigger_paths covers the workflow_paths union` assertion below.
+# Routing it through the shared program would make that assertion compare one
+# implementation against itself and stop catching a scoping regression.
 workflow_paths() {
   awk '
+    # A comment line carries no YAML structure: `#` is not part of the
+    # `^[[:space:]]*paths:` prefix this parser matches, so a comment can never
+    # open a list -- and must not terminate one. Hoisted to the first rule so a
+    # comment at column 0 or at the list indent cannot end the scan.
+    # Exactly one comment rule per program.
+    /^[[:space:]]*#/ { next }
     /^[[:space:]]*paths:/ { f = 1; next }
+    f && /^[[:space:]]*$/ { next }
     f && /^[[:space:]]*-[[:space:]]*/ {
       line = $0
       sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      sub(/[[:space:]]+$/, "", line)
       print line
       next
     }
-    f && /^[[:space:]]*$/ { next }
     f { f = 0 }
   ' "$1" | tr -d "\"'" | sort -u
 }
+
+# The trigger paths of ONE trigger (`push` or `pull_request`): every entry of
+# that trigger's `paths:` list, one per line, normalised (quotes removed,
+# trailing inline comments stripped, sorted). The grammar itself lives in
+# tests/paths-grammar.awk and is loaded by this suite AND by
+# tests/agent-skills-workflow.bash, so there is exactly one implementation of
+# it and one suite can no longer pass where the other fails. The block and
+# list boundaries that grammar pins are documented there.
+#
+# The union in workflow_paths is blind to a one-sided edit; the two triggers
+# must carry the same set because PATH_GATED mirrors the union for BOTH event
+# types.
+TRIGGER_PATHS_AWK="$HERE/paths-grammar.awk"
+
+trigger_paths() {
+  awk -v want="$1" -v mode=paths -f "$TRIGGER_PATHS_AWK" "$2" | tr -d "\"'" | sort -u
+}
+
+# Count `paths` keys in key position, in ONE pass, printing "<any> <block>".
+# Both counts skip block-scalar bodies, so a shell line such as `paths: x`
+# inside a `run: |` step is never mistaken for a YAML key.
+#
+#   any   -- every key-position spelling: line-initial, or after `{`/`,` in a
+#            flow mapping; quoted (`'paths'`, `"paths"`) or bare; with or
+#            without a space before the colon. These are the forms the block
+#            parser cannot represent.
+#   block -- only the bare line-initial `paths:` that opens a block-style list.
+#
+# A block scalar starts on a line whose value is `|` or `>` (optionally with
+# chomping/indent indicators, e.g. `|-`, `>+2`). Its body ends at the first
+# non-blank line indented at or below the key column that introduced it: a
+# sibling key at the scalar's own column terminates the body, a deeper line is
+# still body text. The key column, not the line's leading indent, is used so a
+# `- run: |` sequence item is measured at `run`, not at the `-`. A nested
+# `|`/`>` inside a body is literal text (the body is skipped wholesale); a
+# scalar that runs to end-of-file simply never resumes counting, which is
+# correct -- any `paths` there is body text.
+#
+# Stays here rather than joining tests/paths-grammar.awk: it is already
+# single-copy, so moving it would remove no duplication, and it answers a
+# different question (every key-position spelling, plus block-scalar bodies)
+# than the trigger-block grammar that file exists to keep single-source.
+paths_key_counts() {
+  awk -v quote="['\"]" '
+    function indent(s,   n) {
+      n = 0
+      while (substr(s, n + 1, 1) == " ") n++
+      return n
+    }
+    function key_col(s,   n, rest) {
+      n = indent(s)
+      rest = substr(s, n + 1)
+      if (rest ~ /^- /) {
+        n += 2
+        while (substr(s, n + 1, 1) == " ") n++
+      }
+      return n
+    }
+    BEGIN {
+      keyre = "(^[[:space:]]*|[{,][[:space:]]*)" quote "?paths" quote "?[[:space:]]*:"
+      scalre = ":[[:space:]]*[|>][-+0-9]*[[:space:]]*(#.*)?$"
+    }
+    {
+      if (in_scalar) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        if (indent($0) <= scalar_indent) in_scalar = 0
+        else next
+      }
+      # A comment line carries no YAML structure -- same rule as
+      # tests/paths-grammar.awk -- so it must not count as a key nor start a
+      # scalar skip. After `in_scalar`, which already owns comment lines inside
+      # a block-scalar body (they are body text).
+      if ($0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ keyre) any++
+      if ($0 ~ /^[[:space:]]*paths:[[:space:]]*(#.*)?$/) block++
+      if ($0 ~ scalre) { in_scalar = 1; scalar_indent = key_col($0) }
+    }
+    END { print any + 0, block + 0 }
+  ' "$1"
+}
+
+# 13a. Direct test of paths_key_counts -- the guard that decides WHETHER the
+# contract test may read a workflow at all. A wrong count does not fail that
+# workflow's own assertions, it changes which ones run: an inflated `any` rejects
+# a valid file and `continue`s past every per-workflow assertion, and a comment
+# that starts a block-scalar skip hides a real key so a `paths`-filtered
+# workflow looks unfiltered. Neither is visible in a green run over the eight
+# committed workflows, so the helper is exercised here on purpose-built YAML.
+pkc_case() {
+  local name="$1" yaml="$2" want="$3" tmp got
+  tmp="$(mktemp)"
+  printf '%s' "$yaml" > "$tmp"
+  got="$(paths_key_counts "$tmp")"
+  rm -f "$tmp"
+  if [ "$got" = "$want" ]; then
+    ok "paths_key_counts $name"
+  else
+    bad "paths_key_counts $name" "expected [$want], got [$got]"
+  fi
+}
+
+# A valid block-style list: the one key is both a key-position spelling and a
+# block-style opener.
+pkc_case "counts one block-style paths key" "$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "crates/**"
+YAML
+)" "1 1"
+
+# Regression: a comment inside the list that contains `paths:` text used to
+# increment `any` only, rejecting a valid file and skipping every assertion for
+# that workflow.
+pkc_case "ignores a comment containing paths: text" "$(cat <<'YAML'
+on:
+  push:
+    paths:
+      # keep in sync, paths: must match pull_request below
+      - "crates/**"
+YAML
+)" "1 1"
+
+# Regression: a column-0 comment ending `: |` used to start a block-scalar skip
+# that swallowed the following `paths:` key, so a filtered workflow counted as
+# `0 0` -- indistinguishable from one with no filter.
+pkc_case "ignores a comment ending in a block-scalar indicator" "$(cat <<'YAML'
+# example: |
+  on:
+    push:
+      paths:
+        - "crates/**"
+YAML
+)" "1 1"
+
+# A real block-scalar body may contain anything, including a line that looks
+# like a `paths:` key; it is body text, not a key.
+pkc_case "ignores paths: text inside a run: | body" "$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "crates/**"
+jobs:
+  test:
+    steps:
+      - run: |
+          paths: not-a-key
+YAML
+)" "1 1"
+
+# No `paths` key at all is the only case that legitimately reads `0 0`.
+pkc_case "counts no paths key" "$(cat <<'YAML'
+name: Release
+on:
+  push:
+    branches:
+      - main
+YAML
+)" "0 0"
+
+# A flow-style key is unreadable by the block parser, so the counts must differ
+# and the loud rejection must fire. The flow key sits after a block list -- the
+# "later flow key hiding behind an earlier block list" case.
+pkc_case "counts a flow-style key apart from the block count" "$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "a"
+  pull_request:
+    paths: ["b"]
+YAML
+)" "2 1"
 
 # The job names of a workflow (exactly four spaces of indentation -- the
 # workflow-level `name:` has none and a step-level `name:` has more).
@@ -338,12 +525,123 @@ required_checks() {
 GATED="$(path_gated_json)"
 REQUIRED="$(required_checks)"
 
+# Workflows that are deliberately push-only: they deploy or publish on main and
+# have no PR-time job. Verified across all eight workflows in .github/workflows/
+# when this assertion was added -- only docs.yml qualifies. Every OTHER
+# path-filtered workflow must start on both events; codeql.yml and release.yml
+# declare no `paths:` at all, so they never reach the per-trigger assertions.
+#
+# This is a whitespace-separated LIST. Every use must test membership against
+# the whole list (`case " $PUSH_ONLY " in`) -- a scalar `[ "$base" = "$PUSH_ONLY" ]`
+# silently works for one entry and makes a second allowlisted workflow fail the
+# both-triggers assertion instead.
+PUSH_ONLY="docs"
+
+seen_push_only=""
+
 for wf in "$WORKFLOWS_DIR"/*.yml; do
   base="$(basename "$wf" .yml)"
   marker=".github/workflows/$base.yml"
+
+  # The contract test can only read a block-style `paths:` sequence:
+  #
+  #     paths:
+  #       - "entry"
+  #
+  # GitHub also accepts flow style (`paths: ["a", "b"]`), a separation space
+  # before the colon (`paths :`), a quoted key (`'paths':`), and a scalar.
+  # Those parse to an empty union here, which would skip the entire
+  # per-workflow block below -- a live gate silently blind to a disjoint path
+  # set. Reject them loudly instead of mis-parsing; counting every key-position
+  # spelling against the keys the block parser can open a list from also
+  # catches a later flow key hiding behind an earlier block list. The counts
+  # skip block-scalar bodies, so a shell line such as `paths: x` inside a
+  # `run: |` step is not misread as a YAML key.
+  counts="$(paths_key_counts "$wf")"
+  keys="${counts%% *}"
+  block_keys="${counts##* }"
+  if [ "$keys" != "$block_keys" ]; then
+    bad "workflow $base declares only block-style paths: lists" \
+      ".github/workflows/$base.yml has a paths key the contract test cannot read (flow sequence, quoted key, or 'paths :'); only block-style paths: lists are supported"
+    continue
+  fi
+
   paths="$(workflow_paths "$wf")"
   if [ -z "$paths" ]; then
     continue   # unfiltered workflow: every check of it always reports
+  fi
+
+  # Deleting a trigger does not change the `paths:` union, so without this
+  # presence check the equality assertion below simply never runs and the suite
+  # stays green while the workflow stops reporting for that event -- for
+  # code.yml the required Code checks would never appear and every PR would
+  # block forever. Only an allowlisted push-only workflow may omit a trigger,
+  # and the allowlist is closed-world: the push-only workflow must still
+  # declare `push:` and must NOT declare `pull_request:`, so a file that gained
+  # a PR trigger cannot keep the exemption (and the coverage it implies).
+  #
+  # Membership test against the list, never scalar equality: with two entries a
+  # `[ "$base" = "$PUSH_ONLY" ]` matches neither, and both allowlisted
+  # workflows fall into the both-triggers branch below and fail.
+  push_only=false
+  case " $PUSH_ONLY " in
+    *" $base "*) push_only=true ;;
+  esac
+  if [ "$push_only" = true ]; then
+    seen_push_only="$seen_push_only $base"
+    if grep -q -E '^  push:[[:space:]]*(#.*)?$' "$wf"; then
+      ok "workflow $base has a push trigger"
+    else
+      bad "workflow $base has a push trigger" \
+        "the push-only allowlist entry must still trigger on push"
+    fi
+    if grep -q -E '^  pull_request:[[:space:]]*(#.*)?$' "$wf"; then
+      bad "workflow $base is push-only (no pull_request trigger)" \
+        "it is allowlisted as push-only but declares a pull_request trigger; only a push-only allowlist entry ($PUSH_ONLY) may omit one"
+    else
+      ok "workflow $base is push-only (no pull_request trigger)"
+    fi
+  else
+    for trigger in push pull_request; do
+      if grep -q -E "^  $trigger:[[:space:]]*(#.*)?\$" "$wf"; then
+        ok "workflow $base has a $trigger trigger"
+      else
+        bad "workflow $base has a $trigger trigger" \
+          "a path-filtered workflow must start on both push and pull_request; only a push-only allowlist entry ($PUSH_ONLY) may omit one"
+      fi
+    done
+  fi
+
+  # Both triggers must carry the same path set. The union above is blind to a
+  # one-sided edit: a `paths:` entry removed from only one trigger leaves the
+  # union intact, so GitHub would start the workflow for one event but not the
+  # other while every union-based assertion stayed green. Guard on the two
+  # triggers -- docs.yml is push-only, and comparing its list against an empty
+  # pull_request set would false-positive.
+  if grep -q -E '^  push:[[:space:]]*(#.*)?$' "$wf" &&
+     grep -q -E '^  pull_request:[[:space:]]*(#.*)?$' "$wf"; then
+    push_paths="$(trigger_paths push "$wf")"
+    pr_paths="$(trigger_paths pull_request "$wf")"
+    if [ "$push_paths" = "$pr_paths" ]; then
+      ok "workflow $base push and pull_request paths are identical"
+    else
+      bad "workflow $base push and pull_request paths are identical" \
+        "push=[$push_paths] pull_request=[$pr_paths]"
+    fi
+  fi
+
+  # The scoped parser must account for every entry the union parser sees. If
+  # `trigger_paths` regressed to print nothing, both trigger sets would be
+  # empty and the equality assertion above would pass vacuously ("" == "").
+  # Comparing their union against workflow_paths makes that regression fail
+  # loudly instead. Runs for push-only workflows too (docs.yml): their union is
+  # just the one trigger's list.
+  scoped_paths="$({ trigger_paths push "$wf"; trigger_paths pull_request "$wf"; } | sort -u)"
+  if [ "$scoped_paths" = "$paths" ]; then
+    ok "workflow $base trigger_paths covers the workflow_paths union"
+  else
+    bad "workflow $base trigger_paths covers the workflow_paths union" \
+      "scoped=[$scoped_paths] union=[$paths]"
   fi
 
   # A `paths-ignore` filter would make the trigger set the complement of the
@@ -414,6 +712,21 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
         "$omitting of $(printf '%s' "$rows" | jq 'length') rows omit it"
     fi
   done <<< "$paths"
+done
+
+# The push-only allowlist is closed-world. An allowlisted workflow that was
+# never checked -- its file deleted or renamed -- or that lost its `paths:`
+# list (the `continue` above fires before the branch) would silently remove the
+# push-only exemption AND the union-coverage and paths-ignore assertions that
+# hang off it. Assert every allowlist entry was actually reached.
+for allow in $PUSH_ONLY; do
+  case " $seen_push_only " in
+    *" $allow "*)
+      ok "workflow $allow on the push-only allowlist was checked" ;;
+    *)
+      bad "workflow $allow on the push-only allowlist was checked" \
+        "$allow is allowlisted as push-only, but no checked workflow matched it (deleted, renamed, or missing its paths: list)" ;;
+  esac
 done
 
 # Reverse direction, per row: every path in the row is a trigger path of the
