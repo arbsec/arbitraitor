@@ -346,6 +346,9 @@ workflow_paths() {
       # comment at column 0 or at the list indent cannot end the scan.
       # Exactly one comment rule per program.
       if ($0 ~ /^[[:space:]]*#/) next
+      # Fires before `scalre`, so `paths: |` opens a list here while the same
+      # line sets in_scalar in paths_key_counts. An ordering divergence, and
+      # inert: paths_key_counts rejects a scalar `paths` value before this runs.
       if ($0 ~ /^[[:space:]]*paths:/) { f = 1; next }
       # A scalar opener cannot be a path entry, so start the skip before the
       # `- ` entry rule -- otherwise `- run: |` itself would be printed.
@@ -534,13 +537,22 @@ jobs:
 YAML
 )" "2 1"
 
-# No `paths` key at all is the only case that legitimately reads `0 0`.
+# No `paths` key at all is the only case that legitimately reads `0 0`. The
+# copy still carries a comment that mentions `paths:` and a `paths:` line
+# inside a `run: |` body, so it pins both skip rules: deleting the comment rule
+# or the block-scalar skip adds a key here and the counts no longer read `0 0`.
 pkc_case "counts no paths key" "$(cat <<'YAML'
 name: Release
 on:
   push:
     branches:
       - main
+# keep in sync, paths: must match below
+jobs:
+  test:
+    steps:
+      - run: |
+          paths: not-a-key
 YAML
 )" "0 0"
 
@@ -556,6 +568,128 @@ on:
     paths: ["b"]
 YAML
 )" "2 1"
+
+# 13b. Direct tests of workflow_paths -- the union parser. Its block-scalar skip
+# is DELIBERATELY DUPLICATED from paths_key_counts (see the note on the
+# function), so each copy needs its own pin. The `trigger_paths covers the
+# workflow_paths union` assertion cannot provide one: it compares this parser
+# against the shared grammar, and no committed workflow's `run: |` body happens
+# to contain a `- ` line, so the eight-workflow sweep stays green with the skip
+# deleted. Measured on this tree before these fixtures existed: deleting the
+# `in_scalar` block and the `scalre` rule from workflow_paths, degrading its
+# `key_col` to `return indent(s)`, and moving its `scalre` rule below the `- `
+# entry rule each still reported 186 passed, 0 failed. The three fixtures below
+# pin exactly those three rules.
+wp_case() {
+  local name="$1" yaml="$2" want="$3" tmp got
+  tmp="$(mktemp)"
+  printf '%s' "$yaml" > "$tmp"
+  got="$(workflow_paths "$tmp")"
+  rm -f "$tmp"
+  if [ "$got" = "$want" ]; then
+    ok "workflow_paths $name"
+  else
+    bad "workflow_paths $name" "expected [$want], got [$got]"
+  fi
+}
+
+# The union prints one unquoted entry per line (the function strips quotes and
+# sorts). `grep -qxF` anchors the needle to a whole line, so a decoy is never
+# "absent" merely because some real entry contains it as a substring.
+wp_absent() {
+  local name="$1" yaml="$2" needle="$3" tmp got
+  tmp="$(mktemp)"
+  printf '%s' "$yaml" > "$tmp"
+  got="$(workflow_paths "$tmp")"
+  rm -f "$tmp"
+  if printf '%s\n' "$got" | grep -qxF -- "$needle"; then
+    bad "workflow_paths $name" "union contains [$needle]: [$got]"
+  else
+    ok "workflow_paths $name"
+  fi
+}
+
+# The round-4 probe: one real trigger entry, then a step body whose lines all
+# look like grammar (the `run: |` opener, a shell line, a `paths:` line, and
+# three `- ` lines the entry rule WOULD print if the body were not skipped),
+# plus a flow-style top-level `paths:` key as a decoy. The `- ` spelling is the
+# only one the entry rule can emit, so the step `name:`/`uses:` lines are
+# written as sequence items; deleting the skip prints `also-a-step-line`,
+# `name: only-in-step-body` and `uses: actions/checkout@v4`.
+WP_PROBE="$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "crates/**"
+jobs:
+  test:
+    steps:
+      - run: |
+          echo hi
+          paths: emitted-by-script
+          - also-a-step-line
+          - name: only-in-step-body
+          - uses: actions/checkout@v4
+paths: ["top-level-decoy"]
+YAML
+)"
+wp_case "collects only the trigger entries past a run: | body" "$WP_PROBE" \
+  "crates/**"
+wp_absent "does not collect a - line from inside a run: | body" "$WP_PROBE" \
+  "also-a-step-line"
+wp_absent "does not collect a step name: line from a run: | body" "$WP_PROBE" \
+  "name: only-in-step-body"
+wp_absent "does not collect a step uses: line from a run: | body" "$WP_PROBE" \
+  "uses: actions/checkout@v4"
+# Deliberately no assertion that the body's `paths:` text, the `run: |` opener,
+# or the top-level decoy is absent from the union: the union only ever prints
+# lines the `- ` entry rule collects (with the dash stripped), so a non-`- `
+# line can never appear no matter which rule is deleted. Those three properties
+# are unfalsifiable on this fixture. The opener is pinned on WP_OPEN_LIST
+# instead, where the entry rule would print it if `scalre` ran too late.
+
+# The `scalre` rule must fire BEFORE the `- ` entry rule: a `- run: |` item that
+# arrives while a `paths:` list is still open is a scalar opener, not an entry.
+# Moving the rule below the entry rule prints `run: |` and the body's `- ` line.
+# (A mapping item inside a paths list is valid YAML but not a filter GitHub
+# accepts; what is pinned is the rule order, the only thing between an open list
+# and a body line.)
+WP_OPEN_LIST="$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "crates/**"
+      - run: |
+          - decoy-inside-body
+YAML
+)"
+wp_case "does not let a scalar opener inside an open list leak body lines" \
+  "$WP_OPEN_LIST" "crates/**"
+wp_absent "does not print a scalar opener from inside an open list" \
+  "$WP_OPEN_LIST" "run: |"
+wp_absent "does not print a - line from inside that scalar" "$WP_OPEN_LIST" \
+  "decoy-inside-body"
+
+# The body ends at the KEY COLUMN of the opener, not at its leading indent: a
+# `- key: |` item is measured at `key`, so a sibling at the `key` column ends the
+# body and, being neither blank nor a `- ` entry, closes the `paths:` list. The
+# following `- ` line at the item's indent is then not a list entry. Degrading
+# key_col to `return indent(s)` re-swallows that sibling, the body ends on the
+# `- ` line instead, and a bogus entry joins the union.
+WP_KEY_COL="$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "crates/**"
+      - run: |
+          echo hi
+        shell: bash
+      - contaminated-entry
+YAML
+)"
+wp_case "ends a - key: | body at the key column" "$WP_KEY_COL" "crates/**"
+wp_absent "does not resume the paths list after that body ends" "$WP_KEY_COL" \
+  "contaminated-entry"
 
 # The job names of a workflow (exactly four spaces of indentation -- the
 # workflow-level `name:` has none and a step-level `name:` has more).
@@ -615,9 +749,12 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
   #
   # GitHub also accepts flow style (`paths: ["a", "b"]`), a separation space
   # before the colon (`paths :`), a quoted key (`'paths':`), and a scalar.
-  # A `paths:` key outside the workflow's `on:` triggers (for example a step
-  # `with:` input named `paths`) is a fourth unreadable form. Those parse to an
-  # empty union here, which would skip the entire per-workflow block below -- a
+  # A non-block `paths:` key outside the workflow's `on:` triggers is a fourth
+  # unreadable form -- for example a step `with:` input spelled
+  # `paths: ["a", "b"]`, `paths : [...]` or `'paths': [...]`. Location alone is
+  # NOT what trips the rejection: a block-style step-level `paths:` counts as
+  # both a key and a block opener, so it cancels out. Those parse to an empty
+  # union here, which would skip the entire per-workflow block below -- a
   # live gate silently blind to a disjoint path set. Reject them loudly instead
   # of mis-parsing; counting every key-position spelling against the keys the
   # block parser can open a list from also catches a later flow key hiding
@@ -629,7 +766,7 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
   block_keys="${counts##* }"
   if [ "$keys" != "$block_keys" ]; then
     bad "workflow $base declares only block-style paths: lists" \
-      ".github/workflows/$base.yml has a paths key the contract test cannot read (flow sequence, quoted key, 'paths :', or a paths: key outside the workflow's on: triggers); only block-style paths: lists are supported"
+      ".github/workflows/$base.yml has a paths key the contract test cannot read (flow sequence, quoted key, 'paths :', or a non-block paths: key outside the workflow's on: triggers); only block-style paths: lists are supported"
     continue
   fi
 
