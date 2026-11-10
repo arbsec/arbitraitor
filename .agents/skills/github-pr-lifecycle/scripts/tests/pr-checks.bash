@@ -300,23 +300,67 @@ path_gated_json() {
 # implementation against itself and stop catching a scoping regression.
 workflow_paths() {
   awk '
-    # A comment line carries no YAML structure: `#` is not part of the
-    # `^[[:space:]]*paths:` prefix this parser matches, so a comment can never
-    # open a list -- and must not terminate one. Hoisted to the first rule so a
-    # comment at column 0 or at the list indent cannot end the scan.
-    # Exactly one comment rule per program.
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*paths:/ { f = 1; next }
-    f && /^[[:space:]]*$/ { next }
-    f && /^[[:space:]]*-[[:space:]]*/ {
-      line = $0
-      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
-      sub(/[[:space:]]+#.*$/, "", line)
-      sub(/[[:space:]]+$/, "", line)
-      print line
-      next
+    # The block-scalar skip is DELIBERATELY DUPLICATED from paths_key_counts
+    # below instead of being routed through tests/paths-grammar.awk. Sharing it
+    # would make the union assertion compare one parser against itself: a bug in
+    # the shared program could empty BOTH sides and pass `"" == ""`. The few
+    # lines below are the price of keeping this side genuinely independent; do
+    # not factor them out.
+    #
+    # A line whose value is `|` or `>` (with optional chomping/indent
+    # indicators, e.g. `|-`, `>+2`) opens a block scalar. Its body is literal
+    # text: a `paths:` line inside it must not open a list, and the blank lines
+    # in the body must not be read as ending one -- otherwise `f` stays set and
+    # every later `- ` step line in the file is collected into the union. The
+    # body ends at the first non-blank line indented at or below the key column.
+    # key_col measures a `- run: |` sequence item at `run`, not at the dash, so
+    # the indentation of the body is compared against the key that owns it.
+    function indent(s,   n) {
+      n = 0
+      while (substr(s, n + 1, 1) == " ") n++
+      return n
     }
-    f { f = 0 }
+    function key_col(s,   n, rest) {
+      n = indent(s)
+      rest = substr(s, n + 1)
+      if (rest ~ /^- /) {
+        n += 2
+        while (substr(s, n + 1, 1) == " ") n++
+      }
+      return n
+    }
+    BEGIN { scalre = ":[[:space:]]*[|>][-+0-9]*[[:space:]]*(#.*)?$" }
+    {
+      # After a scalar opener, deeper lines are body text and are skipped
+      # wholesale; a blank line is still inside the body. The first line at or
+      # below the key column ends the scalar and is parsed normally.
+      if (in_scalar) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        if (indent($0) <= scalar_indent) in_scalar = 0
+        else next
+      }
+      # A comment line carries no YAML structure: `#` is not part of the
+      # `^[[:space:]]*paths:` prefix this parser matches, so a comment can never
+      # open a list -- and must not terminate one. Placed after `in_scalar` (a
+      # `#` line inside a scalar body is body text) and first otherwise, so a
+      # comment at column 0 or at the list indent cannot end the scan.
+      # Exactly one comment rule per program.
+      if ($0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ /^[[:space:]]*paths:/) { f = 1; next }
+      # A scalar opener cannot be a path entry, so start the skip before the
+      # `- ` entry rule -- otherwise `- run: |` itself would be printed.
+      if ($0 ~ scalre) { in_scalar = 1; scalar_indent = key_col($0); next }
+      if (f && $0 ~ /^[[:space:]]*$/) next
+      if (f && $0 ~ /^[[:space:]]*-[[:space:]]*/) {
+        line = $0
+        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+        sub(/[[:space:]]+#.*$/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+        print line
+        next
+      }
+      if (f) f = 0
+    }
   ' "$1" | tr -d "\"'" | sort -u
 }
 
@@ -469,6 +513,27 @@ jobs:
 YAML
 )" "1 1"
 
+# `key_col` measures a `- run: |` item at the `run` key column, not at the
+# dash. The step body is deeper than `run`, so it is skipped wholesale; a
+# sibling `paths:` at the `run` column ends the scalar and is counted (the flow
+# form that makes `any != block` and trips the loud rejection). This is the
+# round-4 probe: `1 1` before the `<=` end condition, `2 1` after. Degrading
+# `key_col` to `return indent(s)` re-swallows the sibling key and returns
+# `1 1`, so this fixture pins that rule.
+pkc_case "measures a run: | scalar at the key column, not the dash" "$(cat <<'YAML'
+on:
+  push:
+    paths:
+      - "crates/**"
+jobs:
+  test:
+    steps:
+      - run: |
+          echo hi
+        paths: ["flow-key-at-the-run-column"]
+YAML
+)" "2 1"
+
 # No `paths` key at all is the only case that legitimately reads `0 0`.
 pkc_case "counts no paths key" "$(cat <<'YAML'
 name: Release
@@ -550,19 +615,21 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
   #
   # GitHub also accepts flow style (`paths: ["a", "b"]`), a separation space
   # before the colon (`paths :`), a quoted key (`'paths':`), and a scalar.
-  # Those parse to an empty union here, which would skip the entire
-  # per-workflow block below -- a live gate silently blind to a disjoint path
-  # set. Reject them loudly instead of mis-parsing; counting every key-position
-  # spelling against the keys the block parser can open a list from also
-  # catches a later flow key hiding behind an earlier block list. The counts
-  # skip block-scalar bodies, so a shell line such as `paths: x` inside a
-  # `run: |` step is not misread as a YAML key.
+  # A `paths:` key outside the workflow's `on:` triggers (for example a step
+  # `with:` input named `paths`) is a fourth unreadable form. Those parse to an
+  # empty union here, which would skip the entire per-workflow block below -- a
+  # live gate silently blind to a disjoint path set. Reject them loudly instead
+  # of mis-parsing; counting every key-position spelling against the keys the
+  # block parser can open a list from also catches a later flow key hiding
+  # behind an earlier block list. The counts skip block-scalar bodies, so a
+  # shell line such as `paths: x` inside a `run: |` step is not misread as a
+  # YAML key.
   counts="$(paths_key_counts "$wf")"
   keys="${counts%% *}"
   block_keys="${counts##* }"
   if [ "$keys" != "$block_keys" ]; then
     bad "workflow $base declares only block-style paths: lists" \
-      ".github/workflows/$base.yml has a paths key the contract test cannot read (flow sequence, quoted key, or 'paths :'); only block-style paths: lists are supported"
+      ".github/workflows/$base.yml has a paths key the contract test cannot read (flow sequence, quoted key, 'paths :', or a paths: key outside the workflow's on: triggers); only block-style paths: lists are supported"
     continue
   fi
 
@@ -597,7 +664,7 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
     fi
     if grep -q -E '^  pull_request:[[:space:]]*(#.*)?$' "$wf"; then
       bad "workflow $base is push-only (no pull_request trigger)" \
-        "it is allowlisted as push-only but declares a pull_request trigger; only a push-only allowlist entry ($PUSH_ONLY) may omit one"
+        "it is allowlisted as push-only but declares a pull_request trigger; push-only workflows are allowlisted in PUSH_ONLY ($PUSH_ONLY)"
     else
       ok "workflow $base is push-only (no pull_request trigger)"
     fi
@@ -607,7 +674,7 @@ for wf in "$WORKFLOWS_DIR"/*.yml; do
         ok "workflow $base has a $trigger trigger"
       else
         bad "workflow $base has a $trigger trigger" \
-          "a path-filtered workflow must start on both push and pull_request; only a push-only allowlist entry ($PUSH_ONLY) may omit one"
+          "a path-filtered workflow must start on both push and pull_request; push-only workflows are allowlisted in PUSH_ONLY ($PUSH_ONLY)"
       fi
     done
   fi
