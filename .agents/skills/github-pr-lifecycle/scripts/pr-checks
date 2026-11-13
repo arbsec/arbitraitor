@@ -142,10 +142,14 @@ FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'sp
 # (`.agents/**`, `.github/workflows/agents.yml`, `.shellcheckrc`,
 # `.github/workflows/**`), so the suites are required exactly for the diffs
 # that trigger agents.yml and exempt for every other diff. A required check
-# with no row is never exempt — so an `.agents/**` diff whose suites never
-# reported would pass the gate. `.github/workflows/**` is in the row because
-# the suites assert the PATH_GATED table against every workflow file, so a
-# workflow-file diff can invalidate that table and must run the suites.
+# with no row is never exempt: when it is absent from the rollup it is
+# recorded in `missing_required` and blocks the gate. The failure mode in this
+# area is the reverse — a check omitted from `[checks].required` can never be
+# reported missing (that list is derived from `required` alone), so an
+# `.agents/**` diff whose suites were not required would pass the gate.
+# `.github/workflows/**` is in the row because the suites assert the
+# PATH_GATED table against every workflow file, so a workflow-file diff can
+# invalidate that table and must run the suites.
 # `.shellcheckrc` is path-gated because a `disable=`
 # there silences rules for every script — and qlty's shellcheck plugin lists a
 # repo-root `.shellcheckrc` in its `config_files`, so it weakens both gates.
