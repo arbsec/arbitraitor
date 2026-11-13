@@ -1,14 +1,23 @@
 name: Agent Skills
 
-# Path-filtered home for the agent-skill shell gate.
+# The single home for the agent-skill shell gate.
 #
 # `code.yml` is Rust/Cargo-scoped, so a diff that only touches `.agents/**`
-# never reaches the `Agent Skills Tests` job it owns and the skill shell suites
-# never execute (arbsec/arbitraitor#859). This workflow covers that hole.
+# never reaches a Rust-scoped workflow and the skill shell suites never
+# execute (arbsec/arbitraitor#859). This workflow covers that hole, and it is
+# the ONLY workflow that runs the suites: one gate, one set of suites, no
+# duplicated CI cost on a mixed diff.
 #
-# The job name is deliberately NOT `Agent Skills Tests`: that name stays with
-# `code.yml`, which keeps reporting it for Rust-scoped diffs. Two workflows
-# reporting the same check name would collide on a mixed Rust + `.agents` diff.
+# The job reports as `Agent Skills Tests` so the check name stays stable for
+# every consumer of `[checks].required` in the project config. Two workflows
+# reporting the same check name would collide on a mixed Rust + `.agents` diff,
+# so exactly ONE workflow may carry it.
+#
+# `.github/workflows/**` is in the filter because the suites assert against the
+# workflow files themselves: the PATH_GATED table in `scripts/pr-checks` is
+# checked against every workflow's trigger paths, so a change to any workflow
+# file can invalidate that table. Without this path, a workflow-file-only diff
+# would never run the suites and the table could drift unnoticed.
 #
 # The path filter is spelled out twice on purpose. A YAML anchor/alias pair
 # (`paths: &agents_paths` / `paths: *agents_paths`) is valid and GitHub Actions
@@ -24,11 +33,13 @@ on:
       - ".agents/**"
       - ".github/workflows/agents.yml"
       - ".shellcheckrc"
+      - ".github/workflows/**"
   pull_request:
     paths:
       - ".agents/**"
       - ".github/workflows/agents.yml"
       - ".shellcheckrc"
+      - ".github/workflows/**"
 
 permissions:
   contents: read
@@ -39,7 +50,7 @@ concurrency:
 
 jobs:
   agent-skill-suites:
-    name: Agent Skills Shell Suites
+    name: Agent Skills Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,9 +70,9 @@ jobs:
           done < <(
             # Every shell file under .agents/ — *.sh and *.bash, any depth.
             find .agents -type f \( -name '*.sh' -o -name '*.bash' \) -print
-            # Every extensionless script under .agents/skills/*/scripts/. The
-            # executable-bit filter used in code.yml misses the scripts git
-            # tracks as 100644 (commit-identity, pr-review-local).
+            # Every extensionless script under .agents/skills/*/scripts/. An
+            # executable-bit filter would miss the scripts git tracks as
+            # 100644 (commit-identity, pr-review-local).
             find .agents/skills -type f -path '*/scripts/*' ! -name '*.*' -print
           )
           exit "$failed"

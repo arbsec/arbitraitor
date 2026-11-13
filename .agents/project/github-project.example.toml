@@ -105,21 +105,26 @@ required = [
   "Advisory Check",
   "CodeQL Analysis",
   "Agent Skills Tests",
-  "Agent Skills Shell Suites",
 ]
 optional = ["Documentation", "qlty check", "CodeRabbit"]
 # qlty = external quality gate (qlty.sh).
 # CodeRabbit: the GitHub App check auto-skips in this repo; the local CLI
 # (`scripts/pr-review-local`) is the review mechanism. pr-checks exempts only
 # `bucket == "skipping"`, so a *failing* CodeRabbit run still blocks.
-# Agent Skills Shell Suites: the agents.yml job, path-gated to `.agents/**`,
-# `.github/workflows/agents.yml` and `.shellcheckrc`. It is `required` and has
-# a PATH_GATED row in `scripts/pr-checks`, so it is required exactly for the
+# Agent Skills Tests: the agents.yml job — the single home for the agent-skill
+# shell gate. It is path-gated to `.agents/**`, `.github/workflows/agents.yml`,
+# `.shellcheckrc` and `.github/workflows/**`. It is `required` and has a
+# PATH_GATED row in `scripts/pr-checks`, so it is required exactly for the
 # diffs that trigger agents.yml and exempt for every other diff
 # (arbsec/arbitraitor#862). Without the row a required check is never exempt,
 # and without `required` a check that never reports can never be
 # `missing_required` — that list is derived from `required` alone, so an
 # `.agents/**` diff whose suites never ran would pass the gate.
+# The job was renamed from `Agent Skills Shell Suites` to `Agent Skills Tests`
+# when the gate moved out of code.yml (arbsec/arbitraitor#863). The check name
+# is unchanged from the user's point of view: `Agent Skills Tests` is what
+# code.yml reported before the move and what agents.yml reports after it.
+# Re-sync this file into github-project.local.toml after pulling.
 
 # --- Merge + review policy -----------------------------------------------------
 [merge]

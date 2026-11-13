@@ -58,8 +58,8 @@ releases, so a different version can report findings CI does not.
    rumdl check .
    ```
 
-   Changes under `.agents/**`, or to `.shellcheckrc`, also run the agent-skill
-   shell gate in CI (`.github/workflows/agents.yml`):
+   Changes under `.agents/**` or `.github/workflows/**`, or to `.shellcheckrc`,
+   also run the agent-skill shell gate in CI (`.github/workflows/agents.yml`):
 
    ```bash
    failed=0

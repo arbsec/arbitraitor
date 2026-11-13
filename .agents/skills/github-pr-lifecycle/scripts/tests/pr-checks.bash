@@ -122,10 +122,13 @@ run_case "security.yml diff exempts all path-gated checks" "$SEC_YML_FIXTURE" ".
 run_case ".mise.toml diff leaves only Invariants missing" "$SEC_YML_FIXTURE" ".mise.toml" \
   '{"all_passed":false,"any_failing":false,"any_pending":false,"missing_required":["Invariant Property Tests"]}'
 
-# 5. A required check absent from the rollup with no path coverage -> gate fails
-NO_AST_FIXTURE="$(printf '%s' "$ALL_PASS" | jq 'del(.[12])')"
+# 5. A required check absent from the rollup with no path coverage -> gate fails.
+#    `Check & Lint` (index 0): it is `required` and its PATH_GATED row carries
+#    code.yml's Rust-scoped paths, so a Rust diff matches the row -> not exempt
+#    -> its absence from the rollup is a failure.
+NO_AST_FIXTURE="$(printf '%s' "$ALL_PASS" | jq 'del(.[0])')"
 run_case "absent required check fails the gate" "$NO_AST_FIXTURE" "crates/arbitraitor-core/src/lib.rs" \
-  '{"all_passed":false,"any_failing":false,"any_pending":false,"missing_required":["Agent Skills Tests"]}'
+  '{"all_passed":false,"any_failing":false,"any_pending":false,"missing_required":["Check & Lint"]}'
 
 # 6. A failing check -> any_failing + all_passed false
 FAILING_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[0].bucket = "fail" | .[0].state = "FAILURE"')"
@@ -151,11 +154,11 @@ CODERABBIT_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[] |= (if .name == "Co
 run_case "CodeRabbit failed still blocks" "$CODERABBIT_FAIL_FIXTURE" "README.md" \
   '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
 
-# 8d. `Agent Skills Shell Suites` is `required`, and a FAILING suite still
+# 8d. `Agent Skills Tests` is `required`, and a FAILING suite still
 #     blocks the gate: `all_passed` requires every reported check to be a pass
 #     or exempt, so a red suite run is never a pass.
-AGENT_SUITES_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '. + [{"name":"Agent Skills Shell Suites","state":"FAILURE","bucket":"fail","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
-run_case "failing Agent Skills Shell Suites blocks the gate" "$AGENT_SUITES_FAIL_FIXTURE" ".agents/skills/github-pr-lifecycle/SKILL.md" \
+AGENT_SUITES_FAIL_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '.[] |= (if .name == "Agent Skills Tests" then .bucket = "fail" | .state = "FAILURE" else . end)')"
+run_case "failing Agent Skills Tests blocks the gate" "$AGENT_SUITES_FAIL_FIXTURE" ".agents/skills/github-pr-lifecycle/SKILL.md" \
   '{"all_passed":false,"any_failing":true,"any_pending":false,"missing_required":[]}'
 
 # 9. Hard gh failure (empty output, non-8 exit) -> exit 1
@@ -181,7 +184,7 @@ fi
 
 # 10. code.yml path-gate mirror (arbsec/arbitraitor PR B). The workflow is
 #     Rust/Cargo-scoped, so an `.agents`-only diff legitimately never reports its
-#     six checks. A `wit/**`, `.config/hakari.toml`, or `Cargo.lock` diff DOES
+#     five checks. A `wit/**`, `.config/hakari.toml`, or `Cargo.lock` diff DOES
 #     reach the workflow, so the checks are not exempt and their absence blocks.
 NO_CODE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Check & Lint"
   or .name == "Workspace Hack (ubuntu-latest)"
@@ -189,12 +192,11 @@ NO_CODE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select((.name == "Check 
   or .name == "Test (ubuntu-latest)"
   or .name == "Test (macos-latest)"
   or .name == "Agent Skills Tests") | not)]
-  + [{"name":"Agent Skills Shell Suites","state":"SUCCESS","bucket":"pass","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
+  + [{"name":"Agent Skills Tests","state":"SUCCESS","bucket":"pass","workflow":"Agent Skills","link":"","startedAt":null,"completedAt":null}]')"
 CODE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
  "missing_required":["Check & Lint","Workspace Hack (ubuntu-latest)",
- "Workspace Hack (macos-latest)","Test (ubuntu-latest)","Test (macos-latest)",
- "Agent Skills Tests"]}'
-run_case ".agents-only diff exempts the six code.yml checks" "$NO_CODE_FIXTURE" \
+ "Workspace Hack (macos-latest)","Test (ubuntu-latest)","Test (macos-latest)"]}'
+run_case ".agents-only diff exempts the five code.yml checks" "$NO_CODE_FIXTURE" \
   ".agents/skills/x/SKILL.md" "$FULL_JSON"
 run_case "wit/** diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
   "wit/arbitraitor.wit" "$CODE_MISSING"
@@ -206,13 +208,13 @@ run_case "Cargo.lock diff does not exempt the code.yml checks" "$NO_CODE_FIXTURE
 # `**/Cargo.toml` against the root `Cargo.toml`, so the workflow RUNS for that
 # diff and the code.yml checks are not exempt. If the glob translation turned
 # `**/` into a pattern that REQUIRES a directory separator, a root `Cargo.toml`
-# diff would exempt the six code.yml checks -- and the gate could pass before
+# diff would exempt the five code.yml checks -- and the gate could pass before
 # CI reported them. The translation is `(.*/)?`: zero or more directories.
 run_case "root Cargo.toml does not exempt the code.yml checks" "$NO_CODE_FIXTURE" \
   "Cargo.toml" "$CODE_MISSING"
 # The opposite error: a pattern with NO `**/` prefix is ROOT-only in GitHub
 # Actions. `Cargo.lock` does not match `fuzz/Cargo.lock`, so code.yml does not
-# run for that diff and its six checks ARE exempt. An unanchored translation
+# run for that diff and its five checks ARE exempt. An unanchored translation
 # would match the nested file, require the checks that never report, and block
 # the gate forever with `missing_required`.
 run_case "a nested fuzz/Cargo.lock exempts the code.yml checks" "$NO_CODE_FIXTURE" \
@@ -240,28 +242,30 @@ run_case "a nested tools/lefthook.yml exempts the markdown three" "$NO_MD_FIXTUR
 run_case "rust-only diff exempts the markdown three" "$NO_MD_FIXTURE" \
   "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
 
-# 12. agents.yml path-gate mirror (arbsec/arbitraitor#862). `Agent Skills Shell
-#     Suites` is `required` and has a PATH_GATED row, so it is required exactly
+# 12. agents.yml path-gate mirror (arbsec/arbitraitor#862). `Agent Skills
+#     Tests` is `required` and has a PATH_GATED row, so it is required exactly
 #     for the diffs that trigger agents.yml (`.agents/**`,
-#     `.github/workflows/agents.yml`, `.shellcheckrc`) and exempt for every
-#     other diff. `.shellcheckrc` is in the list because it can weaken the
-#     gate itself (a `disable=` there silences rules for every script). The
-#     suite that never reports is the dangerous case: `missing_required` is
-#     derived from `required` alone, so a check listed only in `optional` can
-#     never be missing, and an `.agents/**` diff whose suites never ran would
-#     pass the gate.
-NO_SUITE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select(.name != "Agent Skills Shell Suites")]')"
+#     `.github/workflows/agents.yml`, `.shellcheckrc`, `.github/workflows/**`)
+#     and exempt for every other diff. `.shellcheckrc` is in the list because
+#     it can weaken the gate itself (a `disable=` there silences rules for
+#     every script). The suite that never reports is the dangerous case:
+#     `missing_required` is derived from `required` alone, so a check listed
+#     only in `optional` can never be missing, and an `.agents/**` diff whose
+#     suites never ran would pass the gate.
+NO_SUITE_FIXTURE="$(printf '%s' "$ALL_PASS" | jq '[.[] | select(.name != "Agent Skills Tests")]')"
 SUITE_MISSING='{"all_passed":false,"any_failing":false,"any_pending":false,
- "missing_required":["Agent Skills Shell Suites"]}'
-run_case ".agents/** diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+ "missing_required":["Agent Skills Tests"]}'
+run_case ".agents/** diff requires the Agent Skills Tests" "$NO_SUITE_FIXTURE" \
   ".agents/skills/github-pr-lifecycle/SKILL.md" "$SUITE_MISSING"
-run_case "agents.yml diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+run_case "agents.yml diff requires the Agent Skills Tests" "$NO_SUITE_FIXTURE" \
   ".github/workflows/agents.yml" "$SUITE_MISSING"
-run_case ".shellcheckrc diff requires the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+run_case ".shellcheckrc diff requires the Agent Skills Tests" "$NO_SUITE_FIXTURE" \
   ".shellcheckrc" "$SUITE_MISSING"
-run_case "a Rust-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+run_case "a workflow-file diff requires the Agent Skills Tests" "$NO_SUITE_FIXTURE" \
+  ".github/workflows/code.yml" "$SUITE_MISSING"
+run_case "a Rust-only diff exempts the Agent Skills Tests" "$NO_SUITE_FIXTURE" \
   "crates/arbitraitor-core/src/lib.rs" "$FULL_JSON"
-run_case "a docs-only diff exempts the Agent Skills Shell Suites" "$NO_SUITE_FIXTURE" \
+run_case "a docs-only diff exempts the Agent Skills Tests" "$NO_SUITE_FIXTURE" \
   "docs/guide.md" "$FULL_JSON"
 
 # 13. The PATH_GATED table mirrors the workflows it claims to mirror.
@@ -1000,11 +1004,12 @@ else
   bad "identical local config emits no drift warning" "stderr: $(<"$drift_err")"
 fi
 
-# 14b. The concrete instance: the local config predates `Agent Skills Shell
-#      Suites` being promoted to `required` (PR #867).
-grep -v '"Agent Skills Shell Suites",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
+# 14b. The concrete instance: the local config predates the gate's move out of
+#      code.yml (arbsec/arbitraitor#863) and still drops the check from
+#      `required`.
+grep -v '"Agent Skills Tests",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
 drift_run
-if grep -q '^warning: .*drops required checks the example declares: Agent Skills Shell Suites$' "$drift_err"; then
+if grep -q '^warning: .*drops required checks the example declares: Agent Skills Tests$' "$drift_err"; then
   ok "drift warns on stderr, naming the dropped required check"
 else
   bad "drift warns on stderr, naming the dropped required check" "stderr: $(<"$drift_err")"
@@ -1042,7 +1047,7 @@ fi
 #      listing every example check as dropped).
 printf '#!/bin/sh\nexit 3\n' > "$COMM_STUB/comm"
 chmod +x "$COMM_STUB/comm"
-grep -v '"Agent Skills Shell Suites",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
+grep -v '"Agent Skills Tests",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
 drift_run   # drifted, real comm: the warning this case must not lose stdout to
 cp "$drift_out" "$STUB/drift_warn.json"
 comm_rc=0
@@ -1062,8 +1067,8 @@ fi
 #      that blank line as a dropped check -- a bogus warning naming nothing.
 #      The `[ -n "$example_required" ]` guard is what suppresses it: nothing is
 #      declared, so nothing can have drifted. The local config is drifted here
-#      (it also drops `Agent Skills Shell Suites`), so a non-empty example would
-#      warn; only the empty example list can keep the warning away.
+#      (it also drops `Agent Skills Tests`), so a non-empty example would warn;
+#      only the empty example list can keep the warning away.
 EXAMPLE_IN_REPO="$REPO/.agents/project/github-project.example.toml"
 cp "$EXAMPLE_IN_REPO" "$STUB/example.bak"
 awk '
@@ -1072,7 +1077,7 @@ awk '
   inreq { next }
   { print }
 ' "$EXAMPLE_TOML" > "$EXAMPLE_IN_REPO"
-grep -v '"Agent Skills Shell Suites",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
+grep -v '"Agent Skills Tests",' "$EXAMPLE_TOML" > "$LOCAL_TOML"
 drift_run
 cp "$STUB/example.bak" "$EXAMPLE_IN_REPO"
 if [ "$drift_rc" -eq 0 ] && [ ! -s "$drift_err" ] && cmp -s "$STUB/clean.json" "$drift_out"; then
