@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Contract test for the agent-skill CI gate (.github/workflows/agents.yml).
 #
-# The gate exists because `code.yml` is Rust/Cargo-scoped: a diff that only
-# touches `.agents/**` never reaches the `Agent Skills Tests` job it owns, so
-# the skill shell suites never executed (arbsec/arbitraitor#859). This suite
-# pins the invariants that make the gate work and keeps them from drifting:
+# The gate is the single home for the agent-skill shell suites: a diff that
+# only touches `.agents/**` never reaches a Rust-scoped workflow, so the skill
+# shell suites would never execute (arbsec/arbitraitor#859). This suite pins
+# the invariants that make the gate work and keeps them from drifting:
 #
 #   1. the workflow exists, triggers on `.agents/**` for pull requests and for
 #      pushes to `main`;
-#   2. the required check name `Agent Skills Tests` stays with `code.yml` and
-#      the new workflow reports a DIFFERENT name — a mixed Rust + `.agents`
-#      diff must never produce two checks under one name;
+#   2. the required check name `Agent Skills Tests` is reported by exactly ONE
+#      workflow (agents.yml) and the superseded name `Agent Skills Shell
+#      Suites` is reported by NO workflow — a mixed Rust + `.agents` diff must
+#      never produce two checks under one name;
 #   3. the syntax check runs `bash -n` once per file (`bash -n a b` parses
 #      only `a`, so the `find -exec bash -n {} +` form checks one file);
-#   4. the new check is registered in the project config;
+#   4. the check name is registered in the project config and the superseded
+#      name is not;
 #   5. the workflow uses no YAML anchor/alias (actionlint cannot parse an
 #      alias node and reports it as a syntax error);
 #   6. shellcheck is pinned by version and a 64-hex digest, runs at
@@ -141,10 +143,10 @@ else
     "count=$(count_job_names 'Agent Skills Tests')"
 fi
 
-if [ "$(count_job_names 'Agent Skills Shell Suites')" -eq 1 ]; then
-  ok "check name 'Agent Skills Shell Suites' is reported by exactly one workflow"
+if [ "$(count_job_names 'Agent Skills Shell Suites')" -eq 0 ]; then
+  ok "superseded check name 'Agent Skills Shell Suites' is reported by no workflow"
 else
-  bad "check name 'Agent Skills Shell Suites' is reported by exactly one workflow" \
+  bad "superseded check name 'Agent Skills Shell Suites' is reported by no workflow" \
     "count=$(count_job_names 'Agent Skills Shell Suites')"
 fi
 
@@ -155,17 +157,21 @@ else
   ok "syntax check runs bash -n once per file"
 fi
 
-# 4. The new check is registered in the project config.
-if grep -q '"Agent Skills Shell Suites"' "$EXAMPLE_TOML"; then
-  ok "new check is registered in the project config"
+# 4. The check name is registered in the project config, and the superseded
+#    name is not. A stale name in [checks].required can never report, and
+#    `missing_required` is derived from `required` alone -- so it would block
+#    the gate forever with no way to tell why.
+if grep -q '"Agent Skills Tests"' "$EXAMPLE_TOML"; then
+  ok "check name is registered in the project config"
 else
-  bad "new check is registered in the project config" "not listed in github-project.example.toml"
+  bad "check name is registered in the project config" "not listed in github-project.example.toml"
 fi
 
-if grep -q '"Agent Skills Tests"' "$EXAMPLE_TOML"; then
-  ok "required check name stays in the project config"
+if grep -q '"Agent Skills Shell Suites"' "$EXAMPLE_TOML"; then
+  bad "superseded check name is not in the project config" \
+    "a stale name in [checks].required can never report and blocks the gate forever"
 else
-  bad "required check name stays in the project config" "not listed in github-project.example.toml"
+  ok "superseded check name is not in the project config"
 fi
 
 # 5. No YAML anchor/alias. actionlint cannot resolve an alias node and
@@ -258,6 +264,62 @@ else
   bad "push and pull_request path filters are identical" \
     "push=[$(trigger_paths push)] pull_request=[$(trigger_paths pull_request)]"
 fi
+
+# 9. No workflow may batch the syntax check. `find … -exec bash -n {} +` parses
+#    only the FIRST file and hands the rest to bash as positional parameters,
+#    so the whole `.agents` tree would be covered by one parse of one file
+#    (arbsec/arbitraitor#863). The `\;` form is no better: find reports every
+#    error but exits 0, so the failure never propagates. Grepped across EVERY
+#    workflow, not just this one: the defect survived because only agents.yml
+#    was ever checked.
+if grep -rn -- '-exec bash -n' "$WORKFLOWS" >/dev/null 2>&1; then
+  bad "no workflow batches the syntax check" \
+    "a batched bash -n parses only the first file"
+else
+  ok "no workflow batches the syntax check"
+fi
+
+# 10. The syntax-check selection must cover the scripts git tracks as 100644
+#     (`commit-identity`, `pr-review-local`). Run the SAME selection the
+#     workflow runs and assert the two paths are in its output -- an executable
+#     -bit filter would drop both.
+syntax_selected="$(cd "$ROOT" && eval "$syntax_finds" 2>/dev/null | sort -u)"
+for want in \
+  .agents/skills/github-pr-lifecycle/scripts/commit-identity \
+  .agents/skills/github-pr-lifecycle/scripts/pr-review-local
+do
+  if printf '%s\n' "$syntax_selected" | grep -qxF -- "$want"; then
+    ok "syntax check selects $want"
+  else
+    bad "syntax check selects $want" "not in the workflow's file selection"
+  fi
+done
+
+# 11. Exactly ONE workflow runs the skill suites. Two runners duplicate the CI
+#     cost on a mixed diff and can drift apart.
+suite_runners=0
+for file in "$WORKFLOWS"/*.yml; do
+  if grep -q 'scripts/tests/\*\.bash' "$file"; then
+    suite_runners=$((suite_runners + 1))
+  fi
+done
+if [ "$suite_runners" -eq 1 ]; then
+  ok "exactly one workflow runs the skill suites"
+else
+  bad "exactly one workflow runs the skill suites" "found $suite_runners workflows"
+fi
+
+# 12. The gate must run for a workflow-file diff: the suites assert the
+#     PATH_GATED table against the workflow files, so a workflow-file diff can
+#     invalidate that table.
+for trigger in push pull_request; do
+  if trigger_paths "$trigger" | grep -qxF '.github/workflows/**'; then
+    ok "agents workflow triggers on workflow files ($trigger)"
+  else
+    bad "agents workflow triggers on workflow files ($trigger)" \
+      "no .github/workflows/** in the $trigger paths list"
+  fi
+done
 
 echo "agent-skills-workflow fixtures: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

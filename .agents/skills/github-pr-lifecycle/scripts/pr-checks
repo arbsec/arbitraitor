@@ -137,22 +137,26 @@ FILES_JSON="$(arb_lib_gh pr diff "$PR" --repo "$REPO" --name-only | jq -R -s 'sp
 # its paths. KEEP IN SYNC with
 # .github/workflows/{code,markdown,invariants,security,agents}.yml.
 # CodeQL Analysis has no entry: its workflow is unfiltered.
-# `Agent Skills Tests` is the code.yml job, and code.yml is Rust/Cargo-scoped,
-# so an `.agents`-only diff never reaches it. The skill shell suites still run
-# for that diff under .github/workflows/agents.yml (job `Agent Skills Shell
-# Suites`, filter `.agents/**` plus `.shellcheckrc`), whose job name is
-# deliberately distinct. `.shellcheckrc` is path-gated because a `disable=`
+# `Agent Skills Tests` is the agents.yml job — the single home for the agent
+# skill shell gate. Its PATH_GATED row mirrors agents.yml's trigger paths
+# (`.agents/**`, `.github/workflows/agents.yml`, `.shellcheckrc`,
+# `.github/workflows/**`), so the suites are required exactly for the diffs
+# that trigger agents.yml and exempt for every other diff. A required check
+# with no row is never exempt: when it is absent from the rollup it is
+# recorded in `missing_required` and blocks the gate. The failure mode in this
+# area is the reverse — a check omitted from `[checks].required` can never be
+# reported missing (that list is derived from `required` alone), so an
+# `.agents/**` diff whose suites were not required would pass the gate.
+# `.github/workflows/**` is in the row because the suites assert the
+# PATH_GATED table against every workflow file, so a workflow-file diff can
+# invalidate that table and must run the suites.
+# `.shellcheckrc` is path-gated because a `disable=`
 # there silences rules for every script — and qlty's shellcheck plugin lists a
 # repo-root `.shellcheckrc` in its `config_files`, so it weakens both gates.
 # The two shellcheck gates have different severity floors: the workflow runs
 # `-S warning`, qlty runs shellcheck at its default (info included) on changed
 # lines, so qlty is the stricter of the two and an info-level finding can block
 # there while the workflow stays green.
-# `Agent Skills Shell Suites` has its own row: it is the agents.yml job, and
-# a required check with no row is never exempt — so an `.agents/**` or
-# `.shellcheckrc` diff whose suites never reported would pass the gate. With
-# the row, the suites are required exactly for the diffs that trigger
-# agents.yml, and exempt for every other diff.
 PATH_GATED='[
   {"name": "Invariant Property Tests",
    "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/invariants.yml"]},
@@ -171,9 +175,7 @@ PATH_GATED='[
   {"name": "Test (macos-latest)",
    "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
   {"name": "Agent Skills Tests",
-   "paths": ["**/*.rs", "**/Cargo.toml", "Cargo.lock", ".mise.toml", ".github/workflows/code.yml", "wit/**", "**/*.wit", ".config/hakari.toml"]},
-  {"name": "Agent Skills Shell Suites",
-   "paths": [".agents/**", ".github/workflows/agents.yml", ".shellcheckrc"]},
+   "paths": [".agents/**", ".github/workflows/agents.yml", ".shellcheckrc", ".github/workflows/**"]},
   {"name": "Markdown Lint",
    "paths": ["**/*.md", "rumdl.toml", "lefthook.yml", ".mise.toml", ".github/workflows/markdown.yml"]},
   {"name": "Book Build",
